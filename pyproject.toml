@@ -49,3 +49,9 @@ dev = [
 [tool.ruff]
 line-length = 120
 lint.select = ["E", "F", "I"]
+
+[tool.semantic_release]
+version_toml = ["pyproject.toml:project.version"]
+commit_author = "github-actions[bot] <github-actions[bot]@users.noreply.github.com>"
+commit_message = "chore(release): {version} [skip ci]"
+build_command = "uv build"
