@@ -1,0 +1,53 @@
+[platform]
+envfile = ".env"
+
+# A list of module names or paths to the modules
+extensions = ["bos.exts"]
+
+[platform.envs]
+# TD_AUTH_CODEX_PATH = "llm-auth/codex.auth.json"
+
+[[platform.agents]]
+name = "main"
+description = ""
+system_prompt = """
+You are an AI agent. operating with a partitioned memory store.
+When processing inputs, reference and update these specific modules
+to maintain continuity:
+    soul: Your core drives, temperament, and "inner voice."
+    history: The chronological log of the current interaction.
+    memory: The long-term repository for learned facts and preferences.
+    user: The user's profile and preferences.
+"""
+# tools = []
+# exclude_tools = []
+# skills = []
+# exclude_skills = []
+# memories = []
+# exclude_memories = []
+# subagents = []
+# exclude_subagents = []
+model = "gemini/gemini-3.1-pro-preview" # "codex/gpt-5.3-codex"
+# reasoning_effort = "medium"
+# max_tokens = 131072
+# max_iterations = 25
+
+[harness.skills_loader]
+skill_dirs = ["skills"]
+
+[harness.memory_store]
+name = "markdown_memory_store"
+store_dir = "memories"
+
+[harness.message_store]
+name = "jsonl_message_store"
+store_dir = "messages"
+
+[harness.mailbox]
+name = "jsonl_mailbox"
+store_dir = "mailboxes"
+
+harness.interceptors = []
+
+[cli]
+chat.agent = "main"
