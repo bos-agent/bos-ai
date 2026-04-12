@@ -1,0 +1,38 @@
+name: Release
+on:
+  workflow_dispatch:
+
+jobs:
+  release:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write       # Required for PyPI OIDC Trusted Publishing
+      contents: write       # Required for PSR to push commits/tags
+    
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0      # PSR needs full history to calculate versions
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version-file: "pyproject.toml"
+
+      - name: Python Semantic Release
+        id: release
+        uses: python-semantic-release/python-semantic-release@v9
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+      # Publish to PyPI ONLY IF a new release was actually generated
+      - name: Publish package distributions to PyPI
+        if: steps.release.outputs.released == 'true'
+        uses: pypa/gh-action-pypi-publish@release/v1

@@ -1,0 +1,27 @@
+name: "PR Title Checker"
+
+on:
+  pull_request:
+    types:
+      - opened
+      - edited
+      - synchronize
+
+jobs:
+  main:
+    name: Validate PR title
+    runs-on: ubuntu-latest
+    steps:
+      - uses: amannn/action-semantic-pull-request@v5
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          # Ensure PR titles follow conventional commits
+          # Example valid titles:
+          #   feat: added a new cli command
+          #   fix: resolved crash on startup
+          #   docs: updated readme
+          requireScope: false
+          subjectPattern: ^(?![A-Z]).+$
+          subjectPatternError: |
+            The subject (description) of the PR title must start with a lowercase letter.
