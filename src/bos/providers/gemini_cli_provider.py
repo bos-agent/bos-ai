@@ -19,8 +19,8 @@ import httpx
 from bos.core import LLMResponse, ToolCallRequest, ep_provider
 from bos.providers.antigravity_provider import (
     _AUTH_URL,
-    _CLIENT_ID,
-    _CLIENT_SECRET,
+    _CLIENT_KEY,
+    _CLIENT_VAL,
     _REDIRECT_URI,
     _SCOPES,
     _convert_messages,
@@ -83,7 +83,7 @@ async def login_gemini_cli(
     try:
         params = urlencode(
             {
-                "client_id": _CLIENT_ID,
+                "client_id": _CLIENT_KEY,
                 "response_type": "code",
                 "redirect_uri": _REDIRECT_URI,
                 "scope": " ".join(_SCOPES),
@@ -110,7 +110,7 @@ async def login_gemini_cli(
         code = result["code"]
 
         _progress(on_progress, "Exchanging authorization code for tokens...")
-        token_data = await exchange_code_for_tokens(code, _CLIENT_ID, _CLIENT_SECRET, _REDIRECT_URI, verifier)
+        token_data = await exchange_code_for_tokens(code, _CLIENT_KEY, _CLIENT_VAL, _REDIRECT_URI, verifier)
 
         if "refresh_token" not in token_data:
             raise RuntimeError("No refresh token received. Please try again.")
@@ -166,8 +166,8 @@ async def get_gemini_cli_token(auth_file: str | None = None) -> OAuthCredentials
         logger.debug("Refreshing expired Gemini CLI token")
         token_data = await refresh_token(
             refresh=creds.refresh,
-            client_id=_CLIENT_ID,
-            client_secret=_CLIENT_SECRET,
+            client_id=_CLIENT_KEY,
+            client_secret=_CLIENT_VAL,
         )
         creds = OAuthCredentials(
             refresh=creds.refresh,

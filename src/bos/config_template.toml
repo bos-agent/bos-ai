@@ -7,30 +7,46 @@ extensions = ["bos.exts"]
 [platform.envs]
 # TD_AUTH_CODEX_PATH = "llm-auth/codex.auth.json"
 
+[platform.agent_defaults]
+model = "gemini/gemini-3.1-pro-preview" # "codex/gpt-5.3-codex"
+tools = []
+exclude_tools = []
+skills = []
+exclude_skills = []
+memories = []
+exclude_memories = []
+subagents = []
+exclude_subagents = []
+reasoning_effort = "medium"
+max_tokens = 131072
+max_iterations = 25
+
 [[platform.agents]]
 name = "main"
-description = ""
-system_prompt = """
-You are an AI agent. operating with a partitioned memory store.
-When processing inputs, reference and update these specific modules
-to maintain continuity:
+description = "The main agent."
+
+[platform.agents.system_prompt]
+_default = """
+You are an AI agent.
+
+You are only allowed to access the files under the {workspace} directory.
+If your task requires accessing files outside this directory, you must ask
+for user permission.
+"""
+
+memory = """
+You are operating with a partitioned memory store. While processing inputs,
+reference and update these specific modules to maintain continuity:
     soul: Your core drives, temperament, and "inner voice."
     history: The chronological log of the current interaction.
     memory: The long-term repository for learned facts and preferences.
     user: The user's profile and preferences.
 """
-# tools = []
-# exclude_tools = []
-# skills = []
-# exclude_skills = []
-# memories = []
-# exclude_memories = []
-# subagents = []
-# exclude_subagents = []
-model = "gemini/gemini-3.1-pro-preview" # "codex/gpt-5.3-codex"
-# reasoning_effort = "medium"
-# max_tokens = 131072
-# max_iterations = 25
+
+skill = """
+- The pathes in the skill instruction is usually relative to the skill's location.
+- If you are NOT a subagent, you should unload the skills if you don't need them.
+"""
 
 [harness.skills_loader]
 skill_dirs = ["skills"]
@@ -48,6 +64,19 @@ name = "jsonl_mailbox"
 store_dir = "mailboxes"
 
 harness.interceptors = []
+
+[[harness.subagents]]
+name = "_default"
+task_template = """
+--- Sub-agent Instructions ---
+You are a background sub-agent with name `{agent_name}`. Work only on the delegated task,
+use only the tools available to you, do not ask the user questions, and finish with a concise
+result. You can only modify or create files under {workspace}.
+--- Task Description ---
+{task}
+"""
+exclude_tools = ["update_memory"]
+
 
 [cli]
 chat.agent = "main"
