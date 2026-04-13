@@ -46,8 +46,8 @@ class Extension:
     name: str
     fn: Callable[..., Any]
     description: str = ""
-    defaults: dict[str, Any] | None = None
-    metadata: dict[str, Any] | None = None
+    defaults: dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 class ExtensionPoint:
@@ -58,7 +58,7 @@ class ExtensionPoint:
     ) -> None:
         self.description = description
         self._validate = validate or getattr(self, "default_validate", None)
-        self._extensions: dict[str, Any] = {}
+        self._extensions: dict[str, Extension] = {}
         self.get = self._extensions.get
         self.has = lambda name: name in self._extensions
         self.describe = lambda: {k: v.description for k, v in self._extensions.items()}
@@ -72,13 +72,13 @@ class ExtensionPoint:
             )
         self._extensions[ext.name] = ext
 
-    def invoke(self, name: str, **kwargs: Any) -> Any:
+    def invoke(self, name: str, kwargs: dict[str, Any] | None = None) -> Any:
         if name not in self._extensions:
             raise ValueError(f"Extension '{name}' not found for '{self.description[:30].strip()}...'")
-        return _apply(self.get(name).fn, _compact(self.get(name).defaults, kwargs))
+        return _apply(self.get(name).fn, _compact(self.get(name).defaults, kwargs or {}))
 
-    async def invoke_async(self, name: str, **kwargs: Any) -> Any:
-        return await _apply_async(self.get(name).fn, _compact(self.get(name).defaults, kwargs))
+    async def invoke_async(self, name: str, kwargs: dict[str, Any] | None = None) -> Any:
+        return await _apply_async(self.get(name).fn, _compact(self.get(name).defaults, kwargs or {}))
 
     def __call__(
         self,
@@ -208,7 +208,7 @@ class LLMClient:
         else:
             provider_name, model_name = "_default", None
         params = self._providers_cfg.get(provider_name, {}) | kwargs | {"messages": messages, "model": model_name}
-        return await ep_provider.invoke_async(provider_name, **_compact(params))
+        return await ep_provider.invoke_async(provider_name, params)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -402,7 +402,6 @@ ep_skills_loader = ExtensionPoint(
 
 @runtime_checkable
 class SkillsLoader(Protocol):
-    async def list_skills(self, names: Iterable[str] | None = None) -> dict[str, dict[str, Any]]: ...
     async def load_skill(self, name: str) -> str: ...
     async def search_skills(self, query: str) -> list[str]: ...
 
@@ -412,47 +411,50 @@ class FileSystemSkillsLoader:
     def __init__(self, skill_dirs: Iterable[Path | str] | None = None) -> None:
         self._skill_dirs = [(Path(__file__).parent / "skills").resolve()]
         self._skill_dirs.extend(Path(dir).expanduser().resolve() for dir in skill_dirs or [])
-        self._skills: dict[str, dict[str, Any]] = None
+        self._skills: dict[str, dict[str, Any]] | None = None
 
-    async def list_skills(self, names: Iterable[str] | None = None) -> dict[str, dict[str, Any]]:
+    async def list_skills(self) -> dict[str, dict[str, Any]]:
         if self._skills is None:
-            self._skills = {}
-            for path in self._skill_dirs:
-                if (path / "SKILL.md").exists():
-                    await self._load_skill_summary(path / "SKILL.md")
-                else:
-                    for child in path.iterdir():
-                        if child.is_dir() and (child / "SKILL.md").exists():
-                            await self._load_skill_summary(child / "SKILL.md")
-        return _compact({name: self._skills.get(name) for name in names}) if names else self._skills.copy()
+            self._skills = await self._load_skill_summary()
+        return self._skills
 
-    async def load_skill(self, name: str) -> str:
-        return _read_text(self._skills.get(name, {}).get("path")) or f"Skill not found: {name}"
+    async def load_skill(self, name: str) -> tuple[Path, str]:
+        skills = await self.list_skills()
+        if (s := skills.get(name)) and (text := _read_text(s.get("path"))):
+            return s["path"].parent, text
 
-    async def search_skills(self, query: str) -> dict[str, str]:
-        query = query.lower()
-        return {
-            name: data.get("summary", "")
-            for name, data in self._skills.items()
-            if query in name.lower() or query in data.get("summary", "").lower()
-        }
+    async def search_skills(self, query: str | None = None) -> dict[str, str]:
+        results = {name: data.get("summary", "") for name, data in (await self.list_skills()).items()}
+        if query:
+            query = query.lower()
+            return {name: data for name, data in results.items() if query in name.lower() or query in data.lower()}
+        return results
 
-    async def _load_skill_summary(self, path: Path) -> None:
-        skill_name = path.parent.name
-        if skill_name in self._skills:
-            return
-        content = path.read_text(encoding="utf-8")
-        # get the frontmatter
-        if frontmatter := re.match(r"^---\n(.*?)\n---", content, re.DOTALL):
-            summary = frontmatter.group(1)
-        else:
-            # get th first a few un-empty lines. stop when total length exceeds 150 characters.
-            summary = ""
-            for line in (line.strip() for line in content.splitlines() if line.strip()):
-                if len(summary) > 150:
-                    break
-                summary += line + "\n"
-        self._skills[skill_name] = {"path": path, "summary": summary}
+    async def _load_skill_summary(self) -> dict[str, dict[str, Any]]:
+        def _iter_skill_files() -> Iterable[tuple[str, Path]]:
+            for d in self._skill_dirs:
+                if (d / "SKILL.md").exists():
+                    yield d.name, d / "SKILL.md"
+                if d.is_dir():
+                    for c in d.iterdir():
+                        if c.is_dir() and (c / "SKILL.md").exists():
+                            yield c.name, c / "SKILL.md"
+
+        skills = {}
+        for skill_name, path in _iter_skill_files():
+            content = path.read_text(encoding="utf-8")
+            # get the frontmatter
+            if frontmatter := re.match(r"^---\n(.*?)\n---", content, re.DOTALL):
+                summary = frontmatter.group(1)
+            else:
+                # get th first a few un-empty lines. stop when total length exceeds 150 characters.
+                summary = ""
+                for line in (line.strip() for line in content.splitlines() if line.strip()):
+                    if len(summary) > 150:
+                        break
+                    summary += line + "\n"
+            skills[skill_name] = {"path": path, "summary": summary}
+        return skills
 
 
 # ============================================================================
@@ -689,6 +691,7 @@ class ReactAgent:
                 await _interrupt()
                 ctx.set_system_prompt(await self._build_system_prompt())
                 await _run_interceptor("before_llm")
+
                 litellm_cache_hint = [{"location": "message", "role": "system"}] + (
                     [] if cache_index == 0 else [{"location": "message", "index": cache_index}]
                 )
@@ -730,10 +733,13 @@ class ReactAgent:
 
                 for tc in response.tool_calls:
                     try:
+                        if not _allowed(tc.name, self._tools, self._exclude_tools):
+                            raise Exception(f"Tool {tc.name} is not allowed")
+
                         result = (
-                            await ep_tool.invoke_async(tc.name, **tc.arguments)
+                            await ep_tool.invoke_async(tc.name, tc.arguments)
                             if ep_tool.has(tc.name)
-                            else await self._local_tools.invoke_async(tc.name, **tc.arguments)
+                            else await self._local_tools.invoke_async(tc.name, tc.arguments)
                         )
                     except Exception as e:
                         logger.error("Error in tool call [%s]: %s", tc.name, e)
@@ -769,6 +775,9 @@ class ReactAgent:
             if msg.get("role") == "tool" and isinstance(content, str) and len(content) > 150:
                 return content[:147] + "..."
             return content
+
+        def _format_call_id(call_id: str | None) -> str | None:
+            return call_id[:64] if call_id is not None else None
 
         async def _get_messages() -> list[dict]:
             messages = await self._message_store.get_messages(conversation_id)
@@ -811,15 +820,24 @@ class ReactAgent:
             for key, content in memories.items():
                 prompt += f"\n### {key.upper()} ###\n{content}"
 
+        if available_skills := _pick_collection(
+            await self._skills_loader.list_skills(), self._skills, self._exclude_skills
+        ):
+            prompt += "\n\n--- AVAILABLE SKILLS ---\n"
+            for name, info in available_skills.items():
+                prompt += f"\n### {name.upper()} ###\n\n"
+                prompt += f"- Location: {info.get('location')}\n"
+                prompt += f"- Summary: {info.get('summary')}"
+
         if self._loaded_skills:
             prompt += "\n\n--- ACTIVE SKILLS ---\n"
-            for name, skill in self._loaded_skills.items():
-                prompt += f"\n### {name.upper()} ###\n{skill}"
+            for name, (location, skill) in self._loaded_skills.items():
+                prompt += f"\n### {name.upper()} ###\n\nLocation: {location}\n\n{skill}"
 
         prompt += (
             "\n\n--- SYSTEM INFORMATION ---\n"
-            f"\nPlatform: {platform.system()}"
-            f"\nDate: {datetime.now().strftime('%A, %B %d, %Y')}\n"
+            f"\n- Platform: {platform.system()}"
+            f"\n- Date: {datetime.now().strftime('%A, %B %d, %Y')}\n"
             "\n\n"
         )
 
@@ -869,9 +887,10 @@ class ReactAgent:
             """Load a specific skill into the agent's system prompt."""
             if not _allowed(name, self._skills, self._exclude_skills):
                 raise ValueError(f"Skill '{name}' is not allowed.")
-            skill = await self._skills_loader.load_skill(name)
-            self._loaded_skills[name] = skill
-            return f"(Successfully loaded skill '{name}'.)"
+            if skill := await self._skills_loader.load_skill(name):
+                self._loaded_skills[name] = skill
+                return f"(Successfully loaded skill '{name}' to system prompt.)"
+            return f"(Failed to load skill '{name}'.)"
 
         @self._local_tools(
             name="unload_skill",
@@ -884,7 +903,7 @@ class ReactAgent:
         async def tool_unload_skill(name: str) -> str:
             """Unload a skill from the agent's system prompt."""
             self._loaded_skills.pop(name, None)
-            return f"(Successfully unloaded skill '{name}'.)"
+            return f"(Successfully unloaded skill '{name}' from system prompt.)"
 
         @self._local_tools(
             name="search_skills",
@@ -901,9 +920,7 @@ class ReactAgent:
         )
         async def tool_search_skills(query: str | None = None) -> str:
             """Search for skills by query."""
-            results = (
-                await self._skills_loader.search_skills(query) if query else await self._skills_loader.list_skills()
-            )
+            results = await self._skills_loader.search_skills(query)
             results = _compact(_pick_collection(results, self._skills, self._exclude_skills))
             return json.dumps(results)
 
@@ -921,8 +938,8 @@ class ReactAgent:
             return json.dumps(results)
 
     @classmethod
-    def register(cls, name: str, discriptions: str | None = None, **agent_cfg):
-        @ep_agent(name=name, discriptions=discriptions, defaults=agent_cfg)
+    def register(cls, name: str, discriptions: str | None = None, **kwargs):
+        @ep_agent(name=name, discriptions=discriptions, defaults=kwargs)
         @wraps(ReactAgent)
         def create_react_agent(*args, **kwargs):
             return ReactAgent(*args, **kwargs)
@@ -1145,6 +1162,7 @@ def bootstrap_platform(
     envfile: str | None = None,
     extensions: list[str] | None = None,
     agents: list[dict[str, Any]] | None = None,
+    agent_defaults: dict[str, Any] | None = None,
 ) -> None:
     """Bootstrap the global environment: load env vars and register extension modules."""
 
@@ -1172,8 +1190,9 @@ def bootstrap_platform(
             _load_ext_paths(paths=paths)
 
     if agents:
+        defaults = agent_defaults or {}
         for agent_spec in agents:
-            ReactAgent.register(**agent_spec)
+            ReactAgent.register(**(defaults | agent_spec))
 
 
 CURRENT_HARNESS: contextvars.ContextVar[AgentHarness] = contextvars.ContextVar("current_harness")
@@ -1308,7 +1327,7 @@ class AgentHarness:
             "local_tools": local_tools,
         }
 
-        agent = ep_agent.invoke(agent_name, **kwargs) if agent_name else ReactAgent(**kwargs)
+        agent = ep_agent.invoke(agent_name, kwargs) if agent_name else ReactAgent(**kwargs)
         return agent
 
     def _create_and_own(self, ep: ExtensionPoint, protocol: type, cfg: Any) -> Any:
@@ -1462,7 +1481,7 @@ def _create_extension_instance(ext_point: ExtensionPoint, ext_protocol: type, co
     if config is None and not ext_point.has("_default"):
         return None
     cfg = (config or {}).copy()
-    return ext_point.invoke(cfg.pop("name", "_default"), **cfg)
+    return ext_point.invoke(cfg.pop("name", "_default"), cfg)
 
 
 def _compact(*dicts: dict, **kwargs: Any) -> dict[str, Any]:

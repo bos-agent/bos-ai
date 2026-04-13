@@ -33,7 +33,7 @@ class _LazyGroup(click.Group):
 @click.option(
     "-w",
     "--workspace",
-    type=click.Path(exists=True, file_okay=False, dir_okay=True),
+    type=click.Path(exists=False, file_okay=False, dir_okay=True),
     default=".",
     help="Path to the workspace directory.",
 )
@@ -41,7 +41,7 @@ class _LazyGroup(click.Group):
 def cli(ctx, workspace):
     """BOS AI CLI"""
     ctx.ensure_object(dict)
-    ctx.obj['WORKSPACE'] = workspace
+    ctx.obj["WORKSPACE"] = workspace
 
 
 def main():
