@@ -27,7 +27,7 @@ def _slugify(address: str) -> str:
     return urllib.parse.quote(address, safe="")
 
 
-@ep_mailbox(name="jsonl_mailbox")
+@ep_mailbox(name="JsonlMailbox")
 class JsonlMailbox:
     """File-based mailbox using JSONL inbox files."""
 

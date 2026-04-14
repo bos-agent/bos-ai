@@ -19,7 +19,7 @@ from typing import Any
 from bos.core import Message, _flock, ep_message_store
 
 
-@ep_message_store(name="jsonl_message_store")
+@ep_message_store(name="JsonlMessageStore")
 class JsonlMessageStore:
     """Persistent message store backed by JSONL files."""
 

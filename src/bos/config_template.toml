@@ -52,18 +52,18 @@ skill = """
 skill_dirs = ["skills"]
 
 [harness.memory_store]
-name = "markdown_memory_store"
+name = "MarkdownMemoryStore"
 store_dir = "memories"
 
 [harness.message_store]
-name = "jsonl_message_store"
+name = "JsonlMessageStore"
 store_dir = "messages"
 
 [harness.mailbox]
-name = "jsonl_mailbox"
+name = "JsonlMailbox"
 store_dir = "mailboxes"
 
-harness.interceptors = []
+harness.interceptors = ["AgentStepRelay"]
 
 [[harness.subagents]]
 name = "_default"
@@ -78,5 +78,13 @@ result. You can only modify or create files under {workspace}.
 exclude_tools = ["update_memory"]
 
 
-[cli]
-chat.agent = "main"
+[main]
+agent = "main"
+
+[[main.channels]]
+# Channel configuration — bridges external clients to the mailbox.
+# Multiple channels can be listed to run in parallel (e.g. HttpChannel + TelegramChannel).
+name = "HttpChannel"
+address = "http"     # mailbox address this channel binds to
+host = "127.0.0.1"   # use 0.0.0.0 in Docker
+port = 8080

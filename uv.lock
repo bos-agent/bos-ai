@@ -157,6 +157,7 @@ name = "bos-ai"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "aiohttp" },
     { name = "beautifulsoup4" },
     { name = "click" },
     { name = "filelock" },
@@ -185,6 +186,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "aiohttp", specifier = ">=3.13.5" },
     { name = "beautifulsoup4", specifier = ">=4.14.3" },
     { name = "click", specifier = ">=8.1.7" },
     { name = "filelock", specifier = ">=3.19.1" },

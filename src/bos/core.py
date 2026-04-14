@@ -845,7 +845,7 @@ class ReactAgent:
 
     def _register_memory_tools(self) -> None:
         @self._local_tools(
-            name="update_memory",
+            name="UpdateMemory",
             parameters={
                 "type": "object",
                 "properties": {
@@ -876,7 +876,7 @@ class ReactAgent:
 
     def _register_skills_tools(self) -> None:
         @self._local_tools(
-            name="load_skill",
+            name="LoadSkill",
             parameters={
                 "type": "object",
                 "properties": {"name": {"type": "string", "description": "Skill name"}},
@@ -893,7 +893,7 @@ class ReactAgent:
             return f"(Failed to load skill '{name}'.)"
 
         @self._local_tools(
-            name="unload_skill",
+            name="UnloadSkill",
             parameters={
                 "type": "object",
                 "properties": {"name": {"type": "string", "description": "Skill name."}},
@@ -906,7 +906,7 @@ class ReactAgent:
             return f"(Successfully unloaded skill '{name}' from system prompt.)"
 
         @self._local_tools(
-            name="search_skills",
+            name="SearchSkills",
             parameters={
                 "type": "object",
                 "properties": {
@@ -926,7 +926,7 @@ class ReactAgent:
 
     def _register_agent_tools(self) -> None:
         @self._local_tools(
-            name="list_agents",
+            name="ListAgents",
             description="List all available agents registered in the system.",
             parameters={"type": "object", "properties": {}},
         )
@@ -959,7 +959,7 @@ class Envelope:
     sender: str  # address like: agent://name
     recipient: str  # address like: channel+telegram://chat_id
     content: str
-    context_type: str = "message"
+    content_type: str = "message"
     conversation_id: str | None = None
     timestamp: datetime = field(default_factory=datetime.now)
 
@@ -1009,8 +1009,49 @@ class InMemMailbox:
 
 
 # ═══════════════════════════════════════════════════════════════
+#  CHANNEL
+# ═══════════════════════════════════════════════════════════════
+
+
+ep_channel = ExtensionPoint(description="Channel. Bridges external clients to/from a mailbox address.")
+
+
+@runtime_checkable
+class Channel(Protocol):
+    """Bridges an external interface (TUI, bot, web) to/from the mailbox.
+
+    A channel is an async service that:
+    - Reads envelopes from ``mailbox.receive(address)`` and presents them externally.
+    - Translates external input into ``Envelope`` objects and calls ``mailbox.send(env)``.
+    """
+
+    async def run(self, mailbox: Mailbox, address: str) -> None:
+        """Bridge loop — runs until cancelled.
+
+        Args:
+            mailbox: The shared harness mailbox.
+            address: This channel's own mailbox address (e.g. ``"http"``).
+        """
+        ...
+
+
+# ═══════════════════════════════════════════════════════════════
 #  AGENT ACTOR
 # ═══════════════════════════════════════════════════════════════
+
+ep_actor_command = ExtensionPoint(
+    description="""Actor command handler. An async function with injectable arguments: input, env, actor, harness.
+    For example:
+
+    @ep_actor_command(name="echo")
+    async def echo(input: str) -> str:
+        return input
+
+    @ep_actor_command(name="tools")
+    async def tools(actor: AgentActor) -> dict:
+        return actor._agent._get_tool_defs()
+    """
+)
 
 
 class AgentActor:
@@ -1066,7 +1107,7 @@ class AgentActor:
                             await self._mailbox.send(Envelope(sender=self._address, recipient=s, content=error_content))
                         del self._tasks[s]
 
-                        if s in self._pending and any(e.context_type == "message" for e in self._pending[s]):
+                        if s in self._pending and any(e.content_type == "message" for e in self._pending[s]):
                             self._fire_pending(s)
 
                 env = await self._mailbox.receive_nowait(self._address)
@@ -1076,18 +1117,27 @@ class AgentActor:
 
                 sender = env.sender
 
+                # --- Command dispatch (independent of ask tasks) ---
+                if env.content_type == "command":
+                    if env.content.strip().startswith("/"):
+                        asyncio.create_task(self._handle_command(env))
+                        continue
+                    else:
+                        env.content_type = "message"
+
                 # --- No task running for sender: start one ---
                 if sender not in self._tasks:
-                    if env.context_type == "message":
+                    if "message" in env.content_type:
                         self._pending.setdefault(sender, []).append(env)
                         self._fire_pending(sender)
                     continue
 
                 # --- Task in-flight for sender: buffer by type ---
-                if env.context_type in ("inject", "stop"):
+                if env.content_type in ("interrupt_message", "interrupt_abort"):
                     self._interrupts.setdefault(sender, []).append(env)
                 else:
                     self._pending.setdefault(sender, []).append(env)
+
         except asyncio.CancelledError:
             await self.aclose()
             raise
@@ -1096,7 +1146,7 @@ class AgentActor:
 
     def _fire_pending(self, sender: str) -> None:
         """Start an ask task for *sender* from all its pending messages."""
-        messages = [e for e in self._pending.pop(sender, []) if e.context_type == "message"]
+        messages = [e for e in self._pending.pop(sender, []) if e.content_type == "message"]
         if not messages:
             return
         content = "\n\n".join(
@@ -1111,10 +1161,15 @@ class AgentActor:
     async def _run_ask(self, sender: str, conversation_id: str, content: str) -> None:
         """Run agent.ask **and** send the reply — all inside the task."""
         while True:
-            response = await self._agent.ask(conversation_id, content, interrupt=self._make_interrupt(sender))
+            response = await self._agent.ask(
+                conversation_id,
+                content,
+                interrupt=self._make_interrupt(sender),
+                ctx_metadata={"sender": sender, "actor_address": self._address},
+            )
             await self._mailbox.send(Envelope(sender=self._address, recipient=sender, content=response))
 
-            messages = [e for e in self._pending.pop(sender, []) if e.context_type == "message"]
+            messages = [e for e in self._pending.pop(sender, []) if e.content_type == "message"]
             if not messages:
                 break
 
@@ -1126,6 +1181,35 @@ class AgentActor:
                 for e in messages
             )
 
+    async def _handle_command(self, env: Envelope) -> None:
+        """Dispatch a command to the appropriate command extension."""
+        parts = env.content.split(None, 1)
+        cmd_name, input = parts[0].lstrip("/"), "" if len(parts) == 1 else parts[1]
+
+        try:
+            result = await ep_actor_command.invoke_async(
+                cmd_name, {"input": input, "env": env, "actor": self, "harness": CURRENT_HARNESS.get(None)}
+            )
+        except Exception as e:
+            result = str(e)
+
+        if result is None:
+            result = "(done)"
+
+        if not isinstance(result, (Envelope, str)):
+            result = json.dumps(result, default=str)
+
+        if isinstance(result, str):
+            result = Envelope(
+                sender=self._address,
+                recipient=env.sender,
+                content=result,
+                content_type="command_result",
+                conversation_id=env.conversation_id,
+            )
+
+        await self._mailbox.send(result)
+
     # ── interrupt (pull-mode, per-sender) ──────────────────────
 
     def _make_interrupt(self, sender: str):
@@ -1136,10 +1220,10 @@ class AgentActor:
             parts: list[str] = []
             remaining: list[Envelope] = []
             for env in buf:
-                if env.context_type == "stop":
+                if env.content_type == "interrupt_abort":
                     self._interrupts[sender] = remaining
                     raise AbortTurn()
-                if env.context_type == "inject":
+                if env.content_type == "interrupt_message":
                     parts.append(f"[from {env.sender}]: {env.content}")
                 else:
                     remaining.append(env)
@@ -1352,11 +1436,8 @@ class AgentHarness:
         harness = self
 
         @tools(
-            name="send_mail",
-            description=(
-                "Send a message to the recipient's address. e.g.: "
-                "send_mail(sender='John', recipient='tui', content='Task 1.3 is done')"
-            ),
+            name="SendMail",
+            description=("Send a message to the recipient's address."),
             parameters={
                 "type": "object",
                 "properties": {
@@ -1373,7 +1454,7 @@ class AgentHarness:
             return f"(Sent to {recipient})"
 
         @tools(
-            name="ask_subagent",
+            name="AskSubagent",
             parameters={
                 "type": "object",
                 "properties": {

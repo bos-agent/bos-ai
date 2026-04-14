@@ -14,7 +14,7 @@ from bos.core import _flock, ep_memory_store
 logger = logging.getLogger(__name__)
 
 
-@ep_memory_store(name="markdown_memory_store")
+@ep_memory_store(name="MarkdownMemoryStore")
 class MarkdownMemoryStore:
     """File-based memory store for long-term agent identity and rules."""
 
