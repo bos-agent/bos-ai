@@ -43,7 +43,7 @@ async def start(workspace: "Workspace") -> None:
 
     async with workspace.harness() as harness:
         agent = harness.create_agent(agent_name)
-        actor = AgentActor(f"agent://{agent_name}", agent, harness.mailbox)
+        actor = AgentActor(f"agent@{agent_name}", agent, harness.mailbox)
 
         channels: list[tuple[Channel, str]] = []
         for cfg in channels_cfg:
@@ -51,7 +51,7 @@ async def start(workspace: "Workspace") -> None:
             if ch is None:
                 logger.warning("Could not create channel from config: %r", cfg)
                 continue
-            channels.append((ch, cfg.get("address", "http")))
+            channels.append((ch, f"channel@{cfg.get('address', 'http')}"))
 
         # Allow channels to start, then write state so bos tui can discover endpoints.
         # We use a short startup window: each channel's run() blocks, so we track

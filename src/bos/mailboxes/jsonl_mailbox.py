@@ -20,11 +20,14 @@ from bos.core import Envelope, _flock, ep_mailbox
 def _slugify(address: str) -> str:
     """Convert an address to a filesystem-safe filename segment using URL encoding.
 
+    The ``@`` separator is kept unencoded for readability with the
+    ``type@name`` convention.
+
     Examples:
-        "agent://coding"  -> "agent%3A%2F%2Fcoding"
-        "inbox@host"      -> "inbox%40host"
+        "agent@main"  -> "agent@main"
+        "channel@http"  -> "channel@http"
     """
-    return urllib.parse.quote(address, safe="")
+    return urllib.parse.quote(address, safe="@")
 
 
 @ep_mailbox(name="JsonlMailbox")

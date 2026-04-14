@@ -128,8 +128,8 @@ class ChatApp(App):
     def __init__(
         self,
         mailbox: Mailbox,
-        agent_address: str = "main",
-        tui_address: str = "tui",
+        agent_address: str = "agent@main",
+        tui_address: str = "client@tui",
     ) -> None:
         super().__init__()
         self._mailbox = mailbox
@@ -232,7 +232,10 @@ class ChatApp(App):
                 content=text,
                 conversation_id=self._conversation_id,
             )
-            await self._mailbox.send(env)
+            try:
+                await self._mailbox.send(env)
+            except Exception as exc:
+                self._write_system(f"[yellow]⚠ Send failed — reconnecting: {exc}[/]")
             return
 
         # Write user message
@@ -249,7 +252,12 @@ class ChatApp(App):
             content=text,
             conversation_id=self._conversation_id,
         )
-        await self._mailbox.send(env)
+        try:
+            await self._mailbox.send(env)
+        except Exception as exc:
+            self._busy = False
+            self._update_status()
+            self._write_system(f"[yellow]⚠ Send failed — reconnecting: {exc}[/]")
 
     async def on_agent_step_event(self, event: AgentStepEvent) -> None:
         """Handle real-time step info from the agent process."""
@@ -367,7 +375,11 @@ class ChatApp(App):
             content_type="command",
             conversation_id=self._conversation_id,
         )
-        await self._mailbox.send(env)
+        try:
+            await self._mailbox.send(env)
+        except Exception as exc:
+            self._write_system(f"[yellow]⚠ Send failed — reconnecting: {exc}[/]")
+            return
         self._write_system(f"[dim]  ⏳ /{command_name}…[/]")
 
     # ── actions ────────────────────────────────────────────────
@@ -396,7 +408,7 @@ class ChatApp(App):
 # ── entrypoint ─────────────────────────────────────────────────
 
 
-async def run_chat_tui(mailbox: Mailbox, agent_address: str = "main") -> None:
+async def run_chat_tui(mailbox: Mailbox, agent_address: str = "agent@main") -> None:
     """Launch the TUI connected to a running agent via channel.
 
     ``mailbox`` must satisfy the ``Mailbox`` protocol — typically an

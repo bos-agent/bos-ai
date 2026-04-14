@@ -42,7 +42,7 @@ def _envelope_from_dict(data: dict[str, Any], default_sender: str) -> Envelope:
     ts = datetime.fromisoformat(ts_raw) if isinstance(ts_raw, str) else datetime.now()
     return Envelope(
         sender=data.get("sender", default_sender),
-        recipient=data.get("recipient", "main"),
+        recipient=data.get("recipient", "agent@main"),
         content=data.get("content", ""),
         content_type=data.get("content_type", "message"),
         conversation_id=data.get("conversation_id"),
@@ -90,6 +90,9 @@ async def _ws_handler(request: web.Request) -> web.WebSocketResponse:
                 try:
                     data = json.loads(msg.data)
                     env = _envelope_from_dict(data, default_sender=channel_address)
+                    # Force sender to channel address so replies route back
+                    # through this channel's mailbox polling address.
+                    env.sender = channel_address
                     await mailbox.send(env)
                 except Exception as exc:
                     logger.warning("Bad WS message: %s — %s", msg.data[:120], exc)

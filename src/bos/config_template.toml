@@ -48,6 +48,9 @@ skill = """
 - If you are NOT a subagent, you should unload the skills if you don't need them.
 """
 
+[harness]
+interceptors = ["AgentStepRelay"]
+
 [harness.skills_loader]
 skill_dirs = ["skills"]
 
@@ -63,8 +66,6 @@ store_dir = "messages"
 name = "JsonlMailbox"
 store_dir = "mailboxes"
 
-harness.interceptors = ["AgentStepRelay"]
-
 [[harness.subagents]]
 name = "_default"
 task_template = """
@@ -75,7 +76,7 @@ result. You can only modify or create files under {workspace}.
 --- Task Description ---
 {task}
 """
-exclude_tools = ["update_memory"]
+exclude_tools = ["UpdateMemory"]
 
 
 [main]
