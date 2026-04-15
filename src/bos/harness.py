@@ -209,6 +209,7 @@ class AgentHarness:
 
         @tools(
             name="AskSubagent",
+            description="Delegate a task to a named subagent and return its response.",
             parameters={
                 "type": "object",
                 "properties": {
