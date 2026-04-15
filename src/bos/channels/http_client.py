@@ -14,7 +14,7 @@ from typing import Any
 
 from aiohttp import WSMsgType
 
-from bos.core import Envelope
+from bos.protocol import Envelope, MessageType
 
 logger = logging.getLogger(__name__)
 
@@ -116,9 +116,10 @@ class HttpChannelClient:
                                 sender=data.get("sender", ""),
                                 recipient=data.get("recipient", self._address),
                                 content=data.get("content", ""),
-                                content_type=data.get("content_type", "message"),
+                                content_type=data.get("content_type", MessageType.MESSAGE),
                                 conversation_id=data.get("conversation_id"),
                                 timestamp=ts,
+                                metadata=data.get("metadata", {}),
                             )
                             await self._recv_queue.put(env)
                         except Exception as exc:

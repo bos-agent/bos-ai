@@ -11,7 +11,8 @@ import asyncio
 import logging
 import uuid
 
-from bos.core import Envelope, Mailbox
+from bos.core import Mailbox
+from bos.protocol import ChannelCommandName, Envelope, MessageType
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +55,7 @@ class BroadcastChannel:
                                     sender=address,
                                     recipient=member,
                                     content=env.content,
-                                    content_type="echo",
+                                    content_type=MessageType.ECHO,
                                     conversation_id=self._conversation_for_member(member),
                                 )
                             )
@@ -93,9 +94,9 @@ class BroadcastChannel:
 
     def _is_new_conversation_request(self, env: Envelope) -> bool:
         return (
-            env.content_type == "channel_command"
-            and env.content.strip() == "new_conversation"
-            or env.content_type == "command"
+            env.content_type == MessageType.CHANNEL_COMMAND
+            and env.content.strip() == ChannelCommandName.NEW_CONVERSATION
+            or env.content_type == MessageType.COMMAND
             and env.content.strip() == "/new"
         )
 
@@ -120,7 +121,7 @@ class BroadcastChannel:
                     sender=address,
                     recipient=member,
                     content="Started a new shared conversation.",
-                    content_type="system",
+                    content_type=MessageType.SYSTEM,
                     conversation_id=self._conversation_for_member(member),
                 )
             )

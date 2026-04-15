@@ -25,6 +25,8 @@ from functools import wraps
 from pathlib import Path
 from typing import Any, Awaitable, Literal, Protocol, runtime_checkable
 
+from bos.protocol import Envelope, MessageType
+
 __version__ = "0.1.0"
 
 
@@ -949,16 +951,6 @@ ep_mailbox = ExtensionPoint(
 )
 
 
-@dataclass
-class Envelope:
-    sender: str  # address like: agent://name
-    recipient: str  # address like: channel+telegram://chat_id
-    content: str
-    content_type: str = "message"
-    conversation_id: str | None = None
-    timestamp: datetime = field(default_factory=datetime.now)
-
-
 @runtime_checkable
 class Mailbox(Protocol):
     """Address-bound message endpoint.
@@ -1101,7 +1093,7 @@ class AgentActor:
                             await self._mailbox.send(Envelope(sender=self._address, recipient=s, content=error_content))
                         del self._tasks[s]
 
-                        if s in self._pending and any(e.content_type == "message" for e in self._pending[s]):
+                        if s in self._pending and any(e.content_type == MessageType.MESSAGE for e in self._pending[s]):
                             self._fire_pending(s)
 
                 env = await self._mailbox.receive_nowait(self._address)
@@ -1112,22 +1104,22 @@ class AgentActor:
                 sender = env.sender
 
                 # --- Command dispatch (independent of ask tasks) ---
-                if env.content_type == "command":
+                if env.content_type == MessageType.COMMAND:
                     if env.content.strip().startswith("/"):
                         asyncio.create_task(self._handle_command(env))
                         continue
                     else:
-                        env.content_type = "message"
+                        env.content_type = MessageType.MESSAGE
 
                 # --- No task running for sender: start one ---
                 if sender not in self._tasks:
-                    if "message" in env.content_type:
+                    if env.content_type == MessageType.MESSAGE:
                         self._pending.setdefault(sender, []).append(env)
                         self._fire_pending(sender)
                     continue
 
                 # --- Task in-flight for sender: buffer by type ---
-                if env.content_type in ("interrupt_message", "interrupt_abort"):
+                if env.content_type in (MessageType.INTERRUPT_MESSAGE, MessageType.INTERRUPT_ABORT):
                     self._interrupts.setdefault(sender, []).append(env)
                 else:
                     self._pending.setdefault(sender, []).append(env)
@@ -1140,7 +1132,7 @@ class AgentActor:
 
     def _fire_pending(self, sender: str) -> None:
         """Start an ask task for *sender* from all its pending messages."""
-        messages = [e for e in self._pending.pop(sender, []) if e.content_type == "message"]
+        messages = [e for e in self._pending.pop(sender, []) if e.content_type == MessageType.MESSAGE]
         if not messages:
             return
         content = "\n\n".join(
@@ -1164,7 +1156,7 @@ class AgentActor:
                 Envelope(sender=self._address, recipient=sender, content=response, conversation_id=conversation_id)
             )
 
-            messages = [e for e in self._pending.pop(sender, []) if e.content_type == "message"]
+            messages = [e for e in self._pending.pop(sender, []) if e.content_type == MessageType.MESSAGE]
             if not messages:
                 break
 
@@ -1201,7 +1193,7 @@ class AgentActor:
                 sender=self._address,
                 recipient=env.sender,
                 content=result,
-                content_type="command_result",
+                content_type=MessageType.COMMAND_RESULT,
                 conversation_id=env.conversation_id,
             )
 
@@ -1217,10 +1209,10 @@ class AgentActor:
             parts: list[str] = []
             remaining: list[Envelope] = []
             for env in buf:
-                if env.content_type == "interrupt_abort":
+                if env.content_type == MessageType.INTERRUPT_ABORT:
                     self._interrupts[sender] = remaining
                     raise AbortTurn()
-                if env.content_type == "interrupt_message":
+                if env.content_type == MessageType.INTERRUPT_MESSAGE:
                     parts.append(f"[from {env.sender}]: {env.content}")
                 else:
                     remaining.append(env)

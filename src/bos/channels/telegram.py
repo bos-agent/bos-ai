@@ -14,7 +14,8 @@ from typing import Any
 
 from aiohttp import ClientSession
 
-from bos.core import Envelope, Mailbox, ep_channel
+from bos.core import Mailbox, ep_channel
+from bos.protocol import Envelope, MessageType
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +77,7 @@ def _extract_inbound_message(update: dict[str, Any], *, bot_username: str | None
         "chat_id": chat_id,
         "text": normalized,
         "conversation_id": _conversation_id_for_chat(chat_id),
-        "content_type": "command" if normalized.startswith("/") else "message",
+        "content_type": MessageType.COMMAND if normalized.startswith("/") else MessageType.MESSAGE,
     }
 
 
@@ -191,7 +192,7 @@ class TelegramChannel:
     async def _forward_replies(self, mailbox: Mailbox, address: str) -> None:
         while True:
             env = await mailbox.receive(address)
-            if env.content_type == "agent_step":
+            if env.content_type == MessageType.AGENT_STEP:
                 continue
 
             chat_id = self._resolve_chat_id(env)

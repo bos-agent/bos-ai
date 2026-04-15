@@ -14,7 +14,8 @@ from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 
-from bos.core import Envelope, _flock, ep_mailbox
+from bos.core import _flock, ep_mailbox
+from bos.protocol import Envelope
 
 
 def _slugify(address: str) -> str:
