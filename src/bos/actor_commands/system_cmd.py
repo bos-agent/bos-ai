@@ -26,7 +26,6 @@ if TYPE_CHECKING:
 async def history(input: str, env: Envelope, actor: AgentActor) -> str:
     """Show conversation history."""
     conversation_id = input.strip() or env.conversation_id
-    # Use the most recent conversation for this actor if none given
     agent = actor._agent
     if not conversation_id:
         return "(no conversation found)"
@@ -74,3 +73,4 @@ async def memory(actor: AgentActor) -> str:
     agent = actor._agent
     result = await agent._memory_store.list_memories()
     return json.dumps({"name": "memory", "result": result}, default=str)
+

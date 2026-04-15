@@ -81,6 +81,7 @@ exclude_tools = ["UpdateMemory"]
 
 [main]
 agent = "main"
+broadcast_address = "channel@user"
 
 [[main.channels]]
 # Channel configuration — bridges external clients to the mailbox.

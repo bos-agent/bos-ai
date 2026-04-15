@@ -37,12 +37,12 @@ logger = logging.getLogger(__name__)
 # ── helpers ────────────────────────────────────────────────────
 
 
-def _envelope_from_dict(data: dict[str, Any], default_sender: str) -> Envelope:
+def _envelope_from_dict(data: dict[str, Any], *, sender: str, target: str) -> Envelope:
     ts_raw = data.get("timestamp")
     ts = datetime.fromisoformat(ts_raw) if isinstance(ts_raw, str) else datetime.now()
     return Envelope(
-        sender=data.get("sender", default_sender),
-        recipient=data.get("recipient", "agent@main"),
+        sender=sender,
+        recipient=data.get("recipient", target),
         content=data.get("content", ""),
         content_type=data.get("content_type", "message"),
         conversation_id=data.get("conversation_id"),
@@ -66,6 +66,7 @@ async def _ws_handler(request: web.Request) -> web.WebSocketResponse:
     """Bidirectional WebSocket bridge between an external client and the mailbox."""
     mailbox: Mailbox = request.app["mailbox"]
     channel_address: str = request.app["channel_address"]
+    target_address: str = request.app["target_address"]
 
     ws = web.WebSocketResponse(heartbeat=30)
     await ws.prepare(request)
@@ -89,10 +90,7 @@ async def _ws_handler(request: web.Request) -> web.WebSocketResponse:
             if msg.type == WSMsgType.TEXT:
                 try:
                     data = json.loads(msg.data)
-                    env = _envelope_from_dict(data, default_sender=channel_address)
-                    # Force sender to channel address so replies route back
-                    # through this channel's mailbox polling address.
-                    env.sender = channel_address
+                    env = _envelope_from_dict(data, sender=channel_address, target=target_address)
                     await mailbox.send(env)
                 except Exception as exc:
                     logger.warning("Bad WS message: %s — %s", msg.data[:120], exc)
@@ -113,9 +111,10 @@ async def _send_handler(request: web.Request) -> web.Response:
     """POST /api/send — one-shot fire-and-forget."""
     mailbox: Mailbox = request.app["mailbox"]
     channel_address: str = request.app["channel_address"]
+    target_address: str = request.app["target_address"]
     try:
         data = await request.json()
-        env = _envelope_from_dict(data, default_sender=channel_address)
+        env = _envelope_from_dict(data, sender=channel_address, target=target_address)
         await mailbox.send(env)
         return web.json_response({"ok": True}, status=202)
     except Exception as exc:
@@ -139,19 +138,23 @@ class HttpChannel:
     the shared harness mailbox via ``address``.
     """
 
-    def __init__(self, host: str = "127.0.0.1", port: int = 8080, **_: Any) -> None:
+    def __init__(self, host: str = "127.0.0.1", port: int = 8080, target_address: str | None = None) -> None:
         self._host = os.environ.get("BOS_CHANNEL_HOST", host)
         self._port = int(os.environ.get("BOS_CHANNEL_PORT", port))
         self.actual_host: str = self._host
         self.actual_port: int = self._port
+        self.target_address: str | None = target_address
 
-    async def run(self, mailbox: Mailbox, address: str) -> None:  # noqa: D102
+    async def run(self, mailbox: Mailbox, address: str) -> None:
+        target = self.target_address or address
         app = web.Application()
         app["mailbox"] = mailbox
         app["channel_address"] = address
+        app["target_address"] = target
         app["status_info"] = {
             "channel": "HttpChannel",
             "address": address,
+            "target_address": target,
             "started_at": datetime.now().isoformat(),
         }
 

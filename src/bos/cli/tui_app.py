@@ -16,6 +16,7 @@ import asyncio
 import json
 import logging
 import uuid
+
 from typing import Any
 
 from rich.markdown import Markdown
@@ -44,9 +45,10 @@ class AgentStepEvent(Message):
 class AgentReplyEvent(Message):
     """Final reply envelope from the agent."""
 
-    def __init__(self, content: str) -> None:
+    def __init__(self, content: str, conversation_id: str | None = None) -> None:
         super().__init__()
         self.content = content
+        self.conversation_id = conversation_id
 
 
 class CommandResultEvent(Message):
@@ -198,9 +200,14 @@ class ChatApp(App):
                     except json.JSONDecodeError:
                         info = {}
                     self.post_message(AgentStepEvent(info))
+                elif env.content_type == "echo":
+                    # User input from another channel — display it
+                    log = self.query_one("#conversation", RichLog)
+                    log.write(f"\n[bold dim cyan]❯ User ({env.sender})[/]")
+                    log.write(f"  {env.content}")
                 else:
                     # Normal reply
-                    self.post_message(AgentReplyEvent(env.content))
+                    self.post_message(AgentReplyEvent(env.content, env.conversation_id))
             except asyncio.CancelledError:
                 break
             except Exception:
@@ -287,7 +294,10 @@ class ChatApp(App):
         log = self.query_one("#conversation", RichLog)
         content = event.content or "(no response)"
 
-        log.write("\n[bold green]▸ Assistant[/]")
+        # Visual mark for replies from a non-current conversation
+        is_current = not event.conversation_id or event.conversation_id == self._conversation_id
+        conv_mark = "" if is_current else f" [dim](conv {event.conversation_id[:8]}…)[/]"
+        log.write(f"\n[bold green]▸ Assistant{conv_mark}[/]")
         try:
             md = Markdown(content)
             log.write(md)
@@ -366,7 +376,6 @@ class ChatApp(App):
         """Send a slash command to the channel server for execution."""
         payload = json.dumps({
             "name": command_name,
-            "conversation_id": self._conversation_id,
         })
         env = Envelope(
             sender=self._tui_address,

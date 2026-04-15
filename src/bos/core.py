@@ -15,6 +15,7 @@ import os
 import platform
 import re
 import shutil
+import tomllib
 import uuid
 from collections.abc import Callable, Iterable
 from contextlib import contextmanager
@@ -23,12 +24,6 @@ from datetime import datetime
 from functools import wraps
 from pathlib import Path
 from typing import Any, Awaitable, Literal, Protocol, runtime_checkable
-
-try:
-    import tomllib
-except ImportError:
-    import tomli as tomllib
-
 
 __version__ = "0.1.0"
 
@@ -650,7 +645,7 @@ class ReactAgent:
         )
         ctx.set_system_prompt(await self._build_system_prompt())
         if not ctx.history:
-            ctx.add_message({"role": "user", "content": f"Current Conversation ID is {conversation_id}"})
+            ctx.add_message({"role": "user", "content": f"--- Current Conversation ID is {conversation_id} ---\n\n"})
         ctx.add_message({"role": "user", "content": content or ""}, merge=True)
 
         llm_params = {
@@ -1071,7 +1066,6 @@ class AgentActor:
 
         # per-sender state
         self._tasks: dict[str, asyncio.Task] = {}  # sender -> running task
-        self._conversations: dict[str, str] = {}  # sender -> conversation_id
         self._pending: dict[str, list[Envelope]] = {}  # sender -> queued messages
         self._interrupts: dict[str, list[Envelope]] = {}  # sender -> interrupt buffer
 
@@ -1153,8 +1147,7 @@ class AgentActor:
             f"[from {e.sender} {e.timestamp.isoformat()}]: {e.content}" if len(messages) > 1 else e.content
             for e in messages
         )
-        conversation_id = messages[-1].conversation_id or self._conversations.setdefault(sender, uuid.uuid4().hex)
-        self._conversations[sender] = conversation_id
+        conversation_id = messages[-1].conversation_id or uuid.uuid4().hex
         self._interrupts[sender] = []
         self._tasks[sender] = asyncio.create_task(self._run_ask(sender, conversation_id, content))
 
@@ -1167,14 +1160,15 @@ class AgentActor:
                 interrupt=self._make_interrupt(sender),
                 ctx_metadata={"sender": sender, "actor_address": self._address},
             )
-            await self._mailbox.send(Envelope(sender=self._address, recipient=sender, content=response))
+            await self._mailbox.send(
+                Envelope(sender=self._address, recipient=sender, content=response, conversation_id=conversation_id)
+            )
 
             messages = [e for e in self._pending.pop(sender, []) if e.content_type == "message"]
             if not messages:
                 break
 
-            conversation_id = messages[-1].conversation_id or conversation_id
-            self._conversations[sender] = conversation_id
+            conversation_id = messages[-1].conversation_id or uuid.uuid4().hex
 
             content = "\n\n".join(
                 f"[from {e.sender} {e.timestamp.isoformat()}]: {e.content}" if len(messages) > 1 else e.content
