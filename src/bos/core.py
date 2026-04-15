@@ -1180,12 +1180,15 @@ class AgentActor:
         parts = env.content.split(None, 1)
         cmd_name, input = parts[0].lstrip("/"), "" if len(parts) == 1 else parts[1]
 
-        try:
-            result = await ep_actor_command.invoke_async(
-                cmd_name, {"input": input, "env": env, "actor": self, "harness": CURRENT_HARNESS.get(None)}
-            )
-        except Exception as e:
-            result = str(e)
+        if not ep_actor_command.has(cmd_name):
+            result = f"Invalid command `{cmd_name}`"
+        else:
+            try:
+                result = await ep_actor_command.invoke_async(
+                    cmd_name, {"input": input, "env": env, "actor": self, "harness": CURRENT_HARNESS.get(None)}
+                )
+            except Exception as e:
+                result = str(e)
 
         if result is None:
             result = "(done)"

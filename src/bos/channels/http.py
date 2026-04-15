@@ -24,7 +24,6 @@ import asyncio
 import dataclasses
 import json
 import logging
-import os
 from datetime import datetime
 from typing import Any
 
@@ -42,7 +41,7 @@ def _envelope_from_dict(data: dict[str, Any], *, sender: str, target: str) -> En
     ts = datetime.fromisoformat(ts_raw) if isinstance(ts_raw, str) else datetime.now()
     return Envelope(
         sender=sender,
-        recipient=data.get("recipient", target),
+        recipient=target,
         content=data.get("content", ""),
         content_type=data.get("content_type", "message"),
         conversation_id=data.get("conversation_id"),
@@ -138,12 +137,12 @@ class HttpChannel:
     the shared harness mailbox via ``address``.
     """
 
-    def __init__(self, host: str = "127.0.0.1", port: int = 8080, target_address: str | None = None) -> None:
-        self._host = os.environ.get("BOS_CHANNEL_HOST", host)
-        self._port = int(os.environ.get("BOS_CHANNEL_PORT", port))
+    def __init__(self, target_address: str, host: str = "127.0.0.1", port: int = 0) -> None:
+        self._host = host
+        self._port = int(port)
         self.actual_host: str = self._host
         self.actual_port: int = self._port
-        self.target_address: str | None = target_address
+        self.target_address: str = target_address
 
     async def run(self, mailbox: Mailbox, address: str) -> None:
         target = self.target_address or address

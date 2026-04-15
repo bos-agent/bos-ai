@@ -1,5 +1,5 @@
 from bos.actor_commands import system_cmd  # noqa: F401
-from bos.channels import http  # noqa: F401
+from bos.channels import http, telegram  # noqa: F401
 from bos.interceptors import agent_step_relay  # noqa: F401
 from bos.mailboxes import jsonl_mailbox  # noqa: F401
 from bos.memory_stores import markdown_memory_store  # noqa: F401

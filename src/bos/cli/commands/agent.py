@@ -182,9 +182,8 @@ def restart(ctx):
 @click.option("--host", default=None, help="Channel host (overrides agent.state).")
 @click.option("--port", default=None, type=int, help="Channel port (overrides agent.state).")
 @click.option("--address", default="tui", show_default=True, help="This TUI's mailbox address.")
-@click.option("--agent-address", default="agent@main", show_default=True, help="Agent address to send messages to.")
 @click.pass_context
-def tui(ctx, host: str | None, port: int | None, address: str, agent_address: str):
+def tui(ctx, host: str | None, port: int | None, address: str):
     """Connect the TUI to a running agent via the HTTP channel."""
     _, rd = _get_ws_and_rd(ctx)
     from bos.runner.proc import read_state
@@ -210,7 +209,7 @@ def tui(ctx, host: str | None, port: int | None, address: str, agent_address: st
         client = HttpChannelClient(host=host, port=port, address=address)
         await client.connect()
         try:
-            await run_chat_tui(client, agent_address=agent_address)
+            await run_chat_tui(client)
         finally:
             await client.aclose()
 

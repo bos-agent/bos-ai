@@ -50,7 +50,7 @@ class TestJsonlMailbox:
                 sender="alice",
                 recipient="bob",
                 content="ping",
-                context_type="research",
+                content_type="research",
                 conversation_id="thread-1",
             )
         )
@@ -60,7 +60,7 @@ class TestJsonlMailbox:
         assert result.sender == "alice"
         assert result.recipient == "bob"
         assert result.content == "ping"
-        assert result.context_type == "research"
+        assert result.content_type == "research"
         assert result.conversation_id == "thread-1"
 
     @pytest.mark.asyncio

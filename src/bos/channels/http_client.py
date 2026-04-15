@@ -45,7 +45,7 @@ class HttpChannelClient:
 
         client = HttpChannelClient(host="127.0.0.1", port=8080, address="tui")
         await client.connect()
-        await client.send(Envelope(sender="tui", recipient="main", content="hello"))
+        await client.send(Envelope(sender="tui", recipient="", content="hello"))
         reply = await client.receive()
         await client.aclose()
     """

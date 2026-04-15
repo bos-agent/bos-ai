@@ -16,7 +16,6 @@ import asyncio
 import json
 import logging
 import uuid
-
 from typing import Any
 
 from rich.markdown import Markdown
@@ -58,6 +57,15 @@ class CommandResultEvent(Message):
         super().__init__()
         self.name = name
         self.data = data
+
+
+class SystemEvent(Message):
+    """System event emitted by the channel infrastructure."""
+
+    def __init__(self, content: str, conversation_id: str | None = None) -> None:
+        super().__init__()
+        self.content = content
+        self.conversation_id = conversation_id
 
 
 # ── ChatApp ────────────────────────────────────────────────────
@@ -130,12 +138,10 @@ class ChatApp(App):
     def __init__(
         self,
         mailbox: Mailbox,
-        agent_address: str = "agent@main",
         tui_address: str = "client@tui",
     ) -> None:
         super().__init__()
         self._mailbox = mailbox
-        self._agent_address = agent_address
         self._tui_address = tui_address
         self._conversation_id = uuid.uuid4().hex
         self._busy = False
@@ -167,7 +173,7 @@ class ChatApp(App):
     # ── lifecycle ──────────────────────────────────────────────
 
     async def on_mount(self) -> None:
-        self.sub_title = f"→ {self._agent_address}"
+        self.sub_title = "→ HttpChannel"
 
         # Start reply polling worker
         self._poll_task = asyncio.create_task(self._poll_replies())
@@ -175,7 +181,7 @@ class ChatApp(App):
         # Welcome
         log = self.query_one("#conversation", RichLog)
         log.write("[bold $primary]Agent CLI ready.[/]")
-        log.write(f"[dim]Agent: {self._agent_address}  ·  Conversation: {self._conversation_id}[/]")
+        log.write(f"[dim]Channel: HttpChannel  ·  Conversation: {self._conversation_id}[/]")
         log.write("[dim]Type /help for commands · Ctrl+C to quit[/]\n")
 
         self.query_one("#prompt", Input).focus()
@@ -205,6 +211,8 @@ class ChatApp(App):
                     log = self.query_one("#conversation", RichLog)
                     log.write(f"\n[bold dim cyan]❯ User ({env.sender})[/]")
                     log.write(f"  {env.content}")
+                elif env.content_type == "system":
+                    self.post_message(SystemEvent(env.content, env.conversation_id))
                 else:
                     # Normal reply
                     self.post_message(AgentReplyEvent(env.content, env.conversation_id))
@@ -235,7 +243,7 @@ class ChatApp(App):
 
             env = Envelope(
                 sender=self._tui_address,
-                recipient=self._agent_address,
+                recipient="",
                 content=text,
                 conversation_id=self._conversation_id,
             )
@@ -255,7 +263,7 @@ class ChatApp(App):
         self._update_status()
         env = Envelope(
             sender=self._tui_address,
-            recipient=self._agent_address,
+            recipient="",
             content=text,
             conversation_id=self._conversation_id,
         )
@@ -339,6 +347,13 @@ class ChatApp(App):
         else:
             self._write_system(f"[dim]{data}[/]")
 
+    async def on_system_event(self, event: SystemEvent) -> None:
+        """Handle infrastructure-level events from the channel layer."""
+        if event.conversation_id:
+            self._conversation_id = event.conversation_id
+            self._update_status()
+        self._write_system(f"[green]{event.content}[/]")
+
     # ── slash commands ────────────────────────────────────────
 
     async def _handle_slash_command(self, text: str) -> None:
@@ -358,9 +373,7 @@ class ChatApp(App):
             )
 
         elif cmd == "/new":
-            self._conversation_id = uuid.uuid4().hex
-            self._write_system(f"[green]✓ New conversation: {self._conversation_id}[/]")
-            self._update_status()
+            await self._send_channel_command("new_conversation", conversation_id=uuid.uuid4().hex)
 
         elif cmd == "/clear":
             self.query_one("#conversation", RichLog).clear()
@@ -374,13 +387,10 @@ class ChatApp(App):
 
     async def _send_command(self, command_name: str) -> None:
         """Send a slash command to the channel server for execution."""
-        payload = json.dumps({
-            "name": command_name,
-        })
         env = Envelope(
             sender=self._tui_address,
-            recipient=self._agent_address,
-            content=payload,
+            recipient="",
+            content=f"/{command_name}",
             content_type="command",
             conversation_id=self._conversation_id,
         )
@@ -390,6 +400,19 @@ class ChatApp(App):
             self._write_system(f"[yellow]⚠ Send failed — reconnecting: {exc}[/]")
             return
         self._write_system(f"[dim]  ⏳ /{command_name}…[/]")
+
+    async def _send_channel_command(self, command_name: str, conversation_id: str | None = None) -> None:
+        env = Envelope(
+            sender=self._tui_address,
+            recipient="",
+            content=command_name,
+            content_type="channel_command",
+            conversation_id=conversation_id,
+        )
+        try:
+            await self._mailbox.send(env)
+        except Exception as exc:
+            self._write_system(f"[yellow]⚠ Send failed — reconnecting: {exc}[/]")
 
     # ── actions ────────────────────────────────────────────────
 
@@ -408,7 +431,7 @@ class ChatApp(App):
 
     def _status_text(self) -> str:
         state = "● thinking" if self._busy else "○ ready"
-        return f"  {self._agent_address}  ·  {self._conversation_id}  ·  {state}"
+        return f"  HttpChannel  ·  {self._conversation_id}  ·  {state}"
 
     def _update_status(self) -> None:
         self.query_one("#status-bar", Static).update(self._status_text())
@@ -417,11 +440,11 @@ class ChatApp(App):
 # ── entrypoint ─────────────────────────────────────────────────
 
 
-async def run_chat_tui(mailbox: Mailbox, agent_address: str = "agent@main") -> None:
+async def run_chat_tui(mailbox: Mailbox) -> None:
     """Launch the TUI connected to a running agent via channel.
 
     ``mailbox`` must satisfy the ``Mailbox`` protocol — typically an
     ``HttpChannelClient`` that has already called ``connect()``.
     """
-    app = ChatApp(mailbox=mailbox, agent_address=agent_address)
+    app = ChatApp(mailbox=mailbox)
     await app.run_async()
