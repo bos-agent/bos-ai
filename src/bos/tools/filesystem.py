@@ -10,7 +10,7 @@ _IGNORE_DIRS = {".git", ".pycache", "__pycache__", "node_modules", "venv", ".ven
 
 
 @ep_tool(
-    name="read_file",
+    name="ReadFile",
     description="Read a text file from the workspace. Supports pagination for large files.",
     parameters={
         "type": "object",
@@ -59,7 +59,7 @@ def _sync_tool_read_file(path: str, line_offset: int = 0, limit: int = 500) -> s
 
 
 @ep_tool(
-    name="write_file",
+    name="WriteFile",
     description="Write content to a text file in the workspace.",
     parameters={
         "type": "object",
@@ -85,7 +85,7 @@ def _sync_tool_write_file(path: str, content: str) -> str:
 
 
 @ep_tool(
-    name="edit_file",
+    name="EditFile",
     description="Surgical text replacement in a file (old_string -> new_string).",
     parameters={
         "type": "object",
@@ -160,7 +160,7 @@ def _sync_tool_edit_file(
 
 
 @ep_tool(
-    name="glob_search",
+    name="GlobSearch",
     description="Find files by glob pattern.",
     parameters={
         "type": "object",
@@ -189,7 +189,7 @@ def _sync_tool_glob_search(pattern: str, cwd: str = ".") -> str:
 
 
 @ep_tool(
-    name="grep_search",
+    name="GrepSearch",
     description="Search file contents with a rg/grep pattern (supports context lines). Safely wraps the output.",
     parameters={
         "type": "object",

@@ -35,6 +35,7 @@ BOS AI ships with a `bos` CLI with lazy-loaded commands to keep startup times in
 - **`bos init`**: Bootstraps a new workspace. It creates the `.bos/config.toml` file and provisions necessary data directories.
 - **`bos auth`**: Set up authentication for various LLM providers and utilities.
 - **`bos chat`**: Drops you into an interactive chat application to talk to the agents defined in your configuration. You can also use it in "oneshot" mode.
+- **Channels**: Built-in channel bridges currently include `HttpChannel` for WebSocket/REST access and `TelegramChannel` for Telegram bot delivery.
 
 **LLM Providers via Auth:**
 ```bash
@@ -105,3 +106,17 @@ When you run a command, `bos` searches upwards from the current directory to fin
 - **`[[platform.agents]]`**: Array of dictionaries defining your agents. You can configure `system_prompt`, limits (`max_tokens`), required `tools`, `skills`, memory definitions, and even `subagents`.
 - **`[harness]`**: Define the overarching services all agents in the environment share. For example, configure the active `memory_store` directory or hook up an interceptor chain.
 - **`[cli]`**: Directives and default options for the command-line application (like specifying a default agent target).
+
+### Telegram Channel
+Configure a Telegram bot channel under `main.channels`:
+
+```toml
+[[main.channels]]
+name = "TelegramChannel"
+address = "telegram"
+token = "123456:telegram-bot-token"
+poll_timeout = 30
+allowed_chat_ids = [123456789]
+```
+
+Each Telegram chat is mapped to a stable BOS `conversation_id` in the form `telegram:<chat_id>`, so replies return to the correct chat.

@@ -9,7 +9,7 @@ _REPL_GLOBALS = {}
 
 
 @ep_tool(
-    name="bash",
+    name="Bash",
     description="Execute a shell command in the current workspace.",
     parameters={
         "type": "object",
@@ -86,7 +86,7 @@ async def tool_powershell(command: str, cwd: str = ".", timeout: int = 60) -> st
 
 
 @ep_tool(
-    name="REPL",
+    name="Repl",
     description="Execute Python code in a persistent REPL environment.",
     parameters={
         "type": "object",
