@@ -2,7 +2,7 @@
 envfile = ".env"
 
 # A list of module names or paths to the modules
-extensions = ["bos.extensions"]
+extensions = ["bos.extensions.bootstrap"]
 
 [platform.envs]
 # TD_AUTH_CODEX_PATH = "llm-auth/codex.auth.json"
