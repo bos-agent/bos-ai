@@ -62,6 +62,7 @@ from .defaults import (
 )
 from .harness import (
     CURRENT_HARNESS,
+    CURRENT_MAILBOX,
     AgentHarness,
     bootstrap_platform,
 )
@@ -77,6 +78,7 @@ __all__ = [
     "AgentActor",
     "AgentHarness",
     "CURRENT_HARNESS",
+    "CURRENT_MAILBOX",
     "Channel",
     "ChainReactInterceptor",
     "Closeable",

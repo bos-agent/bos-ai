@@ -11,7 +11,7 @@ import asyncio
 import logging
 import uuid
 
-from bos.core import MailBox, MailRoute
+from bos.core import MailBox
 from bos.protocol import ChannelCommandName, Envelope, MessageType
 
 logger = logging.getLogger(__name__)
@@ -26,7 +26,7 @@ class BroadcastChannel:
         self._conversation_id = self._new_conversation_id()
         self._member_conversation_ids: dict[str, str] = {}
 
-    async def run(self, route: MailRoute, mailbox: MailBox) -> None:
+    async def run(self, mailbox: MailBox) -> None:
         """Main mediator loop."""
         address = mailbox.address
         logger.info(
@@ -67,14 +67,11 @@ class BroadcastChannel:
 
                 else:
                     for member in self._members:
-                        await route.deliver(
-                            Envelope(
-                                sender=env.sender,
-                                recipient=member,
-                                content=env.content,
-                                content_type=env.content_type,
-                                conversation_id=self._conversation_for_member(member),
-                            )
+                        await mailbox.send(
+                            member,
+                            env.content,
+                            content_type=env.content_type,
+                            conversation_id=self._conversation_for_member(member),
                         )
 
         except asyncio.CancelledError:

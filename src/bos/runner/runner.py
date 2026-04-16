@@ -65,7 +65,7 @@ async def start(workspace: Workspace) -> None:
                     member_addresses = [addr for _, addr in channels]
                     bc = BroadcastChannel(member_addresses, actor_address)
                     tg.create_task(
-                        bc.run(harness.mail_route, harness.mail_route.bind(broadcast_address)),
+                        bc.run(harness.mail_route.bind(broadcast_address)),
                         name="broadcast",
                     )
                 for ch, address in channels:

@@ -136,10 +136,10 @@ class ChatApp(App):
 
     def __init__(
         self,
-        mailbox: HttpChannelClient,
+        client: HttpChannelClient,
     ) -> None:
         super().__init__()
-        self._client = mailbox
+        self._client = client
         self._conversation_id = uuid.uuid4().hex
         self._busy = False
         self._buffer: list[str] = []
