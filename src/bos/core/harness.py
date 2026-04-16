@@ -63,7 +63,6 @@ class AgentHarness:
     def __init__(
         self,
         *,
-        mailbox: dict[str, Any] | None = None,
         mail_route: dict[str, Any] | None = None,
         message_store: dict[str, Any] | None = None,
         memory_store: dict[str, Any] | None = None,
@@ -80,7 +79,7 @@ class AgentHarness:
         self.workspace = self._workspace
         self._subagents_cfg = {cfg.get("name", "_default"): cfg for cfg in subagents} if subagents else {}
 
-        self._mail_route_cfg = mail_route or mailbox
+        self._mail_route_cfg = mail_route
         self._message_store_cfg = message_store
         self._memory_store_cfg = memory_store
         self._consolidator_cfg = consolidator
@@ -91,7 +90,6 @@ class AgentHarness:
         self._owned: list[Any] = []
         self._token: contextvars.Token | None = None
         self._original_cwd: Path | None = None
-        self.mailbox = None
         self.mail_route = None
         self.message_store = None
         self.memory_store = None
@@ -111,7 +109,6 @@ class AgentHarness:
         os.chdir(self._bos_root)
 
         self.mail_route = self._create_and_own("ep_mail_route", MailRoute, self._mail_route_cfg)
-        self.mailbox = self.mail_route
         self.message_store = self._create_and_own("ep_message_store", MessageStore, self._message_store_cfg)
         self.memory_store = self._create_and_own("ep_memory_store", MemoryStore, self._memory_store_cfg)
         self.consolidator = self._create_and_own("ep_consolidator", Consolidator, self._consolidator_cfg)

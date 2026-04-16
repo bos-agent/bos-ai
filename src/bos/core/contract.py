@@ -183,11 +183,6 @@ class MailRoute(Protocol):
     async def deliver(self, env: Envelope) -> None: ...
 
 
-# Backward-compatible aliases for the pre-refactor unbound mailbox surface.
-Mailbox = MailRoute
-ep_mailbox = ep_mail_route
-
-
 ep_channel = ExtensionPoint(description="Channel. Bridges external clients to/from a bound mailbox address.")
 
 

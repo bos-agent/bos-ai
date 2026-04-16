@@ -215,6 +215,3 @@ class InMemMailRoute:
             return self._get_queue(address).get_nowait()
         except asyncio.QueueEmpty:
             return None
-
-
-InMemMailbox = InMemMailRoute

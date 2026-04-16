@@ -137,6 +137,3 @@ class JsonlMailRoute:
     async def aclose(self) -> None:
         """Release tracked state. File locks are per-operation (not held long-term)."""
         self._byte_offsets.clear()
-
-
-JsonlMailbox = JsonlMailRoute
