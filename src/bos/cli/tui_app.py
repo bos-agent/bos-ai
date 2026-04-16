@@ -139,7 +139,7 @@ class ChatApp(App):
         mailbox: HttpChannelClient,
     ) -> None:
         super().__init__()
-        self._mailbox = mailbox
+        self._client = mailbox
         self._conversation_id = uuid.uuid4().hex
         self._busy = False
         self._buffer: list[str] = []
@@ -187,7 +187,7 @@ class ChatApp(App):
         """Background task: await envelopes from the channel."""
         while True:
             try:
-                env = await self._mailbox.receive()
+                env = await self._client.receive()
                 if env.content_type == MessageType.COMMAND_RESULT:
                     # Server-side slash command response
                     try:
@@ -239,7 +239,7 @@ class ChatApp(App):
             sidebar.write(f"  {text}")
 
             try:
-                await self._mailbox.send(text, conversation_id=self._conversation_id)
+                await self._client.send(text, conversation_id=self._conversation_id)
             except Exception as exc:
                 self._write_system(f"[yellow]⚠ Send failed — reconnecting: {exc}[/]")
             return
@@ -253,7 +253,7 @@ class ChatApp(App):
         self._busy = True
         self._update_status()
         try:
-            await self._mailbox.send(text, conversation_id=self._conversation_id)
+            await self._client.send(text, conversation_id=self._conversation_id)
         except Exception as exc:
             self._busy = False
             self._update_status()
@@ -373,7 +373,7 @@ class ChatApp(App):
     async def _send_command(self, command_name: str) -> None:
         """Send a slash command to the channel server for execution."""
         try:
-            await self._mailbox.send(
+            await self._client.send(
                 f"/{command_name}",
                 content_type=MessageType.COMMAND,
                 conversation_id=self._conversation_id,
@@ -385,7 +385,7 @@ class ChatApp(App):
 
     async def _send_channel_command(self, command_name: str, conversation_id: str | None = None) -> None:
         try:
-            await self._mailbox.send(
+            await self._client.send(
                 command_name,
                 content_type=MessageType.CHANNEL_COMMAND,
                 conversation_id=conversation_id,
@@ -422,11 +422,11 @@ class ChatApp(App):
 # ── entrypoint ─────────────────────────────────────────────────
 
 
-async def run_chat_tui(mailbox: HttpChannelClient) -> None:
+async def run_chat_tui(client: HttpChannelClient) -> None:
     """Launch the TUI connected to a running agent via channel.
 
-    ``mailbox`` must be an ``HttpChannelClient`` that has already called
+    ``client`` must be an ``HttpChannelClient`` that has already called
     ``connect()``.
     """
-    app = ChatApp(mailbox=mailbox)
+    app = ChatApp(client=client)
     await app.run_async()

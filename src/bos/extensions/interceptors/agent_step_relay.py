@@ -16,6 +16,7 @@ from typing import Any, Literal
 
 from bos.core import (
     CURRENT_HARNESS,
+    CURRENT_MAILBOX,
     ReactContext,
     ep_react_interceptor,
 )
@@ -47,11 +48,11 @@ class AgentStepInterceptor:
     ) -> None:
         sender = context.metadata.get("sender")
         actor_address = context.metadata.get("actor_address")
-        if not sender or not actor_address:
+        if not sender:
             return
 
         harness = CURRENT_HARNESS.get(None)
-        if not harness or not harness.mail_route:
+        if not harness:
             return
 
         info: dict[str, Any] = {
@@ -93,7 +94,13 @@ class AgentStepInterceptor:
             return
 
         try:
-            await harness.mail_route.bind(actor_address).send(
+            mailbox = CURRENT_MAILBOX.get(None)
+            if mailbox is None:
+                if not actor_address or not harness.mail_route:
+                    return
+                mailbox = harness.mail_route.bind(actor_address)
+
+            await mailbox.send(
                 sender,
                 json.dumps(info, default=str),
                 content_type=MessageType.AGENT_STEP,
