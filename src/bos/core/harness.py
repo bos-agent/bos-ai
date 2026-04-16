@@ -94,7 +94,6 @@ class AgentHarness:
 
     async def __aenter__(self):
         from bos.core import (
-            ChainReactInterceptor,
             Consolidator,
             LLMClient,
             Mailbox,
@@ -102,6 +101,7 @@ class AgentHarness:
             MessageStore,
             SkillsLoader,
         )
+        from bos.core.agent import ChainReactInterceptor
 
         if self._token is not None:
             raise RuntimeError(

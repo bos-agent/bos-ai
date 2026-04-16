@@ -28,6 +28,7 @@ from bos.core._utils import (
 )
 from bos.core.actor import AgentActor
 from bos.core.agent import AbortTurn as AbortTurn
+from bos.core.agent import ChainReactInterceptor as ChainReactInterceptor
 from bos.core.agent import ReactAgent as ReactAgent
 from bos.core.agent import ReactContext as ReactContext
 from bos.core.contract import Agent as Agent
@@ -62,7 +63,6 @@ from bos.core.harness import (
     AgentHarness,
     bootstrap_platform,
 )
-from bos.core.interceptors import ChainReactInterceptor as ChainReactInterceptor
 from bos.core.llm import LLMClient as LLMClient
 from bos.core.llm import LLMResponse as LLMResponse
 from bos.core.llm import ToolCallRequest as ToolCallRequest
