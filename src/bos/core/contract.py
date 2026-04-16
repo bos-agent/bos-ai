@@ -5,7 +5,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
-from ..protocol import Envelope
+from bos.protocol import Envelope
+
 from .registry import ExtensionPoint, ToolRegistry
 
 

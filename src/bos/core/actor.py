@@ -6,7 +6,8 @@ import logging
 import uuid
 from typing import Any
 
-from ..protocol import Envelope, MessageType
+from bos.protocol import Envelope, MessageType
+
 from .agent import AbortTurn
 from .contract import ep_actor_command
 from .harness import CURRENT_HARNESS

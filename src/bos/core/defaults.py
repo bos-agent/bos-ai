@@ -7,7 +7,8 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
-from ..protocol import Envelope
+from bos.protocol import Envelope
+
 from ._utils import _litellm_response_to_llm_response, _read_text
 from .contract import (
     Message,
