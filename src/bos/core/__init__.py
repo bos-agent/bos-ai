@@ -4,18 +4,26 @@ Lightweight single-file agent framework.
 
 from __future__ import annotations
 
-import asyncio
-import importlib
-import importlib.util
-import inspect
-import json
 import logging
-import re
-from collections.abc import Callable
-from contextlib import contextmanager
-from pathlib import Path
-from typing import Any
 
+from bos.core._utils import _aclose as _aclose
+from bos.core._utils import _allowed as _allowed
+from bos.core._utils import _apply as _apply
+from bos.core._utils import _apply_async as _apply_async
+from bos.core._utils import _as_parts as _as_parts
+from bos.core._utils import _build_params as _build_params
+from bos.core._utils import _compact as _compact
+from bos.core._utils import _create_extension_instance as _create_extension_instance
+from bos.core._utils import _flock as _flock
+from bos.core._utils import _litellm_response_to_llm_response as _litellm_response_to_llm_response
+from bos.core._utils import _litellm_tool_calls_to_requests as _litellm_tool_calls_to_requests
+from bos.core._utils import _load_ext_modules as _load_ext_modules
+from bos.core._utils import _load_ext_paths as _load_ext_paths
+from bos.core._utils import _load_json as _load_json
+from bos.core._utils import _pick_collection as _pick_collection
+from bos.core._utils import _read_text as _read_text
+from bos.core._utils import _safe_format as _safe_format
+from bos.core._utils import _strip_think as _strip_think
 from bos.core.actor import AgentActor as _AgentActor
 from bos.core.agent import AbortTurn as AbortTurn
 from bos.core.agent import ReactAgent as ReactAgent
@@ -58,7 +66,8 @@ from bos.core.harness import (
 )
 from bos.core.interceptors import ChainReactInterceptor as ChainReactInterceptor
 from bos.core.llm import LLMClient as LLMClient
-from bos.core.llm import LLMResponse, ToolCallRequest
+from bos.core.llm import LLMResponse as LLMResponse
+from bos.core.llm import ToolCallRequest as ToolCallRequest
 from bos.core.registry import Extension as Extension
 from bos.core.registry import ExtensionPoint as ExtensionPoint
 from bos.core.registry import ToolRegistry as ToolRegistry
@@ -73,212 +82,3 @@ __version__ = "0.1.0"
 
 
 logger = logging.getLogger("bos")
-
-# ═══════════════════════════════════════════════════════════════
-#  INTERNALS
-# ═══════════════════════════════════════════════════════════════
-
-
-def _create_extension_instance(ext_point: ExtensionPoint, ext_protocol: type, config: Any) -> Any:
-    if isinstance(config, ext_protocol):
-        return config
-    if config is None and not ext_point.has("_default"):
-        return None
-    cfg = (config or {}).copy()
-    return ext_point.invoke(cfg.pop("name", "_default"), cfg)
-
-
-def _compact(*dicts: dict, **kwargs: Any) -> dict[str, Any]:
-    """Drop None-valued entries from a dict."""
-    merged = {}
-    [merged.update(d) for d in (*dicts, kwargs) if d is not None]
-    return {k: v for k, v in merged.items() if v is not None}
-
-
-def _build_params(fn: Callable, params: dict[str, Any]) -> tuple[list[Any], dict[str, Any]]:
-    sig = inspect.signature(fn)
-    has_varkw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
-    valid_params = params if has_varkw else {k: v for k, v in params.items() if k in sig.parameters}
-    bound = sig.bind_partial(**valid_params)
-    bound.apply_defaults()
-    return bound.args, bound.kwargs
-
-
-def _apply(fn: Callable, params: dict[str, Any]) -> Any:
-    args, kwargs = _build_params(fn, params)
-    return fn(*args, **kwargs)
-
-
-async def _apply_async(fn: Callable, params: dict[str, Any]) -> Any:
-    args, kwargs = _build_params(fn, params)
-    result = fn(*args, **kwargs)
-    return await result if asyncio.iscoroutine(result) else result
-
-
-def _strip_think(text: str | None) -> str | None:
-    """Remove <think>…</think> blocks that some models embed in content."""
-    if not text:
-        return None
-    return re.sub(r"<think>[\s\S]*?</think>", "", text).strip() or None
-
-
-def _safe_format(template: str, **kwargs: Any) -> str:
-    class SafeMapping(dict):
-        def __missing__(self, key: str) -> str:
-            return f"{{{key}}}"
-
-    return template.format_map(SafeMapping(kwargs))
-
-
-def _load_json(source: Path | str, from_string: bool = False) -> dict[str, Any]:
-    try:
-        return json.loads(source if from_string else Path(source).read_text(encoding="utf-8"))
-    except Exception:
-        logger.warning("Failed to load JSON from %s", source, exc_info=True)
-        return {}
-
-
-def _read_text(path: Path) -> str:
-    try:
-        return path.read_text(encoding="utf-8")
-    except Exception:
-        logger.warning("Failed to read text from %s", path, exc_info=True)
-        return ""
-
-
-def _pick_collection(
-    collection: dict[str, Any],
-    include: list[str] | None = None,
-    exclude: list[str] | None = None,
-) -> dict[str, Any]:
-    if include is not None:
-        collection = {k: v for k, v in collection.items() if k in include}
-    if exclude is not None:
-        collection = {k: v for k, v in collection.items() if k not in exclude}
-    return collection
-
-
-def _allowed(name: str, include: list[str] | None = None, exclude: list[str] | None = None) -> bool:
-    return (include is None or name in include) and (exclude is None or name not in exclude)
-
-
-def _as_parts(content: str | list[dict[str, Any]], cache: bool = False) -> list[dict[str, Any]]:
-    parts = [{"type": "text", "text": content}] if isinstance(content, str) else content
-    return parts if not cache else parts[:-1] + [parts[-1] | {"cache_control": {"type": "ephemeral"}}]
-
-
-@contextmanager
-def _flock(path: Path | str):
-    """Acquire an exclusive filesystem lock on a sidecar ``.lock`` file."""
-    from filelock import FileLock
-
-    lock_path = Path(f"{path}.lock")
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    lock = FileLock(lock_path)
-    lock.acquire()
-    try:
-        yield
-    finally:
-        lock.release()
-
-
-def _litellm_response_to_llm_response(raw: Any) -> LLMResponse:
-    """Convert a LiteLLM chat-completion response to LLMResponse."""
-    if isinstance(raw, LLMResponse):
-        return raw
-
-    choice = raw.choices[0]
-    message = choice.message
-    usage_obj = getattr(raw, "usage", None)
-    usage = {
-        "prompt_tokens": int(getattr(usage_obj, "prompt_tokens", 0) or 0),
-        "completion_tokens": int(getattr(usage_obj, "completion_tokens", 0) or 0),
-        "total_tokens": int(getattr(usage_obj, "total_tokens", 0) or 0),
-    }
-    return LLMResponse(
-        content=message.content and str(message.content),
-        tool_calls=_litellm_tool_calls_to_requests(getattr(message, "tool_calls", None)),
-        finish_reason=choice.finish_reason or "stop",
-        usage=usage,
-        reasoning_content=getattr(message, "reasoning_content", None),
-        thinking_blocks=getattr(message, "thinking_blocks", None),
-    )
-
-
-def _litellm_tool_calls_to_requests(raw_tool_calls: Any) -> list[ToolCallRequest]:
-    """Convert LiteLLM/OpenAI tool_calls to ToolCallRequest records."""
-    if not raw_tool_calls:
-        return []
-    result: list[ToolCallRequest] = []
-    for idx, tc in enumerate(raw_tool_calls):
-        fn = getattr(tc, "function", None)
-        name = getattr(fn, "name", None)
-        raw_arguments = getattr(fn, "arguments", None)
-        arguments = (
-            _load_json(raw_arguments, from_string=True)
-            if isinstance(raw_arguments, str)
-            else raw_arguments
-            if isinstance(raw_arguments, dict)
-            else {}
-        )
-        tc_id = getattr(tc, "id", None) or f"call_{idx}"
-        metadata: dict[str, Any] = {
-            "provider": "litellm",
-            "index": idx,
-            "tool_type": getattr(tc, "type", None),
-            "function_name": name,
-            "raw_arguments": raw_arguments,
-        }
-        result.append(
-            ToolCallRequest(
-                id=str(tc_id),
-                name=str(name or ""),
-                arguments=arguments,
-                metadata=metadata,
-            )
-        )
-    return result
-
-
-def _load_ext_modules(modules: list[str]) -> None:
-    """Load extension modules from a list of module names."""
-    for modname in modules:
-        try:
-            importlib.import_module(modname)
-        except Exception:
-            logger.error("Failed to import extension module %s", modname, exc_info=True)
-
-
-def _load_ext_paths(paths: list[str | Path]) -> None:
-    """Load extensions from a list of paths. If the path is a file, load it.
-    If the path is a directory, load all .py files in it. No recursive loading.
-    """
-
-    def _load_extension_module_file(path: Path) -> bool:
-        """Import a single Python file as an extension module."""
-        module_name = "agentloop_ext_" + str(abs(hash(str(path))))
-        spec = importlib.util.spec_from_file_location(module_name, str(path))
-        if spec and spec.loader:
-            try:
-                module = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(module)
-            except Exception:
-                logger.error("Failed to load extension file %s", path, exc_info=True)
-        else:
-            logger.error("Could not create import spec for extension file %s", path)
-
-    files = {
-        f.expanduser().resolve()
-        for p in map(Path, paths)
-        for f in ([p] if p.is_file() else (x for x in p.rglob("*.py") if not x.name.startswith("_")))
-    }
-    for f in files:
-        _load_extension_module_file(f)
-
-
-async def _aclose(instance: Any) -> None:
-    if isinstance(instance, Closeable):
-        try:
-            await instance.aclose()
-        except Exception:
-            logger.warning("aclose error in %s", type(instance).__name__, exc_info=True)

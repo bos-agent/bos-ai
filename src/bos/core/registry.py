@@ -5,33 +5,9 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from bos.core._utils import _apply, _apply_async, _compact
+
 logger = logging.getLogger("bos")
-
-
-def _compact(*dicts: dict, **kwargs: Any) -> dict[str, Any]:
-    merged = {}
-    [merged.update(d) for d in (*dicts, kwargs) if d is not None]
-    return {k: v for k, v in merged.items() if v is not None}
-
-
-def _build_params(fn: Callable, params: dict[str, Any]) -> tuple[list[Any], dict[str, Any]]:
-    sig = inspect.signature(fn)
-    has_varkw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
-    valid_params = params if has_varkw else {k: v for k, v in params.items() if k in sig.parameters}
-    bound = sig.bind_partial(**valid_params)
-    bound.apply_defaults()
-    return bound.args, bound.kwargs
-
-
-def _apply(fn: Callable, params: dict[str, Any]) -> Any:
-    args, kwargs = _build_params(fn, params)
-    return fn(*args, **kwargs)
-
-
-async def _apply_async(fn: Callable, params: dict[str, Any]) -> Any:
-    args, kwargs = _build_params(fn, params)
-    result = fn(*args, **kwargs)
-    return await result if inspect.isawaitable(result) else result
 
 
 @dataclass
