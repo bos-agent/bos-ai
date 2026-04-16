@@ -5,8 +5,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
-from bos.core.registry import ExtensionPoint, ToolRegistry
-from bos.protocol import Envelope
+from ..protocol import Envelope
+from .registry import ExtensionPoint, ToolRegistry
 
 
 @runtime_checkable
@@ -118,7 +118,7 @@ ep_react_interceptor = ExtensionPoint(
 
 
 if TYPE_CHECKING:
-    from bos.core.agent import ReactContext
+    from .agent import ReactContext
 
 
 @runtime_checkable

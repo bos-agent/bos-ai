@@ -5,7 +5,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from bos.core._utils import _apply, _apply_async, _compact
+from ._utils import _apply, _apply_async, _compact
 
 logger = logging.getLogger("bos")
 

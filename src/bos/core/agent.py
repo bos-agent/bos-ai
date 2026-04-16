@@ -9,11 +9,6 @@ from datetime import datetime
 from functools import wraps
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal
 
-from bos.core.contract import Message, ReactInterceptor, ep_agent, ep_react_interceptor, ep_tool
-from bos.core.defaults import FileSystemSkillsLoader, InMemMemoryStore, InMemMessageStore, NaiveConsolidator
-from bos.core.llm import LLMClient
-from bos.core.registry import ToolRegistry
-
 from ._utils import (
     _aclose,
     _allowed,
@@ -24,6 +19,10 @@ from ._utils import (
     _pick_collection,
     _strip_think,
 )
+from .contract import Message, ReactInterceptor, ep_agent, ep_react_interceptor, ep_tool
+from .defaults import FileSystemSkillsLoader, InMemMemoryStore, InMemMessageStore, NaiveConsolidator
+from .llm import LLMClient
+from .registry import ToolRegistry
 
 if TYPE_CHECKING:
     from .contract import Consolidator, MemoryStore, MessageStore, SkillsLoader
@@ -38,9 +37,9 @@ class ReactContext:
     turn_id: str
     system: list[dict[str, Any]] = field(default_factory=list)
     history: list[dict[str, Any]] = field(default_factory=list)
-    current: list["Message"] = field(default_factory=list)
+    current: list[Message] = field(default_factory=list)
     tool_defs: list[dict[str, Any]] = field(default_factory=list)
-    current_llm_response: "LLMResponse | None" = None
+    current_llm_response: LLMResponse | None = None
     final_content: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -123,12 +122,12 @@ class ReactAgent:
         reasoning_effort: Literal["low", "medium", "high"] | None = None,
         max_tokens: int = 128 * 1024,
         max_iterations: int = 25,
-        llm: "LLMClient | None" = None,
-        message_store: "MessageStore | None" = None,
-        memory_store: "MemoryStore | None" = None,
-        consolidator: "Consolidator | None" = None,
-        skills_loader: "SkillsLoader | None" = None,
-        interceptor: "ReactInterceptor | None" = None,
+        llm: LLMClient | None = None,
+        message_store: MessageStore | None = None,
+        memory_store: MemoryStore | None = None,
+        consolidator: Consolidator | None = None,
+        skills_loader: SkillsLoader | None = None,
+        interceptor: ReactInterceptor | None = None,
         local_tools: ToolRegistry | None = None,
     ):
         self._system_prompt = {"_default": system_prompt} if isinstance(system_prompt, str) else (system_prompt or {})

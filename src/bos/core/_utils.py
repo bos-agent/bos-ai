@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from bos.core.llm import LLMResponse, ToolCallRequest
+    from .llm import LLMResponse, ToolCallRequest
 
 logger = logging.getLogger("bos")
 
@@ -117,8 +117,8 @@ def _flock(path: Path | str):
         lock.release()
 
 
-def _litellm_response_to_llm_response(raw: Any) -> "LLMResponse":
-    from bos.core.llm import LLMResponse
+def _litellm_response_to_llm_response(raw: Any) -> LLMResponse:
+    from .llm import LLMResponse
 
     if isinstance(raw, LLMResponse):
         return raw
@@ -141,8 +141,8 @@ def _litellm_response_to_llm_response(raw: Any) -> "LLMResponse":
     )
 
 
-def _litellm_tool_calls_to_requests(raw_tool_calls: Any) -> list["ToolCallRequest"]:
-    from bos.core.llm import ToolCallRequest
+def _litellm_tool_calls_to_requests(raw_tool_calls: Any) -> list[ToolCallRequest]:
+    from .llm import ToolCallRequest
 
     if not raw_tool_calls:
         return []

@@ -7,7 +7,9 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
-from bos.core.contract import (
+from ..protocol import Envelope
+from ._utils import _litellm_response_to_llm_response, _read_text
+from .contract import (
     Message,
     ep_consolidator,
     ep_mailbox,
@@ -16,10 +18,7 @@ from bos.core.contract import (
     ep_provider,
     ep_skills_loader,
 )
-from bos.core.llm import LLMResponse
-from bos.protocol import Envelope
-
-from ._utils import _litellm_response_to_llm_response, _read_text
+from .llm import LLMResponse
 
 
 @ep_provider(name="_default")

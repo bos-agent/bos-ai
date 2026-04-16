@@ -7,8 +7,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from bos.protocol import Envelope
-
+from ..protocol import Envelope
 from ._utils import _aclose, _create_extension_instance, _load_ext_modules, _load_ext_paths, _safe_format
 from .agent import ChainReactInterceptor, ReactAgent
 from .contract import Consolidator, Mailbox, MemoryStore, MessageStore, SkillsLoader, ep_agent

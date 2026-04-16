@@ -4,7 +4,8 @@ Lightweight single-file agent framework.
 
 from __future__ import annotations
 
-from bos.core._utils import (
+from ..protocol import Envelope as Envelope
+from ._utils import (
     _aclose,
     _allowed,
     _apply,
@@ -24,50 +25,49 @@ from bos.core._utils import (
     _safe_format,
     _strip_think,
 )
-from bos.core.actor import AgentActor
-from bos.core.agent import AbortTurn as AbortTurn
-from bos.core.agent import ChainReactInterceptor as ChainReactInterceptor
-from bos.core.agent import ReactAgent as ReactAgent
-from bos.core.agent import ReactContext as ReactContext
-from bos.core.contract import Agent as Agent
-from bos.core.contract import Channel as Channel
-from bos.core.contract import Closeable as Closeable
-from bos.core.contract import Consolidator as Consolidator
-from bos.core.contract import Mailbox as Mailbox
-from bos.core.contract import MemoryStore as MemoryStore
-from bos.core.contract import Message as Message
-from bos.core.contract import MessageStore as MessageStore
-from bos.core.contract import ReactInterceptor as ReactInterceptor
-from bos.core.contract import SkillsLoader as SkillsLoader
-from bos.core.contract import ep_actor_command as ep_actor_command
-from bos.core.contract import ep_agent as ep_agent
-from bos.core.contract import ep_channel as ep_channel
-from bos.core.contract import ep_consolidator as ep_consolidator
-from bos.core.contract import ep_mailbox as ep_mailbox
-from bos.core.contract import ep_memory_store as ep_memory_store
-from bos.core.contract import ep_message_store as ep_message_store
-from bos.core.contract import ep_provider as ep_provider
-from bos.core.contract import ep_react_interceptor as ep_react_interceptor
-from bos.core.contract import ep_skills_loader as ep_skills_loader
-from bos.core.contract import ep_tool as ep_tool
-from bos.core.defaults import FileSystemSkillsLoader as FileSystemSkillsLoader
-from bos.core.defaults import InMemMailbox as InMemMailbox
-from bos.core.defaults import InMemMemoryStore as InMemMemoryStore
-from bos.core.defaults import InMemMessageStore as InMemMessageStore
-from bos.core.defaults import NaiveConsolidator as NaiveConsolidator
-from bos.core.defaults import litellm_complete as litellm_complete
-from bos.core.harness import (
+from .actor import AgentActor
+from .agent import AbortTurn as AbortTurn
+from .agent import ChainReactInterceptor as ChainReactInterceptor
+from .agent import ReactAgent as ReactAgent
+from .agent import ReactContext as ReactContext
+from .contract import Agent as Agent
+from .contract import Channel as Channel
+from .contract import Closeable as Closeable
+from .contract import Consolidator as Consolidator
+from .contract import Mailbox as Mailbox
+from .contract import MemoryStore as MemoryStore
+from .contract import Message as Message
+from .contract import MessageStore as MessageStore
+from .contract import ReactInterceptor as ReactInterceptor
+from .contract import SkillsLoader as SkillsLoader
+from .contract import ep_actor_command as ep_actor_command
+from .contract import ep_agent as ep_agent
+from .contract import ep_channel as ep_channel
+from .contract import ep_consolidator as ep_consolidator
+from .contract import ep_mailbox as ep_mailbox
+from .contract import ep_memory_store as ep_memory_store
+from .contract import ep_message_store as ep_message_store
+from .contract import ep_provider as ep_provider
+from .contract import ep_react_interceptor as ep_react_interceptor
+from .contract import ep_skills_loader as ep_skills_loader
+from .contract import ep_tool as ep_tool
+from .defaults import FileSystemSkillsLoader as FileSystemSkillsLoader
+from .defaults import InMemMailbox as InMemMailbox
+from .defaults import InMemMemoryStore as InMemMemoryStore
+from .defaults import InMemMessageStore as InMemMessageStore
+from .defaults import NaiveConsolidator as NaiveConsolidator
+from .defaults import litellm_complete as litellm_complete
+from .harness import (
     CURRENT_HARNESS,
     AgentHarness,
     bootstrap_platform,
 )
-from bos.core.llm import LLMClient as LLMClient
-from bos.core.llm import LLMResponse as LLMResponse
-from bos.core.llm import ToolCallRequest as ToolCallRequest
-from bos.core.registry import Extension as Extension
-from bos.core.registry import ExtensionPoint as ExtensionPoint
-from bos.core.registry import ToolRegistry as ToolRegistry
-from bos.protocol import Envelope as Envelope
+from .llm import LLMClient as LLMClient
+from .llm import LLMResponse as LLMResponse
+from .llm import ToolCallRequest as ToolCallRequest
+from .registry import Extension as Extension
+from .registry import ExtensionPoint as ExtensionPoint
+from .registry import ToolRegistry as ToolRegistry
 
 __version__ = "0.1.0"
 
