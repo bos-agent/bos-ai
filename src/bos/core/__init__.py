@@ -14,14 +14,39 @@ import re
 from collections.abc import Callable
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import Any
 
 from bos.core.actor import AgentActor as _AgentActor
 from bos.core.agent import AbortTurn as AbortTurn
-from bos.core.agent import Agent as Agent
 from bos.core.agent import ReactAgent as ReactAgent
 from bos.core.agent import ReactContext as ReactContext
-from bos.core.agent import ep_agent as ep_agent
+from bos.core.contract import Agent as Agent
+from bos.core.contract import Channel as Channel
+from bos.core.contract import Closeable as Closeable
+from bos.core.contract import Consolidator as Consolidator
+from bos.core.contract import Mailbox as Mailbox
+from bos.core.contract import MemoryStore as MemoryStore
+from bos.core.contract import Message as Message
+from bos.core.contract import MessageStore as MessageStore
+from bos.core.contract import ReactInterceptor as ReactInterceptor
+from bos.core.contract import SkillsLoader as SkillsLoader
+from bos.core.contract import ep_actor_command as ep_actor_command
+from bos.core.contract import ep_agent as ep_agent
+from bos.core.contract import ep_channel as ep_channel
+from bos.core.contract import ep_consolidator as ep_consolidator
+from bos.core.contract import ep_mailbox as ep_mailbox
+from bos.core.contract import ep_memory_store as ep_memory_store
+from bos.core.contract import ep_message_store as ep_message_store
+from bos.core.contract import ep_provider as ep_provider
+from bos.core.contract import ep_react_interceptor as ep_react_interceptor
+from bos.core.contract import ep_skills_loader as ep_skills_loader
+from bos.core.contract import ep_tool as ep_tool
+from bos.core.defaults import FileSystemSkillsLoader as FileSystemSkillsLoader
+from bos.core.defaults import InMemMailbox as InMemMailbox
+from bos.core.defaults import InMemMemoryStore as InMemMemoryStore
+from bos.core.defaults import InMemMessageStore as InMemMessageStore
+from bos.core.defaults import NaiveConsolidator as NaiveConsolidator
+from bos.core.defaults import litellm_complete as litellm_complete
 from bos.core.harness import (
     CURRENT_HARNESS as _CURRENT_HARNESS,
 )
@@ -32,28 +57,12 @@ from bos.core.harness import (
     bootstrap_platform as _bootstrap_platform,
 )
 from bos.core.interceptors import ChainReactInterceptor as ChainReactInterceptor
-from bos.core.interceptors import ReactInterceptor as ReactInterceptor
-from bos.core.interceptors import ep_react_interceptor as ep_react_interceptor
 from bos.core.llm import LLMClient as LLMClient
 from bos.core.llm import LLMResponse, ToolCallRequest
-from bos.core.llm import ep_provider as ep_provider
 from bos.core.registry import Extension as Extension
 from bos.core.registry import ExtensionPoint as ExtensionPoint
 from bos.core.registry import ToolRegistry as ToolRegistry
-from bos.core.state import Consolidator as Consolidator
-from bos.core.state import FileSystemSkillsLoader as FileSystemSkillsLoader
-from bos.core.state import InMemMemoryStore as InMemMemoryStore
-from bos.core.state import InMemMessageStore as InMemMessageStore
-from bos.core.state import MemoryStore as MemoryStore
-from bos.core.state import Message as Message
-from bos.core.state import MessageStore as MessageStore
-from bos.core.state import NaiveConsolidator as NaiveConsolidator
-from bos.core.state import SkillsLoader as SkillsLoader
-from bos.core.state import ep_consolidator as ep_consolidator
-from bos.core.state import ep_memory_store as ep_memory_store
-from bos.core.state import ep_message_store as ep_message_store
-from bos.core.state import ep_skills_loader as ep_skills_loader
-from bos.protocol import Envelope
+from bos.protocol import Envelope as Envelope
 
 AgentActor = _AgentActor
 AgentHarness = _AgentHarness
@@ -64,125 +73,6 @@ __version__ = "0.1.0"
 
 
 logger = logging.getLogger("bos")
-
-
-# ═══════════════════════════════════════════════════════════════
-#  CLOSEABLE PROTOCOL
-# ═══════════════════════════════════════════════════════════════
-
-
-@runtime_checkable
-class Closeable(Protocol):
-    """Opt-in cleanup contract for extensions that hold resources."""
-
-    async def aclose(self) -> None: ...
-
-
-# ═══════════════════════════════════════════════════════════════
-#  TOOLS
-# ═══════════════════════════════════════════════════════════════
-
-
-ep_tool = ToolRegistry(description="Tool. An async function could be invoked by llm.")
-
-
-# ============================================================================
-#  MAILBOX
-# ============================================================================
-
-ep_mailbox = ExtensionPoint(
-    description="Mailbox. Used for message passing between agents. It should implement the MailBox protocol."
-)
-
-
-@runtime_checkable
-class Mailbox(Protocol):
-    """Address-bound message endpoint.
-
-    Each instance is bound to a single address at construction time.
-    Instances must not be shared across actors.
-    """
-
-    async def receive(self, address: str) -> Envelope:
-        """Block until a message arrives for this address."""
-        ...
-
-    async def send(self, env: Envelope) -> None:
-        """Deliver an envelope to ``env.recipient``."""
-        ...
-
-    async def receive_nowait(self, address: str) -> Envelope | None:
-        """Non-blocking receive. Returns ``None`` when inbox is empty."""
-        ...
-
-
-@ep_mailbox(name="_default")
-class InMemMailbox:
-    _queues: dict[str, asyncio.Queue[Envelope]] = {}  # agent_name -> queue
-
-    @classmethod
-    def _get_queue(cls, address: str) -> asyncio.Queue[Envelope]:
-        if address not in cls._queues:
-            cls._queues[address] = asyncio.Queue()
-        return cls._queues[address]
-
-    async def receive(self, address: str) -> Envelope:
-        return await self._get_queue(address).get()
-
-    async def send(self, env: Envelope) -> None:
-        await self._get_queue(env.recipient).put(env)
-
-    async def receive_nowait(self, address: str) -> Envelope | None:
-        try:
-            return self._get_queue(address).get_nowait()
-        except asyncio.QueueEmpty:
-            return None
-
-
-# ═══════════════════════════════════════════════════════════════
-#  CHANNEL
-# ═══════════════════════════════════════════════════════════════
-
-
-ep_channel = ExtensionPoint(description="Channel. Bridges external clients to/from a mailbox address.")
-
-
-@runtime_checkable
-class Channel(Protocol):
-    """Bridges an external interface (TUI, bot, web) to/from the mailbox.
-
-    A channel is an async service that:
-    - Reads envelopes from ``mailbox.receive(address)`` and presents them externally.
-    - Translates external input into ``Envelope`` objects and calls ``mailbox.send(env)``.
-    """
-
-    async def run(self, mailbox: Mailbox, address: str) -> None:
-        """Bridge loop — runs until cancelled.
-
-        Args:
-            mailbox: The shared harness mailbox.
-            address: This channel's own mailbox address (e.g. ``"http"``).
-        """
-        ...
-
-
-# ═══════════════════════════════════════════════════════════════
-#  AGENT ACTOR
-# ═══════════════════════════════════════════════════════════════
-
-ep_actor_command = ExtensionPoint(
-    description="""Actor command handler. An async function with injectable arguments: input, env, actor, harness.
-    For example:
-
-    @ep_actor_command(name="echo")
-    async def echo(input: str) -> str:
-        return input
-
-    @ep_actor_command(name="tools")
-    async def tools(actor: AgentActor) -> dict:
-        return actor._agent._get_tool_defs()
-    """
-)
 
 # ═══════════════════════════════════════════════════════════════
 #  INTERNALS

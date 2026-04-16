@@ -1,32 +1,11 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Literal
 
-from bos.core.registry import ExtensionPoint
+from bos.core.contract import ReactInterceptor, ep_react_interceptor
 
 if TYPE_CHECKING:
     from bos.core.agent import ReactContext
-
-
-ep_react_interceptor = ExtensionPoint(
-    description="React Interceptor. A factory that creates interceptors implementing the ReactInterceptor protocol."
-)
-
-
-@runtime_checkable
-class ReactInterceptor(Protocol):
-    async def intercept(
-        self,
-        stage: Literal[
-            "prepare",
-            "before_llm",
-            "after_llm",
-            "after_tool",
-            "final_response",
-            "max_iteration",
-        ],
-        context: ReactContext,
-    ) -> None: ...
 
 
 class ChainReactInterceptor:

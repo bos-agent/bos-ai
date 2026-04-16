@@ -1,18 +1,10 @@
 from __future__ import annotations
 
 import json
-import os
 from dataclasses import dataclass, field
 from typing import Any
 
-from bos.core.registry import ExtensionPoint
-
-ep_provider = ExtensionPoint(
-    description="""
-        LLM provider. An async function that takes messages: list[dict]
-        and returns response:LLMResponse.
-    """
-)
+from bos.core.contract import ep_provider
 
 
 @dataclass
@@ -49,19 +41,6 @@ class ToolCallRequest:
                 "arguments": json.dumps(self.arguments),
             },
         }
-
-
-@ep_provider(name="_default")
-async def litellm_complete(messages: list[dict], model: str, **kwargs: Any) -> LLMResponse:
-    os.environ["LITELLM_MODE"] = "extension"
-
-    import litellm
-
-    from bos.core import _litellm_response_to_llm_response
-
-    raw = await litellm.acompletion(model=model, messages=messages, **kwargs)
-    return _litellm_response_to_llm_response(raw)
-
 
 class LLMClient:
     """Extensible LLM client with provider routing and scoped config."""

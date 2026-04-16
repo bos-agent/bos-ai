@@ -6,9 +6,10 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from functools import wraps
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal
 
-from bos.core.registry import ExtensionPoint, ToolRegistry
+from bos.core.contract import Message, ReactInterceptor, ep_agent
+from bos.core.registry import ToolRegistry
 
 if TYPE_CHECKING:
     from bos.core import (
@@ -16,24 +17,9 @@ if TYPE_CHECKING:
         LLMClient,
         LLMResponse,
         MemoryStore,
-        Message,
         MessageStore,
-        ReactInterceptor,
         SkillsLoader,
     )
-
-ep_agent = ExtensionPoint(description="Agent. A factory that creates agents implementing the Agent protocol.")
-
-
-class Agent(Protocol):
-    async def ask(
-        self,
-        conversation_id: str,
-        message: str | list[dict[str, Any]],
-        interrupt: Callable[[], dict[str, Any] | Awaitable[dict[str, Any]]] | None = None,
-        llm_metadata: dict[str, Any] | None = None,
-        ctx_metadata: dict[str, Any] | None = None,
-    ) -> str: ...
 
 
 @dataclass

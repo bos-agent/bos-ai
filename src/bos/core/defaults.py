@@ -1,40 +1,35 @@
 from __future__ import annotations
 
+import asyncio
+import os
 import re
 from collections.abc import Iterable
-from dataclasses import dataclass, field
-from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import Any
 
-from bos.core.registry import ExtensionPoint
-
-if TYPE_CHECKING:
-    from bos.core import Message
-
-
-ep_message_store = ExtensionPoint(
-    description="""
-        Message store. A factory that creates message stores implementing the MessageStore protocol.
-    """
+from bos.core.contract import (
+    Message,
+    ep_consolidator,
+    ep_mailbox,
+    ep_memory_store,
+    ep_message_store,
+    ep_provider,
+    ep_skills_loader,
 )
+from bos.core.llm import LLMResponse
+from bos.protocol import Envelope
 
 
-@dataclass
-class Message:
-    llm_message: dict[str, Any]
-    created_at: datetime = field(default_factory=datetime.now)
-    turn_id: str | None = None
-    is_summary: bool = False
-    metadata: dict[str, Any] = field(default_factory=dict)
+@ep_provider(name="_default")
+async def litellm_complete(messages: list[dict], model: str, **kwargs: Any) -> LLMResponse:
+    os.environ["LITELLM_MODE"] = "extension"
 
+    import litellm
 
-@runtime_checkable
-class MessageStore(Protocol):
-    async def save_messages(self, conversation_id: str, messages: Iterable[Message]) -> None: ...
-    async def get_messages(self, conversation_id: str, original: bool = False) -> Iterable[Message]: ...
-    async def save_summary(self, conversation_id: str, summary: str) -> None: ...
-    async def list_conversations(self) -> dict[str, dict[str, Any]]: ...
+    from bos.core import _litellm_response_to_llm_response
+
+    raw = await litellm.acompletion(model=model, messages=messages, **kwargs)
+    return _litellm_response_to_llm_response(raw)
 
 
 @ep_message_store(name="_default")
@@ -78,21 +73,6 @@ class InMemMessageStore:
         return contexts
 
 
-ep_memory_store = ExtensionPoint(
-    description="""
-        Memory store. A factory that creates memory stores implementing the MemoryStore protocol.
-    """
-)
-
-
-@runtime_checkable
-class MemoryStore(Protocol):
-    async def load_memory(self, key: str) -> str: ...
-    async def save_memory(self, key: str, content: str) -> None: ...
-    async def list_memories(self) -> dict[str, str]: ...
-    async def search_memory(self, query: str) -> dict[str, str]: ...
-
-
 @ep_memory_store(name="_default")
 class InMemMemoryStore:
     """In-memory store for long-term agent identity and rules."""
@@ -113,18 +93,6 @@ class InMemMemoryStore:
         return {key: txt for key, txt in self._mem.items() if query.lower() in txt.lower()}
 
 
-ep_consolidator = ExtensionPoint(
-    description="""
-        Content consolidator. A factory that creates consolidators implementing the Consolidator protocol.
-    """
-)
-
-
-@runtime_checkable
-class Consolidator(Protocol):
-    async def consolidate(self, messages: list[dict], instruction: str | None = None) -> str: ...
-
-
 @ep_consolidator(name="_default")
 class NaiveConsolidator:
     """Naive content consolidator that take the last 10 messages and concatenate them."""
@@ -136,19 +104,6 @@ class NaiveConsolidator:
                 continue
             summary = (summary or "") + (content if role == "system" else f"{role}: {content.strip()}") + "\n"
         return summary.strip()
-
-
-ep_skills_loader = ExtensionPoint(
-    description="""
-        Skills Loader. A factory that creates skills loaders implementing the SkillsLoader protocol.
-    """
-)
-
-
-@runtime_checkable
-class SkillsLoader(Protocol):
-    async def load_skill(self, name: str) -> str: ...
-    async def search_skills(self, query: str) -> list[str]: ...
 
 
 @ep_skills_loader(name="_default")
@@ -200,3 +155,26 @@ class FileSystemSkillsLoader:
                     summary += line + "\n"
             skills[skill_name] = {"path": path, "summary": summary}
         return skills
+
+
+@ep_mailbox(name="_default")
+class InMemMailbox:
+    _queues: dict[str, asyncio.Queue[Envelope]] = {}
+
+    @classmethod
+    def _get_queue(cls, address: str) -> asyncio.Queue[Envelope]:
+        if address not in cls._queues:
+            cls._queues[address] = asyncio.Queue()
+        return cls._queues[address]
+
+    async def receive(self, address: str) -> Envelope:
+        return await self._get_queue(address).get()
+
+    async def send(self, env: Envelope) -> None:
+        await self._get_queue(env.recipient).put(env)
+
+    async def receive_nowait(self, address: str) -> Envelope | None:
+        try:
+            return self._get_queue(address).get_nowait()
+        except asyncio.QueueEmpty:
+            return None
