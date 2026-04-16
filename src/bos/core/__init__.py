@@ -10,7 +10,6 @@ import importlib.util
 import inspect
 import json
 import logging
-import os
 import platform
 import re
 import uuid
@@ -32,6 +31,11 @@ from bos.core.harness import (
 from bos.core.harness import (
     bootstrap_platform as _bootstrap_platform,
 )
+from bos.core.llm import LLMClient, LLMResponse, ToolCallRequest
+from bos.core.llm import ep_provider as ep_provider
+from bos.core.registry import Extension as Extension
+from bos.core.registry import ExtensionPoint as ExtensionPoint
+from bos.core.registry import ToolRegistry as ToolRegistry
 from bos.protocol import Envelope
 
 AgentActor = _AgentActor
@@ -43,77 +47,6 @@ __version__ = "0.1.0"
 
 
 logger = logging.getLogger("bos")
-
-
-# ═══════════════════════════════════════════════════════════════
-#  Extension Points
-# ═══════════════════════════════════════════════════════════════
-
-
-@dataclass
-class Extension:
-    name: str
-    fn: Callable[..., Any]
-    description: str = ""
-    defaults: dict[str, Any] = field(default_factory=dict)
-    metadata: dict[str, Any] = field(default_factory=dict)
-
-
-class ExtensionPoint:
-    def __init__(
-        self,
-        description: str,
-        validate: Callable[..., bool] | None = None,
-    ) -> None:
-        self.description = description
-        self._validate = validate or getattr(self, "default_validate", None)
-        self._extensions: dict[str, Extension] = {}
-        self.get = self._extensions.get
-        self.has = lambda name: name in self._extensions
-        self.describe = lambda: {k: v.description for k, v in self._extensions.items()}
-
-    def register(self, ext: Extension) -> None:
-        if ext.name in self._extensions:
-            logger.warning(
-                f"Set default provider for extension point: {self.description}"
-                if ext.name == "_default"
-                else f"Extension `{ext.name}` got overwritten for extension point: {self.description}"
-            )
-        self._extensions[ext.name] = ext
-
-    def invoke(self, name: str, kwargs: dict[str, Any] | None = None) -> Any:
-        if name not in self._extensions:
-            raise ValueError(f"Extension '{name}' not found for '{self.description[:30].strip()}...'")
-        return _apply(self.get(name).fn, _compact(self.get(name).defaults, kwargs or {}))
-
-    async def invoke_async(self, name: str, kwargs: dict[str, Any] | None = None) -> Any:
-        return await _apply_async(self.get(name).fn, _compact(self.get(name).defaults, kwargs or {}))
-
-    def __call__(
-        self,
-        *,
-        name: str | None = None,
-        description: str | None = None,
-        defaults: dict[str, Any] | Callable[[], dict[str, Any]] | None = None,
-        **metadata: Any,
-    ) -> Callable[[Callable[..., Any]], Any]:
-        def decorator(fn: Any) -> Any:
-            ext_name = name or getattr(fn, "__name__", None)
-            if ext_name is None:
-                raise ValueError("Extension name is required")
-            ext = Extension(
-                name=ext_name,
-                description=description or getattr(fn, "__doc__", ""),
-                defaults=defaults,
-                metadata=metadata,
-                fn=fn,
-            )
-            if self._validate and not _apply(self._validate, {"fn": fn, "ext": ext, "ext_point": self}):
-                raise ValueError(f"Extension is not valid:\n{description}")
-            self.register(ext)
-            return fn
-
-        return decorator
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -129,129 +62,8 @@ class Closeable(Protocol):
 
 
 # ═══════════════════════════════════════════════════════════════
-#  LLM CLIENT
-# ═══════════════════════════════════════════════════════════════
-
-
-ep_provider = ExtensionPoint(
-    description="""
-        LLM provider. An async function that takes messages: list[dict]
-        and returns response:LLMResponse.
-    """
-)
-
-
-@dataclass
-class LLMResponse:
-    """Response from an LLM provider."""
-
-    content: str | None
-    tool_calls: list[ToolCallRequest] = field(default_factory=list)
-    finish_reason: str = "stop"
-    usage: dict[str, int] = field(default_factory=dict)
-    reasoning_content: str | None = None
-    thinking_blocks: list[dict] | None = None
-
-    @property
-    def text(self) -> str:
-        """Preferred user-visible text payload."""
-        return self.content or self.reasoning_content or ""
-
-
-@dataclass
-class ToolCallRequest:
-    """Tool-call request projected into a provider-agnostic shape."""
-
-    id: str
-    name: str
-    arguments: dict[str, Any]
-    metadata: dict[str, Any] | None = None
-
-    def to_openai_call(self) -> dict[str, Any]:
-        return {
-            "id": self.id,
-            "type": "function",
-            "function": {
-                "name": self.name,
-                # OpenAI-compatible tool call replay expects JSON text here.
-                "arguments": json.dumps(self.arguments),
-            },
-        }
-
-
-@ep_provider(name="_default")
-async def litellm_complete(messages: list[dict], model: str, **kwargs: Any) -> LLMResponse:
-    # avoid litellm call load_dotenv() which will load .env in current working directory
-
-    os.environ["LITELLM_MODE"] = "extension"
-
-    import litellm
-
-    raw = await litellm.acompletion(model=model, messages=messages, **kwargs)
-    return _litellm_response_to_llm_response(raw)
-
-
-class LLMClient:
-    """Extensible LLM client with provider routing and scoped config."""
-
-    def __init__(self, providers_cfg: dict[str, dict[str, Any]] | None = None) -> None:
-        self._providers_cfg: dict[str, dict[str, Any]] = (
-            {k: _compact(v) for k, v in providers_cfg.items() if v is not None} if providers_cfg is not None else {}
-        )
-
-    async def complete(
-        self,
-        messages: list[dict],
-        **kwargs: Any,
-    ) -> LLMResponse:
-        """Call the LLM, routing to the correct provider.
-
-        Merges 4 tiers of config, resolves the provider by model
-        prefix, and injects only the parameters the provider's
-        ``complete`` method accepts.
-        """
-        if model := kwargs.get("model"):
-            provider_name, model_name = model.split("/", 1)
-            if not ep_provider.has(provider_name):
-                provider_name, model_name = "_default", model
-        else:
-            provider_name, model_name = "_default", None
-        params = self._providers_cfg.get(provider_name, {}) | kwargs | {"messages": messages, "model": model_name}
-        return await ep_provider.invoke_async(provider_name, params)
-
-
-# ═══════════════════════════════════════════════════════════════
 #  TOOLS
 # ═══════════════════════════════════════════════════════════════
-
-
-class ToolRegistry(ExtensionPoint):
-    def to_openai_schema(self) -> dict[str, dict[str, Any]]:
-        return {t.name: self.build_openai_schema(t) for t in self._extensions.values()}
-
-    @staticmethod
-    def build_openai_schema(ext: Extension) -> dict[str, Any]:
-        return {
-            "type": "function",
-            "function": {
-                "name": ext.name,
-                "description": ext.description,
-                "parameters": ext.metadata["parameters"],
-            },
-        }
-
-    def default_validate(self, ext: Extension) -> bool:
-        # check the parameters is provided
-        if "parameters" not in ext.metadata:
-            raise ValueError(f"Tool {ext.name} is missing parameters")
-        # check all the parameters of the fn are in the metadata
-        fn_params = set(inspect.signature(ext.fn).parameters.keys())
-        meta_params = set(ext.metadata["parameters"]["properties"].keys())
-        if fn_params != meta_params:
-            raise ValueError(f"Tool {ext.name} parameters do not match the function signature")
-        if not ext.description:
-            logger.warning(f"Tool {ext.name} is missing description")
-        return True
 
 
 ep_tool = ToolRegistry(description="Tool. An async function could be invoked by llm.")
