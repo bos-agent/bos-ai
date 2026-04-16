@@ -1,12 +1,21 @@
 from __future__ import annotations
 
 import contextvars
+import logging
 import os
 import uuid
 from pathlib import Path
 from typing import Any
 
 from bos.protocol import Envelope
+
+from ._utils import _aclose, _create_extension_instance, _load_ext_modules, _load_ext_paths, _safe_format
+from .agent import ChainReactInterceptor, ReactAgent
+from .contract import Consolidator, Mailbox, MemoryStore, MessageStore, SkillsLoader, ep_agent
+from .llm import LLMClient
+from .registry import ToolRegistry
+
+logger = logging.getLogger(__name__)
 
 
 def bootstrap_platform(
@@ -17,8 +26,6 @@ def bootstrap_platform(
     agents: list[dict[str, Any]] | None = None,
     agent_defaults: dict[str, Any] | None = None,
 ) -> None:
-    from bos.core import ReactAgent, _load_ext_modules, _load_ext_paths
-
     bos_root = Path(bos_dir).expanduser().resolve()
     bos_root.mkdir(parents=True, exist_ok=True)
 
@@ -93,16 +100,6 @@ class AgentHarness:
         self.llm = None
 
     async def __aenter__(self):
-        from bos.core import (
-            Consolidator,
-            LLMClient,
-            Mailbox,
-            MemoryStore,
-            MessageStore,
-            SkillsLoader,
-        )
-        from bos.core.agent import ChainReactInterceptor
-
         if self._token is not None:
             raise RuntimeError(
                 "AgentHarness is already active. Use CURRENT_HARNESS.get() to access "
@@ -125,8 +122,6 @@ class AgentHarness:
         return self
 
     async def __aexit__(self, *exc) -> None:
-        from bos.core import _aclose
-
         await _aclose(self.interceptor)
         for resource in reversed(self._owned):
             await _aclose(resource)
@@ -141,8 +136,6 @@ class AgentHarness:
             self._original_cwd = None
 
     def create_agent(self, agent_name: str | None = None, agent_cfg: dict[str, Any] = None):
-        from bos.core import ReactAgent, ep_agent
-
         if CURRENT_HARNESS.get(None) is None:
             raise RuntimeError("create_agent must be called within an active AgentHarness context.")
 
@@ -170,24 +163,19 @@ class AgentHarness:
         return ep_agent.invoke(agent_name, kwargs) if agent_name else ReactAgent(**kwargs)
 
     def _create_and_own(self, ep_name: str, protocol: type, cfg: Any) -> Any:
-        import bos.core as core
-        from bos.core import _create_extension_instance
+        from . import __dict__ as core_exports
 
-        instance = _create_extension_instance(getattr(core, ep_name), protocol, cfg)
+        instance = _create_extension_instance(core_exports[ep_name], protocol, cfg)
         if instance is not None:
             self._owned.append(instance)
         return instance
 
     def _create_local_tools(self):
-        from bos.core import ToolRegistry
-
         tools = ToolRegistry("Harness-scoped tools for this agent.")
         self._register_harness_tools(tools)
         return tools
 
     def _register_harness_tools(self, tools) -> None:
-        from bos.core import _safe_format, ep_agent
-
         harness = self
 
         @tools(

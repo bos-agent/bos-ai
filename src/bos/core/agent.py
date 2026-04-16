@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import platform
 import uuid
 from dataclasses import dataclass, field
@@ -8,18 +9,27 @@ from datetime import datetime
 from functools import wraps
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal
 
-from bos.core.contract import Message, ReactInterceptor, ep_agent, ep_react_interceptor
+from bos.core.contract import Message, ReactInterceptor, ep_agent, ep_react_interceptor, ep_tool
+from bos.core.defaults import FileSystemSkillsLoader, InMemMemoryStore, InMemMessageStore, NaiveConsolidator
+from bos.core.llm import LLMClient
 from bos.core.registry import ToolRegistry
 
+from ._utils import (
+    _aclose,
+    _allowed,
+    _apply_async,
+    _as_parts,
+    _compact,
+    _create_extension_instance,
+    _pick_collection,
+    _strip_think,
+)
+
 if TYPE_CHECKING:
-    from bos.core import (
-        Consolidator,
-        LLMClient,
-        LLMResponse,
-        MemoryStore,
-        MessageStore,
-        SkillsLoader,
-    )
+    from .contract import Consolidator, MemoryStore, MessageStore, SkillsLoader
+    from .llm import LLMResponse
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -38,8 +48,6 @@ class ReactContext:
         self.system = [{"role": "system", "content": content}]
 
     def add_message(self, llm_message: dict[str, Any], *, merge: bool = False, **kwargs) -> None:
-        from bos.core import Message, _as_parts
-
         if merge and self.current and self.current[-1].llm_message["role"] == llm_message["role"]:
             parts = _as_parts(self.current[-1].llm_message["content"]) + _as_parts(llm_message["content"])
             self.current[-1].llm_message["content"] = parts
@@ -73,8 +81,6 @@ class ChainReactInterceptor:
         self._instances: list[ReactInterceptor] = [None] * len(self._configs)
 
     async def aclose(self) -> None:
-        from bos.core import _aclose
-
         for interceptor in self._instances:
             await _aclose(interceptor)
 
@@ -90,8 +96,6 @@ class ChainReactInterceptor:
         ],
         context: ReactContext,
     ) -> None:
-        from bos.core import _create_extension_instance, logger
-
         for i, cfg in enumerate(self._configs):
             if self._instances[i] is None and ep_react_interceptor.has(cfg["name"]):
                 try:
@@ -127,15 +131,6 @@ class ReactAgent:
         interceptor: "ReactInterceptor | None" = None,
         local_tools: ToolRegistry | None = None,
     ):
-        from bos.core import (
-            ChainReactInterceptor,
-            FileSystemSkillsLoader,
-            InMemMemoryStore,
-            InMemMessageStore,
-            LLMClient,
-            NaiveConsolidator,
-        )
-
         self._system_prompt = {"_default": system_prompt} if isinstance(system_prompt, str) else (system_prompt or {})
         self._tools = tools
         self._exclude_tools = exclude_tools
@@ -171,8 +166,6 @@ class ReactAgent:
         llm_metadata: dict[str, Any] | None = None,
         ctx_metadata: dict[str, Any] | None = None,
     ) -> str:
-        from bos.core import _allowed, _apply_async, _compact, _strip_think, ep_tool, logger
-
         ctx = ReactContext(
             conversation_id=conversation_id,
             turn_id=uuid.uuid4().hex,
@@ -297,14 +290,10 @@ class ReactAgent:
         return ctx.final_response
 
     def _get_tool_defs(self) -> list[dict[str, Any]]:
-        from bos.core import _pick_collection, ep_tool
-
         tool_defs = ep_tool.to_openai_schema() | self._local_tools.to_openai_schema()
         return list(_pick_collection(tool_defs, self._tools, self._exclude_tools).values())
 
     async def _get_conversation_history(self, conversation_id: str) -> list[dict]:
-        from bos.core import _compact
-
         def _format_content(msg: dict) -> str:
             content = msg.get("content", "")
             if msg.get("role") == "tool" and isinstance(content, str) and len(content) > 150:
@@ -336,8 +325,6 @@ class ReactAgent:
         return history
 
     async def _build_system_prompt(self) -> str:
-        from bos.core import _pick_collection
-
         prompt = "--- SYSTEM PROMPT ---\n\n"
         prompt += self._system_prompt.get("_default", "")
 
@@ -378,8 +365,6 @@ class ReactAgent:
         return prompt
 
     def _register_memory_tools(self) -> None:
-        from bos.core import _allowed
-
         @self._local_tools(
             name="UpdateMemory",
             parameters={
@@ -410,8 +395,6 @@ class ReactAgent:
             return f"(Successfully updated memory '{key}'.)"
 
     def _register_skills_tools(self) -> None:
-        from bos.core import _compact, _pick_collection
-
         @self._local_tools(
             name="LoadSkill",
             parameters={
@@ -421,8 +404,6 @@ class ReactAgent:
             },
         )
         async def tool_load_skill(name: str) -> str:
-            from bos.core import _allowed
-
             if not _allowed(name, self._skills, self._exclude_skills):
                 raise ValueError(f"Skill '{name}' is not allowed.")
             if skill := await self._skills_loader.load_skill(name):
@@ -461,8 +442,6 @@ class ReactAgent:
             return json.dumps(results)
 
     def _register_agent_tools(self) -> None:
-        from bos.core import _pick_collection
-
         @self._local_tools(
             name="ListAgents",
             description="List all available agents registered in the system.",

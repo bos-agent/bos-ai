@@ -16,12 +16,35 @@ class Closeable(Protocol):
     async def aclose(self) -> None: ...
 
 
-ep_tool = ToolRegistry(description="Tool. An async function could be invoked by llm.")
+ep_tool = ToolRegistry(
+    description="""
+        Tool. An async function could be invoked by llm.
+        On registration, the parameters of the tool whould be provided in jsonschema format.
+        for example:
+
+        @ep_tool(
+            name="echo",
+            description="Echo the message.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "message": {"type": "str"},
+                },
+                "required": ["message"],
+            },
+        )
+        async def echo(message: str) -> str:
+            ...
+    """
+)
 
 ep_provider = ExtensionPoint(
     description="""
-        LLM provider. An async function that takes messages: list[dict]
-        and returns response:LLMResponse.
+        LLM provider. An async function that takes messages and returns response:LLMResponse.
+        for example:
+
+        async def my_provider(messages: list[dict], **kwargs: Any) -> LLMResponse:
+            ...
     """
 )
 

@@ -4,8 +4,6 @@ Lightweight single-file agent framework.
 
 from __future__ import annotations
 
-import logging
-
 from bos.core._utils import (
     _aclose,
     _allowed,
@@ -73,9 +71,6 @@ from bos.protocol import Envelope as Envelope
 
 __version__ = "0.1.0"
 
-
-logger = logging.getLogger("bos")
-
 __all__ = [
     "__version__",
     "AbortTurn",
@@ -138,5 +133,4 @@ __all__ = [
     "_read_text",
     "_safe_format",
     "_strip_think",
-    "logger",
 ]

@@ -2,10 +2,17 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import uuid
 from typing import Any
 
 from bos.protocol import Envelope, MessageType
+
+from .agent import AbortTurn
+from .contract import ep_actor_command
+from .harness import CURRENT_HARNESS
+
+logger = logging.getLogger(__name__)
 
 
 class AgentActor:
@@ -26,8 +33,6 @@ class AgentActor:
         self._tasks.clear()
 
     async def run(self) -> None:
-        from bos.core import logger
-
         try:
             while True:
                 for s in list(self._tasks.keys()):
@@ -107,8 +112,6 @@ class AgentActor:
             )
 
     async def _handle_command(self, env: Envelope) -> None:
-        from bos.core import CURRENT_HARNESS, ep_actor_command
-
         parts = env.content.split(None, 1)
         cmd_name, input = parts[0].lstrip("/"), "" if len(parts) == 1 else parts[1]
 
@@ -140,8 +143,6 @@ class AgentActor:
         await self._mailbox.send(result)
 
     def _make_interrupt(self, sender: str):
-        from bos.core import AbortTurn
-
         def _interrupt() -> dict[str, Any] | None:
             buf = self._interrupts.get(sender, [])
             parts: list[str] = []

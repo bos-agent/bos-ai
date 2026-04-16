@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-async def start(workspace: "Workspace") -> None:
+async def start(workspace: Workspace) -> None:
     """Launch harness, agent actor(s), and all configured channels in-process.
 
     Reads from ``config.toml``::

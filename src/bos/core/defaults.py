@@ -19,14 +19,14 @@ from bos.core.contract import (
 from bos.core.llm import LLMResponse
 from bos.protocol import Envelope
 
+from ._utils import _litellm_response_to_llm_response, _read_text
+
 
 @ep_provider(name="_default")
 async def litellm_complete(messages: list[dict], model: str, **kwargs: Any) -> LLMResponse:
     os.environ["LITELLM_MODE"] = "extension"
 
     import litellm
-
-    from bos.core import _litellm_response_to_llm_response
 
     raw = await litellm.acompletion(model=model, messages=messages, **kwargs)
     return _litellm_response_to_llm_response(raw)
@@ -119,8 +119,6 @@ class FileSystemSkillsLoader:
         return self._skills
 
     async def load_skill(self, name: str) -> tuple[Path, str]:
-        from bos.core import _read_text
-
         skills = await self.list_skills()
         if (s := skills.get(name)) and (text := _read_text(s.get("path"))):
             return s["path"].parent, text
