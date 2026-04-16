@@ -34,7 +34,7 @@ class Workspace:
         cfg_file = self.bos_dir / "config.toml"
         if cfg_file.exists():
             raise FileExistsError(f"Config file {cfg_file} already exists.")
-        config_template_path = Path(__file__).resolve().parents[1] / "config_template.toml"
+        config_template_path = Path(__file__).resolve().parent / "template.toml"
         shutil.copy2(config_template_path, cfg_file)
         self.config = tomllib.loads(cfg_file.read_text(encoding="utf-8"))
 
