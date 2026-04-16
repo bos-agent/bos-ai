@@ -17,7 +17,7 @@ from urllib.parse import urlencode
 import httpx
 
 from bos.core import LLMResponse, ToolCallRequest, ep_provider
-from bos.providers.antigravity_provider import (
+from bos.extensions.providers.antigravity_provider import (
     _AUTH_URL,
     _CLIENT_KEY,
     _CLIENT_VAL,
@@ -29,7 +29,7 @@ from bos.providers.antigravity_provider import (
     _iter_sse,
     _progress,
 )
-from bos.providers.google_oauth import (
+from bos.extensions.providers.google_oauth import (
     OAuthCredentials,
     exchange_code_for_tokens,
     generate_pkce,
@@ -127,7 +127,7 @@ async def login_gemini_cli(
 
         # _discover_antigravity_project falls back to the Antigravity default project.
         # We don't want to use that for Gemini CLI as it often fails with 403 on non-Googler accounts.
-        from bos.providers.antigravity_provider import _DEFAULT_PROJECT_ID
+        from bos.extensions.providers.antigravity_provider import _DEFAULT_PROJECT_ID
 
         if project_id == _DEFAULT_PROJECT_ID:
             project_id = ""

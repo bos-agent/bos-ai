@@ -13,7 +13,7 @@ from urllib.parse import urlencode
 import httpx
 
 from bos.core import LLMResponse, ToolCallRequest, ep_provider
-from bos.providers.google_oauth import (
+from bos.extensions.providers.google_oauth import (
     OAuthCredentials,
     exchange_code_for_tokens,
     generate_pkce,

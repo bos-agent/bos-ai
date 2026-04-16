@@ -35,8 +35,8 @@ async def start(workspace: "Workspace") -> None:
     Blocks until all tasks complete (i.e. until cancelled via SIGTERM or
     ``asyncio.CancelledError``).
     """
-    from bos.channels.broadcast import BroadcastChannel
     from bos.core import AgentActor, Channel, _create_extension_instance, ep_channel
+    from bos.extensions.channels.broadcast import BroadcastChannel
 
     agent_name: str = workspace.get_setting("main.agent") or "_default"
     channels_cfg: list[dict] = workspace.config.get("main", {}).get("channels", [{"name": "HttpChannel"}])

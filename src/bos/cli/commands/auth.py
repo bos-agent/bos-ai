@@ -58,7 +58,7 @@ def antigravity(name: str):
     import json
     import webbrowser
 
-    from bos.providers.antigravity_provider import login_antigravity
+    from bos.extensions.providers.antigravity_provider import login_antigravity
 
     creds_dir = Path.home() / ".config" / "bos"
     creds_dir.mkdir(parents=True, exist_ok=True)
@@ -98,7 +98,7 @@ def gemini_cli(name: str) -> None:
     import json
     import webbrowser
 
-    from bos.providers.gemini_cli_provider import login_gemini_cli
+    from bos.extensions.providers.gemini_cli_provider import login_gemini_cli
 
     click.echo("\n" + "=" * 50)
     click.echo(" Gemini CLI Authentication")

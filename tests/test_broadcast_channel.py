@@ -1,5 +1,5 @@
-from bos.channels.broadcast import BroadcastChannel
 from bos.core import Envelope
+from bos.extensions.channels.broadcast import BroadcastChannel
 
 
 def test_broadcast_rewrites_inbound_to_canonical_conversation_id():
