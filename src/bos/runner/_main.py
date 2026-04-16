@@ -24,7 +24,7 @@ def main() -> None:
     args = parser.parse_args()
 
     # Bootstrap workspace
-    from bos.core import Workspace
+    from bos.config import Workspace
     from bos.runner.proc import RunDir, write_state
     from bos.runner.runner import start as runner_start
 

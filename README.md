@@ -58,7 +58,7 @@ bos chat -M "hello" -m codex/gpt-5.3-codex -a main
 
 `bos-ai` is built on a few core design principles:
 
-- **Lightweight & Embeddable**: The heart of the framework lives in a single, comprehensive file (`core.py`), ensuring that complexity is minimized while keeping the abstractions powerfully dense.
+- **Lightweight & Embeddable**: The runtime core stays compact and explicit, with clear module boundaries for contracts, defaults, agent runtime, harness lifecycle, and protocol handling.
 - **Extensible at the Core**: Every significant layer—from LLM providers, to message persistence, to memory and tools—is powered by an internal Extension System.
 - **Agent as an Actor**: Agents communicate via asynchronous message passing (the `Mailbox` protocol). This enables robust multi-agent orchestration without tightly coupled code.
 - **Harness-Managed Lifecycle**: An `AgentHarness` is used to bootstrap, maintain, and gracefully tear down shared resources (like databases or API connections) across all agents in the workspace.

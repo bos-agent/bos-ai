@@ -17,9 +17,10 @@ import json
 from typing import TYPE_CHECKING
 
 from bos.core import ep_actor_command
+from bos.protocol import Envelope
 
 if TYPE_CHECKING:
-    from bos.core import AgentActor, Envelope
+    from bos.core import AgentActor
 
 
 @ep_actor_command(name="history")
@@ -73,4 +74,3 @@ async def memory(actor: AgentActor) -> str:
     agent = actor._agent
     result = await agent._memory_store.list_memories()
     return json.dumps({"name": "memory", "result": result}, default=str)
-

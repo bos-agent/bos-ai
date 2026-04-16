@@ -9,7 +9,7 @@ import time
 
 import click
 
-from bos.core import Workspace
+from bos.config import Workspace
 
 
 def _get_ws_and_rd(ctx):
@@ -202,8 +202,8 @@ def tui(ctx, host: str | None, port: int | None, address: str):
             "Could not determine channel endpoint. Use --host and --port, or make sure the agent is running."
         )
 
-    from bos.channels.http_client import HttpChannelClient
     from bos.cli.tui_app import run_chat_tui
+    from bos.extensions.channels.http_client import HttpChannelClient
 
     async def _run():
         client = HttpChannelClient(host=host, port=port, address=address)

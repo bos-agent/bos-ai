@@ -25,7 +25,8 @@ from textual.containers import Horizontal
 from textual.message import Message
 from textual.widgets import Footer, Header, Input, RichLog, Static
 
-from bos.core import Envelope, Mailbox
+from bos.core import Mailbox
+from bos.protocol import ChannelCommandName, Envelope, MessageType
 
 logger = logging.getLogger(__name__)
 
@@ -191,7 +192,7 @@ class ChatApp(App):
         while True:
             try:
                 env = await self._mailbox.receive()
-                if env.content_type == "command_result":
+                if env.content_type == MessageType.COMMAND_RESULT:
                     # Server-side slash command response
                     try:
                         data = json.loads(env.content) if isinstance(env.content, str) else env.content
@@ -199,19 +200,19 @@ class ChatApp(App):
                         data = env.content
                     cmd_name = data.get("name", "?") if isinstance(data, dict) else "?"
                     self.post_message(CommandResultEvent(cmd_name, data))
-                elif env.content_type == "agent_step":
+                elif env.content_type == MessageType.AGENT_STEP:
                     # Real-time step info from the agent process
                     try:
                         info = json.loads(env.content) if isinstance(env.content, str) else {}
                     except json.JSONDecodeError:
                         info = {}
                     self.post_message(AgentStepEvent(info))
-                elif env.content_type == "echo":
+                elif env.content_type == MessageType.ECHO:
                     # User input from another channel — display it
                     log = self.query_one("#conversation", RichLog)
                     log.write(f"\n[bold dim cyan]❯ User ({env.sender})[/]")
                     log.write(f"  {env.content}")
-                elif env.content_type == "system":
+                elif env.content_type == MessageType.SYSTEM:
                     self.post_message(SystemEvent(env.content, env.conversation_id))
                 else:
                     # Normal reply
@@ -391,7 +392,7 @@ class ChatApp(App):
             sender=self._tui_address,
             recipient="",
             content=f"/{command_name}",
-            content_type="command",
+            content_type=MessageType.COMMAND,
             conversation_id=self._conversation_id,
         )
         try:
@@ -406,7 +407,7 @@ class ChatApp(App):
             sender=self._tui_address,
             recipient="",
             content=command_name,
-            content_type="channel_command",
+            content_type=MessageType.CHANNEL_COMMAND,
             conversation_id=conversation_id,
         )
         try:
@@ -420,9 +421,12 @@ class ChatApp(App):
         self.query_one("#conversation", RichLog).clear()
 
     def action_new_conversation(self) -> None:
-        self._conversation_id = uuid.uuid4().hex
-        self._write_system(f"[green]✓ New conversation: {self._conversation_id}[/]")
-        self._update_status()
+        asyncio.create_task(
+            self._send_channel_command(
+                ChannelCommandName.NEW_CONVERSATION,
+                conversation_id=uuid.uuid4().hex,
+            )
+        )
 
     # ── helpers ────────────────────────────────────────────────
 

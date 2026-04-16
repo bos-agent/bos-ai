@@ -29,7 +29,8 @@ from typing import Any
 
 from aiohttp import WSMsgType, web
 
-from bos.core import Envelope, Mailbox, ep_channel
+from bos.core import Mailbox, ep_channel
+from bos.protocol import Envelope, MessageType
 
 logger = logging.getLogger(__name__)
 
@@ -43,9 +44,10 @@ def _envelope_from_dict(data: dict[str, Any], *, sender: str, target: str) -> En
         sender=sender,
         recipient=target,
         content=data.get("content", ""),
-        content_type=data.get("content_type", "message"),
+        content_type=data.get("content_type", MessageType.MESSAGE),
         conversation_id=data.get("conversation_id"),
         timestamp=ts,
+        metadata=data.get("metadata", {}),
     )
 
 

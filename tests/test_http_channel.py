@@ -1,4 +1,4 @@
-from bos.channels.http import _envelope_from_dict
+from bos.extensions.channels.http import _envelope_from_dict
 
 
 def test_envelope_from_dict_ignores_client_recipient():

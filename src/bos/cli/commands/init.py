@@ -2,7 +2,7 @@ from pathlib import Path
 
 import click
 
-from bos.core import Workspace
+from bos.config import Workspace
 
 
 @click.command()

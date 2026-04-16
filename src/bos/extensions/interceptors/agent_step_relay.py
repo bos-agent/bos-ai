@@ -16,10 +16,10 @@ from typing import Any, Literal
 
 from bos.core import (
     CURRENT_HARNESS,
-    Envelope,
     ReactContext,
     ep_react_interceptor,
 )
+from bos.protocol import Envelope, MessageType
 
 logger = logging.getLogger(__name__)
 
@@ -98,7 +98,7 @@ class AgentStepInterceptor:
                     sender=actor_address,
                     recipient=sender,
                     content=json.dumps(info, default=str),
-                    content_type="agent_step",
+                    content_type=MessageType.AGENT_STEP,
                     conversation_id=context.conversation_id,
                 )
             )

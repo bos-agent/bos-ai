@@ -10,12 +10,12 @@ import logging
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from bos.core import Workspace
+    from bos.config import Workspace
 
 logger = logging.getLogger(__name__)
 
 
-async def start(workspace: "Workspace") -> None:
+async def start(workspace: Workspace) -> None:
     """Launch harness, agent actor(s), and all configured channels in-process.
 
     Reads from ``config.toml``::
@@ -35,8 +35,8 @@ async def start(workspace: "Workspace") -> None:
     Blocks until all tasks complete (i.e. until cancelled via SIGTERM or
     ``asyncio.CancelledError``).
     """
-    from bos.channels.broadcast import BroadcastChannel
     from bos.core import AgentActor, Channel, _create_extension_instance, ep_channel
+    from bos.extensions.channels.broadcast import BroadcastChannel
 
     agent_name: str = workspace.get_setting("main.agent") or "_default"
     channels_cfg: list[dict] = workspace.config.get("main", {}).get("channels", [{"name": "HttpChannel"}])

@@ -3,13 +3,13 @@ import importlib
 import click
 
 _LAZY_COMMANDS: dict[str, str] = {
-    "auth":    "bos.cli.commands.auth:auth",
-    "init":    "bos.cli.commands.init:init",
-    "start":   "bos.cli.commands.agent:start",
-    "stop":    "bos.cli.commands.agent:stop",
-    "status":  "bos.cli.commands.agent:status",
+    "auth": "bos.cli.commands.auth:auth",
+    "init": "bos.cli.commands.init:init",
+    "start": "bos.cli.commands.agent:start",
+    "stop": "bos.cli.commands.agent:stop",
+    "status": "bos.cli.commands.agent:status",
     "restart": "bos.cli.commands.agent:restart",
-    "tui":     "bos.cli.commands.agent:tui",
+    "tui": "bos.cli.commands.agent:tui",
 }
 
 
@@ -38,14 +38,16 @@ class _LazyGroup(click.Group):
     "-w",
     "--workspace",
     type=click.Path(exists=False, file_okay=False, dir_okay=True),
-    default=".",
+    default=None,
     help="Path to the workspace directory.",
 )
 @click.pass_context
 def cli(ctx, workspace):
     """BOS AI CLI"""
+    import os
+
     ctx.ensure_object(dict)
-    ctx.obj["WORKSPACE"] = workspace
+    ctx.obj["WORKSPACE"] = workspace or os.environ.get("BOS_WORKSPACE", ".")
 
 
 def main():

@@ -1,4 +1,4 @@
-from bos.channels.telegram import (
+from bos.extensions.channels.telegram import (
     TELEGRAM_MESSAGE_LIMIT,
     _conversation_id_for_chat,
     _extract_inbound_message,
