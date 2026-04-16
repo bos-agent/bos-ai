@@ -10,7 +10,7 @@ import logging
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from bos.core import Workspace
+    from bos.config import Workspace
 
 logger = logging.getLogger(__name__)
 

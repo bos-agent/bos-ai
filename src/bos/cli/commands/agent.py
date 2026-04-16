@@ -9,7 +9,7 @@ import time
 
 import click
 
-from bos.core import Workspace
+from bos.config import Workspace
 
 
 def _get_ws_and_rd(ctx):

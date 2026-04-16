@@ -1,6 +1,6 @@
 import logging
 
-from bos.harness import AgentHarness
+from bos.core import AgentHarness
 
 
 def test_harness_local_tools_describe_ask_subagent(caplog):
