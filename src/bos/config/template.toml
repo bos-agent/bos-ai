@@ -62,8 +62,8 @@ store_dir = "memories"
 name = "JsonlMessageStore"
 store_dir = "messages"
 
-[harness.mailbox]
-name = "JsonlMailbox"
+[harness.mail_route]
+name = "JsonlMailRoute"
 store_dir = "mailboxes"
 
 [[harness.subagents]]
@@ -84,10 +84,10 @@ agent = "main"
 broadcast_address = "channel@user"
 
 [[main.channels]]
-# Channel configuration — bridges external clients to the mailbox.
+# Channel configuration — bridges external clients to a bound channel MailBox.
 # Multiple channels can be listed to run in parallel (e.g. HttpChannel + TelegramChannel).
 name = "HttpChannel"
-address = "http"     # mailbox address this channel binds to
+address = "http"     # channel address to bind on the MailRoute
 host = "127.0.0.1"   # use 0.0.0.0 in Docker
 port = 8080
 

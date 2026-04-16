@@ -19,7 +19,7 @@ from bos.core import (
     ReactContext,
     ep_react_interceptor,
 )
-from bos.protocol import Envelope, MessageType
+from bos.protocol import MessageType
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +51,7 @@ class AgentStepInterceptor:
             return
 
         harness = CURRENT_HARNESS.get(None)
-        if not harness or not harness.mailbox:
+        if not harness or not harness.mail_route:
             return
 
         info: dict[str, Any] = {
@@ -93,14 +93,11 @@ class AgentStepInterceptor:
             return
 
         try:
-            await harness.mailbox.send(
-                Envelope(
-                    sender=actor_address,
-                    recipient=sender,
-                    content=json.dumps(info, default=str),
-                    content_type=MessageType.AGENT_STEP,
-                    conversation_id=context.conversation_id,
-                )
+            await harness.mail_route.bind(actor_address).send(
+                sender,
+                json.dumps(info, default=str),
+                content_type=MessageType.AGENT_STEP,
+                conversation_id=context.conversation_id,
             )
         except Exception:
             logger.debug("AgentStepInterceptor send error", exc_info=True)

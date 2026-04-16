@@ -46,7 +46,7 @@ async def start(workspace: Workspace) -> None:
     async with workspace.harness() as harness:
         agent = harness.create_agent(agent_name)
         actor_address = f"agent@{agent_name}"
-        actor = AgentActor(actor_address, agent, harness.mailbox)
+        actor = AgentActor(agent, harness.mail_route.bind(actor_address))
         broadcast_address = workspace.get_setting("main.broadcast_address")
         target_address = broadcast_address or actor_address
 
@@ -64,10 +64,13 @@ async def start(workspace: Workspace) -> None:
                 if broadcast_address:
                     member_addresses = [addr for _, addr in channels]
                     bc = BroadcastChannel(member_addresses, actor_address)
-                    tg.create_task(bc.run(harness.mailbox, broadcast_address), name="broadcast")
+                    tg.create_task(
+                        bc.run(harness.mail_route, harness.mail_route.bind(broadcast_address)),
+                        name="broadcast",
+                    )
                 for ch, address in channels:
                     tg.create_task(
-                        ch.run(harness.mailbox, address),
+                        ch.run(harness.mail_route.bind(address)),
                         name=f"channel:{address}",
                     )
 

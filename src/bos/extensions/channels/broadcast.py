@@ -11,7 +11,7 @@ import asyncio
 import logging
 import uuid
 
-from bos.core import Mailbox
+from bos.core import MailBox, MailRoute
 from bos.protocol import ChannelCommandName, Envelope, MessageType
 
 logger = logging.getLogger(__name__)
@@ -26,8 +26,9 @@ class BroadcastChannel:
         self._conversation_id = self._new_conversation_id()
         self._member_conversation_ids: dict[str, str] = {}
 
-    async def run(self, mailbox: Mailbox, address: str) -> None:
+    async def run(self, route: MailRoute, mailbox: MailBox) -> None:
         """Main mediator loop."""
+        address = mailbox.address
         logger.info(
             "BroadcastChannel %r → %s (actor=%s, conversation_id=%s)",
             address,
@@ -37,7 +38,7 @@ class BroadcastChannel:
         )
         try:
             while True:
-                env = await mailbox.receive(address)
+                env = await mailbox.receive()
 
                 if env.sender in self._members:
                     origin = env.sender
@@ -45,34 +46,28 @@ class BroadcastChannel:
 
                     if self._is_new_conversation_request(env):
                         self._rotate_conversation(origin, requested_local_id=env.conversation_id)
-                        await self._notify_new_conversation(mailbox, address)
+                        await self._notify_new_conversation(mailbox)
                         continue
 
                     for member in self._members:
                         if member != origin:
                             await mailbox.send(
-                                Envelope(
-                                    sender=address,
-                                    recipient=member,
-                                    content=env.content,
-                                    content_type=MessageType.ECHO,
-                                    conversation_id=self._conversation_for_member(member),
-                                )
+                                member,
+                                env.content,
+                                content_type=MessageType.ECHO,
+                                conversation_id=self._conversation_for_member(member),
                             )
 
                     await mailbox.send(
-                        Envelope(
-                            sender=address,
-                            recipient=self._actor,
-                            content=env.content,
-                            content_type=env.content_type,
-                            conversation_id=self._conversation_id,
-                        )
+                        self._actor,
+                        env.content,
+                        content_type=env.content_type,
+                        conversation_id=self._conversation_id,
                     )
 
                 else:
                     for member in self._members:
-                        await mailbox.send(
+                        await route.deliver(
                             Envelope(
                                 sender=env.sender,
                                 recipient=member,
@@ -114,16 +109,13 @@ class BroadcastChannel:
             if not self._is_sticky_local_id(current):
                 self._member_conversation_ids[member] = self._conversation_id
 
-    async def _notify_new_conversation(self, mailbox: Mailbox, address: str) -> None:
+    async def _notify_new_conversation(self, mailbox: MailBox) -> None:
         for member in self._members:
             await mailbox.send(
-                Envelope(
-                    sender=address,
-                    recipient=member,
-                    content="Started a new shared conversation.",
-                    content_type=MessageType.SYSTEM,
-                    conversation_id=self._conversation_for_member(member),
-                )
+                member,
+                "Started a new shared conversation.",
+                content_type=MessageType.SYSTEM,
+                conversation_id=self._conversation_for_member(member),
             )
 
     @staticmethod

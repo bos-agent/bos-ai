@@ -45,7 +45,7 @@ class HttpChannelClient:
 
         client = HttpChannelClient(host="127.0.0.1", port=8080, address="tui")
         await client.connect()
-        await client.send(Envelope(sender="tui", recipient="", content="hello"))
+        await client.send("", "hello")
         reply = await client.receive()
         await client.aclose()
     """
@@ -63,6 +63,10 @@ class HttpChannelClient:
     @property
     def connected(self) -> bool:
         return self._ws is not None and not self._ws.closed
+
+    @property
+    def address(self) -> str:
+        return self._address
 
     async def connect(self) -> None:
         """Open the WebSocket connection and start the background reader."""
@@ -136,8 +140,16 @@ class HttpChannelClient:
                 logger.info("WebSocket disconnected — will reconnect")
                 await self._reconnect()
 
-    async def send(self, env: Envelope) -> None:
-        """Send an envelope to the channel server.
+    async def send(
+        self,
+        recipient: str,
+        content: str,
+        *,
+        content_type: MessageType | str = MessageType.MESSAGE,
+        conversation_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """Send a message to the channel server.
 
         If the connection is down, waits for reconnection (up to 15s)
         before raising.
@@ -147,7 +159,18 @@ class HttpChannelClient:
                 await asyncio.wait_for(self._connected.wait(), timeout=15)
             except asyncio.TimeoutError:
                 raise RuntimeError("Not connected — reconnect timed out")
-        await self._ws.send_json(_envelope_to_dict(env))
+        await self._ws.send_json(
+            _envelope_to_dict(
+                Envelope(
+                    sender=self._address,
+                    recipient=recipient,
+                    content=content,
+                    content_type=content_type,
+                    conversation_id=conversation_id,
+                    metadata=metadata or {},
+                )
+            )
+        )
 
     async def receive(self) -> Envelope:
         """Block until the next envelope arrives."""

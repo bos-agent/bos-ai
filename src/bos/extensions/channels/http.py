@@ -1,6 +1,6 @@
-"""HttpChannel — aiohttp HTTP/WebSocket server bridging external clients to the mailbox.
+"""HttpChannel — aiohttp HTTP/WebSocket server bridging external clients to a bound mailbox.
 
-Runs inside the actor process, shares the harness mailbox. Supports:
+Runs inside the actor process and shares a bound channel mailbox. Supports:
 
 WebSocket
 ---------
@@ -29,7 +29,7 @@ from typing import Any
 
 from aiohttp import WSMsgType, web
 
-from bos.core import Mailbox, ep_channel
+from bos.core import MailBox, ep_channel
 from bos.protocol import Envelope, MessageType
 
 logger = logging.getLogger(__name__)
@@ -65,8 +65,7 @@ def _envelope_to_dict(env: Envelope) -> dict[str, Any]:
 
 async def _ws_handler(request: web.Request) -> web.WebSocketResponse:
     """Bidirectional WebSocket bridge between an external client and the mailbox."""
-    mailbox: Mailbox = request.app["mailbox"]
-    channel_address: str = request.app["channel_address"]
+    mailbox: MailBox = request.app["mailbox"]
     target_address: str = request.app["target_address"]
 
     ws = web.WebSocketResponse(heartbeat=30)
@@ -77,7 +76,7 @@ async def _ws_handler(request: web.Request) -> web.WebSocketResponse:
     async def _forward_to_ws() -> None:
         while not ws.closed:
             try:
-                env = await mailbox.receive(channel_address)
+                env = await mailbox.receive()
                 await ws.send_json(_envelope_to_dict(env))
             except asyncio.CancelledError:
                 break
@@ -91,8 +90,14 @@ async def _ws_handler(request: web.Request) -> web.WebSocketResponse:
             if msg.type == WSMsgType.TEXT:
                 try:
                     data = json.loads(msg.data)
-                    env = _envelope_from_dict(data, sender=channel_address, target=target_address)
-                    await mailbox.send(env)
+                    env = _envelope_from_dict(data, sender=mailbox.address, target=target_address)
+                    await mailbox.send(
+                        env.recipient,
+                        env.content,
+                        content_type=env.content_type,
+                        conversation_id=env.conversation_id,
+                        metadata=env.metadata,
+                    )
                 except Exception as exc:
                     logger.warning("Bad WS message: %s — %s", msg.data[:120], exc)
             elif msg.type in (WSMsgType.ERROR, WSMsgType.CLOSE):
@@ -110,13 +115,18 @@ async def _ws_handler(request: web.Request) -> web.WebSocketResponse:
 
 async def _send_handler(request: web.Request) -> web.Response:
     """POST /api/send — one-shot fire-and-forget."""
-    mailbox: Mailbox = request.app["mailbox"]
-    channel_address: str = request.app["channel_address"]
+    mailbox: MailBox = request.app["mailbox"]
     target_address: str = request.app["target_address"]
     try:
         data = await request.json()
-        env = _envelope_from_dict(data, sender=channel_address, target=target_address)
-        await mailbox.send(env)
+        env = _envelope_from_dict(data, sender=mailbox.address, target=target_address)
+        await mailbox.send(
+            env.recipient,
+            env.content,
+            content_type=env.content_type,
+            conversation_id=env.conversation_id,
+            metadata=env.metadata,
+        )
         return web.json_response({"ok": True}, status=202)
     except Exception as exc:
         return web.json_response({"ok": False, "error": str(exc)}, status=400)
@@ -136,7 +146,7 @@ class HttpChannel:
     """aiohttp HTTP/WebSocket channel server registered on ``ep_channel``.
 
     Binds to ``host:port`` and bridges external WebSocket clients to/from
-    the shared harness mailbox via ``address``.
+    the shared harness mail route via one bound channel mailbox.
     """
 
     def __init__(self, target_address: str, host: str = "127.0.0.1", port: int = 0) -> None:
@@ -146,7 +156,8 @@ class HttpChannel:
         self.actual_port: int = self._port
         self.target_address: str = target_address
 
-    async def run(self, mailbox: Mailbox, address: str) -> None:
+    async def run(self, mailbox: MailBox) -> None:
+        address = mailbox.address
         target = self.target_address or address
         app = web.Application()
         app["mailbox"] = mailbox

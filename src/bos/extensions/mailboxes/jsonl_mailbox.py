@@ -14,8 +14,8 @@ from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 
-from bos.core import _flock, ep_mailbox
-from bos.protocol import Envelope
+from bos.core import _flock, ep_mail_route
+from bos.protocol import Envelope, MessageType
 
 
 def _slugify(address: str) -> str:
@@ -31,9 +31,45 @@ def _slugify(address: str) -> str:
     return urllib.parse.quote(address, safe="@")
 
 
-@ep_mailbox(name="JsonlMailbox")
-class JsonlMailbox:
-    """File-based mailbox using JSONL inbox files."""
+class _JsonlMailBox:
+    def __init__(self, route: "JsonlMailRoute", address: str) -> None:
+        self._route = route
+        self._address = address
+
+    @property
+    def address(self) -> str:
+        return self._address
+
+    async def receive(self) -> Envelope:
+        return await self._route.receive(self._address)
+
+    async def send(
+        self,
+        recipient: str,
+        content: str,
+        *,
+        content_type: MessageType | str = MessageType.MESSAGE,
+        conversation_id: str | None = None,
+        metadata: dict[str, object] | None = None,
+    ) -> None:
+        await self._route.deliver(
+            Envelope(
+                sender=self._address,
+                recipient=recipient,
+                content=content,
+                content_type=content_type,
+                conversation_id=conversation_id,
+                metadata=metadata or {},
+            )
+        )
+
+    async def receive_nowait(self) -> Envelope | None:
+        return await self._route.receive_nowait(self._address)
+
+
+@ep_mail_route(name="JsonlMailRoute")
+class JsonlMailRoute:
+    """File-based mail route using JSONL inbox files."""
 
     def __init__(self, store_dir: str | Path = None) -> None:
         self._dir = Path(store_dir or "./mailboxs").expanduser().resolve()
@@ -43,6 +79,9 @@ class JsonlMailbox:
     def _inbox_path(self, address: str) -> Path:
         return self._dir / f"{_slugify(address)}.jsonl"
 
+    def bind(self, address: str) -> _JsonlMailBox:
+        return _JsonlMailBox(self, address)
+
     async def receive(self, address: str) -> Envelope:
         while True:
             env = await self.receive_nowait(address)
@@ -50,7 +89,7 @@ class JsonlMailbox:
                 return env
             await asyncio.sleep(0.5)
 
-    async def send(self, env: Envelope) -> None:
+    async def deliver(self, env: Envelope) -> None:
         target = self._dir / f"{_slugify(env.recipient)}.jsonl"
         payload = asdict(env)
         payload["timestamp"] = env.timestamp.isoformat()
@@ -98,3 +137,6 @@ class JsonlMailbox:
     async def aclose(self) -> None:
         """Release tracked state. File locks are per-operation (not held long-term)."""
         self._byte_offsets.clear()
+
+
+JsonlMailbox = JsonlMailRoute

@@ -60,7 +60,7 @@ bos chat -M "hello" -m codex/gpt-5.3-codex -a main
 
 - **Lightweight & Embeddable**: The runtime core stays compact and explicit, with clear module boundaries for contracts, defaults, agent runtime, harness lifecycle, and protocol handling.
 - **Extensible at the Core**: Every significant layer—from LLM providers, to message persistence, to memory and tools—is powered by an internal Extension System.
-- **Agent as an Actor**: Agents communicate via asynchronous message passing (the `Mailbox` protocol). This enables robust multi-agent orchestration without tightly coupled code.
+- **Agent as an Actor**: Agents communicate via asynchronous message passing (`MailRoute` plus bound `MailBox` capabilities). This enables robust multi-agent orchestration without tightly coupled code.
 - **Harness-Managed Lifecycle**: An `AgentHarness` is used to bootstrap, maintain, and gracefully tear down shared resources (like databases or API connections) across all agents in the workspace.
 
 ---
@@ -74,7 +74,7 @@ The framework provides named extension points such as:
 - `@ep_tool`: Add new conversational tools that the LLM can invoke.
 - `@ep_memory_store`: Connect alternative vector databases or key-value stores.
 - `@ep_message_store`: Custom persistence logic for conversation history.
-- `@ep_mailbox`: Implement distributed message-passing interfaces like Redis or RabbitMQ.
+- `@ep_mail_route`: Implement distributed message-routing interfaces like Redis or RabbitMQ.
 - `@ep_react_interceptor`: Hooks to orchestrate the internal ReAct loop of an agent.
 
 Example registering a custom tool:

@@ -35,7 +35,9 @@ from .contract import Agent as Agent
 from .contract import Channel as Channel
 from .contract import Closeable as Closeable
 from .contract import Consolidator as Consolidator
+from .contract import MailBox as MailBox
 from .contract import Mailbox as Mailbox
+from .contract import MailRoute as MailRoute
 from .contract import MemoryStore as MemoryStore
 from .contract import Message as Message
 from .contract import MessageStore as MessageStore
@@ -45,6 +47,7 @@ from .contract import ep_actor_command as ep_actor_command
 from .contract import ep_agent as ep_agent
 from .contract import ep_channel as ep_channel
 from .contract import ep_consolidator as ep_consolidator
+from .contract import ep_mail_route as ep_mail_route
 from .contract import ep_mailbox as ep_mailbox
 from .contract import ep_memory_store as ep_memory_store
 from .contract import ep_message_store as ep_message_store
@@ -54,6 +57,7 @@ from .contract import ep_skills_loader as ep_skills_loader
 from .contract import ep_tool as ep_tool
 from .defaults import FileSystemSkillsLoader as FileSystemSkillsLoader
 from .defaults import InMemMailbox as InMemMailbox
+from .defaults import InMemMailRoute as InMemMailRoute
 from .defaults import InMemMemoryStore as InMemMemoryStore
 from .defaults import InMemMessageStore as InMemMessageStore
 from .defaults import NaiveConsolidator as NaiveConsolidator
@@ -87,12 +91,15 @@ __all__ = [
     "Extension",
     "ExtensionPoint",
     "FileSystemSkillsLoader",
+    "InMemMailRoute",
     "InMemMailbox",
     "InMemMemoryStore",
     "InMemMessageStore",
     "LLMClient",
     "LLMResponse",
+    "MailBox",
     "Mailbox",
+    "MailRoute",
     "MemoryStore",
     "Message",
     "MessageStore",
@@ -108,6 +115,7 @@ __all__ = [
     "ep_agent",
     "ep_channel",
     "ep_consolidator",
+    "ep_mail_route",
     "ep_mailbox",
     "ep_memory_store",
     "ep_message_store",
