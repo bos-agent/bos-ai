@@ -193,6 +193,8 @@ class Channel(Protocol):
 
 ep_actor_command = ExtensionPoint(
     description="""Actor command handler. An async function with injectable arguments: input, env, actor, harness.
+    If the command returns None, it will be treated as '(done)'.
+
     For example:
 
     @ep_actor_command(name="echo")

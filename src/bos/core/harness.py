@@ -53,7 +53,7 @@ def bootstrap_platform(
             ReactAgent.register(**(defaults | agent_spec))
 
 
-CURRENT_HARNESS: contextvars.ContextVar["AgentHarness"] = contextvars.ContextVar("current_harness")
+CURRENT_HARNESS: contextvars.ContextVar[AgentHarness] = contextvars.ContextVar("current_harness")
 CURRENT_MAILBOX: contextvars.ContextVar[MailBox] = contextvars.ContextVar("current_mailbox")
 
 
@@ -170,13 +170,8 @@ class AgentHarness:
         return instance
 
     def _create_local_tools(self, agent_name: str | None = None):
-        tools = ToolRegistry("Harness-scoped tools for this agent.")
-        self._register_harness_tools(tools, agent_name=agent_name)
-        return tools
-
-    def _register_harness_tools(self, tools, *, agent_name: str | None = None) -> None:
         harness = self
-        default_mailbox = self.mail_route.bind(f"agent@{agent_name or '_default'}") if self.mail_route else None
+        tools = ToolRegistry("Harness-scoped tools for this agent.")
 
         @tools(
             name="SendMail",
@@ -191,9 +186,7 @@ class AgentHarness:
             },
         )
         async def tool_send_mail(recipient: str, content: str) -> str:
-            mailbox = CURRENT_MAILBOX.get(None) or default_mailbox
-            if mailbox is None:
-                raise RuntimeError("SendMail requires an active actor mailbox.")
+            mailbox = CURRENT_MAILBOX.get(None) or harness.mail_route.bind(f"agent@{agent_name or '_default'}")
             await mailbox.send(recipient, content)
             return f"(Sent to {recipient})"
 
@@ -226,6 +219,8 @@ class AgentHarness:
                     "parent_conversation_id": conversation_id,
                 },
             )
+
+        return tools
 
     def _get_subagent_config(self, agent_name: str) -> dict[str, Any]:
         default = self._subagents_cfg.get("_default", {})

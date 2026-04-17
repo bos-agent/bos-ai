@@ -3,6 +3,7 @@ import logging
 import pytest
 
 from bos.core import AgentHarness
+from bos.extensions.mailboxes import jsonl_mailbox  # noqa: F401
 
 
 def test_harness_local_tools_describe_ask_subagent(caplog):

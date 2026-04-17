@@ -366,6 +366,7 @@ class ReactAgent:
     def _register_memory_tools(self) -> None:
         @self._local_tools(
             name="UpdateMemory",
+            description="Overwrite an allowed memory partition with the complete updated content.",
             parameters={
                 "type": "object",
                 "properties": {
@@ -396,6 +397,7 @@ class ReactAgent:
     def _register_skills_tools(self) -> None:
         @self._local_tools(
             name="LoadSkill",
+            description="Load an allowed skill into the active system prompt for the current agent.",
             parameters={
                 "type": "object",
                 "properties": {"name": {"type": "string", "description": "Skill name"}},
@@ -412,6 +414,7 @@ class ReactAgent:
 
         @self._local_tools(
             name="UnloadSkill",
+            description="Remove a previously loaded skill from the active system prompt.",
             parameters={
                 "type": "object",
                 "properties": {"name": {"type": "string", "description": "Skill name."}},
@@ -424,6 +427,7 @@ class ReactAgent:
 
         @self._local_tools(
             name="SearchSkills",
+            description="Search available allowed skills by name or summary text.",
             parameters={
                 "type": "object",
                 "properties": {

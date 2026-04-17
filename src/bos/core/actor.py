@@ -138,33 +138,15 @@ class AgentActor:
         if result is None:
             result = "(done)"
 
-        if not isinstance(result, (Envelope, str)):
+        if not isinstance(result, str):
             result = json.dumps(result, default=str)
 
-        if isinstance(result, str):
-            result = Envelope(
-                sender=self._address,
-                recipient=env.sender,
-                content=result,
-                content_type=MessageType.COMMAND_RESULT,
-                conversation_id=env.conversation_id,
-            )
-
-        if isinstance(result, Envelope):
-            if result.sender == self._address:
-                await self._mailbox.send(
-                    result.recipient,
-                    result.content,
-                    content_type=result.content_type,
-                    conversation_id=result.conversation_id,
-                    metadata=result.metadata,
-                )
-                return
-
-            harness = CURRENT_HARNESS.get(None)
-            if not harness or harness.mail_route is None:
-                raise RuntimeError("Cannot deliver actor command envelope without an active mail route.")
-            await harness.mail_route.deliver(result)
+        await self._mailbox.send(
+            env.sender,
+            result,
+            content_type=MessageType.COMMAND_RESULT,
+            conversation_id=env.conversation_id,
+        )
 
     def _make_interrupt(self, sender: str):
         def _interrupt() -> dict[str, Any] | None:
