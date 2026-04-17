@@ -1,4 +1,4 @@
-"""TelegramChannel — Telegram Bot API bridge backed by the mailbox.
+"""TelegramChannel — Telegram Bot API bridge backed by a bound mailbox.
 
 Uses Bot API long polling via ``getUpdates`` and routes each Telegram chat to a
 stable BOS ``conversation_id`` so replies can be delivered back to the correct
@@ -14,7 +14,7 @@ from typing import Any
 
 from aiohttp import ClientSession
 
-from bos.core import Mailbox, ep_channel
+from bos.core import MailBox, ep_channel
 from bos.protocol import Envelope, MessageType
 
 logger = logging.getLogger(__name__)
@@ -106,10 +106,11 @@ class TelegramChannel:
         self._offset: int = 0
         self._bot_username: str | None = None
 
-    async def run(self, mailbox: Mailbox, address: str) -> None:
+    async def run(self, mailbox: MailBox) -> None:
         if not self._token:
             raise ValueError("Telegram bot token is required.")
 
+        address = mailbox.address
         target = self.target_address or address
         async with ClientSession(base_url=f"{self._api_base}/bot{self._token}/", raise_for_status=True) as session:
             self._session = session
@@ -117,8 +118,8 @@ class TelegramChannel:
             logger.info("TelegramChannel polling started for address=%r", address)
             try:
                 async with asyncio.TaskGroup() as tg:
-                    tg.create_task(self._poll_updates(mailbox, address, target), name="telegram:poll")
-                    tg.create_task(self._forward_replies(mailbox, address), name="telegram:send")
+                    tg.create_task(self._poll_updates(mailbox, target), name="telegram:poll")
+                    tg.create_task(self._forward_replies(mailbox), name="telegram:send")
             except* asyncio.CancelledError:
                 logger.info("TelegramChannel stopped")
                 raise
@@ -147,7 +148,7 @@ class TelegramChannel:
         username = result.get("username")
         return username if isinstance(username, str) else None
 
-    async def _poll_updates(self, mailbox: Mailbox, address: str, target: str) -> None:
+    async def _poll_updates(self, mailbox: MailBox, target: str) -> None:
         while True:
             try:
                 data = await self._api_call(
@@ -175,13 +176,10 @@ class TelegramChannel:
                     chat_id = str(inbound["chat_id"])
                     self._conversation_to_chat[conversation_id] = chat_id
                     await mailbox.send(
-                        Envelope(
-                            sender=address,
-                            recipient=target,
-                            content=inbound["text"],
-                            content_type=inbound["content_type"],
-                            conversation_id=conversation_id,
-                        )
+                        target,
+                        inbound["text"],
+                        content_type=inbound["content_type"],
+                        conversation_id=conversation_id,
                     )
             except asyncio.CancelledError:
                 raise
@@ -189,9 +187,9 @@ class TelegramChannel:
                 logger.warning("Telegram polling error: %s", exc)
                 await asyncio.sleep(2)
 
-    async def _forward_replies(self, mailbox: Mailbox, address: str) -> None:
+    async def _forward_replies(self, mailbox: MailBox) -> None:
         while True:
-            env = await mailbox.receive(address)
+            env = await mailbox.receive()
             if env.content_type == MessageType.AGENT_STEP:
                 continue
 

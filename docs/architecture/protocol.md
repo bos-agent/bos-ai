@@ -16,7 +16,7 @@ This layer is intentionally separate from `bos.core`.
 
 - actors
 - channels
-- mailbox implementations
+- mail-route and mailbox implementations
 - clients
 - future inter-process transports
 
@@ -32,7 +32,7 @@ That makes it broader than the runtime core. It is the shared wire-level contrac
 
 `bos.protocol` should not contain:
 
-- runtime service protocols such as `Mailbox` or `Agent`
+- runtime service protocols such as `MailRoute`, `MailBox`, or `Agent`
 - extension registries
 - concrete default implementations
 - harness or runner logic

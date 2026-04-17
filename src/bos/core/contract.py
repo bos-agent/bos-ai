@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
-from bos.protocol import Envelope
+from bos.protocol import Envelope, MessageType
 
 from .registry import ExtensionPoint, ToolRegistry
 
@@ -152,28 +152,49 @@ class Agent(Protocol):
     ) -> str: ...
 
 
-ep_mailbox = ExtensionPoint(
-    description="Mailbox. Used for message passing between agents. It should implement the MailBox protocol."
+ep_mail_route = ExtensionPoint(
+    description="MailRoute. Used for message routing between agents. It should implement the MailRoute protocol."
 )
 
 
 @runtime_checkable
-class Mailbox(Protocol):
-    async def receive(self, address: str) -> Envelope: ...
-    async def send(self, env: Envelope) -> None: ...
-    async def receive_nowait(self, address: str) -> Envelope | None: ...
+class MailBox(Protocol):
+    @property
+    def address(self) -> str: ...
+
+    async def receive(self) -> Envelope: ...
+
+    async def send(
+        self,
+        recipient: str,
+        content: str,
+        *,
+        content_type: MessageType | str = MessageType.MESSAGE,
+        conversation_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None: ...
+
+    async def receive_nowait(self) -> Envelope | None: ...
 
 
-ep_channel = ExtensionPoint(description="Channel. Bridges external clients to/from a mailbox address.")
+@runtime_checkable
+class MailRoute(Protocol):
+    def bind(self, address: str) -> MailBox: ...
+    async def deliver(self, env: Envelope) -> None: ...
+
+
+ep_channel = ExtensionPoint(description="Channel. Bridges external clients to/from a bound mailbox address.")
 
 
 @runtime_checkable
 class Channel(Protocol):
-    async def run(self, mailbox: Mailbox, address: str) -> None: ...
+    async def run(self, mailbox: MailBox) -> None: ...
 
 
 ep_actor_command = ExtensionPoint(
     description="""Actor command handler. An async function with injectable arguments: input, env, actor, harness.
+    If the command returns None, it will be treated as '(done)'.
+
     For example:
 
     @ep_actor_command(name="echo")

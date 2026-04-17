@@ -7,13 +7,13 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
-from bos.protocol import Envelope
+from bos.protocol import Envelope, MessageType
 
 from ._utils import _litellm_response_to_llm_response, _read_text
 from .contract import (
     Message,
     ep_consolidator,
-    ep_mailbox,
+    ep_mail_route,
     ep_memory_store,
     ep_message_store,
     ep_provider,
@@ -155,8 +155,44 @@ class FileSystemSkillsLoader:
         return skills
 
 
-@ep_mailbox(name="_default")
-class InMemMailbox:
+class _InMemMailBox:
+    def __init__(self, route: "InMemMailRoute", address: str) -> None:
+        self._route = route
+        self._address = address
+
+    @property
+    def address(self) -> str:
+        return self._address
+
+    async def receive(self) -> Envelope:
+        return await self._route.receive(self._address)
+
+    async def send(
+        self,
+        recipient: str,
+        content: str,
+        *,
+        content_type: MessageType | str = MessageType.MESSAGE,
+        conversation_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        await self._route.deliver(
+            Envelope(
+                sender=self._address,
+                recipient=recipient,
+                content=content,
+                content_type=content_type,
+                conversation_id=conversation_id,
+                metadata=metadata or {},
+            )
+        )
+
+    async def receive_nowait(self) -> Envelope | None:
+        return await self._route.receive_nowait(self._address)
+
+
+@ep_mail_route(name="_default")
+class InMemMailRoute:
     _queues: dict[str, asyncio.Queue[Envelope]] = {}
 
     @classmethod
@@ -165,11 +201,14 @@ class InMemMailbox:
             cls._queues[address] = asyncio.Queue()
         return cls._queues[address]
 
+    def bind(self, address: str) -> _InMemMailBox:
+        return _InMemMailBox(self, address)
+
+    async def deliver(self, env: Envelope) -> None:
+        await self._get_queue(env.recipient).put(env)
+
     async def receive(self, address: str) -> Envelope:
         return await self._get_queue(address).get()
-
-    async def send(self, env: Envelope) -> None:
-        await self._get_queue(env.recipient).put(env)
 
     async def receive_nowait(self, address: str) -> Envelope | None:
         try:

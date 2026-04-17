@@ -11,7 +11,7 @@
 - `agent.py`
   `ReactAgent`, `ReactContext`, `AbortTurn`, and the interceptor chain used by the agent loop.
 - `actor.py`
-  Mailbox-driven actor runtime that wraps an agent.
+  MailBox-driven actor runtime that wraps an agent.
 - `harness.py`
   Lifecycle owner for shared services.
 - `llm.py`
@@ -27,7 +27,7 @@
 
 `bos.core.contract` owns:
 
-- runtime `Protocol` definitions such as `Mailbox`, `Channel`, `Agent`, and stores
+- runtime `Protocol` definitions such as `MailRoute`, `MailBox`, `Channel`, `Agent`, and stores
 - `Message`
 - `ep_*` extension points
 
@@ -37,7 +37,7 @@ This is the place to look for the framework’s runtime contracts.
 
 `bos.core.defaults` owns the built-in `_default` implementations, such as:
 
-- `InMemMailbox`
+- `InMemMailRoute`
 - `InMemMessageStore`
 - `InMemMemoryStore`
 - `NaiveConsolidator`

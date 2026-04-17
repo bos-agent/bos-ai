@@ -7,11 +7,9 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from bos.protocol import Envelope
-
 from ._utils import _aclose, _create_extension_instance, _load_ext_modules, _load_ext_paths, _safe_format
 from .agent import ChainReactInterceptor, ReactAgent
-from .contract import Consolidator, Mailbox, MemoryStore, MessageStore, SkillsLoader, ep_agent
+from .contract import Consolidator, MailBox, MailRoute, MemoryStore, MessageStore, SkillsLoader, ep_agent
 from .llm import LLMClient
 from .registry import ToolRegistry
 
@@ -55,7 +53,8 @@ def bootstrap_platform(
             ReactAgent.register(**(defaults | agent_spec))
 
 
-CURRENT_HARNESS: contextvars.ContextVar["AgentHarness"] = contextvars.ContextVar("current_harness")
+CURRENT_HARNESS: contextvars.ContextVar[AgentHarness] = contextvars.ContextVar("current_harness")
+CURRENT_MAILBOX: contextvars.ContextVar[MailBox] = contextvars.ContextVar("current_mailbox")
 
 
 class AgentHarness:
@@ -64,7 +63,7 @@ class AgentHarness:
     def __init__(
         self,
         *,
-        mailbox: dict[str, Any] | None = None,
+        mail_route: dict[str, Any] | None = None,
         message_store: dict[str, Any] | None = None,
         memory_store: dict[str, Any] | None = None,
         consolidator: dict[str, Any] | None = None,
@@ -80,7 +79,7 @@ class AgentHarness:
         self.workspace = self._workspace
         self._subagents_cfg = {cfg.get("name", "_default"): cfg for cfg in subagents} if subagents else {}
 
-        self._mailbox_cfg = mailbox
+        self._mail_route_cfg = mail_route
         self._message_store_cfg = message_store
         self._memory_store_cfg = memory_store
         self._consolidator_cfg = consolidator
@@ -91,7 +90,7 @@ class AgentHarness:
         self._owned: list[Any] = []
         self._token: contextvars.Token | None = None
         self._original_cwd: Path | None = None
-        self.mailbox = None
+        self.mail_route = None
         self.message_store = None
         self.memory_store = None
         self.consolidator = None
@@ -109,7 +108,7 @@ class AgentHarness:
         self._original_cwd = Path.cwd()
         os.chdir(self._bos_root)
 
-        self.mailbox = self._create_and_own("ep_mailbox", Mailbox, self._mailbox_cfg)
+        self.mail_route = self._create_and_own("ep_mail_route", MailRoute, self._mail_route_cfg)
         self.message_store = self._create_and_own("ep_message_store", MessageStore, self._message_store_cfg)
         self.memory_store = self._create_and_own("ep_memory_store", MemoryStore, self._memory_store_cfg)
         self.consolidator = self._create_and_own("ep_consolidator", Consolidator, self._consolidator_cfg)
@@ -149,7 +148,7 @@ class AgentHarness:
                 "subagents": [],
             }
 
-        local_tools = self._create_local_tools()
+        local_tools = self._create_local_tools(agent_name=agent_name)
         kwargs = (agent_cfg or {}) | {
             "llm": self.llm,
             "message_store": self.message_store,
@@ -170,13 +169,9 @@ class AgentHarness:
             self._owned.append(instance)
         return instance
 
-    def _create_local_tools(self):
-        tools = ToolRegistry("Harness-scoped tools for this agent.")
-        self._register_harness_tools(tools)
-        return tools
-
-    def _register_harness_tools(self, tools) -> None:
+    def _create_local_tools(self, agent_name: str | None = None):
         harness = self
+        tools = ToolRegistry("Harness-scoped tools for this agent.")
 
         @tools(
             name="SendMail",
@@ -184,15 +179,15 @@ class AgentHarness:
             parameters={
                 "type": "object",
                 "properties": {
-                    "sender": {"type": "string", "description": "Sender address"},
                     "recipient": {"type": "string", "description": "Recipient address"},
                     "content": {"type": "string", "description": "Message content"},
                 },
-                "required": ["sender", "recipient", "content"],
+                "required": ["recipient", "content"],
             },
         )
-        async def tool_send_mail(sender: str, recipient: str, content: str) -> str:
-            await harness.mailbox.send(Envelope(sender=sender, recipient=recipient, content=content))
+        async def tool_send_mail(recipient: str, content: str) -> str:
+            mailbox = CURRENT_MAILBOX.get(None) or harness.mail_route.bind(f"agent@{agent_name or '_default'}")
+            await mailbox.send(recipient, content)
             return f"(Sent to {recipient})"
 
         @tools(
@@ -224,6 +219,8 @@ class AgentHarness:
                     "parent_conversation_id": conversation_id,
                 },
             )
+
+        return tools
 
     def _get_subagent_config(self, agent_name: str) -> dict[str, Any]:
         default = self._subagents_cfg.get("_default", {})

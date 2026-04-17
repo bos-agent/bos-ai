@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import logging
 import uuid
@@ -10,16 +11,16 @@ from bos.protocol import Envelope, MessageType
 
 from .agent import AbortTurn
 from .contract import ep_actor_command
-from .harness import CURRENT_HARNESS
+from .harness import CURRENT_HARNESS, CURRENT_MAILBOX
 
 logger = logging.getLogger(__name__)
 
 
 class AgentActor:
-    """Actor that drives an Agent via a Mailbox."""
+    """Actor that drives an Agent via a bound MailBox."""
 
-    def __init__(self, address: str, agent: Any, mailbox: Any):
-        self._address = address
+    def __init__(self, agent: Any, mailbox: Any):
+        self._address = mailbox.address
         self._agent = agent
         self._mailbox = mailbox
         self._tasks: dict[str, asyncio.Task] = {}
@@ -43,13 +44,13 @@ class AgentActor:
                             tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
                             logger.error("Ask task failed for sender=%s:\n%s", s, tb)
                             error_content = f"(error: {exc})\n\n```\n{tb}```"
-                            await self._mailbox.send(Envelope(sender=self._address, recipient=s, content=error_content))
+                            await self._mailbox.send(s, error_content)
                         del self._tasks[s]
 
                         if s in self._pending and any(e.content_type == MessageType.MESSAGE for e in self._pending[s]):
                             self._fire_pending(s)
 
-                env = await self._mailbox.receive_nowait(self._address)
+                env = await self._mailbox.receive_nowait()
                 if env is None:
                     await asyncio.sleep(0.1)
                     continue
@@ -91,14 +92,23 @@ class AgentActor:
 
     async def _run_ask(self, sender: str, conversation_id: str, content: str) -> None:
         while True:
-            response = await self._agent.ask(
-                conversation_id,
-                content,
-                interrupt=self._make_interrupt(sender),
-                ctx_metadata={"sender": sender, "actor_address": self._address},
-            )
+            token: contextvars.Token | None = None
+            try:
+                token = CURRENT_MAILBOX.set(self._mailbox)
+                response = await self._agent.ask(
+                    conversation_id,
+                    content,
+                    interrupt=self._make_interrupt(sender),
+                    ctx_metadata={"sender": sender, "actor_address": self._address},
+                )
+            finally:
+                if token is not None:
+                    CURRENT_MAILBOX.reset(token)
+
             await self._mailbox.send(
-                Envelope(sender=self._address, recipient=sender, content=response, conversation_id=conversation_id)
+                sender,
+                response,
+                conversation_id=conversation_id,
             )
 
             messages = [e for e in self._pending.pop(sender, []) if e.content_type == MessageType.MESSAGE]
@@ -128,19 +138,15 @@ class AgentActor:
         if result is None:
             result = "(done)"
 
-        if not isinstance(result, (Envelope, str)):
+        if not isinstance(result, str):
             result = json.dumps(result, default=str)
 
-        if isinstance(result, str):
-            result = Envelope(
-                sender=self._address,
-                recipient=env.sender,
-                content=result,
-                content_type=MessageType.COMMAND_RESULT,
-                conversation_id=env.conversation_id,
-            )
-
-        await self._mailbox.send(result)
+        await self._mailbox.send(
+            env.sender,
+            result,
+            content_type=MessageType.COMMAND_RESULT,
+            conversation_id=env.conversation_id,
+        )
 
     def _make_interrupt(self, sender: str):
         def _interrupt() -> dict[str, Any] | None:

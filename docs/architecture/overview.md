@@ -23,9 +23,9 @@ The core design rule is:
 1. `Workspace` locates `.bos/config.toml` and loads configuration.
 2. `workspace.bootstrap_platform()` loads extension modules and registers configured agents.
 3. `runner.start(workspace)` creates an `AgentHarness`.
-4. The harness builds shared services such as mailbox, stores, interceptor chain, and LLM client.
+4. The harness builds shared services such as the mail route, stores, interceptor chain, and LLM client.
 5. The runner creates an `AgentActor` and configured channels.
-6. Channels translate external traffic into `Envelope` objects and send them through the mailbox.
+6. Channels translate external traffic into `Envelope` objects and send them through bound `MailBox` capabilities backed by the shared mail route.
 7. The actor drives `ReactAgent`, which uses tools, stores, and providers through the harness-owned services.
 
 ## Package Boundaries
@@ -39,5 +39,5 @@ The core design rule is:
 ## Design Intent
 
 - Keep the local single-process path simple.
-- Keep clustered or multi-process evolution possible through mailbox/channel abstractions.
+- Keep clustered or multi-process evolution possible through mail-route/channel abstractions.
 - Prefer explicit package boundaries over a giant central module.
