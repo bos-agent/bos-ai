@@ -26,29 +26,46 @@ def _get_ws_and_rd(ctx):
 
 @click.command()
 @click.option("--foreground", "-f", is_flag=True, default=False, help="Run in the foreground (don't daemonize).")
+@click.option("--docker", is_flag=True, default=False, help="Run the agent inside a Docker container.")
 @click.pass_context
-def start(ctx, foreground: bool):
+def start(ctx, foreground: bool, docker: bool):
     """Start the agent actor and channel server."""
     ws, rd = _get_ws_and_rd(ctx)
     ws.bootstrap_platform()
 
-    from bos.runner.proc import is_running, read_state, start_background
+    from bos.runner.proc import is_running, read_state, run_docker_foreground, start_background, start_docker
     from bos.runner.runner import start as runner_start
 
     if is_running(rd):
         state = read_state(rd)
-        click.echo(f"Agent is already running (PID {state.get('pid')}).", err=True)
+        identifier = state.get("container_id") if state.get("runtime") == "docker" else state.get("pid")
+        click.echo(f"Agent is already running ({state.get('runtime', 'process')} {identifier}).", err=True)
         raise SystemExit(1)
 
-    if foreground:
+    runtime = ws.get_runtime_config(force_kind="docker" if docker else None)
+
+    if runtime.kind not in {"process", "docker"}:
+        raise click.UsageError(f"Unsupported runtime kind: {runtime.kind!r}")
+
+    if runtime.kind == "docker":
+        if foreground:
+            click.echo("Starting agent in Docker foreground…")
+            raise SystemExit(run_docker_foreground(ws, runtime))
+
+        container_id = start_docker(ws, rd, runtime)
+        click.echo(f"Agent starting in Docker ({container_id[:12]})…")
+    elif foreground:
         click.echo("Starting agent in foreground…")
         asyncio.run(runner_start(ws))
         return
+    else:
+        argv = [sys.executable, "-m", "bos.runner._main", "--workspace", str(ws.workspace)]
+        pid = start_background(argv, rd)
+        click.echo(f"Agent starting (PID {pid})…")
 
-    # Daemonize
-    argv = [sys.executable, "-m", "bos.runner._main", "--workspace", str(ws.workspace)]
-    pid = start_background(argv, rd)
-    click.echo(f"Agent starting (PID {pid})…")
+    state = read_state(rd)
+    pid = state.get("pid")
+    container_id = state.get("container_id")
 
     # Poll agent.state until channels are registered (up to 10s)
     deadline = time.monotonic() + 10
@@ -61,12 +78,17 @@ def start(ctx, foreground: bool):
                 if ch.get("name") == "HttpChannel":
                     host = ch.get("host", "127.0.0.1")
                     port = ch.get("port")
-                    click.echo(f"Agent started (PID {pid}) · ws://{host}:{port}/ws")
+                    if state.get("runtime") == "docker" and host == "0.0.0.0":
+                        host = "127.0.0.1"
+                    ident = container_id[:12] if container_id else pid
+                    click.echo(f"Agent started ({state.get('runtime', 'process')} {ident}) · ws://{host}:{port}/ws")
                     return
-            click.echo(f"Agent started (PID {pid})")
+            ident = container_id[:12] if container_id else pid
+            click.echo(f"Agent started ({state.get('runtime', 'process')} {ident})")
             return
 
-    click.echo(f"Agent started (PID {pid}) — channel info not yet available (check bos status)")
+    ident = container_id[:12] if container_id else pid
+    click.echo(f"Agent started ({runtime.kind} {ident}) — channel info not yet available (check bos status)")
 
 
 # ── bos stop ──────────────────────────────────────────────────
@@ -77,17 +99,18 @@ def start(ctx, foreground: bool):
 def stop(ctx):
     """Stop the running agent."""
     _, rd = _get_ws_and_rd(ctx)
-    from bos.runner.proc import is_running, kill_process, read_state
+    from bos.runner.proc import is_running, read_state, stop_agent
 
     if not is_running(rd):
         click.echo("No agent is running.", err=True)
         raise SystemExit(1)
 
     state = read_state(rd)
-    pid = state.get("pid", "?")
-    click.echo(f"Stopping agent (PID {pid})…")
+    runtime = state.get("runtime", "process")
+    ident = state.get("container_id", "?")[:12] if runtime == "docker" else state.get("pid", "?")
+    click.echo(f"Stopping agent ({runtime} {ident})…")
 
-    kill_process(rd, signal.SIGTERM)
+    stop_agent(rd, signal.SIGTERM)
 
     # Wait up to 5s for clean exit
     deadline = time.monotonic() + 5
@@ -98,7 +121,7 @@ def stop(ctx):
     else:
         click.echo("Agent did not exit cleanly — sending SIGKILL")
         try:
-            kill_process(rd, signal.SIGKILL)
+            stop_agent(rd, signal.SIGKILL)
         except Exception:
             pass
 
@@ -126,7 +149,9 @@ def status(ctx):
         return
 
     status_str = click.style("● running", fg="green") if running else click.style("○ stopped", fg="red")
+    runtime = state.get("runtime", "process")
     pid = state.get("pid", "—")
+    container_id = state.get("container_id", "—")
     started = state.get("started_at", "—")
     last_active = state.get("last_active", "—")
 
@@ -136,7 +161,8 @@ def status(ctx):
         from datetime import datetime
 
         started_dt = datetime.fromisoformat(started)
-        uptime = datetime.now() - started_dt
+        now = datetime.now(started_dt.tzinfo) if started_dt.tzinfo else datetime.now()
+        uptime = now - started_dt
         h, rem = divmod(int(uptime.total_seconds()), 3600)
         m, s = divmod(rem, 60)
         uptime_str = f"{h}h {m}m {s}s" if h else f"{m}m {s}s"
@@ -144,7 +170,10 @@ def status(ctx):
         pass
 
     click.echo(f"Status:      {status_str}")
+    click.echo(f"Runtime:     {runtime}")
     click.echo(f"PID:         {pid}")
+    if runtime == "docker":
+        click.echo(f"Container:   {container_id}")
     click.echo(f"Started:     {started}")
     click.echo(f"Last active: {last_active}")
     click.echo(f"Uptime:      {uptime_str}")
@@ -152,6 +181,8 @@ def status(ctx):
     for ch in state.get("channels", []):
         name = ch.get("name", "?")
         host = ch.get("host", "?")
+        if runtime == "docker" and host == "0.0.0.0":
+            host = "127.0.0.1"
         port = ch.get("port", "?")
         addr = ch.get("address", "?")
         click.echo(f"Channel:     {name} @ {addr} → ws://{host}:{port}/ws")
@@ -165,12 +196,15 @@ def status(ctx):
 def restart(ctx):
     """Restart the agent (stop then start)."""
     # Re-invoke stop (ignore failure if not running)
-    ws, rd = _get_ws_and_rd(ctx)
-    from bos.runner.proc import is_running
+    _, rd = _get_ws_and_rd(ctx)
+    from bos.runner.proc import is_running, read_state
 
     if is_running(rd):
+        state = read_state(rd)
         ctx.invoke(stop)
         time.sleep(0.5)
+        ctx.invoke(start, docker=state.get("runtime") == "docker")
+        return
 
     ctx.invoke(start)
 

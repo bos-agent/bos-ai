@@ -52,6 +52,79 @@ bos chat -M "hello" -m codex/gpt-5.3-codex -a main
 **Global Options:**
 - `-w`, `--workspace`: Path to the workspace directory (defaults to `.`).
 
+## 🐳 Docker
+
+The agent runtime can run directly in a container while the TUI stays local.
+
+### Build the image
+
+```bash
+docker build -t bos-ai:local .
+```
+
+### Start with `bos`
+
+Configure Docker as the runtime in `.bos/config.toml`:
+
+```toml
+[main.runtime]
+kind = "docker"
+image = "bos-ai:local"
+workspace_dir = "/workspace"
+```
+
+Then launch and connect locally:
+
+```bash
+bos start
+bos tui
+bos stop
+```
+
+You can also force Docker for a single run without changing config:
+
+```bash
+bos start --docker
+```
+
+When running in Docker, the built-in HTTP channel is automatically rebound to `0.0.0.0` if it was configured with `127.0.0.1` or `localhost`, so published ports work out of the box.
+
+If `platform.envfile` resolves to a path outside the mounted workspace, `bos start --docker` forwards it to Docker with `--env-file`.
+
+### Start with plain `docker run`
+
+You can also run the image exactly like a normal containerized app, without installing `bos` on the host:
+
+```bash
+docker run --rm \
+  -p 5920:5920 \
+  -v "$PWD:/workspace" \
+  -w /workspace \
+  bos-ai:local
+```
+
+Detached/background operation is the operator's choice:
+
+```bash
+docker run -d \
+  --name bos-agent \
+  -p 5920:5920 \
+  -v "$PWD:/workspace" \
+  -w /workspace \
+  bos-ai:local
+```
+
+If your env file is not inside the mounted workspace, pass it explicitly when using plain Docker:
+
+```bash
+docker run -d \
+  --name bos-agent-telegram \
+  -v "$PWD:/workspace" \
+  -w /workspace \
+  --env-file /absolute/path/to/agent.env \
+  bos-ai:local
+```
+
 ---
 
 ## 🧠 Principles

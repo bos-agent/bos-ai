@@ -13,9 +13,30 @@ import logging
 import os
 import signal
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
+from typing import TextIO
 
 logger = logging.getLogger(__name__)
+
+
+class _TeeStream:
+    """Mirror writes to the original stream and a persistent log file."""
+
+    def __init__(self, primary: TextIO, mirror: TextIO) -> None:
+        self._primary = primary
+        self._mirror = mirror
+
+    def write(self, data: str) -> int:
+        written = self._primary.write(data)
+        self._mirror.write(data)
+        return written
+
+    def flush(self) -> None:
+        self._primary.flush()
+        self._mirror.flush()
+
+    def __getattr__(self, name: str):
+        return getattr(self._primary, name)
 
 
 def main() -> None:
@@ -33,6 +54,13 @@ def main() -> None:
 
     rd = RunDir(ws.bos_dir)
     rd.ensure()
+    runtime_kind = os.environ.get("BOS_RUNTIME", "process")
+    mirrored_log: TextIO | None = None
+
+    if runtime_kind == "docker":
+        mirrored_log = rd.log_file.open("a", encoding="utf-8")
+        sys.stdout = _TeeStream(sys.stdout, mirrored_log)
+        sys.stderr = _TeeStream(sys.stderr, mirrored_log)
 
     # Configure logging to include timestamps
     logging.basicConfig(
@@ -53,11 +81,20 @@ def main() -> None:
     signal.signal(signal.SIGTERM, _on_sigterm)
 
     async def _run() -> None:
+        runtime_kind = os.environ.get("BOS_RUNTIME", "process")
+        container_id = None
+        container_name = None
+        if runtime_kind == "docker":
+            container_id = os.environ.get("BOS_CONTAINER_ID") or os.environ.get("HOSTNAME")
+            container_name = os.environ.get("BOS_CONTAINER_NAME")
         write_state(
             rd,
+            runtime=runtime_kind,
             pid=os.getpid(),
-            started_at=datetime.now().isoformat(),
-            last_active=datetime.now().isoformat(),
+            container_id=container_id,
+            container_name=container_name,
+            started_at=datetime.now(timezone.utc).isoformat(),
+            last_active=datetime.now(timezone.utc).isoformat(),
         )
         logger.info("Actor process started (PID %d, workspace=%s)", os.getpid(), ws.workspace)
         try:
@@ -78,6 +115,8 @@ def main() -> None:
             loop.run_until_complete(main_task)
     finally:
         loop.close()
+        if mirrored_log is not None:
+            mirrored_log.close()
 
 
 if __name__ == "__main__":

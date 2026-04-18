@@ -43,7 +43,7 @@ class HttpChannelClient:
 
     Example::
 
-        client = HttpChannelClient(host="127.0.0.1", port=8080, address="tui")
+        client = HttpChannelClient(host="127.0.0.1", port=5920, address="tui")
         await client.connect()
         await client.send("hello")
         reply = await client.receive()

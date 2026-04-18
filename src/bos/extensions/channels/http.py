@@ -149,7 +149,7 @@ class HttpChannel:
     the shared harness mail route via one bound channel mailbox.
     """
 
-    def __init__(self, target_address: str, host: str = "127.0.0.1", port: int = 0) -> None:
+    def __init__(self, target_address: str, host: str = "127.0.0.1", port: int = 5920) -> None:
         self._host = host
         self._port = int(port)
         self.actual_host: str = self._host

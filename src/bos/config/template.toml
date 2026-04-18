@@ -83,13 +83,19 @@ exclude_tools = ["UpdateMemory"]
 agent = "main"
 broadcast_address = "channel@user"
 
+[main.runtime]
+kind = "process" # set to "docker" to make `bos start` launch a container
+# image = "ghcr.io/your-org/bos-ai:latest"
+workspace_dir = "/workspace"
+# bos_dir = "/bos"
+
 [[main.channels]]
 # Channel configuration — bridges external clients to a bound channel MailBox.
 # Multiple channels can be listed to run in parallel (e.g. HttpChannel + TelegramChannel).
 name = "HttpChannel"
 address = "http"     # channel address to bind on the MailRoute
 host = "127.0.0.1"   # use 0.0.0.0 in Docker
-port = 8080
+port = 5920
 
 #[[main.channels]]
 #name = "TelegramChannel"

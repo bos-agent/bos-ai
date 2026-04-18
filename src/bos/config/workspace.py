@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import shutil
 import tomllib
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +23,15 @@ def _load_config(workspace: str | Path = ".") -> tuple[Path, dict[str, Any]]:
         bos_dir.mkdir(parents=True, exist_ok=True)
         return bos_dir, {}
     return bos_dir, tomllib.loads(cfg_file.read_text(encoding="utf-8"))
+
+
+@dataclass(frozen=True)
+class AgentRuntimeConfig:
+    kind: str = "process"
+    image: str | None = None
+    container_name: str | None = None
+    workspace_dir: str = "/workspace"
+    bos_dir: str | None = None
 
 
 class Workspace:
@@ -59,3 +69,28 @@ class Workspace:
         for seg in segments[:-1]:
             settings = settings.get(seg, {})
         return settings.get(segments[-1])
+
+    def get_runtime_config(self, *, force_kind: str | None = None) -> AgentRuntimeConfig:
+        runtime_cfg = self.config.get("main", {}).get("runtime", {})
+        workspace_dir = runtime_cfg.get("workspace_dir") or "/workspace"
+        bos_dir = runtime_cfg.get("bos_dir")
+        if not bos_dir:
+            try:
+                bos_rel = self.bos_dir.relative_to(self.workspace)
+                bos_dir = str((Path(workspace_dir) / bos_rel).as_posix())
+            except ValueError:
+                bos_dir = "/bos"
+
+        return AgentRuntimeConfig(
+            kind=force_kind or runtime_cfg.get("kind") or "process",
+            image=runtime_cfg.get("image"),
+            container_name=runtime_cfg.get("container_name"),
+            workspace_dir=str(Path(workspace_dir).as_posix()),
+            bos_dir=str(Path(bos_dir).as_posix()),
+        )
+
+    def resolve_platform_envfile(self) -> Path | None:
+        envfile = self.config.get("platform", {}).get("envfile")
+        if not envfile:
+            return None
+        return (self.bos_dir / Path(envfile).expanduser()).resolve()

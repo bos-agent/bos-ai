@@ -7,12 +7,23 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from bos.config import Workspace
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_channel_config_for_runtime(cfg: dict, *, runtime_kind: str) -> dict:
+    """Adjust channel bindings for container execution without mutating the source config."""
+    normalized = dict(cfg)
+    if runtime_kind == "docker" and normalized.get("name") == "HttpChannel":
+        host = normalized.get("host")
+        if host in (None, "", "127.0.0.1", "localhost"):
+            normalized["host"] = "0.0.0.0"
+    return normalized
 
 
 async def start(workspace: Workspace) -> None:
@@ -27,7 +38,7 @@ async def start(workspace: Workspace) -> None:
         name    = "HttpChannel"
         address = "http"
         host    = "127.0.0.1"
-        port    = 8080
+        port    = 5920
 
     When multiple channels are configured a ``BroadcastChannel`` multiplexes
     them behind a single sender address so the actor stays channel-agnostic.
@@ -39,7 +50,11 @@ async def start(workspace: Workspace) -> None:
     from bos.extensions.channels.broadcast import BroadcastChannel
 
     agent_name: str = workspace.get_setting("main.agent") or "_default"
-    channels_cfg: list[dict] = workspace.config.get("main", {}).get("channels", [{"name": "HttpChannel"}])
+    runtime_kind = os.environ.get("BOS_RUNTIME", "process")
+    channels_cfg: list[dict] = [
+        _normalize_channel_config_for_runtime(cfg, runtime_kind=runtime_kind)
+        for cfg in workspace.config.get("main", {}).get("channels", [{"name": "HttpChannel"}])
+    ]
 
     logger.info("Starting harness for agent=%r with %d channel(s)", agent_name, len(channels_cfg))
 
