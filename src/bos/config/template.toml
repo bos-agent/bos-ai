@@ -2,21 +2,13 @@
 envfile = ".env"
 
 # A list of module names or paths to the modules
-extensions = ["bos.extensions.bootstrap"]
+extensions = ["bos.extensions.all"]
 
 [platform.envs]
-# TD_AUTH_CODEX_PATH = "llm-auth/codex.auth.json"
+# BOS_CODEX_AUTH_FILE = "llm-auth/codex.auth.json"
 
 [platform.agent_defaults]
 model = "gemini/gemini-3.1-pro-preview" # "codex/gpt-5.3-codex"
-tools = []
-exclude_tools = []
-skills = []
-exclude_skills = []
-memories = []
-exclude_memories = []
-subagents = []
-exclude_subagents = []
 reasoning_effort = "medium"
 max_tokens = 131072
 max_iterations = 25
@@ -26,12 +18,9 @@ name = "main"
 description = "The main agent."
 
 [platform.agents.system_prompt]
-_default = """
-You are an AI agent.
-
-You are only allowed to access the files under the {workspace} directory.
-If your task requires accessing files outside this directory, you must ask
-for user permission.
+_default = """ You are an AI agent.
+When a task benefits from focused analysis, delegate it to the researcher
+subagent first and then synthesize the final answer for the user.
 """
 
 memory = """
@@ -45,10 +34,24 @@ reference and update these specific modules to maintain continuity:
 
 skill = """
 - The pathes in the skill instruction is usually relative to the skill's location.
-- If you are NOT a subagent, you should unload the skills if you don't need them.
+- You should unload the skills if you don't need them.
+"""
+
+[[platform.agents]]
+name = "researcher"
+description = "Focused repo analyst used through AskSubagent."
+reasoning_effort = "high"
+
+[platform.agents.system_prompt]
+_default = """
+You are the researcher subagent.
+
+Work only on the delegated task, stay inside the workspace boundary, and return
+ concise findings that the main agent can reuse directly.
 """
 
 [harness]
+capability_mode = "defensive" # "offensive" makes scratch agents allow all tools/skills/memories/subagents
 interceptors = ["AgentStepRelay"]
 
 [harness.skills_loader]
