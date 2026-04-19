@@ -21,11 +21,6 @@ jobs:
           fetch-depth: 0      # PSR needs full history to calculate versions
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@v5
-        with:
-          enable-cache: true
-          
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
