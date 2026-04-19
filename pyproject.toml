@@ -53,7 +53,17 @@ line-length = 120
 lint.select = ["E", "F", "I"]
 
 [tool.semantic_release]
+allow_zero_version = true
 version_toml = ["pyproject.toml:project.version"]
 commit_author = "github-actions[bot] <github-actions[bot]@users.noreply.github.com>"
 commit_message = "chore(release): {version} [skip ci]"
 build_command = "python -m ensurepip --upgrade && python -m pip install build && python -m build"
+commit_parser = "conventional"
+commit_parser_options = { parse_squash_commits = true, ignore_merge_commits = true }
+
+[tool.semantic_release.changelog]
+mode = "update"
+insertion_flag = "<!-- version list -->"
+
+[tool.semantic_release.changelog.default_templates]
+mask_initial_release = false
