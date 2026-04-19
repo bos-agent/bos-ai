@@ -28,6 +28,7 @@ from ._utils import (
 )
 from .actor import AgentActor
 from .agent import AbortTurn, ChainReactInterceptor, ReactAgent, ReactContext
+from .builtins import BroadcastChannel
 from .contract import (
     Agent,
     Channel,
@@ -105,6 +106,7 @@ __all__ = [
     "ToolCallRequest",
     "ToolRegistry",
     "bootstrap_platform",
+    "BroadcastChannel",
     "ep_actor_command",
     "ep_agent",
     "ep_channel",

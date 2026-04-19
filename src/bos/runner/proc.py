@@ -255,10 +255,10 @@ def build_docker_argv(
         argv.extend(["--env-file", str(env_file)])
 
     published_ports: set[int] = set()
-    for channel_cfg in workspace.config.get("main", {}).get("channels", [{"name": "HttpChannel"}]):
-        if channel_cfg.get("name") != "HttpChannel":
+    for channel_cfg in workspace.resolve_channels(runtime_kind=runtime.kind):
+        if channel_cfg.name != "HttpChannel":
             continue
-        port = channel_cfg.get("port")
+        port = channel_cfg.options.get("port")
         if isinstance(port, int) and port > 0 and port not in published_ports:
             argv.extend(["--publish", f"{port}:{port}"])
             published_ports.add(port)
