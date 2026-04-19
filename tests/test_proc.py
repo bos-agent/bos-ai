@@ -18,6 +18,9 @@ def test_build_docker_argv_passes_external_env_file(tmp_path):
 [platform]
 envfile = "../../env/agent.env"
 
+[main]
+agent = "main"
+
 [main.runtime]
 kind = "docker"
 image = "bos:test"
@@ -26,6 +29,8 @@ workspace_dir = "/workspace"
 
 [[main.channels]]
 name = "HttpChannel"
+bind_address = "channel@http"
+target_address = "agent@main"
 port = 8080
 """.strip()
         + "\n",
@@ -51,10 +56,18 @@ def test_build_docker_argv_mounts_external_bos_dir(tmp_path):
     bos_dir.mkdir()
     (bos_dir / "config.toml").write_text(
         """
+[main]
+agent = "main"
+
 [main.runtime]
 kind = "docker"
 image = "bos:test"
 workspace_dir = "/workspace"
+
+[[main.channels]]
+name = "HttpChannel"
+bind_address = "channel@http"
+target_address = "agent@main"
 """.strip()
         + "\n",
         encoding="utf-8",

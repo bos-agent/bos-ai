@@ -1,71 +1,35 @@
-"""BroadcastChannel — virtual mediator that multiplexes channels behind one address.
-
-For single-user setups this channel owns one canonical conversation id shared by
-all member channels. Each channel may still keep a channel-local conversation id
-for delivery purposes (for example Telegram uses ``telegram:<chat_id>``).
-"""
-
 from __future__ import annotations
 
 import asyncio
 import logging
 import uuid
 
-from bos.core import MailBox
 from bos.protocol import ChannelCommandName, Envelope, MessageType
+
+from .contract import MailBox, ep_channel
 
 logger = logging.getLogger(__name__)
 
 
+@ep_channel(name="BroadcastChannel")
 class BroadcastChannel:
-    """Reads from a shared address, syncs conversation ids, echoes inbound, fans out outbound."""
+    """Sync conversation ids within one group and fan actor replies back to known members."""
 
-    def __init__(self, member_addresses: list[str], actor_address: str):
-        self._members = set(member_addresses)
-        self._actor = actor_address
+    def __init__(self, target_address: str) -> None:
+        self._members: set[str] = set()
+        self._actor = target_address
         self._conversation_id = self._new_conversation_id()
         self._member_conversation_ids: dict[str, str] = {}
 
     async def run(self, mailbox: MailBox) -> None:
         """Main mediator loop."""
         address = mailbox.address
-        logger.info(
-            "BroadcastChannel %r → %s (actor=%s, conversation_id=%s)",
-            address,
-            ", ".join(sorted(self._members)),
-            self._actor,
-            self._conversation_id,
-        )
+        logger.info("BroadcastChannel %r -> %s (conversation_id=%s)", address, self._actor, self._conversation_id)
         try:
             while True:
                 env = await mailbox.receive()
 
-                if env.sender in self._members:
-                    origin = env.sender
-                    self._remember_member_conversation(origin, env.conversation_id)
-
-                    if self._is_new_conversation_request(env):
-                        self._rotate_conversation(origin, requested_local_id=env.conversation_id)
-                        await self._notify_new_conversation(mailbox)
-                        continue
-
-                    for member in self._members:
-                        if member != origin:
-                            await mailbox.send(
-                                member,
-                                env.content,
-                                content_type=MessageType.ECHO,
-                                conversation_id=self._conversation_for_member(member),
-                            )
-
-                    await mailbox.send(
-                        self._actor,
-                        env.content,
-                        content_type=env.content_type,
-                        conversation_id=self._conversation_id,
-                    )
-
-                else:
+                if env.sender == self._actor:
                     for member in self._members:
                         await mailbox.send(
                             member,
@@ -73,11 +37,37 @@ class BroadcastChannel:
                             content_type=env.content_type,
                             conversation_id=self._conversation_for_member(member),
                         )
+                    continue
+
+                origin = env.sender
+                self._remember_member_conversation(origin, env.conversation_id)
+
+                if self._is_new_conversation_request(env):
+                    self._rotate_conversation(origin, requested_local_id=env.conversation_id)
+                    await self._notify_new_conversation(mailbox)
+                    continue
+
+                for member in self._members:
+                    if member != origin:
+                        await mailbox.send(
+                            member,
+                            env.content,
+                            content_type=MessageType.ECHO,
+                            conversation_id=self._conversation_for_member(member),
+                        )
+
+                await mailbox.send(
+                    self._actor,
+                    env.content,
+                    content_type=env.content_type,
+                    conversation_id=self._conversation_id,
+                )
 
         except asyncio.CancelledError:
             pass
 
     def _remember_member_conversation(self, member: str, conversation_id: str | None) -> None:
+        self._members.add(member)
         if conversation_id:
             self._member_conversation_ids[member] = conversation_id
 

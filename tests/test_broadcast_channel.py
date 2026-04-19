@@ -2,8 +2,7 @@ import asyncio
 
 import pytest
 
-from bos.core import Channel, Envelope
-from bos.extensions.channels.broadcast import BroadcastChannel
+from bos.core import BroadcastChannel, Channel, Envelope, ep_channel
 
 
 class FakeMailbox:
@@ -45,11 +44,15 @@ class FakeMailbox:
 
 
 def test_broadcast_channel_satisfies_channel_protocol():
-    assert isinstance(BroadcastChannel(["channel@http"], "agent@main"), Channel)
+    assert isinstance(BroadcastChannel("agent@main"), Channel)
+
+
+def test_broadcast_channel_is_registered_with_core():
+    assert ep_channel.has("BroadcastChannel")
 
 
 def test_broadcast_rewrites_inbound_to_canonical_conversation_id():
-    channel = BroadcastChannel(["channel@http", "channel@telegram"], "agent@main")
+    channel = BroadcastChannel("agent@main")
     canonical = channel._conversation_id
 
     channel._remember_member_conversation("channel@http", "http-local-1")
@@ -61,7 +64,7 @@ def test_broadcast_rewrites_inbound_to_canonical_conversation_id():
 
 
 def test_rotate_conversation_updates_http_but_keeps_telegram_sticky_id():
-    channel = BroadcastChannel(["channel@http", "channel@telegram"], "agent@main")
+    channel = BroadcastChannel("agent@main")
     old_canonical = channel._conversation_id
     channel._remember_member_conversation("channel@http", "http-local-1")
     channel._remember_member_conversation("channel@telegram", "telegram:42")
@@ -74,7 +77,7 @@ def test_rotate_conversation_updates_http_but_keeps_telegram_sticky_id():
 
 
 def test_new_conversation_request_detects_channel_and_slash_commands():
-    channel = BroadcastChannel(["channel@http"], "agent@main")
+    channel = BroadcastChannel("agent@main")
 
     assert channel._is_new_conversation_request(
         Envelope(
@@ -94,7 +97,7 @@ def test_new_conversation_request_detects_channel_and_slash_commands():
 
 @pytest.mark.asyncio
 async def test_broadcast_run_fans_out_actor_messages_via_bound_mailbox():
-    channel = BroadcastChannel(["channel@http", "channel@telegram"], "agent@main")
+    channel = BroadcastChannel("agent@main")
     channel._remember_member_conversation("channel@http", "http-local-1")
     channel._remember_member_conversation("channel@telegram", "telegram:42")
     mailbox = FakeMailbox(
@@ -120,3 +123,38 @@ async def test_broadcast_run_fans_out_actor_messages_via_bound_mailbox():
         ("channel@user", "channel@telegram", "hello"),
     }
     assert {env.conversation_id for env in mailbox.sent} == {"http-local-1", "telegram:42"}
+
+
+@pytest.mark.asyncio
+async def test_broadcast_run_learns_members_from_inbound_messages():
+    channel = BroadcastChannel("agent@main")
+    mailbox = FakeMailbox(
+        "channel@group",
+        [
+            Envelope(
+                sender="channel@http",
+                recipient="channel@group",
+                content="hello",
+                conversation_id="http-local-1",
+            ),
+            Envelope(
+                sender="agent@main",
+                recipient="channel@group",
+                content="reply",
+                conversation_id=channel._conversation_id,
+            ),
+        ],
+    )
+
+    task = asyncio.create_task(channel.run(mailbox))
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+
+    assert ("channel@group", "agent@main", "hello") in {
+        (env.sender, env.recipient, env.content) for env in mailbox.sent
+    }
+    assert ("channel@group", "channel@http", "reply") in {
+        (env.sender, env.recipient, env.content) for env in mailbox.sent
+    }

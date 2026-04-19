@@ -81,7 +81,6 @@ exclude_tools = ["UpdateMemory"]
 
 [main]
 agent = "main"
-broadcast_address = "channel@user"
 
 [main.runtime]
 kind = "process" # set to "docker" to make `bos start` launch a container
@@ -90,16 +89,23 @@ workspace_dir = "/workspace"
 # bos_dir = "/bos"
 
 [[main.channels]]
-# Channel configuration — bridges external clients to a bound channel MailBox.
-# Multiple channels can be listed to run in parallel (e.g. HttpChannel + TelegramChannel).
+# Broadcast groups are explicit channels. Leaf channels may target an actor
+# directly or a BroadcastChannel. BroadcastChannel must target the actor.
+name = "BroadcastChannel"
+bind_address = "channel@user"
+target_address = "agent@main"
+
+[[main.channels]]
 name = "HttpChannel"
-address = "http"     # channel address to bind on the MailRoute
-host = "127.0.0.1"   # use 0.0.0.0 in Docker
+bind_address = "channel@http"
+target_address = "channel@user"
+host = "127.0.0.1"   # automatically becomes 0.0.0.0 in Docker
 port = 5920
 
 #[[main.channels]]
 #name = "TelegramChannel"
-#address = "telegram"
+#bind_address = "channel@telegram"
+#target_address = "channel@user"
 #token = "123456:telegram-bot-token"
 #poll_timeout = 30
 #allowed_chat_ids = [123456789]        # optional allowlist

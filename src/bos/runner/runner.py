@@ -1,4 +1,4 @@
-"""runner.start() — orchestrates harness, actor(s), and channels in-process.
+"""runner.start() — orchestrates harness, actor(s), and configured channels in-process.
 
 Intentionally NOT in core.py so that core stays focused on framework primitives.
 """
@@ -16,73 +16,44 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _normalize_channel_config_for_runtime(cfg: dict, *, runtime_kind: str) -> dict:
-    """Adjust channel bindings for container execution without mutating the source config."""
-    normalized = dict(cfg)
-    if runtime_kind == "docker" and normalized.get("name") == "HttpChannel":
-        host = normalized.get("host")
-        if host in (None, "", "127.0.0.1", "localhost"):
-            normalized["host"] = "0.0.0.0"
-    return normalized
-
-
 async def start(workspace: Workspace) -> None:
     """Launch harness, agent actor(s), and all configured channels in-process.
 
     Reads from ``config.toml``::
 
-        [main]
-        agent = "main"
-
         [[main.channels]]
-        name    = "HttpChannel"
-        address = "http"
-        host    = "127.0.0.1"
-        port    = 5920
-
-    When multiple channels are configured a ``BroadcastChannel`` multiplexes
-    them behind a single sender address so the actor stays channel-agnostic.
+        name = "HttpChannel"
+        bind_address = "channel@http"
+        target_address = "agent@main"
+        host = "127.0.0.1"
+        port = 5920
 
     Blocks until all tasks complete (i.e. until cancelled via SIGTERM or
     ``asyncio.CancelledError``).
     """
     from bos.core import AgentActor, Channel, _create_extension_instance, ep_channel
-    from bos.extensions.channels.broadcast import BroadcastChannel
 
-    agent_name: str = workspace.get_setting("main.agent") or "_default"
-    runtime_kind = os.environ.get("BOS_RUNTIME", "process")
-    channels_cfg: list[dict] = [
-        _normalize_channel_config_for_runtime(cfg, runtime_kind=runtime_kind)
-        for cfg in workspace.config.get("main", {}).get("channels", [{"name": "HttpChannel"}])
-    ]
+    agent_name = workspace.get_main_agent_name()
+    actor_address = workspace.get_main_agent_address()
+    channels_cfg = workspace.resolve_channels(runtime_kind=os.environ.get("BOS_RUNTIME", "process"))
 
     logger.info("Starting harness for agent=%r with %d channel(s)", agent_name, len(channels_cfg))
 
     async with workspace.harness() as harness:
         agent = harness.create_agent(agent_name)
-        actor_address = f"agent@{agent_name}"
         actor = AgentActor(agent, harness.mail_route.bind(actor_address))
-        broadcast_address = workspace.get_setting("main.broadcast_address")
-        target_address = broadcast_address or actor_address
 
         channels: list[tuple[Channel, str]] = []
         for cfg in channels_cfg:
-            ch = _create_extension_instance(ep_channel, Channel, {"target_address": target_address} | cfg)
+            ch = _create_extension_instance(ep_channel, Channel, cfg.extension_config())
             if ch is None:
                 logger.warning("Could not create channel from config: %r", cfg)
                 continue
-            channels.append((ch, f"channel@{cfg.get('address', 'http')}"))
+            channels.append((ch, cfg.bind_address))
 
         async def _actor_and_channels() -> None:
             async with asyncio.TaskGroup() as tg:
                 tg.create_task(actor.run(), name="actor")
-                if broadcast_address:
-                    member_addresses = [addr for _, addr in channels]
-                    bc = BroadcastChannel(member_addresses, actor_address)
-                    tg.create_task(
-                        bc.run(harness.mail_route.bind(broadcast_address)),
-                        name="broadcast",
-                    )
                 for ch, address in channels:
                     tg.create_task(
                         ch.run(harness.mail_route.bind(address)),
@@ -102,9 +73,8 @@ async def start(workspace: Workspace) -> None:
             if rd.root.exists():
                 channel_info = []
                 for ch, address in channels:
-                    info: dict = {"address": address}
+                    info: dict = {"address": address, "name": type(ch).__name__}
                     if hasattr(ch, "actual_host"):
-                        info["name"] = type(ch).__name__
                         info["host"] = ch.actual_host
                         info["port"] = ch.actual_port
                     channel_info.append(info)
