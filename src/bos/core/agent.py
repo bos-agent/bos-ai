@@ -231,6 +231,8 @@ class ReactAgent:
                     if response.finish_reason == "error":
                         logger.error("Error in LLM response: %s", response.finish_reason)
                         final_content = final_content or "(LLM responds error)"
+                    else:
+                        final_content = final_content or "(empty model response)"
                     _add_message(
                         {
                             "role": "assistant",
@@ -240,7 +242,7 @@ class ReactAgent:
                         }
                     )
                     ctx.final_content = final_content
-                    await _run_interceptor("final_content")
+                    await _run_interceptor("final_response")
                     break
 
                 tool_call_dicts = [tc.to_openai_call() for tc in response.tool_calls]
@@ -457,8 +459,8 @@ class ReactAgent:
             return json.dumps(results)
 
     @classmethod
-    def register(cls, name: str, discriptions: str | None = None, **kwargs):
-        @ep_agent(name=name, discriptions=discriptions, defaults=kwargs)
+    def register(cls, name: str, description: str | None = None, **kwargs):
+        @ep_agent(name=name, description=description, defaults=kwargs)
         @wraps(ReactAgent)
         def create_react_agent(*args, **kwargs):
             return ReactAgent(*args, **kwargs)

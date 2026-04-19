@@ -132,6 +132,76 @@ bos tui
 When Docker is enabled, `HttpChannel` host binding is normalized for container
 access, and BOS AI publishes configured HTTP channel ports automatically.
 
+For scratch agents created directly through `harness.create_agent()` without a
+named agent config, the harness capability default is configurable:
+
+```toml
+[harness]
+capability_mode = "defensive" # or "offensive"
+```
+
+- `defensive`: default scratch agents start with no tools, skills, memories, or subagents
+- `offensive`: default scratch agents start with all capabilities enabled
+
+## Subagent Orchestration
+
+BOS already supports a lightweight form of subagent orchestration inside one
+active harness. The pattern is:
+
+- register multiple named agent profiles under `platform.agents`
+- allow the parent agent to use the local `AskSubagent` tool
+- scope which specialists it may call with `subagents = [...]`
+- customize specialist behavior under `[[harness.subagents]]`
+
+This is delegated orchestration, not a second long-running actor process. The
+parent agent stays at `agent@main`, while specialist agents are invoked on
+demand as additional `agent.ask(...)` calls with their own conversation IDs.
+
+Minimal use case: a manager agent handles the user-facing conversation and
+delegates focused document analysis to a `researcher` subagent.
+
+```toml
+[platform.agent_defaults]
+tools = []
+subagents = []
+
+[[platform.agents]]
+name = "main"
+description = "User-facing manager."
+tools = ["AskSubagent", "ListAgents"]
+subagents = ["researcher"]
+
+[platform.agents.system_prompt]
+_default = """
+Handle the user-facing workflow. Delegate focused repo analysis when needed.
+"""
+
+[[platform.agents]]
+name = "researcher"
+description = "Focused repo analyst."
+tools = []
+
+[platform.agents.system_prompt]
+_default = """
+You only perform focused research tasks delegated by the main agent.
+Return concise findings.
+"""
+
+[[harness.subagents]]
+name = "researcher"
+task_template = """
+You are the {agent_name} specialist.
+Use this dedicated thread for delegated analysis work.
+
+Task:
+{task}
+"""
+```
+
+The `conversation_id` passed to `AskSubagent` defines whether the specialist
+gets a fresh thread, shares the parent thread, or uses a dedicated branch such
+as `parent_conversation_id + "_researcher"`.
+
 ## Extension Points
 
 The framework is designed to be reconfigured and extended, not forked.
