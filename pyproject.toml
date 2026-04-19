@@ -56,4 +56,4 @@ lint.select = ["E", "F", "I"]
 version_toml = ["pyproject.toml:project.version"]
 commit_author = "github-actions[bot] <github-actions[bot]@users.noreply.github.com>"
 commit_message = "chore(release): {version} [skip ci]"
-build_command = "uv build"
+build_command = "python -m ensurepip --upgrade && python -m pip install build && python -m build"
