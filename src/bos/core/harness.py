@@ -3,9 +3,9 @@ from __future__ import annotations
 import contextvars
 import logging
 import os
-import uuid
 from pathlib import Path
-from typing import Any
+from textwrap import dedent
+from typing import Any, Literal
 
 from ._utils import _aclose, _create_extension_instance, _load_ext_modules, _load_ext_paths, _safe_format
 from .agent import ChainReactInterceptor, ReactAgent
@@ -73,11 +73,16 @@ class AgentHarness:
         bos_dir: str | Path = ".bos",
         workspace: str | Path = ".",
         subagents: list[dict[str, Any]] | None = None,
+        capability_mode: Literal["defensive", "offensive"] = "defensive",
     ) -> None:
+        if capability_mode not in {"defensive", "offensive"}:
+            raise ValueError("capability_mode must be 'defensive' or 'offensive'.")
+
         self._bos_root = Path(bos_dir).expanduser().resolve()
         self._workspace = Path(workspace).expanduser().resolve()
         self.workspace = self._workspace
         self._subagents_cfg = {cfg.get("name", "_default"): cfg for cfg in subagents} if subagents else {}
+        self._capability_mode = capability_mode
 
         self._mail_route_cfg = mail_route
         self._message_store_cfg = message_store
@@ -139,13 +144,14 @@ class AgentHarness:
             raise RuntimeError("create_agent must be called within an active AgentHarness context.")
 
         if not any([agent_name, agent_cfg]):
+            capability_default = [] if self._capability_mode == "defensive" else None
             agent_cfg = {
                 "system_prompt": "You are a helpful assistant.",
                 "model": os.getenv("BOS_MODEL"),
-                "tools": [],
-                "skills": [],
-                "memories": [],
-                "subagents": [],
+                "tools": capability_default,
+                "skills": capability_default,
+                "memories": capability_default,
+                "subagents": capability_default,
             }
 
         local_tools = self._create_local_tools(agent_name=agent_name)
@@ -186,24 +192,41 @@ class AgentHarness:
             },
         )
         async def tool_send_mail(recipient: str, content: str) -> str:
-            mailbox = CURRENT_MAILBOX.get(None) or harness.mail_route.bind(f"agent@{agent_name or '_default'}")
+            mailbox = CURRENT_MAILBOX.get(None) or harness.mail_route.bind(f"agent@{agent_name or '__unknown__'}")
             await mailbox.send(recipient, content)
             return f"(Sent to {recipient})"
 
         @tools(
             name="AskSubagent",
-            description="Delegate a task to a named subagent and return its response.",
+            description=dedent("""
+            Delegate a task to a named subagent and return its response.
+
+
+            Choice of the conversation_id:
+            - new uuid: suitable for most of the case, the subagent does not inherit the converation history.
+            - current conversation_id: the subagent can access the full conversation history.
+            - current conversation_id + "_" + agent_name: the subagent can access the history related to itself.
+
+
+            The ref_conversation_id is optional, usually it is the current conversation id in the parent agent.
+            """),
             parameters={
                 "type": "object",
                 "properties": {
                     "agent_name": {"type": "string", "description": "Name of the agent."},
+                    "conversation_id": {"type": "string", "description": "The conversation id."},
                     "message": {"type": "string", "description": "Message to send."},
-                    "conversation_id": {"type": "string", "description": "Parent conversation id."},
+                    "ref_conversation_id": {"type": "string", "description": "The reference conversation id."},
                 },
                 "required": ["agent_name", "conversation_id", "message"],
             },
         )
-        async def ask_subagent(agent_name: str, message: str, conversation_id: str) -> str:
+        async def tool_ask_subagent(
+            agent_name: str,
+            conversation_id: str,
+            message: str,
+            ref_conversation_id: str = None,
+        ) -> str:
             if not ep_agent.has(agent_name):
                 return f"Error: Agent '{agent_name}' not found."
             subagent_cfg = harness._get_subagent_config(agent_name)
@@ -212,12 +235,9 @@ class AgentHarness:
 
             agent = harness.create_agent(agent_name, subagent_cfg)
             return await agent.ask(
-                f"{conversation_id}:{agent_name}:{uuid.uuid4().hex}",
+                conversation_id,
                 message,
-                ctx_metadata={
-                    "subagent": agent_name,
-                    "parent_conversation_id": conversation_id,
-                },
+                ctx_metadata={"subagent": agent_name, "ref_conversation_id": ref_conversation_id},
             )
 
         return tools
