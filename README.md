@@ -1,70 +1,118 @@
 # BOS AI
 
-**Lightweight single-file agent framework**
+Lightweight, extensible infrastructure for building agentic systems in Python.
 
-`bos-ai` is an extensible, actor-based Python framework for building and running autonomous AI agents. Built around a remarkably lean core, it provides everything you need to run, extend, and orchestrate LLM-driven agents with local tool execution, memory, and message passing.
+`bos-ai` is an actor-based framework for running LLM-driven agents with explicit
+message routing, configurable runtime boundaries, and a small core. It is meant
+to be shaped into different kinds of agentic systems rather than forcing one
+opinionated product workflow.
 
----
+## What It Is
 
-## 🚀 Easy Start
+- Fully configurable: agents, tools, skills, memories, channels, runtime, and
+  storage are configured in TOML and wired through extension points.
+- Actor-based: agents communicate through a `MailRoute` plus bound `MailBox`
+  capabilities instead of direct in-process coupling.
+- Built for composition: the same core can back a local TUI, an HTTP/WebSocket
+  endpoint, a Telegram bot, or grouped channel topologies with `BroadcastChannel`.
+- Small core, explicit boundaries: contracts, defaults, harness lifecycle,
+  runtime orchestration, and extensions are kept separate.
 
-1. **Install the package:**
-   ```bash
-   pip install bos-ai
-   ```
+## Privacy
 
-2. **Initialize a Workspace:**
-   Navigate into your project directory and initialize the BOS AI workspace:
-   ```bash
-   bos init
-   ```
-   This command creates a `.bos` directory and a `config.toml` file to hold your project's agent configurations.
+BOS AI does not ship with built-in telemetry, analytics, or hosted data
+collection. Your privacy boundary is defined by the models, tools, channels, and
+storage backends you configure.
 
-3. **Start Chatting:**
-   Use the chat command to interact with your agent:
-   ```bash
-   bos chat
-   ```
+If you use your own local or self-hosted model and keep your channels and
+storage local, BOS AI itself does not require sending your data to any BOS-owned
+service.
 
----
+## Quickstart
 
-## 💻 CLI Intro
-
-BOS AI ships with a `bos` CLI with lazy-loaded commands to keep startup times incredibly fast:
-
-- **`bos init`**: Bootstraps a new workspace. It creates the `.bos/config.toml` file and provisions necessary data directories.
-- **`bos auth`**: Set up authentication for various LLM providers and utilities.
-- **`bos chat`**: Drops you into an interactive chat application to talk to the agents defined in your configuration. You can also use it in "oneshot" mode.
-- **Channels**: Built-in channel bridges currently include `HttpChannel` for WebSocket/REST access and `TelegramChannel` for Telegram bot delivery.
-
-**LLM Providers via Auth:**
-```bash
-# Chat with the Antigravity provider (requires `bos auth antigravity`)
-bos chat -M "hello" -m antigravity/gemini-3.1-pro-low -a main
-
-# Chat with the Gemini CLI provider (requires `bos auth gemini-cli`)
-bos chat -M "hello" -m gemini-cli/gemini-2.5-flash -a main
-
-# Chat with the Codex provider (requires `bos auth codex`)
-bos chat -M "hello" -m codex/gpt-5.3-codex -a main
-```
-
-**Global Options:**
-- `-w`, `--workspace`: Path to the workspace directory (defaults to `.`).
-
-## 🐳 Docker
-
-The agent runtime can run directly in a container while the TUI stays local.
-
-### Build the image
+Install the package:
 
 ```bash
-docker build -t bos-ai:local .
+pip install bos-ai
 ```
 
-### Start with `bos`
+Initialize a workspace:
 
-Configure Docker as the runtime in `.bos/config.toml`:
+```bash
+mkdir my-agent
+cd my-agent
+bos init
+```
+
+Start the agent runtime:
+
+```bash
+bos start
+```
+
+Connect the built-in TUI:
+
+```bash
+bos tui
+```
+
+Useful lifecycle commands:
+
+```bash
+bos status
+bos restart
+bos stop
+```
+
+## Workspace Model
+
+Each workspace gets a `.bos/config.toml`. BOS AI searches upward from the
+current directory for `.bos/config.toml`, then falls back to `~/.bos/config.toml`
+if no workspace-local config exists.
+
+The primary actor is always addressed as `agent@main`. The selected main agent
+implementation is configured separately under `[main].agent`.
+
+Example channel configuration:
+
+```toml
+[main]
+agent = "main"
+
+[[main.channels]]
+name = "BroadcastChannel"
+bind_address = "channel@user"
+target_address = "agent@main"
+
+[[main.channels]]
+name = "HttpChannel"
+bind_address = "channel@http"
+target_address = "channel@user"
+host = "127.0.0.1"
+port = 5920
+
+#[[main.channels]]
+#name = "TelegramChannel"
+#bind_address = "channel@telegram"
+#target_address = "channel@user"
+#token = "123456:telegram-bot-token"
+#poll_timeout = 30
+#allowed_chat_ids = [123456789]
+```
+
+This keeps routing explicit:
+
+- leaf channels may target `agent@main` directly
+- leaf channels may target a `BroadcastChannel`
+- `BroadcastChannel` must target `agent@main`
+
+Deep broadcast trees are intentionally rejected.
+
+## Runtime
+
+The agent can run in-process or in Docker.
+
+Docker runtime example:
 
 ```toml
 [main.runtime]
@@ -73,123 +121,78 @@ image = "bos-ai:local"
 workspace_dir = "/workspace"
 ```
 
-Then launch and connect locally:
+Build and run:
 
 ```bash
+docker build -t bos-ai:local .
 bos start
 bos tui
-bos stop
 ```
 
-You can also force Docker for a single run without changing config:
+When Docker is enabled, `HttpChannel` host binding is normalized for container
+access, and BOS AI publishes configured HTTP channel ports automatically.
 
-```bash
-bos start --docker
-```
+## Extension Points
 
-When running in Docker, the built-in HTTP channel is automatically rebound to `0.0.0.0` if it was configured with `127.0.0.1` or `localhost`, so published ports work out of the box.
+The framework is designed to be reconfigured and extended, not forked.
 
-If `platform.envfile` resolves to a path outside the mounted workspace, `bos start --docker` forwards it to Docker with `--env-file`.
+Core extension points include:
 
-### Start with plain `docker run`
+- `@ep_provider` for model backends
+- `@ep_tool` for tool calls
+- `@ep_memory_store` for long-term memory backends
+- `@ep_message_store` for conversation history
+- `@ep_mail_route` for message transport
+- `@ep_react_interceptor` for ReAct loop interception
+- `@ep_channel` for external interfaces like HTTP, Telegram, or grouped channels
 
-You can also run the image exactly like a normal containerized app, without installing `bos` on the host:
-
-```bash
-docker run --rm \
-  -p 5920:5920 \
-  -v "$PWD:/workspace" \
-  -w /workspace \
-  bos-ai:local
-```
-
-Detached/background operation is the operator's choice:
-
-```bash
-docker run -d \
-  --name bos-agent \
-  -p 5920:5920 \
-  -v "$PWD:/workspace" \
-  -w /workspace \
-  bos-ai:local
-```
-
-If your env file is not inside the mounted workspace, pass it explicitly when using plain Docker:
-
-```bash
-docker run -d \
-  --name bos-agent-telegram \
-  -v "$PWD:/workspace" \
-  -w /workspace \
-  --env-file /absolute/path/to/agent.env \
-  bos-ai:local
-```
-
----
-
-## 🧠 Principles
-
-`bos-ai` is built on a few core design principles:
-
-- **Lightweight & Embeddable**: The runtime core stays compact and explicit, with clear module boundaries for contracts, defaults, agent runtime, harness lifecycle, and protocol handling.
-- **Extensible at the Core**: Every significant layer—from LLM providers, to message persistence, to memory and tools—is powered by an internal Extension System.
-- **Agent as an Actor**: Agents communicate via asynchronous message passing (`MailRoute` plus bound `MailBox` capabilities). This enables robust multi-agent orchestration without tightly coupled code.
-- **Harness-Managed Lifecycle**: An `AgentHarness` is used to bootstrap, maintain, and gracefully tear down shared resources (like databases or API connections) across all agents in the workspace.
-
----
-
-## 🔌 Extension Framework
-
-BOS AI utilizes an `ExtensionPoint` pattern for its modular capabilities. You can seamlessly inject your own logic or override defaults decorators.
-
-The framework provides named extension points such as:
-- `@ep_provider`: Connect new LLM backends (OpenAI, Anthropic, Gemini, etc.).
-- `@ep_tool`: Add new conversational tools that the LLM can invoke.
-- `@ep_memory_store`: Connect alternative vector databases or key-value stores.
-- `@ep_message_store`: Custom persistence logic for conversation history.
-- `@ep_mail_route`: Implement distributed message-routing interfaces like Redis or RabbitMQ.
-- `@ep_react_interceptor`: Hooks to orchestrate the internal ReAct loop of an agent.
-
-Example registering a custom tool:
+Minimal example:
 
 ```python
 from bos.core import ep_tool
 
+
 @ep_tool(
-    name="my_custom_tool",
-    description="Does something awesome.",
-    # ... additional structured metadata ...
+    name="echo_upper",
+    description="Return an uppercase version of the input.",
+    parameters={
+        "type": "object",
+        "properties": {"text": {"type": "string"}},
+        "required": ["text"],
+    },
 )
-async def my_custom_tool(arg1: str):
-    return f"Processed {arg1}"
+async def echo_upper(text: str) -> str:
+    return text.upper()
 ```
 
-To load your extensions, simply add their module paths to the `platform.extensions` array in your workspace's `config.toml`.
+Load extensions by adding their modules to `platform.extensions` in
+`.bos/config.toml`.
 
----
+## CLI
 
-## ⚙️ Configuration System
+The built-in CLI currently exposes:
 
-BOS AI uses a hierarchical, TOML-based configuration pattern that is specifically designed for isolation per-workspace.
+- `bos init`
+- `bos auth`
+- `bos start`
+- `bos stop`
+- `bos status`
+- `bos restart`
+- `bos tui`
 
-When you run a command, `bos` searches upwards from the current directory to find a `.bos/config.toml` file, eventually falling back to a global `~/.bos/config.toml` if none is found.
+Global workspace selection:
 
-### Config Structure (`.bos/config.toml`)
-- **`[platform]`**: Define environment variables, `.env` file locations, and structural extensions loading rules.
-- **`[[platform.agents]]`**: Array of dictionaries defining your agents. You can configure `system_prompt`, limits (`max_tokens`), required `tools`, `skills`, memory definitions, and even `subagents`.
-- **`[harness]`**: Define the overarching services all agents in the environment share. For example, configure the active `memory_store` directory or hook up an interceptor chain.
-- **`[cli]`**: Directives and default options for the command-line application (like specifying a default agent target).
-
-### Telegram Channel
-Configure a Telegram bot channel under `main.channels`:
-
-```toml
-[[main.channels]]
-name = "TelegramChannel"
-address = "telegram"
-token = "123456:telegram-bot-token"
-poll_timeout = 30
-allowed_chat_ids = [123456789]
+```bash
+bos -w /path/to/workspace start
 ```
 
-Each Telegram chat is mapped to a stable BOS `conversation_id` in the form `telegram:<chat_id>`, so replies return to the correct chat.
+## What BOS AI Is Good For
+
+- local-first agent runtimes
+- custom tool-using assistants
+- multi-agent or actor-based orchestration experiments
+- private deployments with self-hosted models
+- channel-driven agents exposed over HTTP or Telegram
+
+If you want a fixed hosted product, this repo is probably too low-level. If you
+want infrastructure for shaping your own agent runtime, this is the right layer.
