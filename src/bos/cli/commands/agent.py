@@ -35,6 +35,27 @@ async def _build_agent_system_prompt(ws: Workspace, agent_name: str | None = Non
         return await agent._build_system_prompt()
 
 
+async def _build_dummy_agent_system_prompt(ws: Workspace) -> str:
+    """Build the system prompt for a dummy agent with offensive capability_mode.
+
+    This creates a harness with capability_mode='offensive' and a default agent
+    (no name, no config) so that all tools, skills, memories, and subagents
+    are visible in the rendered prompt.
+    """
+    ws.bootstrap_platform()
+    harness_cfg = ws.config.get("harness", {}).copy()
+    harness_cfg["capability_mode"] = "offensive"
+    harness_cfg["bos_dir"] = ws.bos_dir
+    harness_cfg["workspace"] = ws.workspace
+
+    from bos.core import AgentHarness, _apply
+
+    harness = _apply(AgentHarness, harness_cfg)
+    async with harness:
+        agent = harness.create_agent()
+        return await agent._build_system_prompt()
+
+
 async def _connect_tui_client(client) -> None:
     try:
         await client.connect()
@@ -65,13 +86,25 @@ def _default_tui_client_id() -> str:
 
 
 @click.command()
-@click.argument("agent_name", required=False)
+@click.option(
+    "--agent", "agent_name", default=None,
+    help="Agent name to show the prompt for. Use '0' for a dummy agent with all tools/skills.",
+)
 @click.pass_context
 def prompt(ctx, agent_name: str | None):
-    """Print the built system prompt for an agent."""
+    """Print the built system prompt for an agent.
+
+    By default, shows the prompt for the configured main agent.
+    Use --agent <name> to show the prompt for a specific agent.
+    Use --agent 0 to show a dummy agent prompt with all available
+    tools and skills (offensive capability mode).
+    """
     ws, _ = _get_ws_and_rd(ctx)
     try:
-        rendered_prompt = asyncio.run(_build_agent_system_prompt(ws, agent_name))
+        if agent_name == "0":
+            rendered_prompt = asyncio.run(_build_dummy_agent_system_prompt(ws))
+        else:
+            rendered_prompt = asyncio.run(_build_agent_system_prompt(ws, agent_name))
     except ValueError as exc:
         raise click.UsageError(str(exc)) from exc
 
