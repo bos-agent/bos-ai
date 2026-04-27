@@ -144,7 +144,7 @@ class AgentHarness:
             os.chdir(self._original_cwd)
             self._original_cwd = None
 
-    def create_agent(self, agent_name: str | None = None, agent_cfg: dict[str, Any] = None):
+    def create_agent(self, agent_name: str | None = None, agent_cfg: dict[str, Any] = None) -> ReactAgent:
         if CURRENT_HARNESS.get(None) is None:
             raise RuntimeError("create_agent must be called within an active AgentHarness context.")
 

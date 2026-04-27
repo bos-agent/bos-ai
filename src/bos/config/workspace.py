@@ -10,6 +10,8 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal
 
+from bos.core import AgentHarness, _apply
+
 
 class WorkspaceResolutionError(RuntimeError):
     """Raised when the active BOS config source cannot be resolved unambiguously."""
@@ -353,9 +355,7 @@ class Workspace:
 
         return resolved_platform_cfg
 
-    def harness(self):
-        from bos.core import AgentHarness, _apply
-
+    def harness(self) -> AgentHarness:
         harness_cfg = self.config.get("harness", {}) | {"bos_dir": self.bos_dir, "workspace": self.workspace}
         return _apply(AgentHarness, harness_cfg)
 

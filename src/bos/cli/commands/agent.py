@@ -1,4 +1,4 @@
-"""``bos start/stop/status/restart/tui`` — agent process lifecycle commands."""
+"""``bos start/stop/status/restart/task/tui`` — agent process lifecycle commands."""
 
 from __future__ import annotations
 
@@ -9,10 +9,18 @@ import re
 import signal
 import sys
 import time
+import uuid
+from collections import deque
+from typing import Any
 
 import click
+from rich.console import Console
+from rich.live import Live
+from rich.panel import Panel
+from rich.text import Text
 
 from bos.config import Workspace, WorkspaceResolutionError
+from bos.protocol import TurnEvent
 
 
 def _get_ws_and_rd(ctx):
@@ -82,12 +90,112 @@ def _default_tui_client_id() -> str:
     return f"tui:{safe or 'local'}"
 
 
+def _turn_event_label(event: TurnEvent) -> str:
+    if event.parent_agent_name and event.agent_name and event.agent_name != event.parent_agent_name:
+        return f"{event.parent_agent_name} -> {event.agent_name}"
+    return event.agent_name or "agent"
+
+
+def _preview(value: Any, limit: int = 120) -> str:
+    text = str(value or "").replace("\n", " ").strip()
+    if len(text) <= limit:
+        return text
+    return text[: max(limit - 1, 0)].rstrip() + "…"
+
+
+class _TaskProgressDisplay:
+    """Compact live renderer for oneshot task turn events."""
+
+    def __init__(self, *, max_rows: int = 5) -> None:
+        self._console = Console(stderr=True)
+        self._enabled = self._console.is_terminal
+        self._live: Live | None = None
+        self._rows: deque[tuple[str, str]] = deque(maxlen=max_rows)
+
+    def __enter__(self) -> "_TaskProgressDisplay":
+        if self._enabled:
+            self._append("dim", "starting task…")
+            self._live = Live(
+                self._render(),
+                console=self._console,
+                refresh_per_second=8,
+                transient=True,
+                vertical_overflow="crop",
+            )
+            self._live.start()
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        if self._live is not None:
+            self._live.stop()
+            self._live = None
+
+    async def emit(self, event: TurnEvent) -> None:
+        if not self._enabled:
+            return
+        style, message = self._format_event(event)
+        if not message:
+            return
+        self._append(style, message)
+        if self._live is not None:
+            self._live.update(self._render())
+
+    def _append(self, style: str, message: str) -> None:
+        self._rows.append((style, _preview(message, 160)))
+
+    def _render(self) -> Panel:
+        body = Text()
+        for idx, (style, message) in enumerate(self._rows):
+            if idx:
+                body.append("\n")
+            body.append(message, style=style)
+        return Panel(body, title="bos task", border_style="cyan", padding=(0, 1))
+
+    def _format_event(self, event: TurnEvent) -> tuple[str, str]:
+        label = _turn_event_label(event)
+
+        if event.event_type == "turn" and event.phase == "start":
+            return "dim", f"▶ {label} started"
+
+        if event.event_type == "llm" and event.detail == "thinking":
+            return "italic dim", f"🤔 {label} thinking…"
+
+        if event.event_type == "llm" and event.detail == "tool_calls":
+            calls = []
+            for tc in event.tool_calls or []:
+                args = tc.get("arguments") or {}
+                args_str = ", ".join(f"{key}={value!r}" for key, value in args.items())
+                calls.append(f"{tc.get('name', '?')}({args_str})")
+            return "cyan", f"⚡ {label}: " + ("; ".join(calls) if calls else "tool call")
+
+        if event.event_type == "tool" and event.detail == "tool_call":
+            return "cyan", f"⚙ {label}: {event.tool_name or '?'} running…"
+
+        if event.event_type == "tool" and event.detail == "tool_result":
+            preview = _preview(event.content, 80)
+            suffix = f" → {preview}" if preview else ""
+            return "green", f"↳ {label}: {event.tool_name or '?'} done{suffix}"
+
+        if event.event_type == "response" and event.detail == "final":
+            return "bold green", "✓ final response ready"
+
+        if event.detail == "max_iteration":
+            return "yellow", f"⚠ {label} max iterations reached"
+
+        if event.detail == "error":
+            return "red", f"⚠ {label} error: {event.content or 'unknown error'}"
+
+        return "", ""
+
+
 # ── bos prompt ────────────────────────────────────────────────
 
 
 @click.command()
 @click.option(
-    "--agent", "agent_name", default=None,
+    "--agent",
+    "agent_name",
+    default=None,
     help="Agent name to show the prompt for. Use '0' for a dummy agent with all tools/skills.",
 )
 @click.pass_context
@@ -109,6 +217,92 @@ def prompt(ctx, agent_name: str | None):
         raise click.UsageError(str(exc)) from exc
 
     click.echo(rendered_prompt, nl=False)
+
+
+# ── bos task ──────────────────────────────────────────────────
+
+
+@click.command()
+@click.argument("message", required=False)
+@click.option(
+    "--agent",
+    "agent_name",
+    default=None,
+    help="Agent name to use (defaults to the configured main agent).",
+)
+@click.option(
+    "--model",
+    default=None,
+    help="Override the model for this task.",
+)
+@click.option(
+    "--stdin",
+    "use_stdin",
+    is_flag=True,
+    default=False,
+    help="Read task content from stdin (appended after MESSAGE if both given).",
+)
+@click.option(
+    "--max-iterations",
+    "max_iterations",
+    type=int,
+    default=None,
+    help="Override the maximum number of ReAct iterations.",
+)
+@click.pass_context
+def task(
+    ctx,
+    message: str | None,
+    agent_name: str | None,
+    model: str | None,
+    use_stdin: bool,
+    max_iterations: int | None,
+):
+    """Run a oneshot agent task and exit.
+
+    Boots the harness, creates an agent, sends a single message,
+    waits for the full ReAct loop to finish, prints the final
+    response, and exits.  No daemon, no channels.
+
+    \b
+    Examples:
+        bos task "refactor the auth module"
+        bos task --agent coder "write tests for utils.py"
+        cat spec.md | bos task --stdin
+        echo "explain this" | bos task --stdin --model gpt-4o
+    """
+    if use_stdin and not sys.stdin.isatty():
+        stdin_content = sys.stdin.read()
+        message = ((message or "") + "\n" + stdin_content).strip() if message else stdin_content.strip()
+    if not message:
+        raise click.UsageError("Provide a task message as an argument or via --stdin.")
+
+    ws, _ = _get_ws_and_rd(ctx)
+    ws.bootstrap_platform()
+    selected_agent = agent_name or ws.get_main_agent_name()
+
+    llm_args: dict = {}
+    if model:
+        llm_args["model"] = model
+
+    async def _run(event_sink: _TaskProgressDisplay | None = None) -> str:
+        agent_cfg = {"max_iterations": max_iterations} if max_iterations is not None else None
+        async with ws.harness() as harness:
+            agent = harness.create_agent(selected_agent, agent_cfg=agent_cfg)
+            return await agent.ask(
+                uuid.uuid4().hex,
+                message,
+                llm_args=llm_args or None,
+                event_sink=event_sink,
+            )
+
+    try:
+        with _TaskProgressDisplay() as progress:
+            result = asyncio.run(_run(progress))
+    except ValueError as exc:
+        raise click.UsageError(str(exc)) from exc
+
+    click.echo(result)
 
 
 # ── bos start ─────────────────────────────────────────────────
