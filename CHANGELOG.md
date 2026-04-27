@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.1.1 (2026-04-27)
+
+### Bug Fixes
+
+- **release**: Advance past deleted PyPI 0.1.0 artifact
+  ([`33555fe`](https://github.com/bos-agent/bos-ai/commit/33555fe61234db051fceebd766492a59a73c0cd2))
+
+
 ## v0.1.0 (2026-04-27)
 
 ### Features
