@@ -1,0 +1,122 @@
+[platform]
+envfile = ".env"
+
+# A list of module names or paths to the modules
+extensions = ["bos.extensions.all"]
+# External .toml and .md agent definitions from .bos/agents/ are auto-scanned by default.
+# Markdown agent frontmatter supplies settings; the Markdown body is the system_prompt.
+# Override the scan directories if needed:
+# agent_dirs = ["agents", "more_agents"]
+
+[platform.envs]
+# BOS_CODEX_AUTH_FILE = "llm-auth/codex.auth.json"
+
+[platform.agent_defaults]
+# NOTE: The shipped default model below has been manually verified for image understanding.
+# Automated phase-1 multimodal regression coverage still targets the `_default` provider on an explicitly chosen OpenAI-compatible model.
+# PDF/file inputs remain unsupported in phase 1 until the reserved `file` path is activated end to end.
+model = "gemini/gemini-3.1-pro-preview" # "codex/gpt-5.3-codex"
+reasoning_effort = "medium"
+max_tokens = 131072
+max_iterations = 25
+
+[[platform.agents]]
+name = "main"
+description = "The main agent."
+
+# Agent `name` is authoritative. If an external file under .bos/agents/
+# defines the same exact name, the later-loaded definition wins.
+# Case-only collisions such as "main" vs "Main" are rejected.
+system_prompt = """
+You are an AI agent.
+## Subagent instructions
+When a task benefits from focused analysis, delegate it to the researcher
+subagent first and then synthesize the final answer for the user.
+## Memory Structure
+You are operating with a partitioned memory store. While processing inputs,
+reference and update these specific modules to maintain continuity:
+    soul: Your core drives, temperament, and "inner voice."
+    history: The chronological log of the current interaction.
+    memory: The long-term repository for learned facts and preferences.
+    user: The user's profile and preferences.
+"""
+
+[[platform.agents]]
+name = "researcher"
+description = "Focused repo analyst used through AskSubagent."
+reasoning_effort = "high"
+
+system_prompt = """
+You are the researcher subagent.
+
+Work only on the delegated task, stay inside the workspace boundary, and return
+ concise findings that the main agent can reuse directly.
+"""
+
+[harness]
+capability_mode = "defensive" # "offensive" makes scratch agents allow all tools/skills/memories/subagents
+
+# Tool-specific runtime configuration is passed to tools as `tool_config`.
+# Uncomment to prefer Tavily for WebSearch and fall back to DuckDuckGo on quota/rate-limit/server errors.
+#
+#[harness.tools.WebSearch]
+#priority = ["tavily", "duckduckgo"]
+#timeout_seconds = 15
+#max_results = 5
+#
+#[harness.tools.WebSearch.providers.tavily]
+#api_key_env = "TAVILY_API_KEY"
+#search_depth = "basic"
+#fallback_on_status = [429, 432, 433, 500, 502, 503, 504]
+
+[harness.skills_loader]
+skill_dirs = ["skills"]
+
+[harness.memory_store]
+name = "MarkdownMemoryStore"
+store_dir = "memories"
+
+[harness.message_store]
+name = "JsonlMessageStore"
+store_dir = "messages"
+
+[harness.mail_route]
+name = "JsonlMailRoute"
+store_dir = "mailboxes"
+
+[[harness.subagents]]
+name = "_default"
+task_template = """
+--- Sub-agent Instructions ---
+You are a background sub-agent with name `{agent_name}`. Work only on the delegated task,
+use only the tools available to you, do not ask the user questions, and finish with a concise
+result. You can only modify or create files under {workspace}.
+--- Task Description ---
+{task}
+"""
+exclude_tools = ["UpdateMemory"]
+
+
+[main]
+agent = "main"
+
+[main.runtime]
+kind = "process" # set to "docker" to make `bos start` launch a container
+# image = "ghcr.io/your-org/bos-ai:latest"
+workspace_dir = "/workspace"
+# bos_dir = "/bos"
+
+[[main.channels]]
+name = "HttpChannel"
+bind_address = "channel@http"
+target_address = "agent@main"
+host = "127.0.0.1"   # automatically becomes 0.0.0.0 in Docker
+port = 5920
+
+#[[main.channels]]
+#name = "TelegramChannel"
+#bind_address = "channel@telegram"
+#target_address = "agent@main"
+#token = "123456:telegram-bot-token"
+#poll_timeout = 30
+#allowed_chat_ids = [123456789]        # optional allowlist
