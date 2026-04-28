@@ -8,6 +8,7 @@ from bos.core import AgentHarness, LLMResponse, ToolCallRequest, ep_agent, ep_pr
 from bos.core.agent import ReactAgent
 from bos.core.registry import ToolRegistry
 from bos.extensions.mailboxes import jsonl_mailbox  # noqa: F401
+from bos.protocol import MessageType
 
 
 def test_harness_local_tools_describe_ask_subagent(caplog):
@@ -50,6 +51,163 @@ async def test_harness_send_mail_falls_back_to_agent_address(tmp_path):
         assert message is not None
         assert message.sender == "agent@__unknown__"
         assert message.content == "hello"
+
+
+@pytest.mark.asyncio
+async def test_harness_peer_task_tools_create_task_and_dispatch_to_actor(tmp_path):
+    bos_dir = tmp_path / ".bos"
+    bos_dir.mkdir()
+    actors = [
+        {"name": "main", "agent": "main", "address": "agent@main"},
+        {"name": "researcher", "agent": "researcher", "address": "agent@researcher"},
+    ]
+
+    async with AgentHarness(
+        mail_route={"name": "JsonlMailRoute", "store_dir": tmp_path / "mail"},
+        bos_dir=bos_dir,
+        workspace=tmp_path,
+        actors=actors,
+        task_ledger={"path": "state/tasks.jsonl"},
+    ) as harness:
+        receiver = harness.mail_route.bind("agent@researcher")
+        await receiver.receive_nowait()
+        tools = harness._create_local_tools(agent_name="main")
+
+        result = await tools.invoke_async(
+            "CreateTask",
+            {"assigned_to": "researcher", "goal": "Research the runner", "context": "Keep it concise."},
+        )
+
+        payload = json.loads(result)
+        message = await receiver.receive_nowait()
+
+    assert payload["task"]["assigned_to"] == "agent@researcher"
+    assert payload["task"]["status"] == "queued"
+    assert payload["binding"]["chat_id"].startswith(f"task:{payload['task']['id']}:worker:")
+    assert message is not None
+    assert message.recipient == "agent@researcher"
+    assert message.chat_id == payload["binding"]["chat_id"]
+    assert message.metadata["task_id"] == payload["task"]["id"]
+
+
+@pytest.mark.asyncio
+async def test_harness_provide_task_input_routes_to_bound_worker_chat(tmp_path):
+    bos_dir = tmp_path / ".bos"
+    bos_dir.mkdir()
+    actors = [
+        {"name": "main", "agent": "main", "address": "agent@main"},
+        {"name": "researcher", "agent": "researcher", "address": "agent@researcher"},
+    ]
+
+    async with AgentHarness(
+        mail_route={"name": "JsonlMailRoute", "store_dir": tmp_path / "mail"},
+        bos_dir=bos_dir,
+        workspace=tmp_path,
+        actors=actors,
+        task_ledger={"path": "state/tasks.jsonl"},
+    ) as harness:
+        receiver = harness.mail_route.bind("agent@researcher")
+        await receiver.receive_nowait()
+        tools = harness._create_local_tools(agent_name="main")
+        created = json.loads(
+            await tools.invoke_async(
+                "CreateTask",
+                {"assigned_to": "agent@researcher", "goal": "Research the runner"},
+            )
+        )
+        initial = await receiver.receive_nowait()
+
+        result = await tools.invoke_async(
+            "ProvideTaskInput",
+            {"task_id": created["task"]["id"], "content": "Use the existing runner tests."},
+        )
+        routed = await receiver.receive_nowait()
+
+    assert initial is not None
+    assert json.loads(result)["binding"]["chat_id"] == created["binding"]["chat_id"]
+    assert routed is not None
+    assert routed.content_type == MessageType.MESSAGE
+    assert routed.chat_id == created["binding"]["chat_id"]
+    assert routed.metadata["task_id"] == created["task"]["id"]
+
+
+@pytest.mark.asyncio
+async def test_harness_wait_for_input_notifies_task_creator_and_reuses_control_chat(tmp_path):
+    bos_dir = tmp_path / ".bos"
+    bos_dir.mkdir()
+    actors = [
+        {"name": "main", "agent": "main", "address": "agent@main"},
+        {"name": "researcher", "agent": "researcher", "address": "agent@researcher"},
+        {"name": "reviewer", "agent": "reviewer", "address": "agent@reviewer"},
+    ]
+
+    async with AgentHarness(
+        mail_route={"name": "JsonlMailRoute", "store_dir": tmp_path / "mail"},
+        bos_dir=bos_dir,
+        workspace=tmp_path,
+        actors=actors,
+        task_ledger={"path": "state/tasks.jsonl"},
+    ) as harness:
+        reviewer_mailbox = harness.mail_route.bind("agent@reviewer")
+        researcher_mailbox = harness.mail_route.bind("agent@researcher")
+        await reviewer_mailbox.receive_nowait()
+        await researcher_mailbox.receive_nowait()
+        researcher_tools = harness._create_local_tools(agent_name="researcher")
+        reviewer_tools = harness._create_local_tools(agent_name="reviewer")
+        created = json.loads(
+            await researcher_tools.invoke_async(
+                "CreateTask",
+                {"assigned_to": "reviewer", "goal": "Review the research"},
+            )
+        )
+        await reviewer_mailbox.receive_nowait()
+
+        await reviewer_tools.invoke_async(
+            "WaitForInput",
+            {"task_id": created["task"]["id"], "prompt": "Which standard should I use?"},
+        )
+        first_notice = await researcher_mailbox.receive_nowait()
+        await reviewer_tools.invoke_async(
+            "WaitForInput",
+            {"task_id": created["task"]["id"], "prompt": "Confirm the standard."},
+        )
+        second_notice = await researcher_mailbox.receive_nowait()
+
+    assert first_notice is not None
+    assert second_notice is not None
+    assert first_notice.recipient == "agent@researcher"
+    assert first_notice.chat_id == second_notice.chat_id
+    assert first_notice.metadata["task_id"] == created["task"]["id"]
+    assert first_notice.metadata["no_reply"] is True
+
+
+@pytest.mark.asyncio
+async def test_harness_list_actors_returns_configured_registry():
+    harness = AgentHarness(
+        actors=[
+            {"name": "main", "agent": "main", "address": "agent@main"},
+            {"name": "reviewer", "agent": "reviewer", "address": "agent@reviewer"},
+        ]
+    )
+
+    tools = harness._create_local_tools(agent_name="main")
+    actors = json.loads(await tools.invoke_async("ListActors"))
+
+    assert [(actor["name"], actor["address"], actor["role"]) for actor in actors] == [
+        ("main", "agent@main", "coordinator"),
+        ("reviewer", "agent@reviewer", "worker"),
+    ]
+
+
+def test_harness_peer_task_tools_are_not_exposed_for_default_single_actor():
+    harness = AgentHarness()
+    tools = harness._create_local_tools(agent_name="main")
+
+    tool_names = set(tools.to_openai_schema())
+
+    assert "AskSubagent" in tool_names
+    assert "CreateTask" not in tool_names
+    assert "ListActors" not in tool_names
 
 
 @pytest.mark.asyncio

@@ -29,6 +29,16 @@ def test_supplied_chat_updates_cursor(tmp_path):
     assert state.get_cursor("tui:host") == "chat-a"
 
 
+def test_task_owned_chat_ids_cannot_be_client_cursors(tmp_path):
+    state = ChatState(path=tmp_path / "chats.json")
+
+    with pytest.raises(ChatStateError, match="Task-owned chat ids"):
+        state.resolve_for_client("tui:host", "task:task-a:worker:abc")
+
+    with pytest.raises(ChatStateError, match="Task-owned chat ids"):
+        state.set_alias("task-a", "task:task-a:worker:abc")
+
+
 def test_aliases_normalize_resolve_and_delete(tmp_path):
     state = ChatState(path=tmp_path / "chats.json")
 

@@ -70,6 +70,7 @@ from .harness import (
 )
 from .llm import LLMClient, LLMResponse, ToolCallRequest
 from .registry import Extension, ExtensionPoint, ToolRegistry
+from .tasks import ActorRef, ChatTaskBinding, TaskEvent, TaskLedger, TaskLedgerError, TaskRecord
 
 __version__ = "0.1.0"
 
@@ -79,8 +80,10 @@ __all__ = [
     "Agent",
     "AgentActor",
     "AgentHarness",
+    "ActorRef",
     "CURRENT_HARNESS",
     "CURRENT_MAILBOX",
+    "ChatTaskBinding",
     "Channel",
     "ChainReactInterceptor",
     "Closeable",
@@ -110,6 +113,10 @@ __all__ = [
     "TurnContext",
     "TurnInterceptor",
     "TurnEvent",
+    "TaskEvent",
+    "TaskLedger",
+    "TaskLedgerError",
+    "TaskRecord",
     "bootstrap_platform",
     "derive_event_sink",
     "ep_actor_command",

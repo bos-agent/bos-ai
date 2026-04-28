@@ -325,6 +325,26 @@ class ResolvedChannelConfig:
         return {"name": self.name, "target_address": self.target_address} | self.options
 
 
+@dataclass(frozen=True)
+class ResolvedActorConfig:
+    name: str
+    agent: str
+    address: str
+    role: Literal["coordinator", "worker"] = "worker"
+    description: str | None = None
+    capabilities: list[str] = field(default_factory=list)
+
+    def actor_ref(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "agent": self.agent,
+            "address": self.address,
+            "role": self.role,
+            "description": self.description,
+            "capabilities": list(self.capabilities),
+        }
+
+
 class Workspace:
     def __init__(self, workspace: str | Path = "."):
         self.workspace = _resolve_workspace_path(workspace)
@@ -356,7 +376,11 @@ class Workspace:
         return resolved_platform_cfg
 
     def harness(self) -> AgentHarness:
-        harness_cfg = self.config.get("harness", {}) | {"bos_dir": self.bos_dir, "workspace": self.workspace}
+        harness_cfg = self.config.get("harness", {}) | {
+            "bos_dir": self.bos_dir,
+            "workspace": self.workspace,
+            "actors": [actor.actor_ref() for actor in self.resolve_actors()],
+        }
         return _apply(AgentHarness, harness_cfg)
 
     def enable_interceptors(self, interceptors: list[str | dict[str, Any]]):
@@ -374,6 +398,108 @@ class Workspace:
 
     def get_main_agent_address(self) -> str:
         return "agent@main"
+
+    def _configured_main_agent_name(self) -> str | None:
+        configured = self.get_setting("main.agent")
+        if configured in (None, ""):
+            return None
+        configured = str(configured).strip()
+        return configured or None
+
+    def resolve_actors(self) -> list[ResolvedActorConfig]:
+        raw_main = self.config.get("main", {})
+        if not isinstance(raw_main, dict):
+            raise ValueError("[main] must be a table.")
+
+        main_agent = self._configured_main_agent_name()
+        raw_actors = raw_main.get("actors")
+        if raw_actors is None:
+            if main_agent is None:
+                raise ValueError("main.agent is required when main.actors is not configured.")
+            return [
+                ResolvedActorConfig(
+                    name="main",
+                    agent=main_agent,
+                    address=self.get_main_agent_address(),
+                    role="coordinator",
+                )
+            ]
+        if not isinstance(raw_actors, list):
+            raise ValueError("main.actors must be a list of tables.")
+
+        actors: list[ResolvedActorConfig] = []
+        seen_names: set[str] = set()
+        seen_addresses: set[str] = set()
+
+        def add_actor(
+            *,
+            name: str,
+            agent: str,
+            address: str,
+            description: str | None = None,
+            capabilities: list[str] | None = None,
+        ) -> None:
+            if name in seen_names:
+                raise ValueError(f"Duplicate actor name: {name!r}")
+            seen_names.add(name)
+            if not address.startswith("agent@"):
+                raise ValueError(f"Actor {name!r} address must start with 'agent@': {address!r}")
+            if address in seen_addresses:
+                raise ValueError(f"Duplicate actor address: {address!r}")
+            seen_addresses.add(address)
+            actors.append(
+                ResolvedActorConfig(
+                    name=name,
+                    agent=agent,
+                    address=address,
+                    role="coordinator" if name == "main" else "worker",
+                    description=description,
+                    capabilities=list(capabilities or []),
+                )
+            )
+
+        if main_agent is not None:
+            add_actor(name="main", agent=main_agent, address=self.get_main_agent_address())
+
+        for idx, raw_actor in enumerate(raw_actors, start=1):
+            if not isinstance(raw_actor, dict):
+                raise ValueError(f"main.actors[{idx}] must be a table, got {type(raw_actor).__name__}.")
+            if "role" in raw_actor:
+                raise ValueError("Actor role is derived from name; main.actors entries must not define role.")
+            name = str(raw_actor.get("name") or "").strip()
+            if not name:
+                raise ValueError(f"main.actors[{idx}] must define a non-empty name.")
+            if main_agent is not None and name == "main":
+                raise ValueError("main.actors must not include 'main' when main.agent is configured.")
+
+            default_address = "agent@main" if name == "main" else f"agent@{name}"
+            address = str(raw_actor.get("address") or default_address).strip()
+
+            capabilities = raw_actor.get("capabilities") or []
+            if not isinstance(capabilities, list) or not all(isinstance(item, str) for item in capabilities):
+                raise ValueError(f"Actor {name!r} capabilities must be a list of strings.")
+
+            description = raw_actor.get("description")
+            if description is not None and not isinstance(description, str):
+                raise ValueError(f"Actor {name!r} description must be a string.")
+
+            agent = str(raw_actor.get("agent") or name).strip()
+            if not agent:
+                raise ValueError(f"Actor {name!r} agent must be non-empty.")
+
+            add_actor(
+                name=name,
+                agent=agent,
+                address=address,
+                description=description,
+                capabilities=list(capabilities),
+            )
+
+        if "main" not in seen_names:
+            raise ValueError(
+                "main.actors must include exactly one actor named 'main' when main.agent is not configured."
+            )
+        return actors
 
     def get_runtime_config(self, *, force_kind: str | None = None) -> AgentRuntimeConfig:
         runtime_cfg = self.config.get("main", {}).get("runtime", {})
@@ -401,7 +527,9 @@ class Workspace:
         return (self.bos_dir / Path(envfile).expanduser()).resolve()
 
     def resolve_channels(self, *, runtime_kind: str = "process") -> list[ResolvedChannelConfig]:
-        actor_address = self.get_main_agent_address()
+        actors = self.resolve_actors()
+        coordinator = next((actor for actor in actors if actor.role == "coordinator"), actors[0])
+        actor_address = coordinator.address
         raw_channels = self.config.get("main", {}).get("channels") or [
             {
                 "name": "HttpChannel",
@@ -445,7 +573,7 @@ class Workspace:
                 )
             )
 
-        self._validate_channel_topology(channels, actor_address=actor_address)
+        self._validate_channel_topology(channels, actor_addresses={actor.address for actor in actors})
         return channels
 
     @staticmethod
@@ -463,7 +591,7 @@ class Workspace:
         return normalized
 
     @staticmethod
-    def _validate_channel_topology(channels: list[ResolvedChannelConfig], *, actor_address: str) -> None:
+    def _validate_channel_topology(channels: list[ResolvedChannelConfig], *, actor_addresses: set[str]) -> None:
         channel_names_by_address = {channel.bind_address: channel.name for channel in channels}
         for channel in channels:
             if channel.name == "BroadcastChannel":
@@ -472,7 +600,7 @@ class Workspace:
                 raise ValueError(f"Channel {channel.bind_address!r} cannot target itself.")
 
             if channel.target_address.startswith("agent@"):
-                if channel.target_address != actor_address:
+                if channel.target_address not in actor_addresses:
                     raise ValueError(
                         f"Channel {channel.bind_address!r} targets unknown actor address {channel.target_address!r}."
                     )
@@ -488,7 +616,7 @@ class Workspace:
                     f"Channel {channel.bind_address!r} targets unknown channel address {channel.target_address!r}."
                 )
             raise ValueError(
-                f"Channel {channel.bind_address!r} must target the actor address {actor_address!r}; "
+                f"Channel {channel.bind_address!r} must target a configured actor address; "
                 f"channel-to-channel routing is no longer supported."
             )
 

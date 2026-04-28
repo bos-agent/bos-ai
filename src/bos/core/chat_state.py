@@ -45,6 +45,8 @@ class ChatState:
     def set_cursor(self, client_id: str, chat_id: str) -> None:
         client_id = self._require_nonempty("client_id", client_id)
         chat_id = self._require_nonempty("chat_id", chat_id)
+        if is_task_chat_id(chat_id):
+            raise ChatStateError("Task-owned chat ids cannot be used as ordinary client cursors.")
         data = self._read()
         data["client_cursors"][client_id] = chat_id
         self._write()
@@ -57,6 +59,8 @@ class ChatState:
     def set_alias(self, alias: str, chat_id: str, *, force: bool = False) -> str:
         normalized = normalize_alias(alias)
         chat_id = self._require_nonempty("chat_id", chat_id)
+        if is_task_chat_id(chat_id):
+            raise ChatStateError("Task-owned chat ids cannot be used as ordinary chat aliases.")
         data = self._read()
         existing = data["aliases"].get(normalized)
         if existing and existing != chat_id and not force:
@@ -143,3 +147,7 @@ def normalize_alias(alias: str) -> str:
     if not re.fullmatch(r"[a-z0-9_.-]+", normalized):
         raise ChatStateError("Alias may only contain letters, numbers, dashes, underscores, and dots.")
     return normalized
+
+
+def is_task_chat_id(chat_id: str) -> bool:
+    return isinstance(chat_id, str) and chat_id.startswith("task:")

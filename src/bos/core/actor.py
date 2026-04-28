@@ -16,6 +16,7 @@ from .chat_state import ChatState
 from .contract import ep_actor_command
 from .events import MailboxEventSink
 from .harness import CURRENT_HARNESS, CURRENT_MAILBOX
+from .tasks import task_chat_id, task_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -64,11 +65,12 @@ class AgentActor:
     buffers, and generation counter.
     """
 
-    def __init__(self, agent: Any, mailbox: Any, chat_state: ChatState | None = None):
+    def __init__(self, agent: Any, mailbox: Any, chat_state: ChatState | None = None, task_ledger: Any = None):
         self._address = mailbox.address
         self._agent = agent
         self._mailbox = mailbox
         self._chat_state = chat_state or ChatState()
+        self._task_ledger = task_ledger
         self._sessions: dict[str, SessionState] = {}
         self._command_tasks: set[asyncio.Task] = set()
 
@@ -103,6 +105,22 @@ class AgentActor:
                     continue
 
                 chat_id = env.chat_id
+                if self._task_ledger is not None:
+                    try:
+                        self._task_ledger.validate_task_envelope(
+                            chat_id=chat_id,
+                            metadata=env.metadata,
+                            actor_address=self._address,
+                        )
+                    except Exception as exc:
+                        await self._mailbox.send(
+                            env.sender,
+                            f"(error: {exc})",
+                            content_type=MessageType.SYSTEM,
+                            chat_id=env.chat_id,
+                            metadata={"task_validation_error": str(exc)},
+                        )
+                        continue
                 session = self._get_or_create_session(chat_id)
 
                 if env.content_type == MessageType.COMMAND:
@@ -204,15 +222,18 @@ class AgentActor:
 
         content = self._merge_pending_messages(messages)
         session.buffers.interrupts.clear()
-        session.execution.reply_recipient = messages[-1].sender
-        session.execution.reply_chat_id = messages[-1].chat_id
+        no_reply = bool(messages[-1].metadata.get("no_reply"))
+        reply_recipient = None if no_reply else messages[-1].sender
+        reply_chat_id = None if no_reply else messages[-1].chat_id
+        session.execution.reply_recipient = reply_recipient
+        session.execution.reply_chat_id = reply_chat_id
         generation = session.execution.generation
         session.execution.task = asyncio.create_task(
             self._run_ask(
                 chat_id=chat_id,
                 generation=generation,
-                reply_recipient=messages[-1].sender,
-                reply_chat_id=messages[-1].chat_id,
+                reply_recipient=reply_recipient,
+                reply_chat_id=reply_chat_id,
                 content=content,
             )
         )
@@ -222,7 +243,7 @@ class AgentActor:
         *,
         chat_id: str,
         generation: int,
-        reply_recipient: str,
+        reply_recipient: str | None,
         reply_chat_id: str | None,
         content: MessageContent,
     ) -> None:
@@ -230,7 +251,11 @@ class AgentActor:
             token: contextvars.Token | None = None
             try:
                 token = CURRENT_MAILBOX.set(self._mailbox)
-                event_sink = _RouteAwareMailboxEventSink(self._mailbox, reply_recipient, reply_chat_id)
+                event_sink = (
+                    _RouteAwareMailboxEventSink(self._mailbox, reply_recipient, reply_chat_id)
+                    if reply_recipient is not None
+                    else None
+                )
                 response = await self._agent.ask(
                     chat_id,
                     content,
@@ -245,11 +270,19 @@ class AgentActor:
             if not self._execution_is_current(chat_id, generation):
                 return
 
-            await self._mailbox.send(
-                reply_recipient,
-                response,
-                chat_id=reply_chat_id,
-            )
+            if reply_recipient is not None:
+                routed_chat_id, routed_metadata = self._task_response_route(
+                    source_chat_id=chat_id,
+                    reply_chat_id=reply_chat_id,
+                    reply_recipient=reply_recipient,
+                    response=response,
+                )
+                await self._mailbox.send(
+                    reply_recipient,
+                    response,
+                    chat_id=routed_chat_id,
+                    metadata=routed_metadata,
+                )
 
             if not self._execution_is_current(chat_id, generation):
                 return
@@ -260,11 +293,54 @@ class AgentActor:
             if not messages:
                 break
 
-            reply_recipient = messages[-1].sender
-            reply_chat_id = messages[-1].chat_id
+            no_reply = bool(messages[-1].metadata.get("no_reply"))
+            reply_recipient = None if no_reply else messages[-1].sender
+            reply_chat_id = None if no_reply else messages[-1].chat_id
             session.execution.reply_recipient = reply_recipient
             session.execution.reply_chat_id = reply_chat_id
             content = self._merge_pending_messages(messages)
+
+    def _task_response_route(
+        self,
+        *,
+        source_chat_id: str,
+        reply_chat_id: str | None,
+        reply_recipient: str,
+        response: str,
+    ) -> tuple[str | None, dict[str, Any]]:
+        if self._task_ledger is None:
+            return reply_chat_id, {}
+        binding = self._task_ledger.get_binding(source_chat_id)
+        if binding is None or binding.actor_address != self._address:
+            return reply_chat_id, {}
+        task = self._task_ledger.get_task(binding.task_id)
+        self._task_ledger.append_event(
+            task.id,
+            "progress",
+            actor=self._address,
+            content=response,
+            metadata={"source_chat_id": source_chat_id, "reply_recipient": reply_recipient},
+        )
+        if binding.purpose != "worker" or not reply_recipient.startswith("agent@") or reply_recipient == self._address:
+            return reply_chat_id, task_metadata(task, chat_id=reply_chat_id or source_chat_id)
+
+        notify_binding = self._task_ledger.first_binding(
+            task.id,
+            actor_address=reply_recipient,
+            purpose="coordinator",
+        )
+        if notify_binding is None:
+            notify_binding = self._task_ledger.bind_chat(
+                task_id=task.id,
+                chat_id=task_chat_id(task.id, "coordinator"),
+                actor_address=reply_recipient,
+                purpose="coordinator",
+            )
+        metadata = task_metadata(task, chat_id=notify_binding.chat_id) | {
+            "task_notification": True,
+            "no_reply": True,
+        }
+        return notify_binding.chat_id, metadata
 
     async def _handle_command(self, env: Envelope) -> None:
         parts = env.content.split(None, 1)
