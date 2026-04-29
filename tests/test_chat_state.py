@@ -29,6 +29,16 @@ def test_supplied_chat_updates_cursor(tmp_path):
     assert state.get_cursor("tui:host") == "chat-a"
 
 
+def test_reserved_chat_ids_cannot_be_client_cursors(tmp_path):
+    state = ChatState(path=tmp_path / "chats.json", reserved_chat_id=lambda chat_id: chat_id.startswith("reserved:"))
+
+    with pytest.raises(ChatStateError, match="Reserved chat ids"):
+        state.resolve_for_client("tui:host", "reserved:abc")
+
+    with pytest.raises(ChatStateError, match="Reserved chat ids"):
+        state.set_alias("reserved-a", "reserved:abc")
+
+
 def test_aliases_normalize_resolve_and_delete(tmp_path):
     state = ChatState(path=tmp_path / "chats.json")
 

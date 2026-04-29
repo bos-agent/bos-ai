@@ -61,6 +61,7 @@ Useful lifecycle commands:
 
 ```bash
 bos status
+bos actors
 bos restart
 bos stop
 ```
@@ -96,8 +97,9 @@ runtime-facing agent config is produced through a resolved platform view.
 For the full rule set and resolver behavior, see
 `docs/architecture/config-workspace.md`.
 
-The primary actor is always addressed as `agent@main`. The selected main agent
-implementation is configured separately under `[main].agent`.
+By default, the primary coordinator actor is addressed as `agent@main`. The
+selected main agent implementation is configured separately under
+`[main].agent`.
 
 Example channel configuration:
 
@@ -234,6 +236,44 @@ Task:
 derives that child `chat_id` from the current parent thread plus a
 short agent tag and random suffix, for example
 `parent-chat~researcher1a2b3c4d`.
+
+## Peer Actor Tasks
+
+BOS also supports configured peer actors for asynchronous, durable delegation.
+Unlike `AskSubagent`, peer actor tasks are not synchronous child calls. Each
+configured actor is a long-running `AgentActor` with a stable address, and task
+delegation is recorded in the internal task ledger before dispatch.
+
+Minimal topology:
+
+```toml
+[main]
+agent = "main"
+
+[[main.actors]]
+name = "researcher"
+agent = "researcher"
+capabilities = ["research"]
+```
+
+The actor named `main` is always the coordinator. If `main.agent` is present,
+it defines that coordinator and `[[main.actors]]` contains only workers. If
+`main.agent` is omitted, `[[main.actors]]` must include exactly one actor named
+`main`. Worker actors may create child tasks through `CreateTask`, but
+workflow-affecting delegation must be ledger-backed. Informal `SendMail` is
+still available for normal messages.
+
+Task-owned chats are separate from client-facing chats:
+
+- `ChatState` owns ordinary `client_id -> chat_id` resume state.
+- The task ledger owns task chat bindings.
+- A task may own multiple chat contexts.
+- A single chat id cannot belong to multiple tasks.
+- Ordinary client resume rejects `task:` chat ids unless an explicit
+  task-inspection/control command is added.
+
+Useful peer task tools include `ListActors`, `CreateTask`, `UpdateTask`,
+`WaitForInput`, `ProvideTaskInput`, `CompleteTask`, and `AbortTask`.
 
 ## Extension Points
 

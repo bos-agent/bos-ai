@@ -148,6 +148,7 @@ class AgentHarness:
         if CURRENT_HARNESS.get(None) is None:
             raise RuntimeError("create_agent must be called within an active AgentHarness context.")
 
+        agent_cfg = dict(agent_cfg or {})
         if not any([agent_name, agent_cfg]):
             capability_default = [] if self._capability_mode == "defensive" else None
             agent_cfg = {
@@ -160,7 +161,7 @@ class AgentHarness:
             }
 
         local_tools = self._create_local_tools(agent_name=agent_name)
-        kwargs = (agent_cfg or {}) | {
+        kwargs = agent_cfg | {
             "agent_name": agent_name or (agent_cfg or {}).get("name"),
             "llm": self.llm,
             "message_store": self.message_store,

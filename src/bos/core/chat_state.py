@@ -4,7 +4,7 @@ import json
 import re
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 
 class ChatStateError(ValueError):
@@ -14,13 +14,19 @@ class ChatStateError(ValueError):
 class ChatState:
     """Server-side client cursor and alias state for chats."""
 
-    def __init__(self, bos_dir: str | Path | None = None, path: str | Path | None = None) -> None:
+    def __init__(
+        self,
+        bos_dir: str | Path | None = None,
+        path: str | Path | None = None,
+        reserved_chat_id: Callable[[str], bool] | None = None,
+    ) -> None:
         if path is not None:
             self._path = Path(path).expanduser().resolve()
         elif bos_dir is not None:
             self._path = Path(bos_dir).expanduser().resolve() / "state" / "chats.json"
         else:
             self._path = None
+        self._reserved_chat_id = reserved_chat_id
         self._data: dict[str, dict[str, str]] = {"client_cursors": {}, "aliases": {}}
         self._loaded = False
 
@@ -45,6 +51,7 @@ class ChatState:
     def set_cursor(self, client_id: str, chat_id: str) -> None:
         client_id = self._require_nonempty("client_id", client_id)
         chat_id = self._require_nonempty("chat_id", chat_id)
+        self._reject_reserved_chat_id(chat_id, "client cursors")
         data = self._read()
         data["client_cursors"][client_id] = chat_id
         self._write()
@@ -57,6 +64,7 @@ class ChatState:
     def set_alias(self, alias: str, chat_id: str, *, force: bool = False) -> str:
         normalized = normalize_alias(alias)
         chat_id = self._require_nonempty("chat_id", chat_id)
+        self._reject_reserved_chat_id(chat_id, "chat aliases")
         data = self._read()
         existing = data["aliases"].get(normalized)
         if existing and existing != chat_id and not force:
@@ -85,6 +93,10 @@ class ChatState:
 
     def list_aliases(self) -> dict[str, str]:
         return dict(self._read()["aliases"])
+
+    def _reject_reserved_chat_id(self, chat_id: str, purpose: str) -> None:
+        if self._reserved_chat_id is not None and self._reserved_chat_id(chat_id):
+            raise ChatStateError(f"Reserved chat ids cannot be used as ordinary {purpose}.")
 
     @staticmethod
     def _require_nonempty(name: str, value: str) -> str:

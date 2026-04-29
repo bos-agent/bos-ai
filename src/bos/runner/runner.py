@@ -33,18 +33,38 @@ async def start(workspace: Workspace) -> None:
     """
     from bos.core import AgentActor, Channel, _create_extension_instance, ep_channel
 
-    agent_name = workspace.get_main_agent_name()
-    actor_address = workspace.get_main_agent_address()
+    actors_cfg = workspace.resolve_actors()
     channels_cfg = workspace.resolve_channels(runtime_kind=os.environ.get("BOS_RUNTIME", "process"))
 
-    logger.info("Starting harness for agent=%r with %d channel(s)", agent_name, len(channels_cfg))
+    logger.info("Starting harness with %d actor(s) and %d channel(s)", len(actors_cfg), len(channels_cfg))
 
     async with workspace.harness() as harness:
         from bos.core.chat_state import ChatState
 
-        chat_state = ChatState(workspace.bos_dir)
-        agent = harness.create_agent(agent_name)
-        actor = AgentActor(agent, harness.mail_route.bind(actor_address), chat_state=chat_state)
+        chat_state = ChatState(
+            workspace.bos_dir,
+            reserved_chat_id=getattr(harness, "is_reserved_chat_id", None),
+        )
+        task_ledger = getattr(harness, "task_ledger", None)
+        if task_ledger is not None:
+            coordinator_addresses = {actor.address for actor in actors_cfg if actor.role == "coordinator"}
+            task_ledger.mark_active_tasks_interrupted(
+                exclude_assignees=coordinator_addresses,
+                reason="restart",
+            )
+        actors = [
+            AgentActor(
+                harness.create_agent(actor_cfg.agent),
+                harness.mail_route.bind(actor_cfg.address),
+                chat_state=chat_state,
+                actor_runtime=(
+                    harness.actor_runtime_for(actor_cfg.address)
+                    if hasattr(harness, "actor_runtime_for")
+                    else None
+                ),
+            )
+            for actor_cfg in actors_cfg
+        ]
 
         channels: list[tuple[Channel, str]] = []
         for cfg in channels_cfg:
@@ -56,7 +76,8 @@ async def start(workspace: Workspace) -> None:
 
         async def _actor_and_channels() -> None:
             async with asyncio.TaskGroup() as tg:
-                tg.create_task(actor.run(), name="actor")
+                for actor_cfg, actor in zip(actors_cfg, actors, strict=True):
+                    tg.create_task(actor.run(), name=f"actor:{actor_cfg.address}")
                 for ch, address in channels:
                     tg.create_task(
                         ch.run(harness.mail_route.bind(address)),
@@ -81,7 +102,17 @@ async def start(workspace: Workspace) -> None:
                         info["host"] = ch.actual_host
                         info["port"] = ch.actual_port
                     channel_info.append(info)
-                write_state(rd, channels=channel_info)
+                actor_info = [
+                    {
+                        "name": actor.name,
+                        "agent": actor.agent,
+                        "address": actor.address,
+                        "role": actor.role,
+                        "status": "idle",
+                    }
+                    for actor in actors_cfg
+                ]
+                write_state(rd, channels=channel_info, actors=actor_info)
         except Exception as exc:
             logger.debug("Could not update agent.state with channel info: %s", exc)
 

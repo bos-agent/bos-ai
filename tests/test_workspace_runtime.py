@@ -3,6 +3,8 @@ from pathlib import Path
 import pytest
 
 from bos.config.workspace import Workspace
+from bos.core import AgentHarness
+from bos.team import TeamHarness
 
 
 def test_runtime_config_defaults_to_process(tmp_path):
@@ -42,6 +44,195 @@ def test_main_agent_address_is_stable_even_when_selecting_different_agent(tmp_pa
 
     assert ws.get_main_agent_name() == "research"
     assert ws.get_main_agent_address() == "agent@main"
+
+
+def test_resolve_actors_defaults_to_single_coordinator(tmp_path):
+    bos_dir = tmp_path / ".bos"
+    bos_dir.mkdir()
+    (bos_dir / "config.toml").write_text("[main]\nagent = \"research\"\n", encoding="utf-8")
+
+    actors = Workspace(tmp_path).resolve_actors()
+
+    assert [(actor.name, actor.agent, actor.address, actor.role) for actor in actors] == [
+        ("main", "research", "agent@main", "coordinator"),
+    ]
+
+
+def test_resolve_actors_loads_configured_workers(tmp_path):
+    bos_dir = tmp_path / ".bos"
+    bos_dir.mkdir()
+    (bos_dir / "config.toml").write_text(
+        """
+[main]
+agent = "main"
+
+[[main.actors]]
+name = "researcher"
+agent = "researcher"
+description = "Research worker"
+capabilities = ["research"]
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    actors = Workspace(tmp_path).resolve_actors()
+
+    assert [(actor.name, actor.agent, actor.address, actor.role) for actor in actors] == [
+        ("main", "main", "agent@main", "coordinator"),
+        ("researcher", "researcher", "agent@researcher", "worker"),
+    ]
+    assert actors[1].description == "Research worker"
+
+
+def test_workspace_harness_uses_classic_harness_for_single_actor(tmp_path):
+    bos_dir = tmp_path / ".bos"
+    bos_dir.mkdir()
+    (bos_dir / "config.toml").write_text(
+        """
+[main]
+agent = "main"
+
+[harness.task_ledger]
+path = "state/tasks.jsonl"
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    harness = Workspace(tmp_path).harness()
+
+    assert type(harness) is AgentHarness
+
+
+def test_workspace_harness_uses_team_harness_for_multi_actor(tmp_path):
+    bos_dir = tmp_path / ".bos"
+    bos_dir.mkdir()
+    (bos_dir / "config.toml").write_text(
+        """
+[main]
+agent = "main"
+
+[[main.actors]]
+name = "researcher"
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    harness = Workspace(tmp_path).harness()
+
+    assert isinstance(harness, TeamHarness)
+
+
+def test_resolve_actors_requires_configured_main_actor_without_main_agent(tmp_path):
+    bos_dir = tmp_path / ".bos"
+    bos_dir.mkdir()
+    (bos_dir / "config.toml").write_text(
+        """
+[[main.actors]]
+name = "main"
+agent = "orchestrator"
+capabilities = ["triage"]
+
+[[main.actors]]
+name = "researcher"
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    actors = Workspace(tmp_path).resolve_actors()
+
+    assert [(actor.name, actor.agent, actor.address, actor.role) for actor in actors] == [
+        ("main", "orchestrator", "agent@main", "coordinator"),
+        ("researcher", "researcher", "agent@researcher", "worker"),
+    ]
+    assert actors[0].capabilities == ["triage"]
+
+
+def test_resolve_actors_rejects_duplicate_actor_address(tmp_path):
+    bos_dir = tmp_path / ".bos"
+    bos_dir.mkdir()
+    (bos_dir / "config.toml").write_text(
+        """
+[main]
+agent = "main"
+
+[[main.actors]]
+name = "other"
+address = "agent@main"
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="Duplicate actor address"):
+        Workspace(tmp_path).resolve_actors()
+
+
+def test_resolve_actors_rejects_role_config(tmp_path):
+    bos_dir = tmp_path / ".bos"
+    bos_dir.mkdir()
+    (bos_dir / "config.toml").write_text(
+        """
+[main]
+agent = "main"
+
+[[main.actors]]
+role = "coordinator"
+name = "backup"
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="role is derived"):
+        Workspace(tmp_path).resolve_actors()
+
+
+def test_resolve_actors_rejects_missing_main_actor_without_main_agent(tmp_path):
+    bos_dir = tmp_path / ".bos"
+    bos_dir.mkdir()
+    (bos_dir / "config.toml").write_text(
+        """
+[[main.actors]]
+name = "researcher"
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="exactly one actor named 'main'"):
+        Workspace(tmp_path).resolve_actors()
+
+
+def test_resolve_actors_rejects_missing_actor_topology_without_main_agent(tmp_path):
+    bos_dir = tmp_path / ".bos"
+    bos_dir.mkdir()
+    (bos_dir / "config.toml").write_text("", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="main.agent is required"):
+        Workspace(tmp_path).resolve_actors()
+
+
+def test_resolve_actors_rejects_configured_main_actor_with_main_agent(tmp_path):
+    bos_dir = tmp_path / ".bos"
+    bos_dir.mkdir()
+    (bos_dir / "config.toml").write_text(
+        """
+[main]
+agent = "main"
+
+[[main.actors]]
+name = "main"
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="must not include 'main'"):
+        Workspace(tmp_path).resolve_actors()
 
 
 def test_resolve_platform_envfile_from_bos_dir(tmp_path):
@@ -189,3 +380,49 @@ target_address = "agent@main"
     channels = Workspace(tmp_path).resolve_channels()
 
     assert channels[0].target_address == "agent@main"
+
+
+def test_resolve_channels_accepts_known_worker_actor_target(tmp_path):
+    bos_dir = tmp_path / ".bos"
+    bos_dir.mkdir()
+    (bos_dir / "config.toml").write_text(
+        """
+[[main.actors]]
+name = "main"
+
+[[main.actors]]
+name = "researcher"
+
+[[main.channels]]
+name = "HttpChannel"
+bind_address = "channel@http"
+target_address = "agent@researcher"
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    channels = Workspace(tmp_path).resolve_channels()
+
+    assert channels[0].target_address == "agent@researcher"
+
+
+def test_resolve_channels_rejects_unknown_actor_target_with_multi_actor_config(tmp_path):
+    bos_dir = tmp_path / ".bos"
+    bos_dir.mkdir()
+    (bos_dir / "config.toml").write_text(
+        """
+[[main.actors]]
+name = "main"
+
+[[main.channels]]
+name = "HttpChannel"
+bind_address = "channel@http"
+target_address = "agent@missing"
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="unknown actor address"):
+        Workspace(tmp_path).resolve_channels()
