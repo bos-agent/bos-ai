@@ -42,35 +42,65 @@ _FRONTMATTER_ALIAS_KEYS = {
 }
 
 
+@dataclass(frozen=True)
+class _DiscoveredConfig:
+    """Result of workspace filesystem discovery."""
+
+    bos_dir: Path
+    config_file: Path
+
+
 def _resolve_workspace_path(workspace: str | Path = ".") -> Path:
     return Path(workspace).expanduser().resolve()
 
 
-def _find_discovered_bos_dir(workspace: Path) -> Path | None:
+def _find_discovered_config(workspace: Path) -> _DiscoveredConfig | None:
     for parent in [workspace] + list(workspace.parents):
-        if (parent / ".bos").exists():
-            return parent / ".bos"
+        has_dotbos = (parent / ".bos").exists()
+        has_bostoml = (parent / "bos.toml").is_file()
+
+        if has_dotbos and has_bostoml:
+            raise WorkspaceResolutionError(
+                f"Ambiguous BOS config: found both .bos/ and bos.toml in {parent}. "
+                "Remove one to resolve the ambiguity."
+            )
+
+        if has_dotbos:
+            return _DiscoveredConfig(
+                bos_dir=parent / ".bos",
+                config_file=parent / ".bos" / "config.toml",
+            )
+
+        if has_bostoml:
+            return _DiscoveredConfig(
+                bos_dir=parent,
+                config_file=parent / "bos.toml",
+            )
+
     return None
 
 
-def _resolve_bos_dir(workspace: Path) -> Path:
-    discovered_bos_dir = _find_discovered_bos_dir(workspace)
+def _resolve_config(workspace: Path) -> _DiscoveredConfig:
+    discovered = _find_discovered_config(workspace)
     configured_bos_dir = os.environ.get("BOS_DIR")
     env_bos_dir = Path(configured_bos_dir).expanduser().resolve() if configured_bos_dir else None
 
-    if discovered_bos_dir and env_bos_dir:
-        discovered_bos_dir = discovered_bos_dir.resolve()
-        if discovered_bos_dir != env_bos_dir:
+    if discovered and env_bos_dir:
+        resolved_bos_dir = discovered.bos_dir.resolve()
+        if resolved_bos_dir != env_bos_dir:
             raise WorkspaceResolutionError(
-                f"Ambiguous BOS config: discovered {discovered_bos_dir} and BOS_DIR={env_bos_dir}. "
+                f"Ambiguous BOS config: discovered {resolved_bos_dir} and BOS_DIR={env_bos_dir}. "
                 "Unset BOS_DIR or run outside that workspace."
             )
-        return discovered_bos_dir
+        return _DiscoveredConfig(bos_dir=resolved_bos_dir, config_file=discovered.config_file.resolve())
 
-    if discovered_bos_dir:
-        return discovered_bos_dir.resolve()
+    if discovered:
+        return _DiscoveredConfig(
+            bos_dir=discovered.bos_dir.resolve(),
+            config_file=discovered.config_file.resolve(),
+        )
     if env_bos_dir:
-        return env_bos_dir
+        return _DiscoveredConfig(bos_dir=env_bos_dir, config_file=env_bos_dir / "config.toml")
 
     raise WorkspaceResolutionError("No BOS workspace found. Run `bos init`, `cd` into a workspace, or set `BOS_DIR`.")
 
@@ -81,21 +111,29 @@ def _config_template_path() -> Path:
 
 def _load_config(workspace: str | Path = ".") -> tuple[Path, dict[str, Any]]:
     workspace = _resolve_workspace_path(workspace)
-    bos_dir = _resolve_bos_dir(workspace)
-    cfg_file = bos_dir / "config.toml"
-    if not cfg_file.exists():
-        return bos_dir, {}
-    return bos_dir, tomllib.loads(cfg_file.read_text(encoding="utf-8"))
+    resolved = _resolve_config(workspace)
+    if not resolved.config_file.exists():
+        return resolved.bos_dir, {}
+    return resolved.bos_dir, tomllib.loads(resolved.config_file.read_text(encoding="utf-8"))
 
 
-def initialize_workspace(workspace: str | Path = ".") -> Path:
+def initialize_workspace(workspace: str | Path = ".", *, dotbos: bool = False) -> Path:
     workspace = _resolve_workspace_path(workspace)
-    bos_dir = workspace / ".bos"
-    cfg_file = bos_dir / "config.toml"
 
-    bos_dir.mkdir(parents=True, exist_ok=True)
-    if cfg_file.exists():
-        raise FileExistsError(f"Config file {cfg_file} already exists.")
+    existing = _find_discovered_config(workspace)
+    if existing is not None:
+        raise WorkspaceResolutionError(
+            f"Workspace already initialized: found {existing.config_file}. "
+            "Remove it before re-initializing."
+        )
+
+    if dotbos:
+        bos_dir = workspace / ".bos"
+        cfg_file = bos_dir / "config.toml"
+        bos_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        bos_dir = workspace
+        cfg_file = workspace / "bos.toml"
 
     shutil.copy2(_config_template_path(), cfg_file)
     return bos_dir
