@@ -99,6 +99,7 @@ async def start(workspace: Workspace) -> None:
                         "agent": actor.agent,
                         "address": actor.address,
                         "role": actor.role,
+                        "status": "idle",
                     }
                     for actor in actors_cfg
                 ]

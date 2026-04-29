@@ -4,6 +4,7 @@ import click
 
 _LAZY_COMMANDS: dict[str, str] = {
     "auth": "bos.cli.commands.auth:auth",
+    "actor": "bos.cli.commands.agent:actor",
     "init": "bos.cli.commands.init:init",
     "prompt": "bos.cli.commands.agent:prompt",
     "start": "bos.cli.commands.agent:start",

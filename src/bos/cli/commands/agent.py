@@ -472,6 +472,88 @@ def status(ctx):
         click.echo(f"Channel:     {name} @ {addr} → ws://{host}:{port}/ws")
 
 
+# ── bos actor ─────────────────────────────────────────────────
+
+
+def _format_actor_table(rows: list[dict[str, str]]) -> str:
+    columns = [
+        ("name", "Name"),
+        ("status", "Status"),
+        ("role", "Role"),
+        ("agent", "Agent"),
+        ("address", "Address"),
+    ]
+    widths = {
+        key: max(len(header), *(len(str(row.get(key, ""))) for row in rows))
+        for key, header in columns
+    }
+    lines = ["  ".join(header.ljust(widths[key]) for key, header in columns)]
+    lines.extend("  ".join(str(row.get(key, "")).ljust(widths[key]) for key, _ in columns) for row in rows)
+    return "\n".join(lines)
+
+
+@click.command()
+@click.pass_context
+def actor(ctx):
+    """Show configured actor statuses."""
+    ws, rd = _get_ws_and_rd(ctx)
+    from bos.runner.proc import is_running, read_state
+
+    state = read_state(rd)
+    running = is_running(rd)
+    try:
+        configured_actors = ws.resolve_actors()
+    except ValueError as exc:
+        raise click.UsageError(str(exc)) from exc
+
+    runtime_actors = state.get("actors") or []
+    if not isinstance(runtime_actors, list):
+        runtime_actors = []
+    runtime_by_address = {
+        str(raw_actor.get("address")): raw_actor
+        for raw_actor in runtime_actors
+        if isinstance(raw_actor, dict) and raw_actor.get("address")
+    }
+
+    rows: list[dict[str, str]] = []
+    seen_addresses: set[str] = set()
+    for actor_cfg in configured_actors:
+        runtime_actor = runtime_by_address.get(actor_cfg.address) or {}
+        if running:
+            status_value = str(runtime_actor.get("status") or ("idle" if runtime_actor else "starting"))
+        else:
+            status_value = "stopped"
+        rows.append(
+            {
+                "name": str(runtime_actor.get("name") or actor_cfg.name),
+                "status": status_value,
+                "role": str(runtime_actor.get("role") or actor_cfg.role),
+                "agent": str(runtime_actor.get("agent") or actor_cfg.agent),
+                "address": actor_cfg.address,
+            }
+        )
+        seen_addresses.add(actor_cfg.address)
+
+    for raw_actor in runtime_actors:
+        if not isinstance(raw_actor, dict):
+            continue
+        address = str(raw_actor.get("address") or "")
+        if not address or address in seen_addresses:
+            continue
+        name = str(raw_actor.get("name") or address.removeprefix("agent@"))
+        rows.append(
+            {
+                "name": name,
+                "status": str(raw_actor.get("status") or ("idle" if running else "stopped")),
+                "role": str(raw_actor.get("role") or ("coordinator" if name == "main" else "worker")),
+                "agent": str(raw_actor.get("agent") or name),
+                "address": address,
+            }
+        )
+
+    click.echo(_format_actor_table(rows))
+
+
 # ── bos restart ───────────────────────────────────────────────
 
 
