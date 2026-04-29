@@ -26,7 +26,7 @@ class FakeMailbox:
         content,
         *,
         content_type: str = "message",
-        conversation_id: str | None = None,
+        chat_id: str | None = None,
         metadata: dict | None = None,
     ) -> None:
         self.sent.append(
@@ -35,7 +35,7 @@ class FakeMailbox:
                 recipient=recipient,
                 content=content,
                 content_type=content_type,
-                conversation_id=conversation_id,
+                chat_id=chat_id,
                 metadata=metadata or {},
             )
         )
@@ -56,7 +56,7 @@ def test_envelope_from_dict_ignores_client_recipient():
             "recipient": "agent@main",
             "content": "hello",
             "content_type": "message",
-            "conversation_id": "conv-1",
+            "chat_id": "conv-1",
         },
         sender="channel@http",
         target="channel@user",
@@ -66,7 +66,7 @@ def test_envelope_from_dict_ignores_client_recipient():
     assert env.recipient == "channel@user"
     assert env.content == "hello"
     assert env.content_type == "message"
-    assert env.conversation_id == "conv-1"
+    assert env.chat_id == "conv-1"
 
 
 def test_envelope_from_dict_preserves_structured_message_content():
@@ -79,7 +79,7 @@ def test_envelope_from_dict_preserves_structured_message_content():
         {
             "content": content,
             "content_type": "message",
-            "conversation_id": "conv-structured",
+            "chat_id": "conv-structured",
         },
         sender="channel@http",
         target="channel@user",
@@ -99,7 +99,7 @@ def test_envelope_from_dict_preserves_path_backed_image_content():
         {
             "content": content,
             "content_type": "message",
-            "conversation_id": "conv-path-image",
+            "chat_id": "conv-path-image",
         },
         sender="channel@http",
         target="channel@user",
@@ -114,7 +114,7 @@ def test_envelope_from_dict_preserves_actor_key_metadata():
         {
             "content": "/new",
             "content_type": "command",
-            "conversation_id": "conv-1",
+            "chat_id": "conv-1",
             "metadata": {"actor_key": "telegram:42"},
         },
         sender="channel@http",
@@ -130,7 +130,7 @@ def test_envelope_from_dict_rejects_structured_non_message_content():
             {
                 "content": [{"type": "text", "text": "/history"}],
                 "content_type": "command",
-                "conversation_id": "conv-command",
+                "chat_id": "conv-command",
             },
             sender="channel@http",
             target="channel@user",
@@ -178,7 +178,7 @@ def test_http_channel_build_app_sets_explicit_upload_limit():
 
     assert app._client_max_size == 5 * 1024 * 1024
     assert app[APP_STATUS_INFO]["max_upload_bytes"] == 5 * 1024 * 1024
-    assert app[APP_STATUS_INFO]["interactive_ws_clients_supported"] == "multiple_by_client_id"
+    assert app[APP_STATUS_INFO]["interactive_ws_clients_supported"] == "one_active_client_per_chat"
     assert app[APP_STATUS_INFO]["interactive_ws_takeover_supported"] == "per_client_id"
 
 
@@ -200,10 +200,10 @@ async def test_http_channel_allows_multiple_interactive_websocket_clients_with_d
     ws_a = None
     ws_b = None
     try:
-        ws_a = await session_a.ws_connect(f"{base_url}/ws?client_id=tui-a&conversation_id=conv-a")
-        ws_b = await session_b.ws_connect(f"{base_url}/ws?client_id=tui-b&conversation_id=conv-b")
-        assert (await ws_a.receive_json(timeout=1))["conversation_id"] == "conv-a"
-        assert (await ws_b.receive_json(timeout=1))["conversation_id"] == "conv-b"
+        ws_a = await session_a.ws_connect(f"{base_url}/ws?client_id=tui-a&chat_id=conv-a")
+        ws_b = await session_b.ws_connect(f"{base_url}/ws?client_id=tui-b&chat_id=conv-b")
+        assert (await ws_a.receive_json(timeout=1))["chat_id"] == "conv-a"
+        assert (await ws_b.receive_json(timeout=1))["chat_id"] == "conv-b"
         assert ws_a.closed is False
         assert ws_b.closed is False
     finally:
@@ -233,10 +233,10 @@ async def test_http_channel_rejects_duplicate_client_id_without_takeover():
     session_b = aiohttp.ClientSession()
     ws_a = None
     try:
-        ws_a = await session_a.ws_connect(f"{base_url}/ws?client_id=tui-a&conversation_id=conv-a")
+        ws_a = await session_a.ws_connect(f"{base_url}/ws?client_id=tui-a&chat_id=conv-a")
         await ws_a.receive_json(timeout=1)
         with pytest.raises(aiohttp.WSServerHandshakeError) as exc:
-            await session_b.ws_connect(f"{base_url}/ws?client_id=tui-a&conversation_id=conv-a")
+            await session_b.ws_connect(f"{base_url}/ws?client_id=tui-a&chat_id=conv-a")
         assert exc.value.status == 409
     finally:
         if ws_a is not None:
@@ -264,9 +264,9 @@ async def test_http_channel_takeover_disconnects_existing_client_id_only():
     ws_a = None
     ws_b = None
     try:
-        ws_a = await session_a.ws_connect(f"{base_url}/ws?client_id=tui-a&conversation_id=conv-a")
+        ws_a = await session_a.ws_connect(f"{base_url}/ws?client_id=tui-a&chat_id=conv-a")
         await ws_a.receive_json(timeout=1)
-        ws_b = await session_b.ws_connect(f"{base_url}/ws?client_id=tui-a&conversation_id=conv-a&takeover=1")
+        ws_b = await session_b.ws_connect(f"{base_url}/ws?client_id=tui-a&chat_id=conv-a&takeover=1")
         await ws_b.receive_json(timeout=1)
 
         msg = await asyncio.wait_for(ws_a.receive(), timeout=1)
@@ -283,7 +283,7 @@ async def test_http_channel_takeover_disconnects_existing_client_id_only():
 
 
 @pytest.mark.asyncio
-async def test_http_channel_injects_direct_actor_key_and_routes_reply_to_matching_client():
+async def test_http_channel_injects_routing_metadata_and_routes_reply_to_matching_client():
     mailbox = FakeMailbox("channel@http")
     channel = HttpChannel(target_address="agent@main", port=0)
     app = channel._build_app(mailbox)
@@ -300,12 +300,12 @@ async def test_http_channel_injects_direct_actor_key_and_routes_reply_to_matchin
     ws_a = None
     ws_b = None
     try:
-        ws_a = await session_a.ws_connect(f"{base_url}/ws?client_id=tui-a&conversation_id=conv-a")
-        ws_b = await session_b.ws_connect(f"{base_url}/ws?client_id=tui-b&conversation_id=conv-b")
+        ws_a = await session_a.ws_connect(f"{base_url}/ws?client_id=tui-a&chat_id=conv-a")
+        ws_b = await session_b.ws_connect(f"{base_url}/ws?client_id=tui-b&chat_id=conv-b")
         await ws_a.receive_json(timeout=1)
         await ws_b.receive_json(timeout=1)
 
-        await ws_a.send_json({"content": "hello", "content_type": "message", "conversation_id": "conv-a"})
+        await ws_a.send_json({"content": "hello", "content_type": "message", "chat_id": "conv-a"})
 
         for _ in range(20):
             if mailbox.sent:
@@ -313,16 +313,15 @@ async def test_http_channel_injects_direct_actor_key_and_routes_reply_to_matchin
             await asyncio.sleep(0.01)
         sent = mailbox.sent[-1]
         assert sent.recipient == "agent@main"
-        assert sent.conversation_id == "conv-a"
-        assert sent.metadata["actor_key"] == "http:tui-a:conv-a"
-        assert sent.metadata["routing"] == {"client_id": "tui-a", "conversation_id": "conv-a"}
+        assert sent.chat_id == "conv-a"
+        assert sent.metadata["routing"] == {"client_id": "tui-a", "chat_id": "conv-a"}
 
         mailbox.push(
             Envelope(
                 sender="agent@main",
                 recipient="channel@http",
                 content="reply",
-                conversation_id="conv-a",
+                chat_id="conv-a",
             )
         )
 
@@ -384,7 +383,7 @@ async def test_http_channel_websocket_receives_new_command_result_payload():
     session = aiohttp.ClientSession()
     ws = None
     try:
-        ws = await session.ws_connect(f"{base_url}/ws?client_id=tui-a&conversation_id=session-2")
+        ws = await session.ws_connect(f"{base_url}/ws?client_id=tui-a&chat_id=session-2")
         await ws.receive_json(timeout=1)
         mailbox.push(
             Envelope(
@@ -395,12 +394,11 @@ async def test_http_channel_websocket_receives_new_command_result_payload():
                         "name": "new",
                         "ok": True,
                         "result": "session reset",
-                        "session_id": "session-2",
-                        "scope": "actor_key_session",
+                        "chat_id": "session-2",
                     }
                 ),
                 content_type=MessageType.COMMAND_RESULT,
-                conversation_id="session-2",
+                chat_id="session-2",
             )
         )
         msg = await ws.receive_json(timeout=1)
@@ -409,10 +407,9 @@ async def test_http_channel_websocket_receives_new_command_result_payload():
             "name": "new",
             "ok": True,
             "result": "session reset",
-            "session_id": "session-2",
-            "scope": "actor_key_session",
+            "chat_id": "session-2",
         }
-        assert msg["conversation_id"] == "session-2"
+        assert msg["chat_id"] == "session-2"
     finally:
         if ws is not None:
             await ws.close()
@@ -436,7 +433,7 @@ async def test_http_send_endpoint_accepts_async_new_without_command_result_guara
     async with aiohttp.ClientSession() as session:
         response = await session.post(
             f"{base_url}/api/send",
-            json={"content": "/new", "content_type": "command", "conversation_id": "legacy-session"},
+            json={"content": "/new", "content_type": "command", "chat_id": "legacy-session"},
         )
         payload = await response.json()
 
