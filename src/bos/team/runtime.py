@@ -3,11 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from bos.core.actor import ActorResponseRoute
+
 from .tasks import TaskLedger, task_chat_id, task_metadata
 
 
 @dataclass(frozen=True)
-class RoutedResponse:
+class PeerTaskRoute(ActorResponseRoute):
     chat_id: str | None
     metadata: dict[str, Any]
     content: str
@@ -34,10 +36,10 @@ class PeerTaskRuntime:
         reply_chat_id: str | None,
         reply_recipient: str,
         response: str,
-    ) -> RoutedResponse:
+    ) -> PeerTaskRoute:
         binding = self._ledger.get_binding(source_chat_id)
         if binding is None or binding.actor_address != self._actor_address:
-            return RoutedResponse(reply_chat_id, {}, response)
+            return PeerTaskRoute(reply_chat_id, {}, response)
 
         task = self._ledger.get_task(binding.task_id)
         self._ledger.append_event(
@@ -52,7 +54,7 @@ class PeerTaskRuntime:
             or not reply_recipient.startswith("agent@")
             or reply_recipient == self._actor_address
         ):
-            return RoutedResponse(reply_chat_id, task_metadata(task, chat_id=reply_chat_id or source_chat_id), response)
+            return PeerTaskRoute(reply_chat_id, task_metadata(task, chat_id=reply_chat_id or source_chat_id), response)
 
         original_chat_id = task.metadata.get("source_chat_id")
         original_sender = task.metadata.get("source_sender")
@@ -75,7 +77,7 @@ class PeerTaskRuntime:
             }
             if pending_tasks:
                 metadata["no_reply"] = True
-            return RoutedResponse(
+            return PeerTaskRoute(
                 original_chat_id,
                 metadata,
                 self._format_task_completion_notification(task, response, source_tasks, pending_tasks),
@@ -97,7 +99,7 @@ class PeerTaskRuntime:
             "task_notification": True,
             "no_reply": True,
         }
-        return RoutedResponse(notify_binding.chat_id, metadata, response)
+        return PeerTaskRoute(notify_binding.chat_id, metadata, response)
 
     def _tasks_for_source_chat(self, task: Any, source_chat_id: str) -> list[Any]:
         return [

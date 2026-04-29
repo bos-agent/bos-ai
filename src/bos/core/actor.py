@@ -6,7 +6,7 @@ import json
 import logging
 import uuid
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Protocol
 
 from bos.protocol import Envelope, MessageContent, MessageType
 from bos.protocol.content import content_as_parts
@@ -54,6 +54,30 @@ class SessionState:
     buffers: SessionBuffers = field(default_factory=SessionBuffers)
 
 
+@dataclass(frozen=True)
+class ActorResponseRoute:
+    chat_id: str | None
+    metadata: dict[str, Any]
+    content: MessageContent
+
+
+class ActorRuntime(Protocol):
+    """Optional hook for actor-specific envelope validation and reply routing."""
+
+    def validate_envelope(self, *, chat_id: str, metadata: dict[str, Any]) -> None:
+        """Validate a message before it enters an actor session."""
+
+    def route_response(
+        self,
+        *,
+        source_chat_id: str,
+        reply_chat_id: str | None,
+        reply_recipient: str,
+        response: str,
+    ) -> ActorResponseRoute:
+        """Return the envelope fields to use when sending an actor response."""
+
+
 class _RouteAwareMailboxEventSink(MailboxEventSink):
     def __init__(self, mailbox: Any, recipient: str, chat_id: str | None) -> None:
         super().__init__(mailbox, recipient)
@@ -77,7 +101,13 @@ class AgentActor:
     buffers, and generation counter.
     """
 
-    def __init__(self, agent: Any, mailbox: Any, chat_state: ChatState | None = None, actor_runtime: Any = None):
+    def __init__(
+        self,
+        agent: Any,
+        mailbox: Any,
+        chat_state: ChatState | None = None,
+        actor_runtime: ActorRuntime | None = None,
+    ):
         self._address = mailbox.address
         self._agent = agent
         self._mailbox = mailbox
