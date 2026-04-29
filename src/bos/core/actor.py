@@ -6,7 +6,7 @@ import json
 import logging
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any
 
 from bos.protocol import Envelope, MessageContent, MessageType
 from bos.protocol.content import content_as_parts
@@ -18,19 +18,6 @@ from .events import MailboxEventSink
 from .harness import CURRENT_HARNESS, CURRENT_MAILBOX
 
 logger = logging.getLogger(__name__)
-
-_TASK_VALIDATED_MESSAGE_TYPES = {
-    MessageType.MESSAGE,
-    MessageType.COMMAND,
-    MessageType.INTERRUPT_MESSAGE,
-    MessageType.INTERRUPT_ABORT,
-}
-_PASSIVE_MESSAGE_TYPES = {
-    MessageType.COMMAND_RESULT,
-    MessageType.ECHO,
-    MessageType.SYSTEM,
-    MessageType.TURN_EVENT,
-}
 
 
 @dataclass
@@ -52,30 +39,6 @@ class SessionState:
     chat_id: str
     execution: SessionExecution = field(default_factory=SessionExecution)
     buffers: SessionBuffers = field(default_factory=SessionBuffers)
-
-
-@dataclass(frozen=True)
-class ActorResponseRoute:
-    chat_id: str | None
-    metadata: dict[str, Any]
-    content: MessageContent
-
-
-class ActorRuntime(Protocol):
-    """Optional hook for actor-specific envelope validation and reply routing."""
-
-    def validate_envelope(self, *, chat_id: str, metadata: dict[str, Any]) -> None:
-        """Validate a message before it enters an actor session."""
-
-    def route_response(
-        self,
-        *,
-        source_chat_id: str,
-        reply_chat_id: str | None,
-        reply_recipient: str,
-        response: str,
-    ) -> ActorResponseRoute:
-        """Return the envelope fields to use when sending an actor response."""
 
 
 class _RouteAwareMailboxEventSink(MailboxEventSink):
@@ -101,18 +64,11 @@ class AgentActor:
     buffers, and generation counter.
     """
 
-    def __init__(
-        self,
-        agent: Any,
-        mailbox: Any,
-        chat_state: ChatState | None = None,
-        actor_runtime: ActorRuntime | None = None,
-    ):
+    def __init__(self, agent: Any, mailbox: Any, chat_state: ChatState | None = None):
         self._address = mailbox.address
         self._agent = agent
         self._mailbox = mailbox
         self._chat_state = chat_state or ChatState()
-        self._actor_runtime = actor_runtime
         self._sessions: dict[str, SessionState] = {}
         self._command_tasks: set[asyncio.Task] = set()
 
@@ -139,8 +95,6 @@ class AgentActor:
                     continue
 
                 if not env.chat_id:
-                    if env.content_type in _PASSIVE_MESSAGE_TYPES:
-                        continue
                     await self._mailbox.send(
                         env.sender,
                         "(error: missing chat_id)",
@@ -149,24 +103,7 @@ class AgentActor:
                     continue
 
                 chat_id = env.chat_id
-                if self._actor_runtime is not None and env.content_type in _TASK_VALIDATED_MESSAGE_TYPES:
-                    try:
-                        self._actor_runtime.validate_envelope(
-                            chat_id=chat_id,
-                            metadata=env.metadata,
-                        )
-                    except Exception as exc:
-                        await self._mailbox.send(
-                            env.sender,
-                            f"(error: {exc})",
-                            content_type=MessageType.SYSTEM,
-                            metadata={"actor_runtime_validation_error": str(exc)},
-                        )
-                        continue
                 session = self._get_or_create_session(chat_id)
-
-                if env.content_type in _PASSIVE_MESSAGE_TYPES:
-                    continue
 
                 if env.content_type == MessageType.COMMAND:
                     if env.content.strip().startswith("/"):
@@ -267,17 +204,15 @@ class AgentActor:
 
         content = self._merge_pending_messages(messages)
         session.buffers.interrupts.clear()
-        reply_recipient = self._reply_recipient_for(messages[-1])
-        reply_chat_id = messages[-1].chat_id if reply_recipient is not None else None
-        session.execution.reply_recipient = reply_recipient
-        session.execution.reply_chat_id = reply_chat_id
+        session.execution.reply_recipient = messages[-1].sender
+        session.execution.reply_chat_id = messages[-1].chat_id
         generation = session.execution.generation
         session.execution.task = asyncio.create_task(
             self._run_ask(
                 chat_id=chat_id,
                 generation=generation,
-                reply_recipient=reply_recipient,
-                reply_chat_id=reply_chat_id,
+                reply_recipient=messages[-1].sender,
+                reply_chat_id=messages[-1].chat_id,
                 content=content,
             )
         )
@@ -287,7 +222,7 @@ class AgentActor:
         *,
         chat_id: str,
         generation: int,
-        reply_recipient: str | None,
+        reply_recipient: str,
         reply_chat_id: str | None,
         content: MessageContent,
     ) -> None:
@@ -295,11 +230,7 @@ class AgentActor:
             token: contextvars.Token | None = None
             try:
                 token = CURRENT_MAILBOX.set(self._mailbox)
-                event_sink = (
-                    _RouteAwareMailboxEventSink(self._mailbox, reply_recipient, reply_chat_id)
-                    if reply_recipient is not None
-                    else None
-                )
+                event_sink = _RouteAwareMailboxEventSink(self._mailbox, reply_recipient, reply_chat_id)
                 response = await self._agent.ask(
                     chat_id,
                     content,
@@ -314,23 +245,11 @@ class AgentActor:
             if not self._execution_is_current(chat_id, generation):
                 return
 
-            if reply_recipient is not None:
-                routed = (
-                    self._actor_runtime.route_response(
-                        source_chat_id=chat_id,
-                        reply_chat_id=reply_chat_id,
-                        reply_recipient=reply_recipient,
-                        response=response,
-                    )
-                    if self._actor_runtime is not None
-                    else None
-                )
-                await self._mailbox.send(
-                    reply_recipient,
-                    routed.content if routed is not None else response,
-                    chat_id=routed.chat_id if routed is not None else reply_chat_id,
-                    metadata=routed.metadata if routed is not None else {},
-                )
+            await self._mailbox.send(
+                reply_recipient,
+                response,
+                chat_id=reply_chat_id,
+            )
 
             if not self._execution_is_current(chat_id, generation):
                 return
@@ -341,20 +260,11 @@ class AgentActor:
             if not messages:
                 break
 
-            reply_recipient = self._reply_recipient_for(messages[-1])
-            reply_chat_id = messages[-1].chat_id if reply_recipient is not None else None
+            reply_recipient = messages[-1].sender
+            reply_chat_id = messages[-1].chat_id
             session.execution.reply_recipient = reply_recipient
             session.execution.reply_chat_id = reply_chat_id
             content = self._merge_pending_messages(messages)
-
-    @staticmethod
-    def _reply_recipient_for(env: Envelope) -> str | None:
-        if env.metadata.get("no_reply"):
-            return None
-        reply_to = env.metadata.get("reply_to")
-        if isinstance(reply_to, str) and reply_to and str(env.sender).startswith("agent@"):
-            return reply_to
-        return env.sender
 
     async def _handle_command(self, env: Envelope) -> None:
         parts = env.content.split(None, 1)

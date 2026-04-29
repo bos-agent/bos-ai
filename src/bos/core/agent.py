@@ -378,7 +378,6 @@ class ReactAgent:
                 "turn_id": ctx.turn_id,
                 "event_sink": event_sink,
                 "tool_config": self._tool_configs.get(tc.name, {}),
-                "sender": ctx.metadata.get("sender"),
             }
 
             if self._local_tools.has(tc.name):
