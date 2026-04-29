@@ -35,12 +35,50 @@ def _get_ws_and_rd(ctx):
     return ws, rd
 
 
-async def _build_agent_system_prompt(ws: Workspace, agent_name: str | None = None) -> str:
+async def _build_agent_system_prompt(
+    ws: Workspace,
+    agent_name: str | None = None,
+    *,
+    peer_tools: bool = False,
+) -> str:
     ws.bootstrap_platform()
     selected_agent = agent_name or ws.get_main_agent_name()
-    async with ws.harness() as harness:
+    harness = _prompt_harness(ws, selected_agent=selected_agent, peer_tools=peer_tools)
+    async with harness:
         agent = harness.create_agent(selected_agent)
         return await agent._build_system_prompt()
+
+
+def _prompt_harness(ws: Workspace, *, selected_agent: str, peer_tools: bool):
+    if not peer_tools:
+        return ws.harness()
+
+    actors = [actor.actor_ref() for actor in ws.resolve_actors()]
+    if len(actors) == 1:
+        actors.append(
+            {
+                "name": "__peer_prompt__",
+                "agent": "__peer_prompt__",
+                "address": "agent@__peer_prompt__",
+            }
+        )
+    elif not any(actor.get("agent") == selected_agent or actor.get("name") == selected_agent for actor in actors):
+        actors.append(
+            {
+                "name": "__prompt_target__",
+                "agent": selected_agent,
+                "address": "agent@__prompt_target__",
+            }
+        )
+
+    harness_cfg = ws.config.get("harness", {}).copy()
+    harness_cfg["bos_dir"] = ws.bos_dir
+    harness_cfg["workspace"] = ws.workspace
+    harness_cfg["actors"] = actors
+
+    from bos.core import AgentHarness, _apply
+
+    return _apply(AgentHarness, harness_cfg)
 
 
 async def _build_dummy_agent_system_prompt(ws: Workspace) -> str:
@@ -198,21 +236,28 @@ class _AskProgressDisplay:
     default=None,
     help="Agent name to show the prompt for. Use '0' for a dummy agent with all tools/skills.",
 )
+@click.option(
+    "--peer-tools",
+    is_flag=True,
+    default=False,
+    help="Enable peer-task tool registration while rendering this prompt.",
+)
 @click.pass_context
-def prompt(ctx, agent_name: str | None):
+def prompt(ctx, agent_name: str | None, peer_tools: bool):
     """Print the built system prompt for an agent.
 
     By default, shows the prompt for the configured main agent.
     Use --agent <name> to show the prompt for a specific agent.
     Use --agent 0 to show a dummy agent prompt with all available
     tools and skills (offensive capability mode).
+    Use --peer-tools to render actor peer-task tools for inspection.
     """
     ws, _ = _get_ws_and_rd(ctx)
     try:
         if agent_name == "0":
             rendered_prompt = asyncio.run(_build_dummy_agent_system_prompt(ws))
         else:
-            rendered_prompt = asyncio.run(_build_agent_system_prompt(ws, agent_name))
+            rendered_prompt = asyncio.run(_build_agent_system_prompt(ws, agent_name, peer_tools=peer_tools))
     except ValueError as exc:
         raise click.UsageError(str(exc)) from exc
 
