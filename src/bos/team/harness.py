@@ -32,7 +32,10 @@ class TeamHarness(AgentHarness):
     def is_reserved_chat_id(self, chat_id: str) -> bool:
         return is_task_chat_id(chat_id)
 
-    def _prepare_agent_cfg(self, agent_name: str | None, agent_cfg: dict[str, Any]) -> dict[str, Any]:
+    def create_agent(self, agent_name: str | None = None, agent_cfg: dict[str, Any] = None):
+        return super().create_agent(agent_name, self._with_peer_task_tools(agent_name, agent_cfg or {}))
+
+    def _with_peer_task_tools(self, agent_name: str | None, agent_cfg: dict[str, Any]) -> dict[str, Any]:
         cfg = dict(agent_cfg)
         configured_tools = cfg.get("tools")
         if "tools" not in cfg and agent_name and ep_agent.has(agent_name):

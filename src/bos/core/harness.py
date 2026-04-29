@@ -161,7 +161,7 @@ class AgentHarness:
             }
 
         local_tools = self._create_local_tools(agent_name=agent_name)
-        kwargs = self._prepare_agent_cfg(agent_name, agent_cfg) | {
+        kwargs = agent_cfg | {
             "agent_name": agent_name or (agent_cfg or {}).get("name"),
             "llm": self.llm,
             "message_store": self.message_store,
@@ -174,10 +174,6 @@ class AgentHarness:
         }
 
         return ep_agent.invoke(agent_name, kwargs) if agent_name else ReactAgent(**kwargs)
-
-    def _prepare_agent_cfg(self, agent_name: str | None, agent_cfg: dict[str, Any]) -> dict[str, Any]:
-        cfg = dict(agent_cfg)
-        return cfg
 
     def _create_and_own(self, ep_name: str, protocol: type, cfg: Any) -> Any:
         from . import __dict__ as core_exports
