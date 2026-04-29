@@ -41,7 +41,10 @@ async def start(workspace: Workspace) -> None:
     async with workspace.harness() as harness:
         from bos.core.chat_state import ChatState
 
-        chat_state = ChatState(workspace.bos_dir)
+        chat_state = ChatState(
+            workspace.bos_dir,
+            reserved_chat_id=getattr(harness, "is_reserved_chat_id", None),
+        )
         task_ledger = getattr(harness, "task_ledger", None)
         if task_ledger is not None:
             coordinator_addresses = {actor.address for actor in actors_cfg if actor.role == "coordinator"}
@@ -54,9 +57,9 @@ async def start(workspace: Workspace) -> None:
                 harness.create_agent(actor_cfg.agent),
                 harness.mail_route.bind(actor_cfg.address),
                 chat_state=chat_state,
-                task_runtime=(
-                    harness.task_runtime_for(actor_cfg.address)
-                    if hasattr(harness, "task_runtime_for")
+                actor_runtime=(
+                    harness.actor_runtime_for(actor_cfg.address)
+                    if hasattr(harness, "actor_runtime_for")
                     else None
                 ),
             )

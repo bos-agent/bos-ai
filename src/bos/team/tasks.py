@@ -81,6 +81,10 @@ def task_chat_id(task_id: str, purpose: str = "worker") -> str:
     return f"task:{task_id}:{safe_purpose}:{uuid.uuid4().hex[:8]}"
 
 
+def is_task_chat_id(chat_id: str) -> bool:
+    return isinstance(chat_id, str) and chat_id.startswith("task:")
+
+
 def task_metadata(task: TaskRecord, *, chat_id: str | None = None) -> dict[str, Any]:
     metadata = {
         "task_id": task.id,

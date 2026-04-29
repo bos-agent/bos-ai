@@ -7,7 +7,7 @@ from bos.core.contract import ep_agent
 from bos.core.harness import AgentHarness
 
 from .runtime import PeerTaskRuntime
-from .tasks import ActorRef, TaskLedger
+from .tasks import ActorRef, TaskLedger, is_task_chat_id
 from .tools import peer_task_tool_names_for_role, register_peer_task_tools
 
 
@@ -26,8 +26,11 @@ class TeamHarness(AgentHarness):
         self.peer_tasks_enabled = len(self.actor_registry) > 1
         self.task_ledger = TaskLedger(self._resolve_task_ledger_path(task_ledger))
 
-    def task_runtime_for(self, actor_address: str) -> PeerTaskRuntime:
+    def actor_runtime_for(self, actor_address: str) -> PeerTaskRuntime:
         return PeerTaskRuntime(self.task_ledger, actor_address)
+
+    def is_reserved_chat_id(self, chat_id: str) -> bool:
+        return is_task_chat_id(chat_id)
 
     def _prepare_agent_cfg(self, agent_name: str | None, agent_cfg: dict[str, Any]) -> dict[str, Any]:
         cfg = dict(agent_cfg)

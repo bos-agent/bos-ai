@@ -77,12 +77,12 @@ class AgentActor:
     buffers, and generation counter.
     """
 
-    def __init__(self, agent: Any, mailbox: Any, chat_state: ChatState | None = None, task_runtime: Any = None):
+    def __init__(self, agent: Any, mailbox: Any, chat_state: ChatState | None = None, actor_runtime: Any = None):
         self._address = mailbox.address
         self._agent = agent
         self._mailbox = mailbox
         self._chat_state = chat_state or ChatState()
-        self._task_runtime = task_runtime
+        self._actor_runtime = actor_runtime
         self._sessions: dict[str, SessionState] = {}
         self._command_tasks: set[asyncio.Task] = set()
 
@@ -119,9 +119,9 @@ class AgentActor:
                     continue
 
                 chat_id = env.chat_id
-                if self._task_runtime is not None and env.content_type in _TASK_VALIDATED_MESSAGE_TYPES:
+                if self._actor_runtime is not None and env.content_type in _TASK_VALIDATED_MESSAGE_TYPES:
                     try:
-                        self._task_runtime.validate_envelope(
+                        self._actor_runtime.validate_envelope(
                             chat_id=chat_id,
                             metadata=env.metadata,
                         )
@@ -130,7 +130,7 @@ class AgentActor:
                             env.sender,
                             f"(error: {exc})",
                             content_type=MessageType.SYSTEM,
-                            metadata={"task_validation_error": str(exc)},
+                            metadata={"actor_runtime_validation_error": str(exc)},
                         )
                         continue
                 session = self._get_or_create_session(chat_id)
@@ -286,13 +286,13 @@ class AgentActor:
 
             if reply_recipient is not None:
                 routed = (
-                    self._task_runtime.route_response(
+                    self._actor_runtime.route_response(
                         source_chat_id=chat_id,
                         reply_chat_id=reply_chat_id,
                         reply_recipient=reply_recipient,
                         response=response,
                     )
-                    if self._task_runtime is not None
+                    if self._actor_runtime is not None
                     else None
                 )
                 await self._mailbox.send(

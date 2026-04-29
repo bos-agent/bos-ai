@@ -25,7 +25,7 @@ async def test_actor_rejects_task_chat_bound_to_another_actor():
     ledger.bind_chat(task_id=task_record.id, chat_id=chat_id, actor_address="agent@researcher")
     route = InMemMailRoute()
     agent = RecordingAgent()
-    actor = AgentActor(agent, route.bind("agent@main"), task_runtime=PeerTaskRuntime(ledger, "agent@main"))
+    actor = AgentActor(agent, route.bind("agent@main"), actor_runtime=PeerTaskRuntime(ledger, "agent@main"))
     sender = route.bind("agent@researcher")
 
     task = asyncio.create_task(actor.run())
@@ -59,7 +59,7 @@ async def test_actor_does_not_bounce_system_errors_on_task_chats():
     actor = AgentActor(
         RecordingAgent(),
         route.bind(main_address),
-        task_runtime=PeerTaskRuntime(ledger, main_address),
+        actor_runtime=PeerTaskRuntime(ledger, main_address),
     )
 
     task = asyncio.create_task(actor.run())
@@ -71,7 +71,7 @@ async def test_actor_does_not_bounce_system_errors_on_task_chats():
                 content="(error: missing metadata)",
                 content_type=MessageType.SYSTEM,
                 chat_id=chat_id,
-                metadata={"task_validation_error": "previous failure"},
+                metadata={"actor_runtime_validation_error": "previous failure"},
             )
         )
         await asyncio.sleep(0.1)
@@ -94,7 +94,7 @@ async def test_actor_accepts_task_chat_for_bound_actor():
     actor = AgentActor(
         agent,
         route.bind("agent@researcher"),
-        task_runtime=PeerTaskRuntime(ledger, "agent@researcher"),
+        actor_runtime=PeerTaskRuntime(ledger, "agent@researcher"),
     )
     sender = route.bind("agent@main")
 
@@ -137,12 +137,12 @@ async def test_worker_task_reply_is_routed_to_coordinator_owned_task_chat_withou
     worker = AgentActor(
         worker_agent,
         route.bind(researcher_address),
-        task_runtime=PeerTaskRuntime(ledger, researcher_address),
+        actor_runtime=PeerTaskRuntime(ledger, researcher_address),
     )
     coordinator = AgentActor(
         coordinator_agent,
         route.bind(coordinator_address),
-        task_runtime=PeerTaskRuntime(ledger, coordinator_address),
+        actor_runtime=PeerTaskRuntime(ledger, coordinator_address),
     )
 
     worker_task = asyncio.create_task(worker.run())

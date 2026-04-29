@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from .harness import TeamHarness
 from .runtime import PeerTaskRuntime
-from .tasks import ActorRef, ChatTaskBinding, TaskEvent, TaskLedger, TaskLedgerError, TaskRecord
+from .tasks import ActorRef, ChatTaskBinding, TaskEvent, TaskLedger, TaskLedgerError, TaskRecord, is_task_chat_id
 
 __all__ = [
     "ActorRef",
@@ -19,4 +19,5 @@ __all__ = [
     "TaskLedgerError",
     "TaskRecord",
     "TeamHarness",
+    "is_task_chat_id",
 ]
