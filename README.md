@@ -62,6 +62,7 @@ Useful lifecycle commands:
 ```bash
 bos status
 bos actor
+bos prompt --agent 1  # inspect coordinator peer-task tools
 bos restart
 bos stop
 ```

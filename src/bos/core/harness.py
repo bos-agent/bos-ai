@@ -23,6 +23,18 @@ from .tasks import ActorRef, TaskLedger, TaskLedgerError, task_chat_id, task_met
 
 logger = logging.getLogger(__name__)
 
+_PEER_TASK_COMMON_TOOLS = (
+    "ListActors",
+    "CreateTask",
+    "UpdateTask",
+    "StartTask",
+    "WaitForInput",
+    "CompleteTask",
+    "FailTask",
+)
+_PEER_TASK_COORDINATOR_TOOLS = _PEER_TASK_COMMON_TOOLS + ("ProvideTaskInput", "AbortTask")
+_PEER_TASK_WORKER_TOOLS = _PEER_TASK_COMMON_TOOLS
+
 
 def bootstrap_platform(
     bos_dir: str | Path = ".bos",
@@ -197,6 +209,7 @@ class AgentHarness:
         if CURRENT_HARNESS.get(None) is None:
             raise RuntimeError("create_agent must be called within an active AgentHarness context.")
 
+        agent_cfg = dict(agent_cfg or {})
         if not any([agent_name, agent_cfg]):
             capability_default = [] if self._capability_mode == "defensive" else None
             agent_cfg = {
@@ -209,7 +222,7 @@ class AgentHarness:
             }
 
         local_tools = self._create_local_tools(agent_name=agent_name)
-        kwargs = (agent_cfg or {}) | {
+        kwargs = self._with_peer_task_tools(agent_name, agent_cfg) | {
             "agent_name": agent_name or (agent_cfg or {}).get("name"),
             "llm": self.llm,
             "message_store": self.message_store,
@@ -222,6 +235,41 @@ class AgentHarness:
         }
 
         return ep_agent.invoke(agent_name, kwargs) if agent_name else ReactAgent(**kwargs)
+
+    def _with_peer_task_tools(self, agent_name: str | None, agent_cfg: dict[str, Any]) -> dict[str, Any]:
+        cfg = dict(agent_cfg)
+        configured_tools = cfg.get("tools")
+        if "tools" not in cfg and agent_name and ep_agent.has(agent_name):
+            configured_tools = ep_agent.get(agent_name).defaults.get("tools")
+        if not isinstance(configured_tools, list):
+            return cfg
+
+        peer_tools = self._peer_task_tool_names_for_agent(agent_name or cfg.get("name"))
+        if not peer_tools:
+            return cfg
+
+        tools = list(configured_tools)
+        tools.extend(tool_name for tool_name in peer_tools if tool_name not in tools)
+        cfg["tools"] = tools
+        return cfg
+
+    def _peer_task_tool_names_for_agent(self, agent_name: str | None) -> tuple[str, ...]:
+        if not self.peer_tasks_enabled or not agent_name:
+            return ()
+
+        matched_actor = next(
+            (
+                actor
+                for actor in self.actor_registry.values()
+                if actor.name == agent_name or actor.agent == agent_name
+            ),
+            None,
+        )
+        if matched_actor is None:
+            return ()
+        if matched_actor.role == "coordinator":
+            return _PEER_TASK_COORDINATOR_TOOLS
+        return _PEER_TASK_WORKER_TOOLS
 
     def _create_and_own(self, ep_name: str, protocol: type, cfg: Any) -> Any:
         from . import __dict__ as core_exports

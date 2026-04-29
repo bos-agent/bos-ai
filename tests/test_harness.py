@@ -199,6 +199,59 @@ async def test_harness_list_actors_returns_configured_registry():
     ]
 
 
+@pytest.mark.asyncio
+async def test_harness_injects_peer_task_tools_for_restricted_actor_agents(tmp_path):
+    coordinator_name = f"coordinator_{uuid.uuid4().hex}"
+    worker_name = f"worker_{uuid.uuid4().hex}"
+    try:
+        ReactAgent.register(name=coordinator_name, tools=[], system_prompt="Coordinate work.")
+        ReactAgent.register(name=worker_name, tools=[], system_prompt="Work on delegated tasks.")
+        bos_dir = tmp_path / ".bos"
+        bos_dir.mkdir()
+
+        async with AgentHarness(
+            bos_dir=bos_dir,
+            workspace=tmp_path,
+            actors=[
+                {"name": "main", "agent": coordinator_name, "address": "agent@main"},
+                {"name": "researcher", "agent": worker_name, "address": "agent@researcher"},
+            ],
+        ) as harness:
+            coordinator = harness.create_agent(coordinator_name)
+            worker = harness.create_agent(worker_name)
+
+        assert {"ListActors", "CreateTask", "ProvideTaskInput", "AbortTask"} <= set(coordinator._tools)
+        assert {"ListActors", "CreateTask", "WaitForInput", "CompleteTask"} <= set(worker._tools)
+        assert "ProvideTaskInput" not in worker._tools
+        assert "AbortTask" not in worker._tools
+    finally:
+        ep_agent._extensions.pop(coordinator_name, None)
+        ep_agent._extensions.pop(worker_name, None)
+
+
+@pytest.mark.asyncio
+async def test_harness_leaves_unrestricted_actor_tools_unmodified(tmp_path):
+    agent_name = f"unrestricted_{uuid.uuid4().hex}"
+    try:
+        ReactAgent.register(name=agent_name, system_prompt="Use any available tool.")
+        bos_dir = tmp_path / ".bos"
+        bos_dir.mkdir()
+
+        async with AgentHarness(
+            bos_dir=bos_dir,
+            workspace=tmp_path,
+            actors=[
+                {"name": "main", "agent": agent_name, "address": "agent@main"},
+                {"name": "researcher", "agent": "researcher", "address": "agent@researcher"},
+            ],
+        ) as harness:
+            agent = harness.create_agent(agent_name)
+
+        assert agent._tools is None
+    finally:
+        ep_agent._extensions.pop(agent_name, None)
+
+
 def test_harness_peer_task_tools_are_not_exposed_for_default_single_actor():
     harness = AgentHarness()
     tools = harness._create_local_tools(agent_name="main")
