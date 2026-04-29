@@ -1,17 +1,13 @@
 from __future__ import annotations
 
 import contextvars
-import json
 import logging
 import os
 import re
 import uuid
-from dataclasses import asdict
 from pathlib import Path
 from textwrap import dedent
 from typing import Any, Literal
-
-from bos.protocol import MessageType
 
 from ._utils import _aclose, _create_extension_instance, _load_ext_modules, _load_ext_paths, _safe_format
 from .agent import ChainReactInterceptor, ReactAgent
@@ -19,21 +15,8 @@ from .contract import Consolidator, EventSink, MailBox, MailRoute, MemoryStore, 
 from .events import derive_event_sink
 from .llm import LLMClient
 from .registry import ToolRegistry
-from .tasks import ActorRef, TaskLedger, TaskLedgerError, task_chat_id, task_metadata
 
 logger = logging.getLogger(__name__)
-
-_PEER_TASK_COMMON_TOOLS = (
-    "ListActors",
-    "CreateTask",
-    "UpdateTask",
-    "StartTask",
-    "WaitForInput",
-    "CompleteTask",
-    "FailTask",
-)
-_PEER_TASK_COORDINATOR_TOOLS = _PEER_TASK_COMMON_TOOLS + ("ProvideTaskInput", "AbortTask")
-_PEER_TASK_WORKER_TOOLS = _PEER_TASK_COMMON_TOOLS
 
 
 def bootstrap_platform(
@@ -94,8 +77,6 @@ class AgentHarness:
         bos_dir: str | Path = ".bos",
         workspace: str | Path = ".",
         subagents: list[dict[str, Any]] | None = None,
-        actors: list[dict[str, Any]] | None = None,
-        task_ledger: dict[str, Any] | str | Path | None = None,
         capability_mode: Literal["defensive", "offensive"] = "defensive",
     ) -> None:
         if capability_mode not in {"defensive", "offensive"}:
@@ -115,10 +96,6 @@ class AgentHarness:
         self._providers_cfg = providers
         self._interceptors_cfg = interceptors
         self._tools_cfg = tools or {}
-        self._actors_cfg = actors
-        self.actor_registry = self._create_actor_registry(actors)
-        self.peer_tasks_enabled = len(self.actor_registry) > 1
-        self.task_ledger = TaskLedger(self._resolve_task_ledger_path(task_ledger))
 
         self._owned: list[Any] = []
         self._token: contextvars.Token | None = None
@@ -130,44 +107,6 @@ class AgentHarness:
         self.skills_loader = None
         self.interceptor = None
         self.llm = None
-
-    def _resolve_task_ledger_path(self, cfg: dict[str, Any] | str | Path | None) -> Path | None:
-        if cfg is None:
-            return self._bos_root / "state" / "tasks.jsonl"
-        if isinstance(cfg, (str, Path)):
-            return Path(cfg).expanduser().resolve()
-        if isinstance(cfg, dict):
-            path = cfg.get("path")
-            if path in (None, ""):
-                return self._bos_root / "state" / "tasks.jsonl"
-            task_path = Path(str(path)).expanduser()
-            return task_path if task_path.is_absolute() else (self._bos_root / task_path).resolve()
-        raise TypeError("task_ledger must be a path, table, or None.")
-
-    @staticmethod
-    def _create_actor_registry(actors: list[dict[str, Any]] | None) -> dict[str, ActorRef]:
-        if not actors:
-            return {
-                "agent@main": ActorRef(
-                    name="main",
-                    agent="main",
-                    address="agent@main",
-                    role="coordinator",
-                )
-            }
-        registry: dict[str, ActorRef] = {}
-        for raw_actor in actors:
-            name = str(raw_actor["name"])
-            ref = ActorRef(
-                name=name,
-                agent=raw_actor.get("agent"),
-                address=str(raw_actor["address"]),
-                role="coordinator" if name == "main" else "worker",
-                description=raw_actor.get("description"),
-                capabilities=list(raw_actor.get("capabilities") or []),
-            )
-            registry[ref.address] = ref
-        return registry
 
     async def __aenter__(self):
         if self._token is not None:
@@ -222,7 +161,7 @@ class AgentHarness:
             }
 
         local_tools = self._create_local_tools(agent_name=agent_name)
-        kwargs = self._with_peer_task_tools(agent_name, agent_cfg) | {
+        kwargs = self._prepare_agent_cfg(agent_name, agent_cfg) | {
             "agent_name": agent_name or (agent_cfg or {}).get("name"),
             "llm": self.llm,
             "message_store": self.message_store,
@@ -236,40 +175,9 @@ class AgentHarness:
 
         return ep_agent.invoke(agent_name, kwargs) if agent_name else ReactAgent(**kwargs)
 
-    def _with_peer_task_tools(self, agent_name: str | None, agent_cfg: dict[str, Any]) -> dict[str, Any]:
+    def _prepare_agent_cfg(self, agent_name: str | None, agent_cfg: dict[str, Any]) -> dict[str, Any]:
         cfg = dict(agent_cfg)
-        configured_tools = cfg.get("tools")
-        if "tools" not in cfg and agent_name and ep_agent.has(agent_name):
-            configured_tools = ep_agent.get(agent_name).defaults.get("tools")
-        if not isinstance(configured_tools, list):
-            return cfg
-
-        peer_tools = self._peer_task_tool_names_for_agent(agent_name or cfg.get("name"))
-        if not peer_tools:
-            return cfg
-
-        tools = list(configured_tools)
-        tools.extend(tool_name for tool_name in peer_tools if tool_name not in tools)
-        cfg["tools"] = tools
         return cfg
-
-    def _peer_task_tool_names_for_agent(self, agent_name: str | None) -> tuple[str, ...]:
-        if not self.peer_tasks_enabled or not agent_name:
-            return ()
-
-        matched_actor = next(
-            (
-                actor
-                for actor in self.actor_registry.values()
-                if actor.name == agent_name or actor.agent == agent_name
-            ),
-            None,
-        )
-        if matched_actor is None:
-            return ()
-        if matched_actor.role == "coordinator":
-            return _PEER_TASK_COORDINATOR_TOOLS
-        return _PEER_TASK_WORKER_TOOLS
 
     def _create_and_own(self, ep_name: str, protocol: type, cfg: Any) -> Any:
         from . import __dict__ as core_exports
@@ -283,30 +191,6 @@ class AgentHarness:
         harness = self
         current_agent_name = agent_name or "__unknown__"
         tools = ToolRegistry("Harness-scoped tools for this agent.")
-
-        def current_actor_address() -> str:
-            mailbox = CURRENT_MAILBOX.get(None)
-            if mailbox is not None:
-                return mailbox.address
-            return f"agent@{current_agent_name}"
-
-        def normalize_actor_address(value: str) -> str:
-            value = str(value or "").strip()
-            if not value:
-                raise TaskLedgerError("actor address must be non-empty.")
-            address = value if value.startswith("agent@") else f"agent@{value}"
-            if address not in harness.actor_registry:
-                raise TaskLedgerError(f"Actor {address!r} is not registered.")
-            return address
-
-        def coordinator_address() -> str:
-            for actor in harness.actor_registry.values():
-                if actor.role == "coordinator":
-                    return actor.address
-            return "agent@main"
-
-        def result_payload(value: Any) -> str:
-            return json.dumps(value, default=str)
 
         @tools(
             name="SendMail",
@@ -324,271 +208,6 @@ class AgentHarness:
             mailbox = CURRENT_MAILBOX.get(None) or harness.mail_route.bind(f"agent@{current_agent_name}")
             await mailbox.send(recipient, content)
             return f"(Sent to {recipient})"
-
-        if harness.peer_tasks_enabled:
-
-            @tools(
-                name="ListActors",
-                description="List configured peer actors and their current registry status.",
-                parameters={"type": "object", "properties": {}, "required": []},
-            )
-            async def tool_list_actors() -> str:
-                return result_payload([asdict(actor) for actor in harness.actor_registry.values()])
-
-            @tools(
-                name="CreateTask",
-                description=dedent("""
-                Create a durable peer task assigned to an actor and dispatch it asynchronously.
-
-                This is the peer-actor delegation primitive. It records the task in
-                the task ledger, binds a task-owned worker chat, sends the task to
-                the assigned actor, and returns immediately.
-                """),
-                parameters={
-                    "type": "object",
-                    "properties": {
-                        "assigned_to": {"type": "string", "description": "Actor name or address to receive the task."},
-                        "goal": {"type": "string", "description": "Task goal."},
-                        "context": {"type": "string", "description": "Optional task context."},
-                        "parent_id": {"type": "string", "description": "Optional parent task id."},
-                    },
-                    "required": ["assigned_to", "goal"],
-                },
-            )
-            async def tool_create_task(
-                assigned_to: str,
-                goal: str,
-                context: str = "",
-                parent_id: str | None = None,
-                chat_id: str | None = None,
-                ctx_metadata: dict[str, Any] | None = None,
-            ) -> str:
-                assigned_address = normalize_actor_address(assigned_to)
-                created_by = current_actor_address()
-                parent = parent_id or None
-                task_context: dict[str, Any] = {}
-                if chat_id:
-                    task_context["source_chat_id"] = chat_id
-                source_sender = (ctx_metadata or {}).get("sender")
-                if isinstance(source_sender, str) and source_sender:
-                    task_context["source_sender"] = source_sender
-                task_context["source_actor"] = created_by
-                task = harness.task_ledger.create_task(
-                    goal=goal,
-                    created_by=created_by,
-                    assigned_to=assigned_address,
-                    parent_id=parent,
-                    context=context,
-                    metadata=task_context,
-                )
-                worker_chat_id = task_chat_id(task.id, "worker")
-                binding = harness.task_ledger.bind_chat(
-                    task_id=task.id,
-                    chat_id=worker_chat_id,
-                    actor_address=assigned_address,
-                    purpose="worker",
-                )
-                metadata = task_metadata(task, chat_id=worker_chat_id)
-                mailbox = CURRENT_MAILBOX.get(None) or harness.mail_route.bind(created_by)
-                await mailbox.send(
-                    assigned_address,
-                    f"Task {task.id}: {goal}\n\n{context}".strip(),
-                    chat_id=worker_chat_id,
-                    metadata=metadata,
-                )
-                return result_payload({"task": asdict(task), "binding": asdict(binding)})
-
-            @tools(
-                name="UpdateTask",
-                description="Append progress or metadata to a durable task.",
-                parameters={
-                    "type": "object",
-                    "properties": {
-                        "task_id": {"type": "string"},
-                        "progress": {"type": "string"},
-                    },
-                    "required": ["task_id", "progress"],
-                },
-            )
-            async def tool_update_task(task_id: str, progress: str) -> str:
-                event = harness.task_ledger.append_event(
-                    task_id,
-                    "progress",
-                    actor=current_actor_address(),
-                    content=progress,
-                )
-                return result_payload({"event": asdict(event), "task": asdict(harness.task_ledger.get_task(task_id))})
-
-            @tools(
-                name="StartTask",
-                description="Mark a durable task as running.",
-                parameters={
-                    "type": "object",
-                    "properties": {"task_id": {"type": "string"}},
-                    "required": ["task_id"],
-                },
-            )
-            async def tool_start_task(task_id: str) -> str:
-                event = harness.task_ledger.append_event(
-                    task_id,
-                    "started",
-                    actor=current_actor_address(),
-                    status="running",
-                )
-                return result_payload({"event": asdict(event), "task": asdict(harness.task_ledger.get_task(task_id))})
-
-            @tools(
-                name="WaitForInput",
-                description="Mark a task as waiting for input and notify the coordinator actor.",
-                parameters={
-                    "type": "object",
-                    "properties": {
-                        "task_id": {"type": "string"},
-                        "prompt": {"type": "string"},
-                    },
-                    "required": ["task_id", "prompt"],
-                },
-            )
-            async def tool_wait_for_input(task_id: str, prompt: str) -> str:
-                event = harness.task_ledger.append_event(
-                    task_id,
-                    "waiting_input",
-                    actor=current_actor_address(),
-                    content=prompt,
-                )
-                task = harness.task_ledger.get_task(task_id)
-                owner_address = task.created_by if task.created_by in harness.actor_registry else coordinator_address()
-                owner_binding = harness.task_ledger.first_binding(
-                    task.id,
-                    actor_address=owner_address,
-                    purpose="coordinator",
-                )
-                if owner_binding is None:
-                    owner_binding = harness.task_ledger.bind_chat(
-                        task_id=task.id,
-                        chat_id=task_chat_id(task.id, "coordinator"),
-                        actor_address=owner_address,
-                        purpose="coordinator",
-                    )
-                mailbox = CURRENT_MAILBOX.get(None) or harness.mail_route.bind(current_actor_address())
-                await mailbox.send(
-                    owner_address,
-                    f"Task {task_id} is waiting for input:\n\n{prompt}",
-                    chat_id=owner_binding.chat_id,
-                    metadata=task_metadata(task, chat_id=owner_binding.chat_id)
-                    | {"task_notification": True, "no_reply": True},
-                )
-                return result_payload({"event": asdict(event), "task": asdict(task)})
-
-            @tools(
-                name="ProvideTaskInput",
-                description="Provide input for a waiting task and route it to the bound worker chat.",
-                parameters={
-                    "type": "object",
-                    "properties": {
-                        "task_id": {"type": "string"},
-                        "content": {"type": "string"},
-                    },
-                    "required": ["task_id", "content"],
-                },
-            )
-            async def tool_provide_task_input(task_id: str, content: str) -> str:
-                task = harness.task_ledger.get_task(task_id)
-                binding = harness.task_ledger.first_binding(task_id, actor_address=task.assigned_to, purpose="worker")
-                if binding is None or binding.actor_address is None:
-                    raise TaskLedgerError(f"Task {task_id!r} has no bound worker chat.")
-                event = harness.task_ledger.append_event(
-                    task_id,
-                    "input_provided",
-                    actor=current_actor_address(),
-                    content=content,
-                    status="running",
-                )
-                mailbox = CURRENT_MAILBOX.get(None) or harness.mail_route.bind(current_actor_address())
-                await mailbox.send(
-                    binding.actor_address,
-                    content,
-                    chat_id=binding.chat_id,
-                    metadata=task_metadata(task, chat_id=binding.chat_id),
-                )
-                return result_payload({"event": asdict(event), "binding": asdict(binding)})
-
-            @tools(
-                name="CompleteTask",
-                description="Mark a durable task as completed with a result.",
-                parameters={
-                    "type": "object",
-                    "properties": {
-                        "task_id": {"type": "string"},
-                        "result": {"type": "string"},
-                    },
-                    "required": ["task_id", "result"],
-                },
-            )
-            async def tool_complete_task(task_id: str, result: str) -> str:
-                event = harness.task_ledger.append_event(
-                    task_id,
-                    "completed",
-                    actor=current_actor_address(),
-                    content=result,
-                    result=result,
-                )
-                return result_payload({"event": asdict(event), "task": asdict(harness.task_ledger.get_task(task_id))})
-
-            @tools(
-                name="FailTask",
-                description="Mark a durable task as failed with a reason.",
-                parameters={
-                    "type": "object",
-                    "properties": {
-                        "task_id": {"type": "string"},
-                        "reason": {"type": "string"},
-                    },
-                    "required": ["task_id", "reason"],
-                },
-            )
-            async def tool_fail_task(task_id: str, reason: str) -> str:
-                event = harness.task_ledger.append_event(
-                    task_id,
-                    "failed",
-                    actor=current_actor_address(),
-                    reason=reason,
-                    status="failed",
-                )
-                return result_payload({"event": asdict(event), "task": asdict(harness.task_ledger.get_task(task_id))})
-
-            @tools(
-                name="AbortTask",
-                description="Mark a durable task as aborted and send an abort interrupt to its worker chat when bound.",
-                parameters={
-                    "type": "object",
-                    "properties": {
-                        "task_id": {"type": "string"},
-                        "reason": {"type": "string"},
-                    },
-                    "required": ["task_id"],
-                },
-            )
-            async def tool_abort_task(task_id: str, reason: str = "aborted") -> str:
-                task = harness.task_ledger.get_task(task_id)
-                event = harness.task_ledger.append_event(
-                    task_id,
-                    "aborted",
-                    actor=current_actor_address(),
-                    reason=reason,
-                    status="aborted",
-                )
-                binding = harness.task_ledger.first_binding(task_id, actor_address=task.assigned_to, purpose="worker")
-                if binding is not None and binding.actor_address is not None:
-                    mailbox = CURRENT_MAILBOX.get(None) or harness.mail_route.bind(current_actor_address())
-                    await mailbox.send(
-                        binding.actor_address,
-                        reason,
-                        content_type=MessageType.INTERRUPT_ABORT,
-                        chat_id=binding.chat_id,
-                        metadata=task_metadata(task, chat_id=binding.chat_id),
-                    )
-                return result_payload({"event": asdict(event), "task": asdict(task)})
 
         @tools(
             name="AskSubagent",

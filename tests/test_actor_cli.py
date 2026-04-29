@@ -1,8 +1,8 @@
 from click.testing import CliRunner
 
 from bos.cli.entry import cli
-from bos.core.tasks import TaskLedger
 from bos.runner.proc import RunDir, write_state
+from bos.team.tasks import TaskLedger
 
 
 def test_actors_command_shows_configured_actors_when_stopped(tmp_path):

@@ -16,7 +16,6 @@ from .chat_state import ChatState
 from .contract import ep_actor_command
 from .events import MailboxEventSink
 from .harness import CURRENT_HARNESS, CURRENT_MAILBOX
-from .tasks import task_chat_id, task_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -78,12 +77,12 @@ class AgentActor:
     buffers, and generation counter.
     """
 
-    def __init__(self, agent: Any, mailbox: Any, chat_state: ChatState | None = None, task_ledger: Any = None):
+    def __init__(self, agent: Any, mailbox: Any, chat_state: ChatState | None = None, task_runtime: Any = None):
         self._address = mailbox.address
         self._agent = agent
         self._mailbox = mailbox
         self._chat_state = chat_state or ChatState()
-        self._task_ledger = task_ledger
+        self._task_runtime = task_runtime
         self._sessions: dict[str, SessionState] = {}
         self._command_tasks: set[asyncio.Task] = set()
 
@@ -120,12 +119,11 @@ class AgentActor:
                     continue
 
                 chat_id = env.chat_id
-                if self._task_ledger is not None and env.content_type in _TASK_VALIDATED_MESSAGE_TYPES:
+                if self._task_runtime is not None and env.content_type in _TASK_VALIDATED_MESSAGE_TYPES:
                     try:
-                        self._task_ledger.validate_task_envelope(
+                        self._task_runtime.validate_envelope(
                             chat_id=chat_id,
                             metadata=env.metadata,
-                            actor_address=self._address,
                         )
                     except Exception as exc:
                         await self._mailbox.send(
@@ -287,17 +285,21 @@ class AgentActor:
                 return
 
             if reply_recipient is not None:
-                routed_chat_id, routed_metadata, routed_content = self._task_response_route(
-                    source_chat_id=chat_id,
-                    reply_chat_id=reply_chat_id,
-                    reply_recipient=reply_recipient,
-                    response=response,
+                routed = (
+                    self._task_runtime.route_response(
+                        source_chat_id=chat_id,
+                        reply_chat_id=reply_chat_id,
+                        reply_recipient=reply_recipient,
+                        response=response,
+                    )
+                    if self._task_runtime is not None
+                    else None
                 )
                 await self._mailbox.send(
                     reply_recipient,
-                    routed_content,
-                    chat_id=routed_chat_id,
-                    metadata=routed_metadata,
+                    routed.content if routed is not None else response,
+                    chat_id=routed.chat_id if routed is not None else reply_chat_id,
+                    metadata=routed.metadata if routed is not None else {},
                 )
 
             if not self._execution_is_current(chat_id, generation):
@@ -323,124 +325,6 @@ class AgentActor:
         if isinstance(reply_to, str) and reply_to and str(env.sender).startswith("agent@"):
             return reply_to
         return env.sender
-
-    def _task_response_route(
-        self,
-        *,
-        source_chat_id: str,
-        reply_chat_id: str | None,
-        reply_recipient: str,
-        response: str,
-    ) -> tuple[str | None, dict[str, Any], str]:
-        if self._task_ledger is None:
-            return reply_chat_id, {}, response
-        binding = self._task_ledger.get_binding(source_chat_id)
-        if binding is None or binding.actor_address != self._address:
-            return reply_chat_id, {}, response
-        task = self._task_ledger.get_task(binding.task_id)
-        self._task_ledger.append_event(
-            task.id,
-            "progress",
-            actor=self._address,
-            content=response,
-            metadata={"source_chat_id": source_chat_id, "reply_recipient": reply_recipient},
-        )
-        if binding.purpose != "worker" or not reply_recipient.startswith("agent@") or reply_recipient == self._address:
-            return reply_chat_id, task_metadata(task, chat_id=reply_chat_id or source_chat_id), response
-
-        original_chat_id = task.metadata.get("source_chat_id")
-        original_sender = task.metadata.get("source_sender")
-        if (
-            isinstance(original_chat_id, str)
-            and original_chat_id
-            and isinstance(original_sender, str)
-            and original_sender
-        ):
-            source_tasks = self._tasks_for_source_chat(task, original_chat_id)
-            pending_tasks = [
-                source_task
-                for source_task in source_tasks
-                if source_task.id != task.id and source_task.status in {"queued", "running", "waiting_input"}
-            ]
-            metadata = task_metadata(task, chat_id=original_chat_id) | {
-                "task_notification": True,
-                "source_chat_id": original_chat_id,
-                "reply_to": original_sender,
-            }
-            if pending_tasks:
-                metadata["no_reply"] = True
-            return (
-                original_chat_id,
-                metadata,
-                self._format_task_completion_notification(task, response, source_tasks, pending_tasks),
-            )
-
-        notify_binding = self._task_ledger.first_binding(
-            task.id,
-            actor_address=reply_recipient,
-            purpose="coordinator",
-        )
-        if notify_binding is None:
-            notify_binding = self._task_ledger.bind_chat(
-                task_id=task.id,
-                chat_id=task_chat_id(task.id, "coordinator"),
-                actor_address=reply_recipient,
-                purpose="coordinator",
-            )
-        metadata = task_metadata(task, chat_id=notify_binding.chat_id) | {
-            "task_notification": True,
-            "no_reply": True,
-        }
-        return notify_binding.chat_id, metadata, response
-
-    def _tasks_for_source_chat(self, task: Any, source_chat_id: str) -> list[Any]:
-        return [
-            candidate
-            for candidate in self._task_ledger.list_tasks()
-            if candidate.created_by == task.created_by
-            and candidate.metadata.get("source_chat_id") == source_chat_id
-        ]
-
-    @staticmethod
-    def _format_task_completion_notification(
-        task: Any,
-        response: str,
-        source_tasks: list[Any],
-        pending_tasks: list[Any],
-    ) -> str:
-        task_result = task.result or response
-        lines = [
-            "Peer task update:",
-            f"- task_id: {task.id}",
-            f"- assigned_to: {task.assigned_to}",
-            f"- status: {task.status}",
-            f"- goal: {task.goal}",
-        ]
-        if task_result:
-            lines.append(f"- result: {task_result}")
-
-        if source_tasks:
-            lines.append("")
-            lines.append("Related tasks for this user request:")
-            for source_task in source_tasks:
-                summary = source_task.result
-                if summary is None and source_task.id == task.id:
-                    summary = task_result
-                result_text = f", result: {summary}" if summary else ""
-                lines.append(
-                    f"- {source_task.id}: {source_task.status}, assigned_to: {source_task.assigned_to}, "
-                    f"goal: {source_task.goal}{result_text}"
-                )
-
-        lines.append("")
-        if pending_tasks:
-            pending_ids = ", ".join(source_task.id for source_task in pending_tasks)
-            lines.append(f"Do not answer the user yet. Pending related task(s): {pending_ids}.")
-            lines.append("Record this update and wait for the remaining task result(s).")
-        else:
-            lines.append("All related tasks for the original user request are complete.")
-            lines.append("Use the original user request plus these task results to reply to the user now.")
-        return "\n".join(lines)
 
     async def _handle_command(self, env: Envelope) -> None:
         parts = env.content.split(None, 1)

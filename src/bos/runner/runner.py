@@ -42,17 +42,23 @@ async def start(workspace: Workspace) -> None:
         from bos.core.chat_state import ChatState
 
         chat_state = ChatState(workspace.bos_dir)
-        coordinator_addresses = {actor.address for actor in actors_cfg if actor.role == "coordinator"}
-        harness.task_ledger.mark_active_tasks_interrupted(
-            exclude_assignees=coordinator_addresses,
-            reason="restart",
-        )
+        task_ledger = getattr(harness, "task_ledger", None)
+        if task_ledger is not None:
+            coordinator_addresses = {actor.address for actor in actors_cfg if actor.role == "coordinator"}
+            task_ledger.mark_active_tasks_interrupted(
+                exclude_assignees=coordinator_addresses,
+                reason="restart",
+            )
         actors = [
             AgentActor(
                 harness.create_agent(actor_cfg.agent),
                 harness.mail_route.bind(actor_cfg.address),
                 chat_state=chat_state,
-                task_ledger=harness.task_ledger,
+                task_runtime=(
+                    harness.task_runtime_for(actor_cfg.address)
+                    if hasattr(harness, "task_runtime_for")
+                    else None
+                ),
             )
             for actor_cfg in actors_cfg
         ]

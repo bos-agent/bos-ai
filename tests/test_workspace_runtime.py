@@ -3,6 +3,8 @@ from pathlib import Path
 import pytest
 
 from bos.config.workspace import Workspace
+from bos.core import AgentHarness
+from bos.team import TeamHarness
 
 
 def test_runtime_config_defaults_to_process(tmp_path):
@@ -81,6 +83,46 @@ capabilities = ["research"]
         ("researcher", "researcher", "agent@researcher", "worker"),
     ]
     assert actors[1].description == "Research worker"
+
+
+def test_workspace_harness_uses_classic_harness_for_single_actor(tmp_path):
+    bos_dir = tmp_path / ".bos"
+    bos_dir.mkdir()
+    (bos_dir / "config.toml").write_text(
+        """
+[main]
+agent = "main"
+
+[harness.task_ledger]
+path = "state/tasks.jsonl"
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    harness = Workspace(tmp_path).harness()
+
+    assert type(harness) is AgentHarness
+
+
+def test_workspace_harness_uses_team_harness_for_multi_actor(tmp_path):
+    bos_dir = tmp_path / ".bos"
+    bos_dir.mkdir()
+    (bos_dir / "config.toml").write_text(
+        """
+[main]
+agent = "main"
+
+[[main.actors]]
+name = "researcher"
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    harness = Workspace(tmp_path).harness()
+
+    assert isinstance(harness, TeamHarness)
 
 
 def test_resolve_actors_requires_configured_main_actor_without_main_agent(tmp_path):

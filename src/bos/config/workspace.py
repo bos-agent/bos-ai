@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from bos.core import AgentHarness, _apply
+from bos.team import TeamHarness
 
 
 class WorkspaceResolutionError(RuntimeError):
@@ -376,12 +377,16 @@ class Workspace:
         return resolved_platform_cfg
 
     def harness(self) -> AgentHarness:
+        actors = self.resolve_actors()
         harness_cfg = self.config.get("harness", {}) | {
             "bos_dir": self.bos_dir,
             "workspace": self.workspace,
-            "actors": [actor.actor_ref() for actor in self.resolve_actors()],
         }
-        return _apply(AgentHarness, harness_cfg)
+        if len(actors) <= 1:
+            harness_cfg.pop("task_ledger", None)
+            return _apply(AgentHarness, harness_cfg)
+        harness_cfg["actors"] = [actor.actor_ref() for actor in actors]
+        return _apply(TeamHarness, harness_cfg)
 
     def enable_interceptors(self, interceptors: list[str | dict[str, Any]]):
         interceptors_cfg = self.config.setdefault("harness", {}).setdefault("interceptors", [])

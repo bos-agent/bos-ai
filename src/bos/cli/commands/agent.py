@@ -76,9 +76,10 @@ def _prompt_harness(ws: Workspace, *, selected_agent: str, peer_tools: bool):
     harness_cfg["workspace"] = ws.workspace
     harness_cfg["actors"] = actors
 
-    from bos.core import AgentHarness, _apply
+    from bos.core import _apply
+    from bos.team import TeamHarness
 
-    return _apply(AgentHarness, harness_cfg)
+    return _apply(TeamHarness, harness_cfg)
 
 
 async def _build_dummy_agent_system_prompt(ws: Workspace) -> str:
@@ -93,6 +94,7 @@ async def _build_dummy_agent_system_prompt(ws: Workspace) -> str:
     harness_cfg["capability_mode"] = "offensive"
     harness_cfg["bos_dir"] = ws.bos_dir
     harness_cfg["workspace"] = ws.workspace
+    harness_cfg.pop("task_ledger", None)
 
     from bos.core import AgentHarness, _apply
 
@@ -604,7 +606,7 @@ def actors(ctx):
 
 
 def _active_tasks_by_actor(bos_dir) -> dict[str, Any]:
-    from bos.core.tasks import TaskLedger
+    from bos.team.tasks import TaskLedger
 
     ledger = TaskLedger(bos_dir / "state" / "tasks.jsonl")
     active_statuses = {"queued", "running", "waiting_input"}

@@ -3,8 +3,9 @@ import asyncio
 import pytest
 
 from bos.core import AgentActor, InMemMailRoute
-from bos.core.tasks import TaskLedger, task_chat_id, task_metadata
 from bos.protocol import Envelope, MessageType
+from bos.team.runtime import PeerTaskRuntime
+from bos.team.tasks import TaskLedger, task_chat_id, task_metadata
 
 
 class RecordingAgent:
@@ -24,7 +25,7 @@ async def test_actor_rejects_task_chat_bound_to_another_actor():
     ledger.bind_chat(task_id=task_record.id, chat_id=chat_id, actor_address="agent@researcher")
     route = InMemMailRoute()
     agent = RecordingAgent()
-    actor = AgentActor(agent, route.bind("agent@main"), task_ledger=ledger)
+    actor = AgentActor(agent, route.bind("agent@main"), task_runtime=PeerTaskRuntime(ledger, "agent@main"))
     sender = route.bind("agent@researcher")
 
     task = asyncio.create_task(actor.run())
@@ -55,7 +56,11 @@ async def test_actor_does_not_bounce_system_errors_on_task_chats():
     chat_id = task_chat_id(task_record.id)
     ledger.bind_chat(task_id=task_record.id, chat_id=chat_id, actor_address=researcher_address)
     route = InMemMailRoute()
-    actor = AgentActor(RecordingAgent(), route.bind(main_address), task_ledger=ledger)
+    actor = AgentActor(
+        RecordingAgent(),
+        route.bind(main_address),
+        task_runtime=PeerTaskRuntime(ledger, main_address),
+    )
 
     task = asyncio.create_task(actor.run())
     try:
@@ -86,7 +91,11 @@ async def test_actor_accepts_task_chat_for_bound_actor():
     ledger.bind_chat(task_id=task_record.id, chat_id=chat_id, actor_address="agent@researcher")
     route = InMemMailRoute()
     agent = RecordingAgent()
-    actor = AgentActor(agent, route.bind("agent@researcher"), task_ledger=ledger)
+    actor = AgentActor(
+        agent,
+        route.bind("agent@researcher"),
+        task_runtime=PeerTaskRuntime(ledger, "agent@researcher"),
+    )
     sender = route.bind("agent@main")
 
     task = asyncio.create_task(actor.run())
@@ -125,8 +134,16 @@ async def test_worker_task_reply_is_routed_to_coordinator_owned_task_chat_withou
         response="coordinator saw worker result",
         **kwargs,
     )
-    worker = AgentActor(worker_agent, route.bind(researcher_address), task_ledger=ledger)
-    coordinator = AgentActor(coordinator_agent, route.bind(coordinator_address), task_ledger=ledger)
+    worker = AgentActor(
+        worker_agent,
+        route.bind(researcher_address),
+        task_runtime=PeerTaskRuntime(ledger, researcher_address),
+    )
+    coordinator = AgentActor(
+        coordinator_agent,
+        route.bind(coordinator_address),
+        task_runtime=PeerTaskRuntime(ledger, coordinator_address),
+    )
 
     worker_task = asyncio.create_task(worker.run())
     coordinator_task = asyncio.create_task(coordinator.run())
@@ -179,39 +196,38 @@ def test_worker_task_reply_routes_to_original_chat_until_sibling_tasks_complete(
     second_worker_chat = task_chat_id(second_task.id)
     ledger.bind_chat(task_id=first_task.id, chat_id=first_worker_chat, actor_address=researcher_address)
     ledger.bind_chat(task_id=second_task.id, chat_id=second_worker_chat, actor_address=reviewer_address)
-    route = InMemMailRoute()
-    researcher = AgentActor(RecordingAgent(), route.bind(researcher_address), task_ledger=ledger)
-    reviewer = AgentActor(RecordingAgent(), route.bind(reviewer_address), task_ledger=ledger)
+    researcher_runtime = PeerTaskRuntime(ledger, researcher_address)
+    reviewer_runtime = PeerTaskRuntime(ledger, reviewer_address)
 
     ledger.append_event(first_task.id, "completed", actor=researcher_address, content="42", result="42")
-    routed_chat_id, routed_metadata, routed_content = researcher._task_response_route(
+    routed = researcher_runtime.route_response(
         source_chat_id=first_worker_chat,
         reply_chat_id=first_worker_chat,
         reply_recipient=coordinator_address,
         response="42",
     )
 
-    assert routed_chat_id == user_chat_id
-    assert routed_metadata["reply_to"] == user_sender
-    assert routed_metadata["no_reply"] is True
-    assert "Pending related task(s)" in routed_content
-    assert first_task.id in routed_content
-    assert second_task.id in routed_content
+    assert routed.chat_id == user_chat_id
+    assert routed.metadata["reply_to"] == user_sender
+    assert routed.metadata["no_reply"] is True
+    assert "Pending related task(s)" in routed.content
+    assert first_task.id in routed.content
+    assert second_task.id in routed.content
 
     ledger.append_event(second_task.id, "completed", actor=reviewer_address, content="7", result="7")
-    routed_chat_id, routed_metadata, routed_content = reviewer._task_response_route(
+    routed = reviewer_runtime.route_response(
         source_chat_id=second_worker_chat,
         reply_chat_id=second_worker_chat,
         reply_recipient=coordinator_address,
         response="7",
     )
 
-    assert routed_chat_id == user_chat_id
-    assert routed_metadata["reply_to"] == user_sender
-    assert "no_reply" not in routed_metadata
-    assert "All related tasks" in routed_content
-    assert "result: 42" in routed_content
-    assert "result: 7" in routed_content
+    assert routed.chat_id == user_chat_id
+    assert routed.metadata["reply_to"] == user_sender
+    assert "no_reply" not in routed.metadata
+    assert "All related tasks" in routed.content
+    assert "result: 42" in routed.content
+    assert "result: 7" in routed.content
 
 
 def test_actor_honors_reply_to_only_for_actor_senders():

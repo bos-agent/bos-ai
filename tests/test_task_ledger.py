@@ -1,6 +1,6 @@
 import pytest
 
-from bos.core.tasks import TaskLedger, TaskLedgerError, task_chat_id
+from bos.team.tasks import TaskLedger, TaskLedgerError, task_chat_id
 
 
 def test_create_root_task_persists_and_reloads(tmp_path):

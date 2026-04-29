@@ -9,6 +9,7 @@ from bos.core.agent import ReactAgent
 from bos.core.registry import ToolRegistry
 from bos.extensions.mailboxes import jsonl_mailbox  # noqa: F401
 from bos.protocol import MessageType
+from bos.team import TeamHarness
 
 
 def test_harness_local_tools_describe_ask_subagent(caplog):
@@ -62,7 +63,7 @@ async def test_harness_peer_task_tools_create_task_and_dispatch_to_actor(tmp_pat
         {"name": "researcher", "agent": "researcher", "address": "agent@researcher"},
     ]
 
-    async with AgentHarness(
+    async with TeamHarness(
         mail_route={"name": "JsonlMailRoute", "store_dir": tmp_path / "mail"},
         bos_dir=bos_dir,
         workspace=tmp_path,
@@ -99,7 +100,7 @@ async def test_harness_provide_task_input_routes_to_bound_worker_chat(tmp_path):
         {"name": "researcher", "agent": "researcher", "address": "agent@researcher"},
     ]
 
-    async with AgentHarness(
+    async with TeamHarness(
         mail_route={"name": "JsonlMailRoute", "store_dir": tmp_path / "mail"},
         bos_dir=bos_dir,
         workspace=tmp_path,
@@ -141,7 +142,7 @@ async def test_harness_wait_for_input_notifies_task_creator_and_reuses_control_c
         {"name": "reviewer", "agent": "reviewer", "address": "agent@reviewer"},
     ]
 
-    async with AgentHarness(
+    async with TeamHarness(
         mail_route={"name": "JsonlMailRoute", "store_dir": tmp_path / "mail"},
         bos_dir=bos_dir,
         workspace=tmp_path,
@@ -183,7 +184,7 @@ async def test_harness_wait_for_input_notifies_task_creator_and_reuses_control_c
 
 @pytest.mark.asyncio
 async def test_harness_list_actors_returns_configured_registry():
-    harness = AgentHarness(
+    harness = TeamHarness(
         actors=[
             {"name": "main", "agent": "main", "address": "agent@main"},
             {"name": "reviewer", "agent": "reviewer", "address": "agent@reviewer"},
@@ -209,7 +210,7 @@ async def test_harness_injects_peer_task_tools_for_restricted_actor_agents(tmp_p
         bos_dir = tmp_path / ".bos"
         bos_dir.mkdir()
 
-        async with AgentHarness(
+        async with TeamHarness(
             bos_dir=bos_dir,
             workspace=tmp_path,
             actors=[
@@ -237,7 +238,7 @@ async def test_harness_leaves_unrestricted_actor_tools_unmodified(tmp_path):
         bos_dir = tmp_path / ".bos"
         bos_dir.mkdir()
 
-        async with AgentHarness(
+        async with TeamHarness(
             bos_dir=bos_dir,
             workspace=tmp_path,
             actors=[
