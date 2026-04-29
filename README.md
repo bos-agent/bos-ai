@@ -61,7 +61,7 @@ Useful lifecycle commands:
 
 ```bash
 bos status
-bos actor
+bos actors
 bos restart
 bos stop
 ```

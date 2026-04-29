@@ -3,15 +3,15 @@ import importlib
 import click
 
 _LAZY_COMMANDS: dict[str, str] = {
+    "actors": "bos.cli.commands.agent:actors",
+    "ask": "bos.cli.commands.agent:ask",
     "auth": "bos.cli.commands.auth:auth",
-    "actor": "bos.cli.commands.agent:actor",
     "init": "bos.cli.commands.init:init",
     "prompt": "bos.cli.commands.agent:prompt",
     "start": "bos.cli.commands.agent:start",
     "stop": "bos.cli.commands.agent:stop",
     "status": "bos.cli.commands.agent:status",
     "restart": "bos.cli.commands.agent:restart",
-    "task": "bos.cli.commands.agent:task",
     "tui": "bos.cli.commands.agent:tui",
 }
 

@@ -1,4 +1,4 @@
-"""``bos start/stop/status/restart/task/tui`` — agent process lifecycle commands."""
+"""``bos start/stop/status/restart/ask/tui`` — agent process lifecycle commands."""
 
 from __future__ import annotations
 
@@ -103,8 +103,8 @@ def _preview(value: Any, limit: int = 120) -> str:
     return text[: max(limit - 1, 0)].rstrip() + "…"
 
 
-class _TaskProgressDisplay:
-    """Compact live renderer for oneshot task turn events."""
+class _AskProgressDisplay:
+    """Compact live renderer for oneshot ask turn events."""
 
     def __init__(self, *, max_rows: int = 5) -> None:
         self._console = Console(stderr=True)
@@ -112,9 +112,9 @@ class _TaskProgressDisplay:
         self._live: Live | None = None
         self._rows: deque[tuple[str, str]] = deque(maxlen=max_rows)
 
-    def __enter__(self) -> "_TaskProgressDisplay":
+    def __enter__(self) -> "_AskProgressDisplay":
         if self._enabled:
-            self._append("dim", "starting task…")
+            self._append("dim", "starting ask…")
             self._live = Live(
                 self._render(),
                 console=self._console,
@@ -149,7 +149,7 @@ class _TaskProgressDisplay:
             if idx:
                 body.append("\n")
             body.append(message, style=style)
-        return Panel(body, title="bos task", border_style="cyan", padding=(0, 1))
+        return Panel(body, title="bos ask", border_style="cyan", padding=(0, 1))
 
     def _format_event(self, event: TurnEvent) -> tuple[str, str]:
         label = _turn_event_label(event)
@@ -219,7 +219,7 @@ def prompt(ctx, agent_name: str | None):
     click.echo(rendered_prompt, nl=False)
 
 
-# ── bos task ──────────────────────────────────────────────────
+# ── bos ask ───────────────────────────────────────────────────
 
 
 @click.command()
@@ -233,14 +233,14 @@ def prompt(ctx, agent_name: str | None):
 @click.option(
     "--model",
     default=None,
-    help="Override the model for this task.",
+    help="Override the model for this ask.",
 )
 @click.option(
     "--stdin",
     "use_stdin",
     is_flag=True,
     default=False,
-    help="Read task content from stdin (appended after MESSAGE if both given).",
+    help="Read ask content from stdin (appended after MESSAGE if both given).",
 )
 @click.option(
     "--max-iterations",
@@ -250,7 +250,7 @@ def prompt(ctx, agent_name: str | None):
     help="Override the maximum number of ReAct iterations.",
 )
 @click.pass_context
-def task(
+def ask(
     ctx,
     message: str | None,
     agent_name: str | None,
@@ -258,7 +258,7 @@ def task(
     use_stdin: bool,
     max_iterations: int | None,
 ):
-    """Run a oneshot agent task and exit.
+    """Ask a oneshot agent question and exit.
 
     Boots the harness, creates an agent, sends a single message,
     waits for the full ReAct loop to finish, prints the final
@@ -266,16 +266,16 @@ def task(
 
     \b
     Examples:
-        bos task "refactor the auth module"
-        bos task --agent coder "write tests for utils.py"
-        cat spec.md | bos task --stdin
-        echo "explain this" | bos task --stdin --model gpt-4o
+        bos ask "refactor the auth module"
+        bos ask --agent coder "write tests for utils.py"
+        cat spec.md | bos ask --stdin
+        echo "explain this" | bos ask --stdin --model gpt-4o
     """
     if use_stdin and not sys.stdin.isatty():
         stdin_content = sys.stdin.read()
         message = ((message or "") + "\n" + stdin_content).strip() if message else stdin_content.strip()
     if not message:
-        raise click.UsageError("Provide a task message as an argument or via --stdin.")
+        raise click.UsageError("Provide an ask message as an argument or via --stdin.")
 
     ws, _ = _get_ws_and_rd(ctx)
     ws.bootstrap_platform()
@@ -285,7 +285,7 @@ def task(
     if model:
         llm_args["model"] = model
 
-    async def _run(event_sink: _TaskProgressDisplay | None = None) -> str:
+    async def _run(event_sink: _AskProgressDisplay | None = None) -> str:
         agent_cfg = {"max_iterations": max_iterations} if max_iterations is not None else None
         async with ws.harness() as harness:
             agent = harness.create_agent(selected_agent, agent_cfg=agent_cfg)
@@ -297,7 +297,7 @@ def task(
             )
 
     try:
-        with _TaskProgressDisplay() as progress:
+        with _AskProgressDisplay() as progress:
             result = asyncio.run(_run(progress))
     except ValueError as exc:
         raise click.UsageError(str(exc)) from exc
@@ -472,7 +472,7 @@ def status(ctx):
         click.echo(f"Channel:     {name} @ {addr} → ws://{host}:{port}/ws")
 
 
-# ── bos actor ─────────────────────────────────────────────────
+# ── bos actors ────────────────────────────────────────────────
 
 
 def _format_actor_table(rows: list[dict[str, str]]) -> str:
@@ -482,6 +482,7 @@ def _format_actor_table(rows: list[dict[str, str]]) -> str:
         ("role", "Role"),
         ("agent", "Agent"),
         ("address", "Address"),
+        ("task", "Task"),
     ]
     widths = {
         key: max(len(header), *(len(str(row.get(key, ""))) for row in rows))
@@ -494,7 +495,7 @@ def _format_actor_table(rows: list[dict[str, str]]) -> str:
 
 @click.command()
 @click.pass_context
-def actor(ctx):
+def actors(ctx):
     """Show configured actor statuses."""
     ws, rd = _get_ws_and_rd(ctx)
     from bos.runner.proc import is_running, read_state
@@ -514,6 +515,7 @@ def actor(ctx):
         for raw_actor in runtime_actors
         if isinstance(raw_actor, dict) and raw_actor.get("address")
     }
+    active_tasks_by_actor = _active_tasks_by_actor(ws.bos_dir)
 
     rows: list[dict[str, str]] = []
     seen_addresses: set[str] = set()
@@ -530,6 +532,7 @@ def actor(ctx):
                 "role": str(runtime_actor.get("role") or actor_cfg.role),
                 "agent": str(runtime_actor.get("agent") or actor_cfg.agent),
                 "address": actor_cfg.address,
+                "task": _format_actor_task(active_tasks_by_actor.get(actor_cfg.address)),
             }
         )
         seen_addresses.add(actor_cfg.address)
@@ -548,10 +551,33 @@ def actor(ctx):
                 "role": str(raw_actor.get("role") or ("coordinator" if name == "main" else "worker")),
                 "agent": str(raw_actor.get("agent") or name),
                 "address": address,
+                "task": _format_actor_task(active_tasks_by_actor.get(address)),
             }
         )
 
     click.echo(_format_actor_table(rows))
+
+
+def _active_tasks_by_actor(bos_dir) -> dict[str, Any]:
+    from bos.core.tasks import TaskLedger
+
+    ledger = TaskLedger(bos_dir / "state" / "tasks.jsonl")
+    active_statuses = {"queued", "running", "waiting_input"}
+    tasks = [task for task in ledger.list_tasks() if task.status in active_statuses]
+    tasks.sort(key=lambda task: task.updated_at, reverse=True)
+    result: dict[str, Any] = {}
+    for task in tasks:
+        result.setdefault(task.assigned_to, task)
+    return result
+
+
+def _format_actor_task(task: Any | None) -> str:
+    if task is None:
+        return "—"
+    goal = str(task.goal).replace("\n", " ").strip()
+    if len(goal) > 48:
+        goal = goal[:47].rstrip() + "…"
+    return f"{task.status}:{task.id} {goal}"
 
 
 # ── bos restart ───────────────────────────────────────────────
