@@ -88,7 +88,7 @@ def register_peer_task_tools(tools: Any, harness: Any, current_agent_name: str) 
         context: str = "",
         parent_id: str | None = None,
         chat_id: str | None = None,
-        ctx_metadata: dict[str, Any] | None = None,
+        sender: str | None = None,
     ) -> str:
         assigned_address = normalize_actor_address(assigned_to)
         created_by = current_actor_address()
@@ -96,9 +96,8 @@ def register_peer_task_tools(tools: Any, harness: Any, current_agent_name: str) 
         task_context: dict[str, Any] = {}
         if chat_id:
             task_context["source_chat_id"] = chat_id
-        source_sender = (ctx_metadata or {}).get("sender")
-        if isinstance(source_sender, str) and source_sender:
-            task_context["source_sender"] = source_sender
+        if sender:
+            task_context["source_sender"] = sender
         task_context["source_actor"] = created_by
         task = harness.task_ledger.create_task(
             goal=goal,
