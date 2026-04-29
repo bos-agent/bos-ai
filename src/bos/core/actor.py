@@ -20,6 +20,19 @@ from .tasks import task_chat_id, task_metadata
 
 logger = logging.getLogger(__name__)
 
+_TASK_VALIDATED_MESSAGE_TYPES = {
+    MessageType.MESSAGE,
+    MessageType.COMMAND,
+    MessageType.INTERRUPT_MESSAGE,
+    MessageType.INTERRUPT_ABORT,
+}
+_PASSIVE_MESSAGE_TYPES = {
+    MessageType.COMMAND_RESULT,
+    MessageType.ECHO,
+    MessageType.SYSTEM,
+    MessageType.TURN_EVENT,
+}
+
 
 @dataclass
 class SessionBuffers:
@@ -97,6 +110,8 @@ class AgentActor:
                     continue
 
                 if not env.chat_id:
+                    if env.content_type in _PASSIVE_MESSAGE_TYPES:
+                        continue
                     await self._mailbox.send(
                         env.sender,
                         "(error: missing chat_id)",
@@ -105,7 +120,7 @@ class AgentActor:
                     continue
 
                 chat_id = env.chat_id
-                if self._task_ledger is not None:
+                if self._task_ledger is not None and env.content_type in _TASK_VALIDATED_MESSAGE_TYPES:
                     try:
                         self._task_ledger.validate_task_envelope(
                             chat_id=chat_id,
@@ -117,11 +132,13 @@ class AgentActor:
                             env.sender,
                             f"(error: {exc})",
                             content_type=MessageType.SYSTEM,
-                            chat_id=env.chat_id,
                             metadata={"task_validation_error": str(exc)},
                         )
                         continue
                 session = self._get_or_create_session(chat_id)
+
+                if env.content_type in _PASSIVE_MESSAGE_TYPES:
+                    continue
 
                 if env.content_type == MessageType.COMMAND:
                     if env.content.strip().startswith("/"):

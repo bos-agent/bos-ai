@@ -41,8 +41,41 @@ async def test_actor_rejects_task_chat_bound_to_another_actor():
         await asyncio.gather(task, return_exceptions=True)
 
     assert response.content_type == MessageType.SYSTEM
+    assert response.chat_id is None
     assert "bound to actor" in response.content
     assert agent.calls == []
+
+
+@pytest.mark.asyncio
+async def test_actor_does_not_bounce_system_errors_on_task_chats():
+    main_address = "agent@main-no-bounce"
+    researcher_address = "agent@researcher-no-bounce"
+    ledger = TaskLedger()
+    task_record = ledger.create_task(goal="Research", created_by=main_address, assigned_to=researcher_address)
+    chat_id = task_chat_id(task_record.id)
+    ledger.bind_chat(task_id=task_record.id, chat_id=chat_id, actor_address=researcher_address)
+    route = InMemMailRoute()
+    actor = AgentActor(RecordingAgent(), route.bind(main_address), task_ledger=ledger)
+
+    task = asyncio.create_task(actor.run())
+    try:
+        await route.deliver(
+            Envelope(
+                sender=researcher_address,
+                recipient=main_address,
+                content="(error: missing metadata)",
+                content_type=MessageType.SYSTEM,
+                chat_id=chat_id,
+                metadata={"task_validation_error": "previous failure"},
+            )
+        )
+        await asyncio.sleep(0.1)
+        response = await route.receive_nowait(researcher_address)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    assert response is None
 
 
 @pytest.mark.asyncio
