@@ -27,11 +27,6 @@ def test_harness_local_tools_describe_ask_subagent(caplog):
     assert schema["function"]["parameters"]["required"] == ["agent_name", "message"]
 
 
-def test_harness_rejects_unknown_capability_mode():
-    with pytest.raises(ValueError, match="capability_mode must be 'defensive' or 'offensive'"):
-        AgentHarness(capability_mode="sandbox")
-
-
 @pytest.mark.asyncio
 async def test_harness_send_mail_falls_back_to_agent_address(tmp_path):
     bos_dir = tmp_path / ".bos"
@@ -53,7 +48,7 @@ async def test_harness_send_mail_falls_back_to_agent_address(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_harness_create_agent_defaults_to_defensive_mode(tmp_path):
+async def test_harness_create_agent_defaults_to_no_capabilities(tmp_path):
     bos_dir = tmp_path / ".bos"
     bos_dir.mkdir()
 
@@ -68,20 +63,62 @@ async def test_harness_create_agent_defaults_to_defensive_mode(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_harness_create_agent_offensive_mode_enables_all_capabilities(tmp_path):
+async def test_registered_agent_defaults_to_no_capabilities(tmp_path):
     bos_dir = tmp_path / ".bos"
     bos_dir.mkdir()
+    agent_name = f"locked_{uuid.uuid4().hex}"
 
-    async with AgentHarness(bos_dir=bos_dir, workspace=tmp_path, capability_mode="offensive") as harness:
-        agent = harness.create_agent()
-        tool_names = {tool_def["function"]["name"] for tool_def in agent._get_tool_defs()}
+    try:
+        ReactAgent.register(name=agent_name, description="Locked", system_prompt="Stay locked down.")
 
-        assert agent._tools is None
-        assert agent._skills is None
-        assert agent._memories is None
-        assert agent._subagents is None
-        assert {"SendMail", "AskSubagent", "LoadSkill", "SearchSkills", "ListAgents"} <= tool_names
-        assert "UnloadSkill" not in tool_names
+        async with AgentHarness(bos_dir=bos_dir, workspace=tmp_path) as harness:
+            agent = harness.create_agent(agent_name)
+
+            assert agent._tools == []
+            assert agent._skills == []
+            assert agent._memories == []
+            assert agent._subagents == []
+            assert agent._get_tool_defs() == []
+    finally:
+        ep_agent._extensions.pop(agent_name, None)
+
+
+@pytest.mark.asyncio
+async def test_registered_agent_star_capabilities_enable_all(tmp_path):
+    bos_dir = tmp_path / ".bos"
+    bos_dir.mkdir()
+    agent_name = f"open_{uuid.uuid4().hex}"
+
+    try:
+        ReactAgent.register(
+            name=agent_name,
+            description="Open",
+            system_prompt="Use everything.",
+            tools="*",
+            skills="*",
+            memories="*",
+            subagents="*",
+        )
+
+        async with AgentHarness(bos_dir=bos_dir, workspace=tmp_path) as harness:
+            agent = harness.create_agent(agent_name)
+            tool_names = {tool_def["function"]["name"] for tool_def in agent._get_tool_defs()}
+
+            assert agent._tools is None
+            assert agent._skills is None
+            assert agent._memories is None
+            assert agent._subagents is None
+            assert {"SendMail", "AskSubagent", "LoadSkill", "SearchSkills", "ListAgents"} <= tool_names
+            assert "UnloadSkill" not in tool_names
+    finally:
+        ep_agent._extensions.pop(agent_name, None)
+
+
+def test_registered_agent_rejects_unknown_capability_string():
+    agent_name = f"bad_caps_{uuid.uuid4().hex}"
+
+    with pytest.raises(TypeError, match="tools must be a list, '\\*', or None"):
+        ReactAgent.register(name=agent_name, tools="all")
 
 
 @pytest.mark.asyncio
@@ -129,10 +166,15 @@ Use this skill to search YouTube.
     async with AgentHarness(
         bos_dir=bos_dir,
         workspace=tmp_path,
-        capability_mode="offensive",
         skills_loader={"skill_dirs": [skills_dir]},
     ) as harness:
-        agent = harness.create_agent()
+        agent = harness.create_agent(
+            agent_cfg={
+                "system_prompt": "You are a helpful assistant.",
+                "tools": ["LoadSkill", "SearchSkills"],
+                "skills": None,
+            }
+        )
         search_result = await agent._local_tools.invoke_async("SearchSkills", {"query": "youtube"})
         load_result = await agent._local_tools.invoke_async("LoadSkill", {"name": "youtube-searcher"})
 

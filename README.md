@@ -151,16 +151,24 @@ bos tui
 When Docker is enabled, `HttpChannel` host binding is normalized for container
 access, and BOS AI publishes configured HTTP channel ports automatically.
 
-For scratch agents created directly through `harness.create_agent()` without a
-named agent config, the harness capability default is configurable:
+Named agents are capability-deny by default. Omitted `tools`, `skills`,
+`memories`, and `subagents` settings are treated as empty allow-lists. Configure
+each agent with explicit allow-lists, or use `"*"` to allow all names in that
+capability group:
 
 ```toml
-[harness]
-capability_mode = "defensive" # or "offensive"
+[[platform.agents]]
+name = "main"
+tools = ["ReadFile", "SearchFiles"]
+skills = "*"
+memories = ["user", "memory"]
+subagents = ["researcher"]
 ```
 
-- `defensive`: default scratch agents start with no tools, skills, memories, or subagents
-- `offensive`: default scratch agents start with all capabilities enabled
+`exclude_tools`, `exclude_skills`, `exclude_memories`, and `exclude_subagents`
+can still be used to subtract names from an allow-list, including from `"*"`.
+Scratch agents created directly through `harness.create_agent()` without a named
+agent config also start with no tools, skills, memories, or subagents.
 
 ## Skills
 

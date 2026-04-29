@@ -1,6 +1,7 @@
 import sys
 
 from bos.config.workspace import Workspace
+from bos.core import ep_agent
 
 
 def test_workspace_bootstrap_loads_extensions_bundle(tmp_path):
@@ -57,3 +58,33 @@ system_prompt = "Resolved prompt"
             "system_prompt": "Resolved prompt",
         }
     ]
+
+
+def test_workspace_bootstrap_normalizes_agent_capability_strings(tmp_path):
+    bos_dir = tmp_path / ".bos"
+    bos_dir.mkdir()
+    agent_name = "capability-main"
+    (bos_dir / "config.toml").write_text(
+        f"""
+[platform]
+
+[[platform.agents]]
+name = "{agent_name}"
+description = "Capabilities"
+tools = "*"
+skills = ["writer"]
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    try:
+        Workspace(tmp_path).bootstrap_platform()
+        defaults = ep_agent.get(agent_name).defaults
+
+        assert defaults["tools"] is None
+        assert defaults["skills"] == ["writer"]
+        assert defaults["memories"] == []
+        assert defaults["subagents"] == []
+    finally:
+        ep_agent._extensions.pop(agent_name, None)

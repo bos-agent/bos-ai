@@ -48,6 +48,9 @@ Agent definitions now have a bounded split mechanism:
 - relative paths are resolved against `.bos/`; absolute paths and `~` are supported
 - supported external forms: `<dir>/<name>.toml` and `<dir>/<name>.md`
 - Markdown agent frontmatter supplies agent settings; the Markdown body becomes `system_prompt`
+- Agent capability settings (`tools`, `skills`, `memories`, `subagents`) default
+  to empty allow-lists when omitted; use `"*"` to allow all names for a
+  capability group or provide an explicit string list.
 
 Resolution rules:
 
