@@ -6,8 +6,7 @@ import os
 import re
 import uuid
 from pathlib import Path
-from textwrap import dedent
-from typing import Any, Literal
+from typing import Any
 
 from ._utils import _aclose, _create_extension_instance, _load_ext_modules, _load_ext_paths, _safe_format
 from .agent import ChainReactInterceptor, ReactAgent
@@ -77,16 +76,11 @@ class AgentHarness:
         bos_dir: str | Path = ".bos",
         workspace: str | Path = ".",
         subagents: list[dict[str, Any]] | None = None,
-        capability_mode: Literal["defensive", "offensive"] = "defensive",
     ) -> None:
-        if capability_mode not in {"defensive", "offensive"}:
-            raise ValueError("capability_mode must be 'defensive' or 'offensive'.")
-
         self._bos_root = Path(bos_dir).expanduser().resolve()
         self._workspace = Path(workspace).expanduser().resolve()
         self.workspace = self._workspace
         self._subagents_cfg = {cfg.get("name", "_default"): cfg for cfg in subagents} if subagents else {}
-        self._capability_mode = capability_mode
 
         self._mail_route_cfg = mail_route
         self._message_store_cfg = message_store
@@ -149,14 +143,13 @@ class AgentHarness:
             raise RuntimeError("create_agent must be called within an active AgentHarness context.")
 
         if not any([agent_name, agent_cfg]):
-            capability_default = [] if self._capability_mode == "defensive" else None
             agent_cfg = {
                 "system_prompt": "You are a helpful assistant.",
                 "model": os.getenv("BOS_MODEL"),
-                "tools": capability_default,
-                "skills": capability_default,
-                "memories": capability_default,
-                "subagents": capability_default,
+                "tools": [],
+                "skills": [],
+                "memories": [],
+                "subagents": [],
             }
 
         local_tools = self._create_local_tools(agent_name=agent_name)
@@ -206,13 +199,7 @@ class AgentHarness:
 
         @tools(
             name="AskSubagent",
-            description=dedent("""
-            Delegate a task to a named subagent and return its response.
-
-            The runtime always creates a fresh subagent chat id derived
-            from the current parent chat, so the delegated run starts in
-            an isolated thread instead of reusing model-chosen history.
-            """),
+            description="Delegate a task to a named subagent and return its response.",
             parameters={
                 "type": "object",
                 "properties": {

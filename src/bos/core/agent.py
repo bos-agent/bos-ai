@@ -564,6 +564,20 @@ class ReactAgent:
 
     @classmethod
     def register(cls, name: str, description: str | None = None, **kwargs):
+        _CAPABILITY_KEYS = ("tools", "skills", "memories", "subagents")
+
+        def map_value(key, value):
+            if isinstance(value, list):
+                return value
+            if value is None:
+                return []
+            if value == "*":
+                return None
+            raise TypeError(f"{key} must be a list, '*', or None")
+
+        for key in _CAPABILITY_KEYS:
+            kwargs[key] = map_value(key, kwargs.get(key))
+
         @ep_agent(name=name, description=description, defaults=kwargs)
         @wraps(ReactAgent)
         def create_react_agent(*args, **kwargs):

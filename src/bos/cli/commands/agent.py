@@ -44,15 +44,13 @@ async def _build_agent_system_prompt(ws: Workspace, agent_name: str | None = Non
 
 
 async def _build_dummy_agent_system_prompt(ws: Workspace) -> str:
-    """Build the system prompt for a dummy agent with offensive capability_mode.
+    """Build the system prompt for a dummy agent with all capabilities enabled.
 
-    This creates a harness with capability_mode='offensive' and a default agent
-    (no name, no config) so that all tools, skills, memories, and subagents
-    are visible in the rendered prompt.
+    This creates a harness and an explicit scratch agent config so that all
+    tools, skills, memories, and subagents are visible in the rendered prompt.
     """
     ws.bootstrap_platform()
     harness_cfg = ws.config.get("harness", {}).copy()
-    harness_cfg["capability_mode"] = "offensive"
     harness_cfg["bos_dir"] = ws.bos_dir
     harness_cfg["workspace"] = ws.workspace
 
@@ -60,7 +58,16 @@ async def _build_dummy_agent_system_prompt(ws: Workspace) -> str:
 
     harness = _apply(AgentHarness, harness_cfg)
     async with harness:
-        agent = harness.create_agent()
+        agent = harness.create_agent(
+            agent_cfg={
+                "system_prompt": "You are a helpful assistant.",
+                "model": os.getenv("BOS_MODEL"),
+                "tools": None,
+                "skills": None,
+                "memories": None,
+                "subagents": None,
+            }
+        )
         return await agent._build_system_prompt()
 
 
@@ -205,7 +212,7 @@ def prompt(ctx, agent_name: str | None):
     By default, shows the prompt for the configured main agent.
     Use --agent <name> to show the prompt for a specific agent.
     Use --agent 0 to show a dummy agent prompt with all available
-    tools and skills (offensive capability mode).
+    tools and skills.
     """
     ws, _ = _get_ws_and_rd(ctx)
     try:

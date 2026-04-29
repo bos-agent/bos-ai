@@ -19,6 +19,12 @@ model = "gemini/gemini-3.1-pro-preview" # "codex/gpt-5.3-codex"
 reasoning_effort = "medium"
 max_tokens = 131072
 max_iterations = 25
+# Agent capabilities default to [] when omitted. Use "*" to allow all, or list
+# explicit allowed names. The same pattern applies to skills, memories, and subagents.
+# tools = ["ReadFile", "SearchFiles"]
+# skills = "*"
+# memories = ["user", "memory"]
+# subagents = ["researcher"]
 
 [[platform.agents]]
 name = "main"
@@ -54,8 +60,6 @@ Work only on the delegated task, stay inside the workspace boundary, and return
 """
 
 [harness]
-capability_mode = "defensive" # "offensive" makes scratch agents allow all tools/skills/memories/subagents
-
 # Tool-specific runtime configuration is passed to tools as `tool_config`.
 # Uncomment to prefer Tavily for WebSearch and fall back to DuckDuckGo on quota/rate-limit/server errors.
 #
