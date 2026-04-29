@@ -361,17 +361,25 @@ class AgentHarness:
                 context: str = "",
                 parent_id: str | None = None,
                 chat_id: str | None = None,
+                ctx_metadata: dict[str, Any] | None = None,
             ) -> str:
                 assigned_address = normalize_actor_address(assigned_to)
                 created_by = current_actor_address()
                 parent = parent_id or None
+                task_context: dict[str, Any] = {}
+                if chat_id:
+                    task_context["source_chat_id"] = chat_id
+                source_sender = (ctx_metadata or {}).get("sender")
+                if isinstance(source_sender, str) and source_sender:
+                    task_context["source_sender"] = source_sender
+                task_context["source_actor"] = created_by
                 task = harness.task_ledger.create_task(
                     goal=goal,
                     created_by=created_by,
                     assigned_to=assigned_address,
                     parent_id=parent,
                     context=context,
-                    metadata={"source_chat_id": chat_id} if chat_id else {},
+                    metadata=task_context,
                 )
                 worker_chat_id = task_chat_id(task.id, "worker")
                 binding = harness.task_ledger.bind_chat(

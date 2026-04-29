@@ -156,6 +156,77 @@ async def test_worker_task_reply_is_routed_to_coordinator_owned_task_chat_withou
     assert "worker result" in coordinator_agent.calls[0][1]
 
 
+def test_worker_task_reply_routes_to_original_chat_until_sibling_tasks_complete():
+    coordinator_address = "agent@main-source-route"
+    researcher_address = "agent@researcher-source-route"
+    reviewer_address = "agent@reviewer-source-route"
+    user_chat_id = "user-chat-source-route"
+    user_sender = "channel@http"
+    ledger = TaskLedger()
+    first_task = ledger.create_task(
+        goal="Pick a number",
+        created_by=coordinator_address,
+        assigned_to=researcher_address,
+        metadata={"source_chat_id": user_chat_id, "source_sender": user_sender},
+    )
+    second_task = ledger.create_task(
+        goal="Pick another number",
+        created_by=coordinator_address,
+        assigned_to=reviewer_address,
+        metadata={"source_chat_id": user_chat_id, "source_sender": user_sender},
+    )
+    first_worker_chat = task_chat_id(first_task.id)
+    second_worker_chat = task_chat_id(second_task.id)
+    ledger.bind_chat(task_id=first_task.id, chat_id=first_worker_chat, actor_address=researcher_address)
+    ledger.bind_chat(task_id=second_task.id, chat_id=second_worker_chat, actor_address=reviewer_address)
+    route = InMemMailRoute()
+    researcher = AgentActor(RecordingAgent(), route.bind(researcher_address), task_ledger=ledger)
+    reviewer = AgentActor(RecordingAgent(), route.bind(reviewer_address), task_ledger=ledger)
+
+    ledger.append_event(first_task.id, "completed", actor=researcher_address, content="42", result="42")
+    routed_chat_id, routed_metadata, routed_content = researcher._task_response_route(
+        source_chat_id=first_worker_chat,
+        reply_chat_id=first_worker_chat,
+        reply_recipient=coordinator_address,
+        response="42",
+    )
+
+    assert routed_chat_id == user_chat_id
+    assert routed_metadata["reply_to"] == user_sender
+    assert routed_metadata["no_reply"] is True
+    assert "Pending related task(s)" in routed_content
+    assert first_task.id in routed_content
+    assert second_task.id in routed_content
+
+    ledger.append_event(second_task.id, "completed", actor=reviewer_address, content="7", result="7")
+    routed_chat_id, routed_metadata, routed_content = reviewer._task_response_route(
+        source_chat_id=second_worker_chat,
+        reply_chat_id=second_worker_chat,
+        reply_recipient=coordinator_address,
+        response="7",
+    )
+
+    assert routed_chat_id == user_chat_id
+    assert routed_metadata["reply_to"] == user_sender
+    assert "no_reply" not in routed_metadata
+    assert "All related tasks" in routed_content
+    assert "result: 42" in routed_content
+    assert "result: 7" in routed_content
+
+
+def test_actor_honors_reply_to_only_for_actor_senders():
+    user_env = Envelope(sender="channel@http", recipient="agent@main", content="hi", metadata={"reply_to": "agent@x"})
+    actor_env = Envelope(
+        sender="agent@researcher",
+        recipient="agent@main",
+        content="done",
+        metadata={"reply_to": "channel@http"},
+    )
+
+    assert AgentActor._reply_recipient_for(user_env) == "channel@http"
+    assert AgentActor._reply_recipient_for(actor_env) == "channel@http"
+
+
 async def _async_response(response: str) -> str:
     return response
 
