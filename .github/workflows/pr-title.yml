@@ -29,3 +29,4 @@ jobs:
           subjectPattern: ^(?![A-Z]).+$
           subjectPatternError: |
             The subject (description) of the PR title must start with a lowercase letter.
+

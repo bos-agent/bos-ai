@@ -11,8 +11,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        ca-certificates \
-        tini \
+    ca-certificates \
+    tini \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=uv /uv /usr/local/bin/uv
@@ -35,3 +35,4 @@ WORKDIR /workspace
 
 ENTRYPOINT ["tini", "--", "python", "-m", "bos.runner._main"]
 CMD ["--workspace", "/workspace"]
+
