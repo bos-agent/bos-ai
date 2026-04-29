@@ -34,38 +34,3 @@ subagents = []
 
     assert result.exit_code == 0
     assert result.output.startswith("--- SYSTEM PROMPT ---\n\nInspect this prompt.\n\n--- SYSTEM INFORMATION ---")
-
-
-def test_cli_prompt_agent_one_forces_peer_task_tool_inspection(tmp_path):
-    bos_dir = tmp_path / ".bos"
-    bos_dir.mkdir()
-    (bos_dir / "config.toml").write_text(
-        """
-[main]
-agent = "prompt-peer-inspector"
-
-[platform]
-
-[[platform.agents]]
-name = "prompt-peer-inspector"
-description = "Prompt peer inspector"
-system_prompt = "Inspect peer tools."
-tools = []
-skills = []
-memories = []
-subagents = []
-""".strip()
-        + "\n",
-        encoding="utf-8",
-    )
-
-    try:
-        result = CliRunner().invoke(cli, ["--workspace", str(tmp_path), "prompt", "--agent", "1"])
-    finally:
-        ep_agent._extensions.pop("prompt-peer-inspector", None)
-
-    assert result.exit_code == 0
-    assert "### ListActors ###" in result.output
-    assert "### CreateTask ###" in result.output
-    assert "### ProvideTaskInput ###" in result.output
-    assert "### AbortTask ###" in result.output

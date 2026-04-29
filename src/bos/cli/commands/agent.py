@@ -64,33 +64,6 @@ async def _build_dummy_agent_system_prompt(ws: Workspace) -> str:
         return await agent._build_system_prompt()
 
 
-async def _build_peer_task_system_prompt(ws: Workspace) -> str:
-    """Build the coordinator prompt with peer-task tools forced on for inspection."""
-    ws.bootstrap_platform()
-    actors = [actor.actor_ref() for actor in ws.resolve_actors()]
-    if len(actors) == 1:
-        actors.append(
-            {
-                "name": "__peer_inspector__",
-                "agent": "__peer_inspector__",
-                "address": "agent@__peer_inspector__",
-            }
-        )
-    coordinator_agent = next((actor["agent"] for actor in actors if actor["name"] == "main"), ws.get_main_agent_name())
-
-    harness_cfg = ws.config.get("harness", {}).copy()
-    harness_cfg["bos_dir"] = ws.bos_dir
-    harness_cfg["workspace"] = ws.workspace
-    harness_cfg["actors"] = actors
-
-    from bos.core import AgentHarness, _apply
-
-    harness = _apply(AgentHarness, harness_cfg)
-    async with harness:
-        agent = harness.create_agent(coordinator_agent)
-        return await agent._build_system_prompt()
-
-
 async def _connect_tui_client(client) -> None:
     try:
         await client.connect()
@@ -223,7 +196,7 @@ class _TaskProgressDisplay:
     "--agent",
     "agent_name",
     default=None,
-    help="Agent name to show the prompt for. Use '0' for a dummy agent, or '1' to force peer-task mode.",
+    help="Agent name to show the prompt for. Use '0' for a dummy agent with all tools/skills.",
 )
 @click.pass_context
 def prompt(ctx, agent_name: str | None):
@@ -233,14 +206,11 @@ def prompt(ctx, agent_name: str | None):
     Use --agent <name> to show the prompt for a specific agent.
     Use --agent 0 to show a dummy agent prompt with all available
     tools and skills (offensive capability mode).
-    Use --agent 1 to force peer-task mode for coordinator tool inspection.
     """
     ws, _ = _get_ws_and_rd(ctx)
     try:
         if agent_name == "0":
             rendered_prompt = asyncio.run(_build_dummy_agent_system_prompt(ws))
-        elif agent_name == "1":
-            rendered_prompt = asyncio.run(_build_peer_task_system_prompt(ws))
         else:
             rendered_prompt = asyncio.run(_build_agent_system_prompt(ws, agent_name))
     except ValueError as exc:
