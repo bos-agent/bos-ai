@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.2.1 (2026-04-30)
+
+### Bug Fixes
+
+- Trigger version bump to resolve pypi conflict
+  ([`4571391`](https://github.com/bos-agent/bos-ai/commit/45713918becee2758f3630bea2d3db936053f0bf))
+
+
 ## v0.2.0 (2026-04-30)
 
 ### Features
