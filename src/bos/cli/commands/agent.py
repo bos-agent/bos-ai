@@ -43,34 +43,6 @@ async def _build_agent_system_prompt(ws: Workspace, agent_name: str | None = Non
         return await agent._build_system_prompt()
 
 
-async def _build_dummy_agent_system_prompt(ws: Workspace) -> str:
-    """Build the system prompt for a dummy agent with all capabilities enabled.
-
-    This creates a harness and an explicit scratch agent config so that all
-    tools, skills, memories, and subagents are visible in the rendered prompt.
-    """
-    ws.bootstrap_platform()
-    harness_cfg = ws.config.get("harness", {}).copy()
-    harness_cfg["bos_dir"] = ws.bos_dir
-    harness_cfg["workspace"] = ws.workspace
-
-    from bos.core import AgentHarness, _apply
-
-    harness = _apply(AgentHarness, harness_cfg)
-    async with harness:
-        agent = harness.create_agent(
-            agent_cfg={
-                "system_prompt": "You are a helpful assistant.",
-                "model": os.getenv("BOS_MODEL"),
-                "tools": None,
-                "skills": None,
-                "memories": None,
-                "subagents": None,
-            }
-        )
-        return await agent._build_system_prompt()
-
-
 async def _connect_tui_client(client) -> None:
     try:
         await client.connect()
@@ -203,7 +175,7 @@ class _TaskProgressDisplay:
     "--agent",
     "agent_name",
     default=None,
-    help="Agent name to show the prompt for. Use '0' for a dummy agent with all tools/skills.",
+    help="Agent name to show the prompt for. Use '0' for the default agent with all tools/skills.",
 )
 @click.pass_context
 def prompt(ctx, agent_name: str | None):
@@ -211,15 +183,17 @@ def prompt(ctx, agent_name: str | None):
 
     By default, shows the prompt for the configured main agent.
     Use --agent <name> to show the prompt for a specific agent.
-    Use --agent 0 to show a dummy agent prompt with all available
+    Use --agent 0 to show the default agent prompt with all available
     tools and skills.
     """
     ws, _ = _get_ws_and_rd(ctx)
     try:
-        if agent_name == "0":
-            rendered_prompt = asyncio.run(_build_dummy_agent_system_prompt(ws))
-        else:
-            rendered_prompt = asyncio.run(_build_agent_system_prompt(ws, agent_name))
+        rendered_prompt = asyncio.run(
+            _build_agent_system_prompt(
+                ws,
+                agent_name == "0" and "_default" or agent_name,
+            )
+        )
     except ValueError as exc:
         raise click.UsageError(str(exc)) from exc
 

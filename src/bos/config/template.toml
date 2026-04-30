@@ -9,7 +9,7 @@ extensions = ["bos.extensions.all"]
 # agent_dirs = ["agents", "more_agents"]
 
 [platform.envs]
-# BOS_CODEX_AUTH_FILE = "llm-auth/codex.auth.json"
+BOS_CAPABILITY_LIMIT = 5
 
 [platform.agent_defaults]
 # NOTE: The shipped default model below has been manually verified for image understanding.
@@ -26,38 +26,17 @@ max_iterations = 25
 # memories = ["user", "memory"]
 # subagents = ["researcher"]
 
-[[platform.agents]]
-name = "main"
-description = "The main agent."
+# [[platform.agents]]
+# name = "main"
+# description = "The main agent."
 
-# Agent `name` is authoritative. If an external file under .bos/agents/
-# defines the same exact name, the later-loaded definition wins.
-# Case-only collisions such as "main" vs "Main" are rejected.
-system_prompt = """
-You are an AI agent.
-## Subagent instructions
-When a task benefits from focused analysis, delegate it to the researcher
-subagent first and then synthesize the final answer for the user.
-## Memory Structure
-You are operating with a partitioned memory store. While processing inputs,
-reference and update these specific modules to maintain continuity:
-    soul: Your core drives, temperament, and "inner voice."
-    history: The chronological log of the current interaction.
-    memory: The long-term repository for learned facts and preferences.
-    user: The user's profile and preferences.
-"""
+# # Agent `name` is authoritative. If an external file under .bos/agents/
+# # defines the same exact name, the later-loaded definition wins.
+# # Case-only collisions such as "main" vs "Main" are rejected.
+# system_prompt = """
+# You are an AI agent.
+# """
 
-[[platform.agents]]
-name = "researcher"
-description = "Focused repo analyst used through AskSubagent."
-reasoning_effort = "high"
-
-system_prompt = """
-You are the researcher subagent.
-
-Work only on the delegated task, stay inside the workspace boundary, and return
- concise findings that the main agent can reuse directly.
-"""
 
 [harness]
 # Tool-specific runtime configuration is passed to tools as `tool_config`.
@@ -88,8 +67,7 @@ store_dir = "messages"
 name = "JsonlMailRoute"
 store_dir = "mailboxes"
 
-[[harness.subagents]]
-name = "_default"
+[harness.subagent_defaults]
 task_template = """
 --- Sub-agent Instructions ---
 You are a background sub-agent with name `{agent_name}`. Work only on the delegated task,
@@ -98,23 +76,19 @@ result. You can only modify or create files under {workspace}.
 --- Task Description ---
 {task}
 """
-exclude_tools = ["UpdateMemory"]
-
 
 [main]
-agent = "main"
+# agent = "main"
 
 [main.runtime]
 kind = "process" # set to "docker" to make `bos start` launch a container
 # image = "ghcr.io/your-org/bos-ai:latest"
-workspace_dir = "/workspace"
-# bos_dir = "/bos"
 
 [[main.channels]]
 name = "HttpChannel"
 bind_address = "channel@http"
 target_address = "agent@main"
-host = "127.0.0.1"   # automatically becomes 0.0.0.0 in Docker
+host = "127.0.0.1"            # automatically becomes 0.0.0.0 in Docker
 port = 5920
 
 #[[main.channels]]

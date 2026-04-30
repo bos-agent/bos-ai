@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 
 def bootstrap_platform(
-    bos_dir: str | Path = ".bos",
+    bos_dir: str | Path,
     envs: dict[str, str] | None = None,
     envfile: str | None = None,
     extensions: list[str] | None = None,
@@ -29,11 +29,11 @@ def bootstrap_platform(
     bos_root.mkdir(parents=True, exist_ok=True)
 
     if envs:
-        os.environ.update(envs)
+        os.environ.update({k: str(v) for k, v in envs.items()})
     if envfile:
         from dotenv import load_dotenv
 
-        load_dotenv((bos_root / Path(envfile).expanduser()).resolve())
+        load_dotenv((bos_root / Path(envfile).expanduser()).resolve(), override=True)
 
     if extensions:
         modules, paths = [], []
@@ -72,14 +72,16 @@ class AgentHarness:
         providers: dict[str, dict[str, Any]] | None = None,
         interceptors: list[str | dict[str, Any]] | None = None,
         tools: dict[str, dict[str, Any]] | None = None,
+        subagent_defaults: dict[str, Any] | None = None,
+        subagents: list[dict[str, Any]] | None = None,
         bos_dir: str | Path = ".bos",
         workspace: str | Path = ".",
-        subagents: list[dict[str, Any]] | None = None,
     ) -> None:
         self._bos_root = Path(bos_dir).expanduser().resolve()
         self._workspace = Path(workspace).expanduser().resolve()
         self.workspace = self._workspace
-        self._subagents_cfg = {cfg.get("name", "_default"): cfg for cfg in subagents} if subagents else {}
+        self._subagent_defaults = subagent_defaults or {}
+        self._subagents_cfg = {cfg["name"]: cfg for cfg in subagents} if subagents else {}
 
         self._mail_route_cfg = mail_route
         self._message_store_cfg = message_store
@@ -199,9 +201,7 @@ class AgentHarness:
         return tools
 
     def _get_subagent_config(self, agent_name: str) -> dict[str, Any]:
-        default = self._subagents_cfg.get("_default", {})
-        config = self._subagents_cfg.get(agent_name, {})
-        return default | config
+        return self._subagent_defaults | (self._subagents_cfg.get(agent_name) or {})
 
     @staticmethod
     def _make_subagent_chat_id(parent_chat_id: str, agent_name: str) -> str:

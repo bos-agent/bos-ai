@@ -25,7 +25,7 @@ class _LazyGroup(click.Group):
     def list_commands(self, ctx: click.Context) -> list[str]:
         return sorted(set(super().list_commands(ctx)) | set(self._lazy_commands))
 
-    def get_command(self, ctx: click.Context, cmd_name: str) -> click.BaseCommand | None:
+    def get_command(self, ctx: click.Context, cmd_name: str) -> click.Command | None:
         if cmd := super().get_command(ctx, cmd_name):
             return cmd
         if cmd_name in self._lazy_commands:
@@ -46,7 +46,15 @@ class _LazyGroup(click.Group):
 @click.pass_context
 def cli(ctx, workspace):
     """BOS AI CLI"""
+    import logging
     import os
+    import sys
+
+    logging.basicConfig(
+        level=os.environ.get("BOS_LOG_LEVEL", "INFO").upper(),
+        format="%(asctime)s %(levelname)-8s %(name)s %(message)s",
+        stream=sys.stderr,
+    )
 
     ctx.ensure_object(dict)
     ctx.obj["WORKSPACE"] = workspace or os.environ.get("BOS_WORKSPACE", ".")

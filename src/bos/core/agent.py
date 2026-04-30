@@ -25,7 +25,6 @@ from ._utils import (
     _strip_think,
 )
 from .contract import EventSink, Message, TurnInterceptor, ep_agent, ep_tool, ep_turn_interceptor
-from .defaults import FileSystemSkillsLoader, InMemMemoryStore, InMemMessageStore, NaiveConsolidator
 from .events import derive_event_sink
 from .llm import LLMClient, ToolCallRequest
 from .registry import ToolRegistry
@@ -35,11 +34,6 @@ if TYPE_CHECKING:
     from .llm import LLMResponse
 
 logger = logging.getLogger(__name__)
-try:
-    PROMPT_SECTION_ITEM_LIMIT = int(os.environ.get("BOS_CAPABILITY_LIMIT", 50))
-except Exception:
-    PROMPT_SECTION_ITEM_LIMIT = 50
-    logger.warning("Env variable BOS_CAPABILITY_LIMIT should be a valid integer number.")
 
 
 @dataclass
@@ -120,6 +114,11 @@ class ChainReactInterceptor:
 class ReactAgent:
     def __init__(
         self,
+        *,
+        message_store: MessageStore,
+        memory_store: MemoryStore,
+        consolidator: Consolidator,
+        skills_loader: SkillsLoader,
         system_prompt: str | None = None,
         tools: list[str] | None = None,
         exclude_tools: list[str] | None = None,
@@ -129,19 +128,15 @@ class ReactAgent:
         exclude_memories: list[str] | None = None,
         subagents: list[str] | None = None,
         exclude_subagents: list[str] | None = None,
+        agent_name: str | None = None,
         model: str | None = None,
         reasoning_effort: Literal["low", "medium", "high"] | None = None,
-        max_tokens: int = 128 * 1024,
-        max_iterations: int = 25,
         llm: LLMClient | None = None,
-        message_store: MessageStore | None = None,
-        memory_store: MemoryStore | None = None,
-        consolidator: Consolidator | None = None,
-        skills_loader: SkillsLoader | None = None,
-        interceptor: TurnInterceptor | None = None,
         local_tools: ToolRegistry | None = None,
         tool_configs: dict[str, dict[str, Any]] | None = None,
-        agent_name: str | None = None,
+        interceptor: TurnInterceptor | None = None,
+        max_tokens: int = 128 * 1024,
+        max_iterations: int = 25,
     ):
         if system_prompt is not None and not isinstance(system_prompt, str):
             raise TypeError("system_prompt must be a string or None")
@@ -160,10 +155,10 @@ class ReactAgent:
         self._max_iterations = max_iterations
 
         self._llm = llm or LLMClient()
-        self._message_store = message_store or InMemMessageStore()
-        self._memory_store = memory_store or InMemMemoryStore()
-        self._consolidator = consolidator or NaiveConsolidator()
-        self._skills_loader = skills_loader or FileSystemSkillsLoader()
+        self._message_store = message_store
+        self._memory_store = memory_store
+        self._consolidator = consolidator
+        self._skills_loader = skills_loader
         self._interceptor = interceptor or ChainReactInterceptor()
         self._local_tools = local_tools or ToolRegistry("Agent-scoped local tools.")
         self._tool_configs = tool_configs or {}
@@ -496,15 +491,21 @@ class ReactAgent:
 
     @staticmethod
     def _limit_prompt_collection(collection: dict[str, Any], kind: str) -> dict[str, Any]:
-        if len(collection) <= PROMPT_SECTION_ITEM_LIMIT:
+        try:
+            limit = int(os.environ.get("BOS_CAPABILITY_LIMIT", 50))
+        except Exception:
+            limit = 50
+            logger.warning("Env variable BOS_CAPABILITY_LIMIT should be a valid integer number.")
+
+        if len(collection) <= limit:
             return collection
         logger.warning(
             "Rendering only the first %d %s in the system prompt; %d are available.",
-            PROMPT_SECTION_ITEM_LIMIT,
+            limit,
             kind,
             len(collection),
         )
-        return dict(list(collection.items())[:PROMPT_SECTION_ITEM_LIMIT])
+        return dict(list(collection.items())[:limit])
 
     def _register_tools(self) -> None:
         @self._local_tools(

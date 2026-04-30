@@ -3,18 +3,28 @@ import uuid
 
 import pytest
 
-from bos.core import AgentHarness, InMemMemoryStore, LLMResponse, ToolCallRequest, ep_agent, ep_provider
-from bos.core.agent import ReactAgent
+from bos.core import AgentHarness, LLMResponse, ToolCallRequest, ep_agent, ep_provider
+from bos.core.agent import ChainReactInterceptor, ReactAgent
 from bos.core.contract import SkillMeta
+from bos.core.defaults import FileSystemSkillsLoader, InMemMemoryStore, InMemMessageStore, NaiveConsolidator
 from bos.core.registry import ToolRegistry
 from bos.extensions.mailboxes import jsonl_mailbox  # noqa: F401
+
+
+def create_test_agent(**kwargs):
+    kwargs.setdefault("message_store", InMemMessageStore())
+    kwargs.setdefault("memory_store", InMemMemoryStore())
+    kwargs.setdefault("consolidator", NaiveConsolidator())
+    kwargs.setdefault("skills_loader", FileSystemSkillsLoader())
+    kwargs.setdefault("interceptor", ChainReactInterceptor())
+    return ReactAgent(**kwargs)
 
 
 def test_react_agent_local_tools_describe_ask_subagent(caplog):
     local_tools = ToolRegistry("test tools")
 
     with caplog.at_level(logging.WARNING):
-        agent = ReactAgent(local_tools=local_tools)
+        agent = create_test_agent(local_tools=local_tools)
 
     assert local_tools.get("AskSubagent") is not None
     ask_subagent = agent._local_tools.get("AskSubagent")
@@ -145,7 +155,7 @@ async def test_react_agent_returns_placeholder_for_empty_model_response():
         return LLMResponse(content=None)
 
     try:
-        agent = ReactAgent(model=f"{provider_name}/empty")
+        agent = create_test_agent(model=f"{provider_name}/empty")
         result = await agent.ask("empty-response-chat", "Say something.")
 
         assert result == "(empty model response)"
@@ -155,7 +165,7 @@ async def test_react_agent_returns_placeholder_for_empty_model_response():
 
 def test_react_agent_rejects_dict_system_prompt():
     with pytest.raises(TypeError, match="system_prompt must be a string or None"):
-        ReactAgent(system_prompt={"_default": "nope"})  # type: ignore[arg-type]
+        create_test_agent(system_prompt={"_default": "nope"})  # type: ignore[arg-type]
 
 
 @pytest.mark.asyncio
@@ -204,7 +214,7 @@ Use this skill to search YouTube.
 
 @pytest.mark.asyncio
 async def test_memories_render_with_shared_prompt_section_format():
-    agent = ReactAgent(memory_store=InMemMemoryStore(user="Prefers concise answers."), memories=None)
+    agent = create_test_agent(memory_store=InMemMemoryStore(user="Prefers concise answers."), memories=None)
 
     memories_prompt = await agent._prompt_section_memories()
 
@@ -241,7 +251,7 @@ async def test_prompt_sections_render_first_50_items_and_warn(caplog):
         for i, name in enumerate(subagent_names):
             ReactAgent.register(name=name, description=f"Subagent description {i:03}", tools=[])
 
-        agent = ReactAgent(
+        agent = create_test_agent(
             local_tools=local_tools,
             tools=tool_names,
             skills_loader=StaticSkillsLoader(),
@@ -279,7 +289,7 @@ async def test_react_agent_first_turn_passes_only_user_text():
         return LLMResponse(content="ok")
 
     try:
-        agent = ReactAgent(model=f"{provider_name}/plain", system_prompt="Reply plainly.")
+        agent = create_test_agent(model=f"{provider_name}/plain", system_prompt="Reply plainly.")
         result = await agent.ask("thread-123", "Hello.")
 
         user_messages = [message for message in captured["messages"] if message.get("role") == "user"]
@@ -326,7 +336,7 @@ async def test_react_agent_injects_runtime_tool_context():
         )
 
     try:
-        agent = ReactAgent(
+        agent = create_test_agent(
             model=f"{provider_name}/tool-context",
             local_tools=tools,
             tools=["EchoWithContext"],
@@ -456,12 +466,9 @@ async def test_harness_ask_subagent_delegates_to_named_specialist(tmp_path):
         async with AgentHarness(
             bos_dir=bos_dir,
             workspace=tmp_path,
-            subagents=[
-                {
-                    "name": "_default",
-                    "task_template": "--- Sub-agent Instructions ---\n{task}",
-                }
-            ],
+            subagent_defaults={
+                "task_template": "--- Sub-agent Instructions ---\n{task}",
+            },
         ) as harness:
             manager = harness.create_agent(manager_name)
             subagents_prompt = await manager._prompt_section_subagents()

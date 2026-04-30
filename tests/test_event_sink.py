@@ -9,12 +9,22 @@ from bos.core import (
     AgentHarness,
     InMemMailRoute,
     LLMResponse,
-    ReactAgent,
     ToolCallRequest,
     ep_agent,
     ep_provider,
 )
+from bos.core.agent import ChainReactInterceptor, ReactAgent
+from bos.core.defaults import FileSystemSkillsLoader, InMemMemoryStore, InMemMessageStore, NaiveConsolidator
 from bos.protocol import MessageType
+
+
+def create_test_agent(**kwargs):
+    kwargs.setdefault("message_store", InMemMessageStore())
+    kwargs.setdefault("memory_store", InMemMemoryStore())
+    kwargs.setdefault("consolidator", NaiveConsolidator())
+    kwargs.setdefault("skills_loader", FileSystemSkillsLoader())
+    kwargs.setdefault("interceptor", ChainReactInterceptor())
+    return ReactAgent(**kwargs)
 
 
 class CaptureSink:
@@ -36,7 +46,7 @@ async def test_react_agent_emits_root_lifecycle_events():
 
     try:
         sink = CaptureSink()
-        agent = ReactAgent(model=f"{provider_name}/root")
+        agent = create_test_agent(model=f"{provider_name}/root")
 
         result = await agent.ask("root-chat", "Say something.", event_sink=sink)
 
@@ -78,7 +88,7 @@ async def test_react_agent_emits_tool_events_and_injects_event_sink():
 
     try:
         sink = CaptureSink()
-        agent = ReactAgent(model=f"{provider_name}/tool", tools=["EchoWithContext"])
+        agent = create_test_agent(model=f"{provider_name}/tool", tools=["EchoWithContext"])
         agent._local_tools(
             name="EchoWithContext",
             description="Echo the user text plus injected runtime identifiers.",
@@ -146,7 +156,7 @@ async def test_ask_subagent_emits_child_lineage_events(tmp_path):
         async with AgentHarness(
             bos_dir=bos_dir,
             workspace=tmp_path,
-            subagents=[{"name": "_default", "task_template": "--- Sub-agent Instructions ---\n{task}"}],
+            subagent_defaults={"task_template": "--- Sub-agent Instructions ---\n{task}"},
         ) as harness:
             manager = harness.create_agent(manager_name)
             result = await manager.ask("parent-chat", "Explain the event sink refactor.", event_sink=sink)
@@ -184,7 +194,7 @@ async def test_actor_serializes_turn_events_to_mailbox():
         sender_address = f"channel@http-{suffix}"
         actor_mailbox = route.bind(actor_address)
         sender_mailbox = route.bind(sender_address)
-        agent = ReactAgent(model=f"{provider_name}/actor", agent_name="main")
+        agent = create_test_agent(model=f"{provider_name}/actor", agent_name="main")
         actor = AgentActor(agent, actor_mailbox)
 
         task = asyncio.create_task(actor.run())
@@ -247,7 +257,7 @@ async def test_actor_turn_event_tool_payload_uses_canonical_shape():
         sender_address = f"channel@http-{suffix}"
         actor_mailbox = route.bind(actor_address)
         sender_mailbox = route.bind(sender_address)
-        agent = ReactAgent(model=f"{provider_name}/actor-tool", agent_name="main", tools=["EchoWithContext"])
+        agent = create_test_agent(model=f"{provider_name}/actor-tool", agent_name="main", tools=["EchoWithContext"])
         agent._local_tools(
             name="EchoWithContext",
             description="Return a long string for tool result previews.",
