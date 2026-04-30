@@ -13,8 +13,10 @@ from bos.core import (
     ep_agent,
     ep_provider,
 )
-from bos.core.agent import ReactAgent, ChainReactInterceptor
-from bos.core.defaults import InMemMemoryStore, InMemMessageStore, NaiveConsolidator, FileSystemSkillsLoader
+from bos.core.agent import ChainReactInterceptor, ReactAgent
+from bos.core.defaults import FileSystemSkillsLoader, InMemMemoryStore, InMemMessageStore, NaiveConsolidator
+from bos.protocol import MessageType
+
 
 def create_test_agent(**kwargs):
     kwargs.setdefault("message_store", InMemMessageStore())
@@ -23,7 +25,6 @@ def create_test_agent(**kwargs):
     kwargs.setdefault("skills_loader", FileSystemSkillsLoader())
     kwargs.setdefault("interceptor", ChainReactInterceptor())
     return ReactAgent(**kwargs)
-from bos.protocol import MessageType
 
 
 class CaptureSink:
@@ -155,7 +156,7 @@ async def test_ask_subagent_emits_child_lineage_events(tmp_path):
         async with AgentHarness(
             bos_dir=bos_dir,
             workspace=tmp_path,
-            subagents=[{"name": "_default", "task_template": "--- Sub-agent Instructions ---\n{task}"}],
+            subagent_defaults={"task_template": "--- Sub-agent Instructions ---\n{task}"},
         ) as harness:
             manager = harness.create_agent(manager_name)
             result = await manager.ask("parent-chat", "Explain the event sink refactor.", event_sink=sink)

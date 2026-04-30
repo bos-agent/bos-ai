@@ -4,10 +4,12 @@ import uuid
 import pytest
 
 from bos.core import AgentHarness, LLMResponse, ToolCallRequest, ep_agent, ep_provider
-from bos.core.agent import ReactAgent, ChainReactInterceptor
-from bos.core.defaults import InMemMemoryStore, InMemMessageStore, NaiveConsolidator, FileSystemSkillsLoader
+from bos.core.agent import ChainReactInterceptor, ReactAgent
 from bos.core.contract import SkillMeta
+from bos.core.defaults import FileSystemSkillsLoader, InMemMemoryStore, InMemMessageStore, NaiveConsolidator
 from bos.core.registry import ToolRegistry
+from bos.extensions.mailboxes import jsonl_mailbox  # noqa: F401
+
 
 def create_test_agent(**kwargs):
     kwargs.setdefault("message_store", InMemMessageStore())
@@ -16,7 +18,6 @@ def create_test_agent(**kwargs):
     kwargs.setdefault("skills_loader", FileSystemSkillsLoader())
     kwargs.setdefault("interceptor", ChainReactInterceptor())
     return ReactAgent(**kwargs)
-from bos.extensions.mailboxes import jsonl_mailbox  # noqa: F401
 
 
 def test_react_agent_local_tools_describe_ask_subagent(caplog):
@@ -465,12 +466,9 @@ async def test_harness_ask_subagent_delegates_to_named_specialist(tmp_path):
         async with AgentHarness(
             bos_dir=bos_dir,
             workspace=tmp_path,
-            subagents=[
-                {
-                    "name": "_default",
-                    "task_template": "--- Sub-agent Instructions ---\n{task}",
-                }
-            ],
+            subagent_defaults={
+                "task_template": "--- Sub-agent Instructions ---\n{task}",
+            },
         ) as harness:
             manager = harness.create_agent(manager_name)
             subagents_prompt = await manager._prompt_section_subagents()
