@@ -12,6 +12,7 @@ from bos.protocol import Envelope, MessageContent, MessageType
 from bos.protocol.content import content_preview, image_source_to_model_url
 
 from ._utils import _litellm_response_to_llm_response, _read_text
+from .agent import ReactAgent
 from .contract import (
     Message,
     SkillMeta,
@@ -312,3 +313,32 @@ def _normalize_litellm_message(message: dict[str, Any]) -> dict[str, Any]:
         raise ValueError(f"Unsupported BOS content part for default provider: {part_type!r}")
 
     return {**message, "content": normalized}
+
+
+_system_prompt = """
+## Role
+You are a helpful assistant attempting to solve a task by interleaving reasoning (Thought) and actions (Act).
+
+## Process Loop
+For every user input, you must strictly follow this cycle:
+1. **Thought**: Reason about the current situation. Describe what you need to do and which tool is best suited.
+2. **Action**: Choose an action from the list of available tools.
+3. **Action Input**: Provide the specific parameters for the chosen tool.
+4. **Observation**: You will receive the output of that tool (this is provided by the system, not you).
+... (Repeat steps 1-4 until you have sufficient information)
+5. **Final Answer**: Provide the definitive response to the user.
+
+## Constraints
+- If a tool fails, reflect on the error in your next Thought and try a different approach.
+- Only use the tools provided. Do not make up tool names.
+- Always wait for an Observation before proceeding to the next Thought.
+"""
+
+ReactAgent.register(
+    "_default",
+    tools="*",
+    skills="*",
+    memories="*",
+    subagents="*",
+    system_prompt=_system_prompt,
+)

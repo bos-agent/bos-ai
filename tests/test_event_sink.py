@@ -9,11 +9,20 @@ from bos.core import (
     AgentHarness,
     InMemMailRoute,
     LLMResponse,
-    ReactAgent,
     ToolCallRequest,
     ep_agent,
     ep_provider,
 )
+from bos.core.agent import ReactAgent, ChainReactInterceptor
+from bos.core.defaults import InMemMemoryStore, InMemMessageStore, NaiveConsolidator, FileSystemSkillsLoader
+
+def create_test_agent(**kwargs):
+    kwargs.setdefault("message_store", InMemMessageStore())
+    kwargs.setdefault("memory_store", InMemMemoryStore())
+    kwargs.setdefault("consolidator", NaiveConsolidator())
+    kwargs.setdefault("skills_loader", FileSystemSkillsLoader())
+    kwargs.setdefault("interceptor", ChainReactInterceptor())
+    return ReactAgent(**kwargs)
 from bos.protocol import MessageType
 
 
@@ -36,7 +45,7 @@ async def test_react_agent_emits_root_lifecycle_events():
 
     try:
         sink = CaptureSink()
-        agent = ReactAgent(model=f"{provider_name}/root")
+        agent = create_test_agent(model=f"{provider_name}/root")
 
         result = await agent.ask("root-chat", "Say something.", event_sink=sink)
 
@@ -78,7 +87,7 @@ async def test_react_agent_emits_tool_events_and_injects_event_sink():
 
     try:
         sink = CaptureSink()
-        agent = ReactAgent(model=f"{provider_name}/tool", tools=["EchoWithContext"])
+        agent = create_test_agent(model=f"{provider_name}/tool", tools=["EchoWithContext"])
         agent._local_tools(
             name="EchoWithContext",
             description="Echo the user text plus injected runtime identifiers.",
@@ -184,7 +193,7 @@ async def test_actor_serializes_turn_events_to_mailbox():
         sender_address = f"channel@http-{suffix}"
         actor_mailbox = route.bind(actor_address)
         sender_mailbox = route.bind(sender_address)
-        agent = ReactAgent(model=f"{provider_name}/actor", agent_name="main")
+        agent = create_test_agent(model=f"{provider_name}/actor", agent_name="main")
         actor = AgentActor(agent, actor_mailbox)
 
         task = asyncio.create_task(actor.run())
@@ -247,7 +256,7 @@ async def test_actor_turn_event_tool_payload_uses_canonical_shape():
         sender_address = f"channel@http-{suffix}"
         actor_mailbox = route.bind(actor_address)
         sender_mailbox = route.bind(sender_address)
-        agent = ReactAgent(model=f"{provider_name}/actor-tool", agent_name="main", tools=["EchoWithContext"])
+        agent = create_test_agent(model=f"{provider_name}/actor-tool", agent_name="main", tools=["EchoWithContext"])
         agent._local_tools(
             name="EchoWithContext",
             description="Return a long string for tool result previews.",

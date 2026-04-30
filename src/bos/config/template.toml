@@ -9,7 +9,7 @@ extensions = ["bos.extensions.all"]
 # agent_dirs = ["agents", "more_agents"]
 
 [platform.envs]
-# BOS_CODEX_AUTH_FILE = "llm-auth/codex.auth.json"
+BOS_CAPABILITY_LIMIT = 5
 
 [platform.agent_defaults]
 # NOTE: The shipped default model below has been manually verified for image understanding.
@@ -114,7 +114,7 @@ workspace_dir = "/workspace"
 name = "HttpChannel"
 bind_address = "channel@http"
 target_address = "agent@main"
-host = "127.0.0.1"   # automatically becomes 0.0.0.0 in Docker
+host = "127.0.0.1"            # automatically becomes 0.0.0.0 in Docker
 port = 5920
 
 #[[main.channels]]

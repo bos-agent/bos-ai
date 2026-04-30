@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 
 def bootstrap_platform(
-    bos_dir: str | Path = ".bos",
+    bos_dir: str | Path,
     envs: dict[str, str] | None = None,
     envfile: str | None = None,
     extensions: list[str] | None = None,
@@ -29,11 +29,11 @@ def bootstrap_platform(
     bos_root.mkdir(parents=True, exist_ok=True)
 
     if envs:
-        os.environ.update(envs)
+        os.environ.update({k: str(v) for k, v in envs.items()})
     if envfile:
         from dotenv import load_dotenv
 
-        load_dotenv((bos_root / Path(envfile).expanduser()).resolve())
+        load_dotenv((bos_root / Path(envfile).expanduser()).resolve(), override=True)
 
     if extensions:
         modules, paths = [], []

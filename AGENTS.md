@@ -32,3 +32,17 @@ This `AGENTS.md` applies to the entire repository.
 - If a change touches config/runtime behavior, add or update targeted pytest coverage in `tests/`.
 - `uv run ruff check src tests` is a useful signal, but the repo may already contain unrelated lint findings. Do not assume a lint failure came from your change without checking the reported files.
 - Pull request titles must follow semantic/conventional format, for example `feat(config): ...` or `fix(runner): ...`, because GitHub Actions validate the PR title.
+
+## Agent skills
+
+### Issue tracker
+
+Issues and PRDs for this repo live as markdown files in `.agent/scratch/`. See `.agent/docs/issue-tracker.md`.
+
+### Triage labels
+
+Triage state uses the five canonical labels (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`). See `.agent/docs/triage-labels.md`.
+
+### Domain docs
+
+This is a single-context repo with a global `.agent/CONTEXT.md` and `.agent/adr/`. See `.agent/docs/domain.md`.
