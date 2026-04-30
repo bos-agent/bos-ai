@@ -115,6 +115,51 @@ class NaiveConsolidator:
         return summary.strip()
 
 
+def _parse_frontmatter_fields(frontmatter: str) -> dict[str, str]:
+    """Parse the simple YAML-style front matter fields used by skill files."""
+
+    def strip_quotes(value: str) -> str:
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            return value[1:-1]
+        return value
+
+    def normalize_block(block: list[str], style: str) -> str:
+        lines = [line[2:] if line.startswith("  ") else line.lstrip() for line in block]
+        if style == ">":
+            return " ".join(line.strip() for line in lines if line.strip())
+        return "\n".join(lines).strip()
+
+    fields: dict[str, str] = {}
+    lines = frontmatter.splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if not line.strip() or line.startswith((" ", "\t")) or ":" not in line:
+            i += 1
+            continue
+
+        key, raw_value = line.split(":", 1)
+        key = key.strip()
+        value = raw_value.strip()
+        block_style = value[:1] if value in {">", "|", ">-", "|-", ">+", "|+"} else ""
+        if block_style:
+            block: list[str] = []
+            i += 1
+            while i < len(lines):
+                next_line = lines[i]
+                if next_line and not next_line.startswith((" ", "\t")) and ":" in next_line:
+                    break
+                block.append(next_line)
+                i += 1
+            fields[key] = normalize_block(block, block_style)
+            continue
+
+        fields[key] = strip_quotes(value)
+        i += 1
+
+    return fields
+
+
 @ep_skills_loader(name="_default")
 class FileSystemSkillsLoader:
     def __init__(self, skill_dirs: Iterable[Path | str] | None = None) -> None:
@@ -133,7 +178,11 @@ class FileSystemSkillsLoader:
         return (
             skill_metas
             if not query
-            else {name: sm for name, sm in skill_metas.items() if query in name.lower() or query in sm.summary.lower()}
+            else {
+                name: sm
+                for name, sm in skill_metas.items()
+                if query in name.lower() or query in sm.name.lower() or query in sm.description.lower()
+            }
         )
 
     async def _get_skill_metas(self) -> dict[str, SkillMeta]:
@@ -159,15 +208,20 @@ class FileSystemSkillsLoader:
         skill_metas = {}
         for skill_name, path in skill_files.items():
             content = path.read_text(encoding="utf-8")
-            if frontmatter := re.match(r"^---\n(.*?)\n---", content, re.DOTALL):
-                summary = frontmatter.group(1)
-            else:
-                summary = ""
+            description = ""
+            if frontmatter := re.match(r"^---\s*\n(.*?)\n---\s*(?:\n|$)", content, re.DOTALL):
+                metadata = _parse_frontmatter_fields(frontmatter.group(1))
+                description = metadata.get("description") or metadata.get("summary") or ""
+            if not description:
                 for line in (line.strip() for line in content.splitlines() if line.strip()):
-                    if len(summary) > 150:
+                    if len(description) > 250:
                         break
-                    summary += line + "\n"
-            skill_metas[skill_name] = SkillMeta(location=str(path), summary=summary)
+                    description += line + " "
+            skill_metas[skill_name] = SkillMeta(
+                location=str(path),
+                name=skill_name,
+                description=description,
+            )
         return skill_metas
 
 

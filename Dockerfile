@@ -35,4 +35,3 @@ WORKDIR /workspace
 
 ENTRYPOINT ["tini", "--", "python", "-m", "bos.runner._main"]
 CMD ["--workspace", "/workspace"]
-
