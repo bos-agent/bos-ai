@@ -8,10 +8,9 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from ._utils import _aclose, _create_extension_instance, _load_ext_modules, _load_ext_paths, _safe_format
+from ._utils import _aclose, _create_extension_instance, _load_ext_modules, _load_ext_paths
 from .agent import ChainReactInterceptor, ReactAgent
-from .contract import Consolidator, EventSink, MailBox, MailRoute, MemoryStore, MessageStore, SkillsLoader, ep_agent
-from .events import derive_event_sink
+from .contract import Consolidator, MailBox, MailRoute, MemoryStore, MessageStore, SkillsLoader, ep_agent
 from .llm import LLMClient
 from .registry import ToolRegistry
 
@@ -178,7 +177,7 @@ class AgentHarness:
     def _create_local_tools(self, agent_name: str | None = None):
         harness = self
         current_agent_name = agent_name or "__unknown__"
-        tools = ToolRegistry("Harness-scoped tools for this agent.")
+        tools = ToolRegistry("Harness-provided local tools for this agent.")
 
         @tools(
             name="SendMail",
@@ -196,46 +195,6 @@ class AgentHarness:
             mailbox = CURRENT_MAILBOX.get(None) or harness.mail_route.bind(f"agent@{current_agent_name}")
             await mailbox.send(recipient, content)
             return f"(Sent to {recipient})"
-
-        @tools(
-            name="AskSubagent",
-            description="Delegate a task to a named subagent and return its response.",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "agent_name": {"type": "string", "description": "Name of the agent."},
-                    "message": {"type": "string", "description": "Message to send."},
-                },
-                "required": ["agent_name", "message"],
-            },
-        )
-        async def tool_ask_subagent(
-            agent_name: str,
-            message: str,
-            chat_id: str,
-            turn_id: str,
-            event_sink: EventSink | None = None,
-        ) -> str:
-            if not ep_agent.has(agent_name):
-                return f"Error: Agent '{agent_name}' not found."
-            subagent_cfg = harness._get_subagent_config(agent_name)
-            if task_template := subagent_cfg.get("task_template"):
-                message = _safe_format(task_template, task=message, agent_name=agent_name, workspace=harness.workspace)
-
-            child_chat_id = harness._make_subagent_chat_id(chat_id, agent_name)
-            agent = harness.create_agent(agent_name, subagent_cfg)
-            child_event_sink = derive_event_sink(
-                event_sink,
-                parent_turn_id=turn_id,
-                parent_chat_id=chat_id,
-                parent_agent_name=current_agent_name,
-            )
-            return await agent.ask(
-                child_chat_id,
-                message,
-                ctx_metadata={"subagent": agent_name, "ref_chat_id": chat_id},
-                event_sink=child_event_sink,
-            )
 
         return tools
 

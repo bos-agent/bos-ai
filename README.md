@@ -182,10 +182,9 @@ skill_dirs = ["skills"]
 ```
 
 Agents see allowed skills in the system prompt with each skill's `SKILL.md`
-location and summary. `SearchSkills` returns structured JSON entries with
-`name`, `location`, and `summary`. `LoadSkill` reads and returns the full
-`SKILL.md` instructions as a tool result; it does not permanently mutate the
-agent's system prompt.
+location and summary. `LoadSkill` reads and returns the full `SKILL.md`
+instructions as a tool result; it does not permanently mutate the agent's
+system prompt.
 
 ## Subagent Orchestration
 
@@ -212,7 +211,7 @@ subagents = []
 [[platform.agents]]
 name = "main"
 description = "User-facing manager."
-tools = ["AskSubagent", "ListAgents"]
+tools = ["AskSubagent"]
 subagents = ["researcher"]
 system_prompt = """
 Handle the user-facing workflow. Delegate focused repo analysis when needed.

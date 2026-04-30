@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import platform
 import uuid
 from dataclasses import dataclass, field
@@ -20,10 +21,12 @@ from ._utils import (
     _compact,
     _create_extension_instance,
     _pick_collection,
+    _safe_format,
     _strip_think,
 )
 from .contract import EventSink, Message, TurnInterceptor, ep_agent, ep_tool, ep_turn_interceptor
 from .defaults import FileSystemSkillsLoader, InMemMemoryStore, InMemMessageStore, NaiveConsolidator
+from .events import derive_event_sink
 from .llm import LLMClient, ToolCallRequest
 from .registry import ToolRegistry
 
@@ -32,6 +35,11 @@ if TYPE_CHECKING:
     from .llm import LLMResponse
 
 logger = logging.getLogger(__name__)
+try:
+    PROMPT_SECTION_ITEM_LIMIT = int(os.environ.get("BOS_CAPABILITY_LIMIT", 50))
+except Exception:
+    PROMPT_SECTION_ITEM_LIMIT = 50
+    logger.warning("Env variable BOS_CAPABILITY_LIMIT should be a valid integer number.")
 
 
 @dataclass
@@ -157,13 +165,11 @@ class ReactAgent:
         self._consolidator = consolidator or NaiveConsolidator()
         self._skills_loader = skills_loader or FileSystemSkillsLoader()
         self._interceptor = interceptor or ChainReactInterceptor()
-        self._local_tools = local_tools or ToolRegistry("Harness-scoped tools for this agent.")
+        self._local_tools = local_tools or ToolRegistry("Agent-scoped local tools.")
         self._tool_configs = tool_configs or {}
         self._agent_name = agent_name or "__unknown__"
 
-        self._register_memory_tools()
-        self._register_skills_tools()
-        self._register_agent_tools()
+        self._register_tools()
 
     async def ask(
         self,
@@ -428,6 +434,7 @@ class ReactAgent:
             await self._prompt_section_memories(),
             await self._prompt_section_tools(),
             await self._prompt_section_skills(),
+            await self._prompt_section_subagents(),
             self._prompt_section_system_info(),
         ]
         return "\n\n".join(s for s in sections if s)
@@ -441,35 +448,43 @@ class ReactAgent:
             self._memories,
             self._exclude_memories,
         )
-        if not memories:
-            return ""
-        section = "--- ACTIVE MEMORY ---\n\n"
-        for key, content in memories.items():
-            section += f"\n### {key.upper()} ###\n{content}"
-        return section
+        return self._format_prompt_section("ACTIVE MEMORY", memories)
 
     async def _prompt_section_tools(self) -> str:
         all_tools = ep_tool.describe() | self._local_tools.describe()
-        available_tools = _pick_collection(all_tools, self._tools, self._exclude_tools)
-        if not available_tools:
-            return ""
-        section = "--- AVAILABLE TOOLS ---\n\n"
-        for name, info in available_tools.items():
-            section += f"### {name} ###\n"
-            section += f"{info}\n\n"
-        return section
+        available_tools = self._limit_prompt_collection(
+            _pick_collection(all_tools, self._tools, self._exclude_tools),
+            "tools",
+        )
+        return self._format_prompt_section("AVAILABLE TOOLS", available_tools)
 
     async def _prompt_section_skills(self) -> str:
-        available_skills = _pick_collection(
-            await self._skills_loader.search_skills(), self._skills, self._exclude_skills
+        available_skills = self._limit_prompt_collection(
+            _pick_collection(await self._skills_loader.search_skills(), self._skills, self._exclude_skills),
+            "skills",
         )
-        if not available_skills:
+        return self._format_prompt_section(
+            "AVAILABLE SKILLS",
+            {name: meta.description for name, meta in available_skills.items()},
+        )
+
+    async def _prompt_section_subagents(self) -> str:
+        available_subagents = self._limit_prompt_collection(
+            _pick_collection(ep_agent.describe(), self._subagents, self._exclude_subagents),
+            "subagents",
+        )
+        available_subagents.pop("_default", None)
+        return self._format_prompt_section("AVAILABLE SUBAGENTS", available_subagents)
+
+    @staticmethod
+    def _format_prompt_section(title: str, items: dict[str, Any]) -> str:
+        if not items:
             return ""
-        section = "--- AVAILABLE SKILLS ---\n\n"
-        for name, meta in available_skills.items():
-            section += f"\n### {name.upper()} ###\n\n"
-            section += f"- Location: {meta.location}\n"
-            section += f"- Summary: {meta.summary}"
+
+        section = f"--- {title} ---\n\n"
+        for key, content in items.items():
+            section += f"* **{key}**\n"
+            section += f"```\n{content}\n```\n\n"
         return section
 
     def _prompt_section_system_info(self) -> str:
@@ -479,7 +494,80 @@ class ReactAgent:
             f"- Date: {datetime.now().strftime('%A, %B %d, %Y')}\n"
         )
 
-    def _register_memory_tools(self) -> None:
+    @staticmethod
+    def _limit_prompt_collection(collection: dict[str, Any], kind: str) -> dict[str, Any]:
+        if len(collection) <= PROMPT_SECTION_ITEM_LIMIT:
+            return collection
+        logger.warning(
+            "Rendering only the first %d %s in the system prompt; %d are available.",
+            PROMPT_SECTION_ITEM_LIMIT,
+            kind,
+            len(collection),
+        )
+        return dict(list(collection.items())[:PROMPT_SECTION_ITEM_LIMIT])
+
+    def _register_tools(self) -> None:
+        @self._local_tools(
+            name="AskSubagent",
+            description="Delegate a task to a named subagent and return its response.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "agent_name": {"type": "string", "description": "Name of the agent, case sensitive."},
+                    "message": {"type": "string", "description": "Task or message to send."},
+                },
+                "required": ["agent_name", "message"],
+            },
+        )
+        async def tool_ask_subagent(
+            agent_name: str,
+            message: str | None = None,
+            task: str | None = None,
+            chat_id: str = "",
+            turn_id: str = "",
+            event_sink: EventSink | None = None,
+        ) -> str:
+            if not _allowed(agent_name, self._subagents, self._exclude_subagents):
+                return f"Error: Agent '{agent_name}' is not an allowed subagent."
+            if not ep_agent.has(agent_name):
+                return f"Error: Agent '{agent_name}' not found."
+
+            from .harness import CURRENT_HARNESS
+
+            harness = CURRENT_HARNESS.get(None)
+            if harness is None:
+                return "Error: AskSubagent requires an active AgentHarness."
+
+            child_message = message if message is not None else task
+            if not child_message:
+                return "Error: AskSubagent requires a non-empty message."
+
+            subagent_cfg = harness._get_subagent_config(agent_name)
+            if task_template := subagent_cfg.get("task_template"):
+                child_message = _safe_format(
+                    task_template,
+                    task=child_message,
+                    message=child_message,
+                    agent_name=agent_name,
+                    workspace=harness.workspace,
+                )
+
+            child_chat_id = harness._make_subagent_chat_id(chat_id, agent_name)
+            child_agent_cfg = {k: v for k, v in subagent_cfg.items() if k not in {"name", "task_template"}}
+            agent = harness.create_agent(agent_name, child_agent_cfg)
+            child_event_sink = derive_event_sink(
+                event_sink,
+                parent_turn_id=turn_id,
+                parent_chat_id=chat_id,
+                parent_agent_name=self._agent_name,
+            )
+            return await agent.ask(
+                child_chat_id,
+                child_message,
+                ctx_metadata={"subagent": agent_name, "ref_chat_id": chat_id},
+                event_sink=child_event_sink,
+            )
+
         @self._local_tools(
             name="UpdateMemory",
             description="Overwrite an allowed memory partition with the complete updated content.",
@@ -510,7 +598,6 @@ class ReactAgent:
             await self._memory_store.save_memory(key, content)
             return f"(Successfully updated memory '{key}'.)"
 
-    def _register_skills_tools(self) -> None:
         @self._local_tools(
             name="LoadSkill",
             description="Read an allowed skill's full instructions and return them as the tool result.",
@@ -527,40 +614,6 @@ class ReactAgent:
                 return await self._skills_loader.load_skill(name)
             except Exception as ex:
                 return f"(Failed to load skill '{name}': {ex}.)"
-
-        @self._local_tools(
-            name="SearchSkills",
-            description="Search available allowed skills by name or summary text.",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Search query. If empty, return all skills.",
-                    }
-                },
-                "required": [],
-            },
-        )
-        async def tool_search_skills(query: str | None = None) -> str:
-            skills = await self._skills_loader.search_skills(query)
-            skills = _compact(_pick_collection(skills, self._skills, self._exclude_skills))
-            results = [
-                {"name": name, "location": str(sm.location), "summary": sm.summary} for name, sm in skills.items()
-            ]
-            return json.dumps(results)
-
-    def _register_agent_tools(self) -> None:
-        @self._local_tools(
-            name="ListAgents",
-            description="List all available agents registered in the system.",
-            parameters={"type": "object", "properties": {}},
-        )
-        async def tool_list_agents() -> str:
-            results = ep_agent.describe()
-            results.pop("_default", None)
-            results = _pick_collection(results, self._subagents, self._exclude_subagents)
-            return json.dumps(results)
 
     @classmethod
     def register(cls, name: str, description: str | None = None, **kwargs):

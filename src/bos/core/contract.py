@@ -110,7 +110,8 @@ ep_skills_loader = ExtensionPoint(
 @dataclass
 class SkillMeta:
     location: str
-    summary: str
+    name: str = ""
+    description: str = ""
 
 
 @runtime_checkable

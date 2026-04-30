@@ -1,30 +1,42 @@
-import json
 import logging
 import uuid
 
 import pytest
 
-from bos.core import AgentHarness, LLMResponse, ToolCallRequest, ep_agent, ep_provider
+from bos.core import AgentHarness, InMemMemoryStore, LLMResponse, ToolCallRequest, ep_agent, ep_provider
 from bos.core.agent import ReactAgent
+from bos.core.contract import SkillMeta
 from bos.core.registry import ToolRegistry
 from bos.extensions.mailboxes import jsonl_mailbox  # noqa: F401
 
 
-def test_harness_local_tools_describe_ask_subagent(caplog):
-    harness = AgentHarness()
+def test_react_agent_local_tools_describe_ask_subagent(caplog):
+    local_tools = ToolRegistry("test tools")
 
     with caplog.at_level(logging.WARNING):
-        tools = harness._create_local_tools()
+        agent = ReactAgent(local_tools=local_tools)
 
-    ask_subagent = tools.get("AskSubagent")
+    assert local_tools.get("AskSubagent") is not None
+    ask_subagent = agent._local_tools.get("AskSubagent")
     assert ask_subagent.description.lstrip().startswith("Delegate a task to a named subagent and return its response.")
     assert not any("Tool AskSubagent is missing description" in record.message for record in caplog.records)
 
-    schema = tools.to_openai_schema()["AskSubagent"]
+    schema = agent._local_tools.to_openai_schema()["AskSubagent"]
     assert schema["function"]["description"] == ask_subagent.description
     properties = schema["function"]["parameters"]["properties"]
     assert set(properties) == {"agent_name", "message"}
     assert schema["function"]["parameters"]["required"] == ["agent_name", "message"]
+    assert agent._local_tools.get("ListAgents") is None
+    assert agent._local_tools.get("SearchSkills") is None
+
+
+def test_harness_local_tools_do_not_own_ask_subagent():
+    harness = AgentHarness()
+
+    tools = harness._create_local_tools()
+
+    assert tools.get("SendMail") is not None
+    assert tools.get("AskSubagent") is None
 
 
 @pytest.mark.asyncio
@@ -108,7 +120,9 @@ async def test_registered_agent_star_capabilities_enable_all(tmp_path):
             assert agent._skills is None
             assert agent._memories is None
             assert agent._subagents is None
-            assert {"SendMail", "AskSubagent", "LoadSkill", "SearchSkills", "ListAgents"} <= tool_names
+            assert {"SendMail", "AskSubagent", "LoadSkill"} <= tool_names
+            assert "ListAgents" not in tool_names
+            assert "SearchSkills" not in tool_names
             assert "UnloadSkill" not in tool_names
     finally:
         ep_agent._extensions.pop(agent_name, None)
@@ -145,7 +159,7 @@ def test_react_agent_rejects_dict_system_prompt():
 
 
 @pytest.mark.asyncio
-async def test_skill_tools_return_metadata_and_full_skill_body(tmp_path):
+async def test_skills_render_metadata_in_prompt_and_load_full_skill_body(tmp_path):
     bos_dir = tmp_path / ".bos"
     bos_dir.mkdir()
     skills_dir = tmp_path / "skills"
@@ -155,7 +169,7 @@ async def test_skill_tools_return_metadata_and_full_skill_body(tmp_path):
     skill_file.write_text(
         """
 ---
-name: youtube-searcher
+name: youtube-searcher-display-name
 description: Search YouTube.
 ---
 Use this skill to search YouTube.
@@ -171,21 +185,86 @@ Use this skill to search YouTube.
         agent = harness.create_agent(
             agent_cfg={
                 "system_prompt": "You are a helpful assistant.",
-                "tools": ["LoadSkill", "SearchSkills"],
+                "tools": ["LoadSkill"],
                 "skills": None,
             }
         )
-        search_result = await agent._local_tools.invoke_async("SearchSkills", {"query": "youtube"})
+        skills_prompt = await agent._prompt_section_skills()
+        skill_metas = await harness.skills_loader.search_skills("YouTube")
         load_result = await agent._local_tools.invoke_async("LoadSkill", {"name": "youtube-searcher"})
 
-    assert json.loads(search_result) == [
-        {
-            "name": "youtube-searcher",
-            "location": str(skill_file),
-            "summary": "name: youtube-searcher\ndescription: Search YouTube.",
-        }
-    ]
+    assert "* **youtube-searcher**" in skills_prompt
+    assert "* **youtube-searcher-display-name**" not in skills_prompt
+    assert "```\nSearch YouTube.\n```" in skills_prompt
+    assert str(skill_file) not in skills_prompt
+    assert skill_metas["youtube-searcher"].name == "youtube-searcher"
+    assert skill_metas["youtube-searcher"].description == "Search YouTube."
     assert load_result == skill_file.read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_memories_render_with_shared_prompt_section_format():
+    agent = ReactAgent(memory_store=InMemMemoryStore(user="Prefers concise answers."), memories=None)
+
+    memories_prompt = await agent._prompt_section_memories()
+
+    assert memories_prompt == "--- ACTIVE MEMORY ---\n\n* **user**\n```\nPrefers concise answers.\n```\n\n"
+
+
+@pytest.mark.asyncio
+async def test_prompt_sections_render_first_50_items_and_warn(caplog):
+    local_tools = ToolRegistry("many test tools")
+    tool_names = [f"Tool{i:03}" for i in range(51)]
+
+    for i, tool_name in enumerate(tool_names):
+        local_tools(
+            name=tool_name,
+            description=f"Tool description {i:03}",
+            parameters={"type": "object", "properties": {}, "required": []},
+        )(lambda: "ok")
+
+    class StaticSkillsLoader:
+        async def load_skill(self, name: str) -> str:
+            return name
+
+        async def search_skills(self, query: str | None = None) -> dict[str, SkillMeta]:
+            return {
+                f"skill_{i:03}": SkillMeta(
+                    location=f"/skills/skill_{i:03}/SKILL.md",
+                    description=f"Skill description {i:03}",
+                )
+                for i in range(51)
+            }
+
+    subagent_names = [f"prompt_cap_agent_{uuid.uuid4().hex}_{i:03}" for i in range(51)]
+    try:
+        for i, name in enumerate(subagent_names):
+            ReactAgent.register(name=name, description=f"Subagent description {i:03}", tools=[])
+
+        agent = ReactAgent(
+            local_tools=local_tools,
+            tools=tool_names,
+            skills_loader=StaticSkillsLoader(),
+            subagents=subagent_names,
+        )
+
+        with caplog.at_level(logging.WARNING):
+            tools_prompt = await agent._prompt_section_tools()
+            skills_prompt = await agent._prompt_section_skills()
+            subagents_prompt = await agent._prompt_section_subagents()
+
+        assert "* **Tool049**" in tools_prompt
+        assert "* **Tool050**" not in tools_prompt
+        assert "* **skill_049**" in skills_prompt
+        assert "* **skill_050**" not in skills_prompt
+        assert f"* **{subagent_names[49]}**" in subagents_prompt
+        assert f"* **{subagent_names[50]}**" not in subagents_prompt
+        assert "first 50 tools" in caplog.text
+        assert "first 50 skills" in caplog.text
+        assert "first 50 subagents" in caplog.text
+    finally:
+        for name in subagent_names:
+            ep_agent._extensions.pop(name, None)
 
 
 @pytest.mark.asyncio
@@ -360,7 +439,7 @@ async def test_harness_ask_subagent_delegates_to_named_specialist(tmp_path):
             name=manager_name,
             description="Manager",
             model=f"{provider_name}/manager",
-            tools=["AskSubagent", "ListAgents"],
+            tools=["AskSubagent"],
             subagents=[researcher_name],
             system_prompt="Delegate focused work to the researcher when useful.",
         )
@@ -385,13 +464,13 @@ async def test_harness_ask_subagent_delegates_to_named_specialist(tmp_path):
             ],
         ) as harness:
             manager = harness.create_agent(manager_name)
-            listed_agents = await manager._local_tools.invoke_async("ListAgents", {})
+            subagents_prompt = await manager._prompt_section_subagents()
             result = await manager.ask("parent-chat", "Explain the orchestration pattern.")
 
             chats = await harness.message_store.list_chats()
 
-        assert researcher_name in listed_agents
-        assert "Researcher" in listed_agents
+        assert researcher_name in subagents_prompt
+        assert "Researcher" in subagents_prompt
         assert result == "Manager synthesized: Researcher says BOS delegates to named specialists via AskSubagent."
         assert "parent-chat" in chats
         child_chats = [chat for chat in chats if chat != "parent-chat"]
@@ -401,3 +480,66 @@ async def test_harness_ask_subagent_delegates_to_named_specialist(tmp_path):
         ep_provider._extensions.pop(provider_name, None)
         ep_agent._extensions.pop(manager_name, None)
         ep_agent._extensions.pop(researcher_name, None)
+
+
+@pytest.mark.asyncio
+async def test_ask_subagent_rejects_disallowed_registered_agent(tmp_path):
+    suffix = uuid.uuid4().hex
+    provider_name = f"test_subagent_filter_provider_{suffix}"
+    manager_name = f"manager_{suffix}"
+    allowed_name = f"allowed_{suffix}"
+    blocked_name = f"blocked_{suffix}"
+
+    @ep_provider(name=provider_name)
+    async def scripted_provider(messages, model=None, **kwargs):
+        if model == "manager":
+            tool_messages = [message for message in messages if message.get("role") == "tool"]
+            if tool_messages:
+                return LLMResponse(content=tool_messages[-1]["content"])
+            return LLMResponse(
+                content="",
+                tool_calls=[
+                    ToolCallRequest(
+                        id="call_ask_subagent",
+                        name="AskSubagent",
+                        arguments={"agent_name": blocked_name, "message": "Should be rejected."},
+                    )
+                ],
+            )
+        return LLMResponse(content="blocked response")
+
+    try:
+        ReactAgent.register(
+            name=manager_name,
+            description="Manager",
+            model=f"{provider_name}/manager",
+            tools=["AskSubagent"],
+            subagents=[allowed_name],
+        )
+        ReactAgent.register(
+            name=allowed_name,
+            description="Allowed",
+            model=f"{provider_name}/allowed",
+            tools=[],
+        )
+        ReactAgent.register(
+            name=blocked_name,
+            description="Blocked",
+            model=f"{provider_name}/blocked",
+            tools=[],
+        )
+
+        bos_dir = tmp_path / ".bos"
+        bos_dir.mkdir()
+        async with AgentHarness(bos_dir=bos_dir, workspace=tmp_path) as harness:
+            manager = harness.create_agent(manager_name)
+            result = await manager.ask("parent-chat", "Try the blocked subagent.")
+            chats = await harness.message_store.list_chats()
+
+        assert result == f"Error: Agent '{blocked_name}' is not an allowed subagent."
+        assert list(chats) == ["parent-chat"]
+    finally:
+        ep_provider._extensions.pop(provider_name, None)
+        ep_agent._extensions.pop(manager_name, None)
+        ep_agent._extensions.pop(allowed_name, None)
+        ep_agent._extensions.pop(blocked_name, None)
