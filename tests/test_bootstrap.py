@@ -51,7 +51,8 @@ system_prompt = "Resolved prompt"
 
     Workspace(tmp_path).bootstrap_platform()
 
-    assert registered == [
+    non_default = [r for r in registered if r.get("name") != "_default"]
+    assert non_default == [
         {
             "name": "main",
             "description": "External",

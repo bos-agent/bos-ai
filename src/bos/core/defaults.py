@@ -12,7 +12,6 @@ from bos.protocol import Envelope, MessageContent, MessageType
 from bos.protocol.content import content_preview, image_source_to_model_url
 
 from ._utils import _litellm_response_to_llm_response, _read_text
-from .agent import ReactAgent
 from .contract import (
     Message,
     SkillMeta,
@@ -334,11 +333,11 @@ For every user input, you must strictly follow this cycle:
 - Always wait for an Observation before proceeding to the next Thought.
 """
 
-ReactAgent.register(
-    "_default",
-    tools="*",
-    skills="*",
-    memories="*",
-    subagents="*",
-    system_prompt=_system_prompt,
-)
+default_agent_spec: dict[str, Any] = {
+    "name": "_default",
+    "tools": "*",
+    "skills": "*",
+    "memories": "*",
+    "subagents": "*",
+    "system_prompt": _system_prompt,
+}

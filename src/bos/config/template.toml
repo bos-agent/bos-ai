@@ -9,12 +9,9 @@ extensions = ["bos.extensions.all"]
 # agent_dirs = ["agents", "more_agents"]
 
 [platform.envs]
-BOS_CAPABILITY_LIMIT = 5
+BOS_CAPABILITY_LIMIT = 50
 
 [platform.agent_defaults]
-# NOTE: The shipped default model below has been manually verified for image understanding.
-# Automated phase-1 multimodal regression coverage still targets the `_default` provider on an explicitly chosen OpenAI-compatible model.
-# PDF/file inputs remain unsupported in phase 1 until the reserved `file` path is activated end to end.
 model = "gemini/gemini-3.1-pro-preview" # "codex/gpt-5.3-codex"
 reasoning_effort = "medium"
 max_tokens = 131072
@@ -27,12 +24,11 @@ max_iterations = 25
 # subagents = ["researcher"]
 
 # [[platform.agents]]
-# name = "main"
+# name = "bosai"
 # description = "The main agent."
 
-# # Agent `name` is authoritative. If an external file under .bos/agents/
-# # defines the same exact name, the later-loaded definition wins.
-# # Case-only collisions such as "main" vs "Main" are rejected.
+# # Agent `bosai` is authoritative. If an external file under .bos/agents/
+# # defines the same exact name, e.g. `bosai.md`, the later-loaded definition wins.
 # system_prompt = """
 # You are an AI agent.
 # """
@@ -70,9 +66,9 @@ store_dir = "mailboxes"
 [harness.subagent_defaults]
 task_template = """
 --- Sub-agent Instructions ---
-You are a background sub-agent with name `{agent_name}`. Work only on the delegated task,
-use only the tools available to you, do not ask the user questions, and finish with a concise
-result. You can only modify or create files under {workspace}.
+You are a background sub-agent `{agent_name}`. Work only on the delegated task,
+use only the tools available to you, do not ask the user questions, and finish with
+a concise result. You can only modify or create files under {workspace}.
 --- Task Description ---
 {task}
 """
