@@ -4,11 +4,6 @@ Lightweight single-file agent framework.
 
 from __future__ import annotations
 
-import tomllib
-from importlib.metadata import PackageNotFoundError
-from importlib.metadata import version as _package_version
-from pathlib import Path
-
 from bos.protocol import Envelope, TurnEvent
 
 from ._utils import (
@@ -77,21 +72,7 @@ from .harness import (
 from .llm import LLMClient, LLMResponse, ToolCallRequest
 from .registry import Extension, ExtensionPoint, ToolRegistry
 
-
-def _resolve_version() -> str:
-    pyproject = Path(__file__).resolve().parents[3] / "pyproject.toml"
-    if pyproject.exists():
-        return str(tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]["version"])
-    try:
-        return _package_version("bos-ai")
-    except PackageNotFoundError:
-        return "0+unknown"
-
-
-__version__ = _resolve_version()
-
 __all__ = [
-    "__version__",
     "AbortTurn",
     "Agent",
     "AgentActor",
