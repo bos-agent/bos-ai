@@ -12,6 +12,7 @@ class FakeClient:
         self.calls: list[dict] = []
         self.client_id = "client-1"
         self.chat_id = "chat-1"
+        self.connected = True
 
     async def send(self, content, **kwargs):
         self.calls.append({"content": content, **kwargs})
@@ -195,8 +196,10 @@ def test_chat_status_text_uses_current_client_and_chat():
     client = FakeClient()
     app = ChatApp(client=client)
 
-    assert app._chat_status_text() == "  Chat: chat-1  |  Client: client-1"
-    assert app._header_subtitle() == "HttpChannel | chat-1"
+    assert "Chat: chat-1" in app._chat_status_text()
+    assert "Client: client-1" in app._chat_status_text()
+    assert "connected" in app._chat_status_text()
+    assert "HttpChannel | chat-1" in app._header_subtitle()
 
 
 @pytest.mark.asyncio
