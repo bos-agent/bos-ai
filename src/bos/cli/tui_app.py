@@ -140,8 +140,8 @@ class ChatApp(App):
     """
 
     BINDINGS = [
+        Binding("escape", "interrupt_turn", "Interrupt", show=True, priority=True),
         Binding("ctrl+c", "quit", "Quit", show=True, priority=True),
-        Binding("escape", "quit", "Quit", show=False),
         Binding("ctrl+l", "clear_log", "Clear", show=True),
         Binding("ctrl+n", "reset_chat", "New Chat", show=True),
     ]
@@ -196,7 +196,7 @@ class ChatApp(App):
         log = self.query_one("#chat", RichLog)
         log.write("[bold $primary]Agent CLI ready.[/]")
         log.write(f"[dim]Channel: HttpChannel  ·  Chat: {self._chat_id}[/]")
-        log.write("[dim]Type /help for commands · Ctrl+C to quit[/]\n")
+        log.write("[dim]Type /help for commands · Ctrl+C to interrupt · Ctrl+Q/Esc to quit[/]\n")
 
         self.query_one("#prompt", Input).focus()
 
@@ -402,7 +402,13 @@ class ChatApp(App):
                 "  /tokens   — rough token estimate\n"
                 "  /chats  — list all chats\n"
                 "  /memory   — list agent memories\n"
-                "  /clear    — clear the log"
+                "  /clear    — clear the log\n"
+                "\n"
+                "[bold]Hot keys:[/]\n"
+                "  Ctrl+C    — interrupt the current turn\n"
+                "  Ctrl+Q    — quit\n"
+                "  Ctrl+L    — clear the log\n"
+                "  Ctrl+N    — start a new chat"
             )
 
         elif normalized_cmd == "/new":
@@ -449,6 +455,32 @@ class ChatApp(App):
 
     def action_reset_chat(self) -> None:
         asyncio.create_task(self._send_command("/new"))
+
+    async def action_interrupt_turn(self) -> None:
+        """Abort the in-flight turn for the current chat."""
+        if not self._busy:
+            self._write_system("[dim]No active turn to interrupt.[/]")
+            return
+
+        try:
+            await self._client.send(
+                "",
+                content_type=MessageType.INTERRUPT_ABORT,
+                chat_id=self._chat_id,
+                metadata={"reason": "user_hotkey"},
+            )
+        except Exception as exc:
+            self._write_system(f"[yellow]⚠ Interrupt failed — reconnecting: {exc}[/]")
+            return
+
+        self._buffer.clear()
+        sidebar = self.query_one("#sidebar", RichLog)
+        sidebar.clear()
+        sidebar.display = False
+        self._busy = False
+        self._update_status()
+        self._write_system("[yellow]⏹ Turn interrupt requested.[/]")
+        self.query_one("#prompt", Input).focus()
 
     # ── helpers ────────────────────────────────────────────────
 

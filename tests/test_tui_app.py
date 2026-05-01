@@ -72,6 +72,71 @@ async def test_ctrl_n_uses_same_reset_chat_path(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_interrupt_turn_hotkey_sends_interrupt_abort(monkeypatch):
+    client = FakeClient()
+    app = ChatApp(client=client)
+    app._busy = True
+    app._buffer.append("queued")
+    outputs: list[str] = []
+    updates: list[bool] = []
+    focused: list[bool] = []
+
+    class FakeSidebar:
+        display = True
+
+        def clear(self):
+            self.display = False
+
+    class FakePrompt:
+        def focus(self):
+            focused.append(True)
+
+    sidebar = FakeSidebar()
+
+    def fake_query_one(selector, *args, **kwargs):
+        if selector == "#sidebar":
+            return sidebar
+        if selector == "#prompt":
+            return FakePrompt()
+        raise AssertionError(selector)
+
+    monkeypatch.setattr(app, "query_one", fake_query_one)
+    monkeypatch.setattr(app, "_write_system", outputs.append)
+    monkeypatch.setattr(app, "_update_status", lambda: updates.append(app._busy))
+
+    await app.action_interrupt_turn()
+
+    assert client.calls == [
+        {
+            "content": "",
+            "content_type": MessageType.INTERRUPT_ABORT,
+            "chat_id": "chat-1",
+            "metadata": {"reason": "user_hotkey"},
+        }
+    ]
+    assert app._busy is False
+    assert app._buffer == []
+    assert sidebar.display is False
+    assert updates == [False]
+    assert outputs == ["[yellow]⏹ Turn interrupt requested.[/]"]
+    assert focused == [True]
+
+
+@pytest.mark.asyncio
+async def test_interrupt_turn_without_active_turn_is_noop(monkeypatch):
+    client = FakeClient()
+    app = ChatApp(client=client)
+    outputs: list[str] = []
+
+    monkeypatch.setattr(app, "_write_system", outputs.append)
+
+    await app.action_interrupt_turn()
+
+    assert client.calls == []
+    assert outputs == ["[dim]No active turn to interrupt.[/]"]
+
+
+@pytest.mark.asyncio
 async def test_command_result_event_for_new_updates_displayed_chat(monkeypatch):
     client = FakeClient()
     app = ChatApp(client=client)

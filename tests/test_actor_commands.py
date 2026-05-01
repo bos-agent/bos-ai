@@ -315,6 +315,45 @@ async def test_new_cancels_or_fences_in_flight_reply_and_drops_stale_result():
 
 
 @pytest.mark.asyncio
+async def test_interrupt_abort_cancels_in_flight_turn_without_reply():
+    route = InMemMailRoute()
+    actor_address = f"agent@{uuid.uuid4().hex}"
+    sender_address = f"channel@{uuid.uuid4().hex}"
+    actor_mailbox = route.bind(actor_address)
+    sender_mailbox = route.bind(sender_address)
+    agent = SlowAgent()
+    actor = AgentActor(agent, actor_mailbox)
+
+    actor_task = asyncio.create_task(actor.run())
+    try:
+        await sender_mailbox.send(actor_address, "hello", chat_id="interrupt-chat")
+        await asyncio.wait_for(agent.started.wait(), timeout=1)
+
+        await sender_mailbox.send(
+            actor_address,
+            "",
+            content_type=MessageType.INTERRUPT_ABORT,
+            chat_id="interrupt-chat",
+        )
+
+        for _ in range(20):
+            session = actor._sessions.get("interrupt-chat")
+            if session is not None and session.execution.task is None:
+                break
+            await asyncio.sleep(0.05)
+        else:
+            raise AssertionError("in-flight turn was not interrupted")
+
+        agent.finish.set()
+
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(sender_mailbox.receive(), timeout=0.2)
+    finally:
+        actor_task.cancel()
+        await asyncio.gather(actor_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_resume_retires_previous_in_flight_session():
     route = InMemMailRoute()
     actor_address = f"agent@{uuid.uuid4().hex}"
