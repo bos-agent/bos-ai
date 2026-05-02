@@ -10,7 +10,7 @@ from typing import Any
 
 from ._utils import _aclose, _create_extension_instance, _load_ext_modules, _load_ext_paths
 from .agent import ChainReactInterceptor, ReactAgent
-from .contract import Consolidator, MailBox, MailRoute, MemoryStore, MessageStore, SkillsLoader, ep_agent
+from .contract import Consolidator, MailBox, MailRoute, MemoryExtension, MessageStore, SkillsLoader, ep_agent
 from .defaults import default_agent_spec
 from .llm import LLMClient
 
@@ -65,7 +65,7 @@ class AgentHarness:
         *,
         mail_route: dict[str, Any] | None = None,
         message_store: dict[str, Any] | None = None,
-        memory_store: dict[str, Any] | None = None,
+        memory: dict[str, Any] | None = None,
         consolidator: dict[str, Any] | None = None,
         skills_loader: dict[str, Any] | None = None,
         providers: dict[str, dict[str, Any]] | None = None,
@@ -84,7 +84,7 @@ class AgentHarness:
 
         self._mail_route_cfg = mail_route
         self._message_store_cfg = message_store
-        self._memory_store_cfg = memory_store
+        self._memory_cfg = memory
         self._consolidator_cfg = consolidator
         self._skills_loader_cfg = skills_loader
         self._providers_cfg = providers
@@ -96,7 +96,7 @@ class AgentHarness:
         self._original_cwd: Path | None = None
         self.mail_route = None
         self.message_store = None
-        self.memory_store = None
+        self.memory = None
         self.consolidator = None
         self.skills_loader = None
         self.interceptor = None
@@ -114,7 +114,7 @@ class AgentHarness:
 
         self.mail_route = self._create_and_own("ep_mail_route", MailRoute, self._mail_route_cfg)
         self.message_store = self._create_and_own("ep_message_store", MessageStore, self._message_store_cfg)
-        self.memory_store = self._create_and_own("ep_memory_store", MemoryStore, self._memory_store_cfg)
+        self.memory = self._create_and_own("ep_memory", MemoryExtension, self._memory_cfg)
         self.consolidator = self._create_and_own("ep_consolidator", Consolidator, self._consolidator_cfg)
         self.skills_loader = self._create_and_own("ep_skills_loader", SkillsLoader, self._skills_loader_cfg)
         self.interceptor = ChainReactInterceptor(self._interceptors_cfg)
@@ -148,7 +148,7 @@ class AgentHarness:
                 "model": os.getenv("BOS_MODEL"),
                 "tools": [],
                 "skills": [],
-                "memories": [],
+                "maxims": [],
                 "subagents": [],
             }
 
@@ -156,7 +156,7 @@ class AgentHarness:
             "name": role or (agent_cfg or {}).get("name"),
             "llm": self.llm,
             "message_store": self.message_store,
-            "memory_store": self.memory_store,
+            "memory": self.memory,
             "consolidator": self.consolidator,
             "skills_loader": self.skills_loader,
             "interceptor": self.interceptor,
