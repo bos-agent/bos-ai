@@ -13,11 +13,12 @@ from bos.protocol.content import content_preview, image_source_to_model_url
 
 from ._utils import _litellm_response_to_llm_response, _read_text
 from .contract import (
+    MemoryEntry,
     Message,
     SkillMeta,
     ep_consolidator,
     ep_mail_route,
-    ep_memory_store,
+    ep_memory,
     ep_message_store,
     ep_provider,
     ep_skills_loader,
@@ -81,24 +82,54 @@ class InMemMessageStore:
         return contexts
 
 
-@ep_memory_store(name="_default")
-class InMemMemoryStore:
-    """In-memory store for long-term agent identity and rules."""
+@ep_memory(name="_default")
+class InMemMemoryExtension:
+    """In-memory store for maxims and episodic memories."""
 
-    def __init__(self, **memories: str) -> None:
-        self._mem = {k.lower(): v for k, v in memories.items()}
+    def __init__(self, **maxims: str) -> None:
+        self._maxims = {k.lower(): v for k, v in maxims.items()}
+        self._memories: dict[str, MemoryEntry] = {}
+        self._counter = 0
 
-    async def load_memory(self, key: str) -> str:
-        return self._mem.get(key.lower(), "")
+    # ── Maxims ──
 
-    async def save_memory(self, key: str, content: str) -> None:
-        self._mem[key.lower()] = content
+    async def get_maxim(self, key: str) -> str:
+        return self._maxims.get(key.lower(), "")
 
-    async def list_memories(self) -> dict[str, str]:
-        return self._mem.copy()
+    async def set_maxim(self, key: str, content: str) -> None:
+        self._maxims[key.lower()] = content
 
-    async def search_memory(self, query: str) -> dict[str, str]:
-        return {key: txt for key, txt in self._mem.items() if query.lower() in txt.lower()}
+    async def list_maxims(self) -> dict[str, str]:
+        return self._maxims.copy()
+
+    # ── Memories ──
+
+    async def search_memories(self, query: str, *, top_k: int = 5) -> list[MemoryEntry]:
+        q = query.lower()
+        results = [e for e in self._memories.values() if q in e.content.lower() or any(q in t.lower() for t in e.tags)]
+        return sorted(results, key=lambda e: e.created_at, reverse=True)[:top_k]
+
+    async def ingest_memory(self, content: str, *, tags: list[str] | None = None) -> str:
+        self._counter += 1
+        entry_id = f"mem_{self._counter}"
+        self._memories[entry_id] = MemoryEntry(
+            id=entry_id,
+            content=content,
+            tags=tags or [],
+            created_at=datetime.now().isoformat(),
+        )
+        return entry_id
+
+    async def get_memory(self, entry_id: str) -> MemoryEntry | None:
+        return self._memories.get(entry_id)
+
+    async def forget_memory(self, entry_id: str) -> None:
+        self._memories.pop(entry_id, None)
+
+    # ── Optimization ──
+
+    async def optimize(self) -> None:
+        pass
 
 
 @ep_consolidator(name="_default")
@@ -337,7 +368,7 @@ default_agent_spec: dict[str, Any] = {
     "name": "_default",
     "tools": "*",
     "skills": "*",
-    "memories": "*",
+    "maxims": "*",
     "subagents": "*",
     "system_prompt": _system_prompt,
 }
