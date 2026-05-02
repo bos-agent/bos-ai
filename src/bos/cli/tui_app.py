@@ -141,7 +141,7 @@ class ChatApp(App):
 
     BINDINGS = [
         Binding("escape", "interrupt_turn", "Interrupt", show=True, priority=True),
-        Binding("ctrl+c", "quit", "Quit", show=True, priority=True),
+        Binding("ctrl+q", "quit", "Quit", show=True, priority=True),
         Binding("ctrl+l", "clear_log", "Clear", show=True),
         Binding("ctrl+n", "reset_chat", "New Chat", show=True),
     ]
@@ -197,8 +197,7 @@ class ChatApp(App):
         # Welcome
         log = self.query_one("#chat", RichLog)
         log.write("[bold $primary]Agent CLI ready.[/]")
-        log.write(f"[dim]Channel: HttpChannel  ·  Chat: {self._chat_id}[/]")
-        log.write("[dim]Type /help for commands · Escape to interrupt · Ctrl+C to quit[/]\n")
+        log.write("[dim]Type /help for commands · Escape to interrupt · Ctrl+Q to quit[/]\n")
 
         self.query_one("#prompt", Input).focus()
 
@@ -408,7 +407,7 @@ class ChatApp(App):
                 "\n"
                 "[bold]Hot keys:[/]\n"
                 "  Escape    — interrupt the current turn\n"
-                "  Ctrl+C    — quit\n"
+                "  Ctrl+Q    — quit\n"
                 "  Ctrl+L    — clear the log\n"
                 "  Ctrl+N    — start a new chat"
             )
@@ -529,6 +528,7 @@ class ChatApp(App):
                 break
             except Exception:
                 logger.debug("Connection status poll error", exc_info=True)
+
 
 # ── entrypoint ─────────────────────────────────────────────────
 
