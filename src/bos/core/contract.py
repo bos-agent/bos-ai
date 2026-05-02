@@ -107,21 +107,6 @@ class MemoryExtension(Protocol):
     async def optimize(self) -> None: ...
 
 
-# Deprecated — will be removed in a future version.
-ep_memory_store = ExtensionPoint(
-    description="Deprecated. Use ep_memory instead."
-)
-
-
-@runtime_checkable
-class MemoryStore(Protocol):
-    """Deprecated. Use MemoryExtension instead."""
-    async def load_memory(self, key: str) -> str: ...
-    async def save_memory(self, key: str, content: str) -> None: ...
-    async def list_memories(self) -> dict[str, str]: ...
-    async def search_memory(self, query: str) -> dict[str, str]: ...
-
-
 ep_consolidator = ExtensionPoint(
     description="""
         Content consolidator. A factory that creates consolidators implementing the Consolidator protocol.
