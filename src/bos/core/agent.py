@@ -380,36 +380,30 @@ class ReactAgent:
         try:
             if not _allowed(tc.name, self._tools, self._exclude_tools):
                 raise Exception(f"Tool {tc.name} is not allowed")
-
-            params = tc.arguments | {
-                "chat_id": ctx.chat_id,
-                "turn_id": ctx.turn_id,
-                "event_sink": event_sink,
-                "tool_config": self._tool_configs.get(tc.name, {}),
-            }
-
-            if self._local_tools.has(tc.name):
-                return await self._local_tools.invoke_async(tc.name, params)
-
-            if ep_tool.has(tc.name):
-                return await ep_tool.invoke_async(tc.name, params)
-
-            raise Exception(f"Tool {tc.name} not found")
+            return await self._invoke_tool(
+                tc.name,
+                **tc.arguments,
+                chat_id=ctx.chat_id,
+                turn_id=ctx.turn_id,
+                event_sink=event_sink,
+            )
         except Exception as e:
             logger.error("Error in tool call [%s]: %s", tc.name, e)
             return str(e)
 
     async def _invoke_tool(self, tool_name: str, **params: Any) -> str:
-        """Invoke a local tool by name — used by tests."""
-        kwargs = {
-            "chat_id": "",
-            "turn_id": "",
-            "event_sink": None,
+        """Invoke a tool by name, merging runtime context into its parameters."""
+        kwargs = params | {
+            "chat_id": params.pop("chat_id", ""),
+            "turn_id": params.pop("turn_id", ""),
+            "event_sink": params.pop("event_sink", None),
             "tool_config": self._tool_configs.get(tool_name, {}),
-        } | params
+        }
         if self._local_tools.has(tool_name):
             return await self._local_tools.invoke_async(tool_name, kwargs)
-        return await ep_tool.invoke_async(tool_name, kwargs)
+        if ep_tool.has(tool_name):
+            return await ep_tool.invoke_async(tool_name, kwargs)
+        raise Exception(f"Tool {tool_name} not found")
 
     async def _get_chat_history(self, chat_id: str) -> list[dict]:
         def _format_content(msg: dict) -> MessageContent:
