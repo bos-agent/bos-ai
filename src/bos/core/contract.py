@@ -73,15 +73,49 @@ class MessageStore(Protocol):
     async def list_chats(self) -> dict[str, dict[str, Any]]: ...
 
 
-ep_memory_store = ExtensionPoint(
+ep_memory = ExtensionPoint(
     description="""
-        Memory store. A factory that creates memory stores implementing the MemoryStore protocol.
+        Memory extension. A factory that creates memory backends implementing
+        the MemoryExtension protocol. Replaces ep_memory_store.
     """
+)
+
+
+@dataclass
+class MemoryEntry:
+    id: str
+    content: str          # full content from get_memory; truncated snippet from search_memories
+    tags: list[str] = field(default_factory=list)
+    created_at: str = ""
+    metadata: dict | None = None
+
+
+@runtime_checkable
+class MemoryExtension(Protocol):
+    # ── Maxims: preloaded into system prompt every turn ──
+    async def get_maxim(self, key: str) -> str: ...
+    async def set_maxim(self, key: str, content: str) -> None: ...
+    async def list_maxims(self) -> dict[str, str]: ...
+
+    # ── Memories: searched on demand ──
+    async def search_memories(self, query: str, *, top_k: int = 5) -> list[MemoryEntry]: ...
+    async def ingest_memory(self, content: str, *, tags: list[str] | None = None) -> str: ...
+    async def get_memory(self, entry_id: str) -> MemoryEntry | None: ...
+    async def forget_memory(self, entry_id: str) -> None: ...
+
+    # ── Background optimization ──
+    async def optimize(self) -> None: ...
+
+
+# Deprecated — will be removed in a future version.
+ep_memory_store = ExtensionPoint(
+    description="Deprecated. Use ep_memory instead."
 )
 
 
 @runtime_checkable
 class MemoryStore(Protocol):
+    """Deprecated. Use MemoryExtension instead."""
     async def load_memory(self, key: str) -> str: ...
     async def save_memory(self, key: str, content: str) -> None: ...
     async def list_memories(self) -> dict[str, str]: ...
