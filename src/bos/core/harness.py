@@ -13,7 +13,6 @@ from .agent import ChainReactInterceptor, ReactAgent
 from .contract import Consolidator, MailBox, MailRoute, MemoryStore, MessageStore, SkillsLoader, ep_agent
 from .defaults import default_agent_spec
 from .llm import LLMClient
-from .registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -153,7 +152,6 @@ class AgentHarness:
                 "subagents": [],
             }
 
-        local_tools = self._create_local_tools(role=role)
         kwargs = (agent_cfg or {}) | {
             "name": role or (agent_cfg or {}).get("name"),
             "llm": self.llm,
@@ -162,7 +160,6 @@ class AgentHarness:
             "consolidator": self.consolidator,
             "skills_loader": self.skills_loader,
             "interceptor": self.interceptor,
-            "local_tools": local_tools,
             "tool_configs": self._tools_cfg,
         }
 
@@ -175,9 +172,6 @@ class AgentHarness:
         if instance is not None:
             self._owned.append(instance)
         return instance
-
-    def _create_local_tools(self, role: str | None = None):
-        return ToolRegistry("Harness-provided local tools for this agent.")
 
     def _get_subagent_config(self, role: str) -> dict[str, Any]:
         return self._subagent_defaults | (self._subagents_cfg.get(role) or {})
