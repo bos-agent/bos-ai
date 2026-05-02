@@ -177,28 +177,7 @@ class AgentHarness:
         return instance
 
     def _create_local_tools(self, role: str | None = None):
-        harness = self
-        current_role = role or "__unknown__"
-        tools = ToolRegistry("Harness-provided local tools for this agent.")
-
-        @tools(
-            name="SendMail",
-            description=("Send a message to the recipient's address."),
-            parameters={
-                "type": "object",
-                "properties": {
-                    "recipient": {"type": "string", "description": "Recipient address"},
-                    "content": {"type": "string", "description": "Message content"},
-                },
-                "required": ["recipient", "content"],
-            },
-        )
-        async def tool_send_mail(recipient: str, content: str) -> str:
-            mailbox = CURRENT_MAILBOX.get(None) or harness.mail_route.bind(f"agent@{current_role}")
-            await mailbox.send(recipient, content)
-            return f"(Sent to {recipient})"
-
-        return tools
+        return ToolRegistry("Harness-provided local tools for this agent.")
 
     def _get_subagent_config(self, role: str) -> dict[str, Any]:
         return self._subagent_defaults | (self._subagents_cfg.get(role) or {})
