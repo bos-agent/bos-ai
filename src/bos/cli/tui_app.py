@@ -237,6 +237,20 @@ class ChatApp(App):
 
     # ── event handlers ────────────────────────────────────────
 
+    def on_key(self, event: Input.Changed | Any) -> None:
+        """Redirect keystrokes to the prompt unless it already has focus."""
+        prompt = self.query_one("#prompt", Input)
+        if self.focused is not prompt:
+            prompt.focus()
+            # Forward printable characters into the input
+            if event.character and event.is_printable:
+                prompt.value += event.character
+                # Defer cursor move so it isn't reset by the focus change
+                self.call_after_refresh(
+                    setattr, prompt, "cursor_position", len(prompt.value)
+                )
+                event.prevent_default()
+
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         text = event.value.strip()
         if not text:
