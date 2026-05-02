@@ -102,7 +102,7 @@ async def test_registered_agent_star_capabilities_enable_all(tmp_path):
             assert agent._skills is None
             assert agent._memories is None
             assert agent._subagents is None
-            assert {"AskSubagent", "LoadSkill"} <= tool_names
+            assert {"AskSubagent", "LoadSkill", "UpdateMemory"} <= tool_names
             assert "ListAgents" not in tool_names
             assert "SearchSkills" not in tool_names
             assert "UnloadSkill" not in tool_names
