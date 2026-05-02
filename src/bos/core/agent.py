@@ -128,7 +128,7 @@ class ReactAgent:
         exclude_memories: list[str] | None = None,
         subagents: list[str] | None = None,
         exclude_subagents: list[str] | None = None,
-        agent_name: str | None = None,
+        name: str | None = None,
         model: str | None = None,
         reasoning_effort: Literal["low", "medium", "high"] | None = None,
         llm: LLMClient | None = None,
@@ -162,7 +162,7 @@ class ReactAgent:
         self._interceptor = interceptor or ChainReactInterceptor()
         self._local_tools = local_tools or ToolRegistry("Agent-scoped local tools.")
         self._tool_configs = tool_configs or {}
-        self._agent_name = agent_name or "__unknown__"
+        self._name = name or "__unknown__"
 
         self._register_tools()
 
@@ -235,7 +235,7 @@ class ReactAgent:
                         phase=phase,
                         chat_id=ctx.chat_id,
                         turn_id=ctx.turn_id,
-                        agent_name=self._agent_name,
+                        agent_name=self._name,
                         stage=stage,
                         detail=detail,
                         tool_name=tool_name,
@@ -514,24 +514,24 @@ class ReactAgent:
             parameters={
                 "type": "object",
                 "properties": {
-                    "agent_name": {"type": "string", "description": "Name of the agent, case sensitive."},
+                    "role": {"type": "string", "description": "The role (kind) of the subagent to delegate to, case sensitive."},
                     "message": {"type": "string", "description": "Task or message to send."},
                 },
-                "required": ["agent_name", "message"],
+                "required": ["role", "message"],
             },
         )
         async def tool_ask_subagent(
-            agent_name: str,
+            role: str,
             message: str | None = None,
             task: str | None = None,
             chat_id: str = "",
             turn_id: str = "",
             event_sink: EventSink | None = None,
         ) -> str:
-            if not _allowed(agent_name, self._subagents, self._exclude_subagents):
-                return f"Error: Agent '{agent_name}' is not an allowed subagent."
-            if not ep_agent.has(agent_name):
-                return f"Error: Agent '{agent_name}' not found."
+            if not _allowed(role, self._subagents, self._exclude_subagents):
+                return f"Error: Agent '{role}' is not an allowed subagent."
+            if not ep_agent.has(role):
+                return f"Error: Agent '{role}' not found."
 
             from .harness import CURRENT_HARNESS
 
@@ -543,29 +543,29 @@ class ReactAgent:
             if not child_message:
                 return "Error: AskSubagent requires a non-empty message."
 
-            subagent_cfg = harness._get_subagent_config(agent_name)
+            subagent_cfg = harness._get_subagent_config(role)
             if task_template := subagent_cfg.get("task_template"):
                 child_message = _safe_format(
                     task_template,
                     task=child_message,
                     message=child_message,
-                    agent_name=agent_name,
+                    role=role,
                     workspace=harness.workspace,
                 )
 
-            child_chat_id = harness._make_subagent_chat_id(chat_id, agent_name)
+            child_chat_id = harness._make_subagent_chat_id(chat_id, role)
             child_agent_cfg = {k: v for k, v in subagent_cfg.items() if k not in {"name", "task_template"}}
-            agent = harness.create_agent(agent_name, child_agent_cfg)
+            agent = harness.create_agent(role, child_agent_cfg)
             child_event_sink = derive_event_sink(
                 event_sink,
                 parent_turn_id=turn_id,
                 parent_chat_id=chat_id,
-                parent_agent_name=self._agent_name,
+                parent_agent_name=self._name,
             )
             return await agent.ask(
                 child_chat_id,
                 child_message,
-                ctx_metadata={"subagent": agent_name, "ref_chat_id": chat_id},
+                ctx_metadata={"subagent": role, "ref_chat_id": chat_id},
                 event_sink=child_event_sink,
             )
 

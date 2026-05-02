@@ -34,8 +34,8 @@ def test_react_agent_local_tools_describe_ask_subagent(caplog):
     schema = agent._local_tools.to_openai_schema()["AskSubagent"]
     assert schema["function"]["description"] == ask_subagent.description
     properties = schema["function"]["parameters"]["properties"]
-    assert set(properties) == {"agent_name", "message"}
-    assert schema["function"]["parameters"]["required"] == ["agent_name", "message"]
+    assert set(properties) == {"role", "message"}
+    assert schema["function"]["parameters"]["required"] == ["role", "message"]
     assert agent._local_tools.get("ListAgents") is None
     assert agent._local_tools.get("SearchSkills") is None
 
@@ -429,7 +429,7 @@ async def test_harness_ask_subagent_delegates_to_named_specialist(tmp_path):
                         id="call_ask_subagent",
                         name="AskSubagent",
                         arguments={
-                            "agent_name": researcher_name,
+                            "role": researcher_name,
                             "message": "Summarize BOS subagent orchestration in one line.",
                         },
                     )
@@ -509,7 +509,7 @@ async def test_ask_subagent_rejects_disallowed_registered_agent(tmp_path):
                     ToolCallRequest(
                         id="call_ask_subagent",
                         name="AskSubagent",
-                        arguments={"agent_name": blocked_name, "message": "Should be rejected."},
+                        arguments={"role": blocked_name, "message": "Should be rejected."},
                     )
                 ],
             )

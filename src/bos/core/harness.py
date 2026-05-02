@@ -139,11 +139,11 @@ class AgentHarness:
             os.chdir(self._original_cwd)
             self._original_cwd = None
 
-    def create_agent(self, agent_name: str | None = None, agent_cfg: dict[str, Any] = None) -> ReactAgent:
+    def create_agent(self, role: str | None = None, agent_cfg: dict[str, Any] = None) -> ReactAgent:
         if CURRENT_HARNESS.get(None) is None:
             raise RuntimeError("create_agent must be called within an active AgentHarness context.")
 
-        if not any([agent_name, agent_cfg]):
+        if not any([role, agent_cfg]):
             agent_cfg = {
                 "system_prompt": "You are a helpful assistant.",
                 "model": os.getenv("BOS_MODEL"),
@@ -153,9 +153,9 @@ class AgentHarness:
                 "subagents": [],
             }
 
-        local_tools = self._create_local_tools(agent_name=agent_name)
+        local_tools = self._create_local_tools(role=role)
         kwargs = (agent_cfg or {}) | {
-            "agent_name": agent_name or (agent_cfg or {}).get("name"),
+            "name": role or (agent_cfg or {}).get("name"),
             "llm": self.llm,
             "message_store": self.message_store,
             "memory_store": self.memory_store,
@@ -166,7 +166,7 @@ class AgentHarness:
             "tool_configs": self._tools_cfg,
         }
 
-        return ep_agent.invoke(agent_name, kwargs) if agent_name else ReactAgent(**kwargs)
+        return ep_agent.invoke(role, kwargs) if role else ReactAgent(**kwargs)
 
     def _create_and_own(self, ep_name: str, protocol: type, cfg: Any) -> Any:
         from . import __dict__ as core_exports
@@ -176,9 +176,9 @@ class AgentHarness:
             self._owned.append(instance)
         return instance
 
-    def _create_local_tools(self, agent_name: str | None = None):
+    def _create_local_tools(self, role: str | None = None):
         harness = self
-        current_agent_name = agent_name or "__unknown__"
+        current_role = role or "__unknown__"
         tools = ToolRegistry("Harness-provided local tools for this agent.")
 
         @tools(
@@ -194,17 +194,17 @@ class AgentHarness:
             },
         )
         async def tool_send_mail(recipient: str, content: str) -> str:
-            mailbox = CURRENT_MAILBOX.get(None) or harness.mail_route.bind(f"agent@{current_agent_name}")
+            mailbox = CURRENT_MAILBOX.get(None) or harness.mail_route.bind(f"agent@{current_role}")
             await mailbox.send(recipient, content)
             return f"(Sent to {recipient})"
 
         return tools
 
-    def _get_subagent_config(self, agent_name: str) -> dict[str, Any]:
-        return self._subagent_defaults | (self._subagents_cfg.get(agent_name) or {})
+    def _get_subagent_config(self, role: str) -> dict[str, Any]:
+        return self._subagent_defaults | (self._subagents_cfg.get(role) or {})
 
     @staticmethod
-    def _make_subagent_chat_id(parent_chat_id: str, agent_name: str) -> str:
-        agent_tag = re.sub(r"[^a-z0-9]+", "-", agent_name.lower()).strip("-") or "agent"
+    def _make_subagent_chat_id(parent_chat_id: str, role: str) -> str:
+        agent_tag = re.sub(r"[^a-z0-9]+", "-", role.lower()).strip("-") or "agent"
         agent_tag = agent_tag[:10]
         return f"{parent_chat_id}~{agent_tag}{uuid.uuid4().hex[:8]}"
