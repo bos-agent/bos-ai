@@ -487,14 +487,23 @@ def tui(ctx, host: str | None, port: int | None, client_id: str | None):
     _, rd = _get_ws_and_rd(ctx)
     from bos.runner.proc import read_state
 
-    # Discover endpoint from agent.state
-    if not (host and port):
+    def _resolve_endpoint() -> tuple[str, int] | None:
+        """Read agent.state to discover the current HttpChannel host:port."""
         state = read_state(rd)
         for ch in state.get("channels", []):
             if ch.get("name") == "HttpChannel":
-                host = host or ch.get("host", "127.0.0.1")
-                port = port or ch.get("port")
-                break
+                h = ch.get("host", "127.0.0.1")
+                p = ch.get("port")
+                if h and p:
+                    return (h, int(p))
+        return None
+
+    # Discover initial endpoint (CLI overrides take precedence)
+    if not (host and port):
+        resolved = _resolve_endpoint()
+        if resolved:
+            host = host or resolved[0]
+            port = port or resolved[1]
 
     if not host or not port:
         raise click.UsageError(
@@ -511,6 +520,7 @@ def tui(ctx, host: str | None, port: int | None, client_id: str | None):
             address="tui",
             client_id=client_id or _default_tui_client_id(),
             chat_id=None,
+            endpoint_resolver=_resolve_endpoint,
         )
         await _connect_tui_client(client)
         try:

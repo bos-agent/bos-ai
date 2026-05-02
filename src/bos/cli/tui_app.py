@@ -140,8 +140,8 @@ class ChatApp(App):
     """
 
     BINDINGS = [
+        Binding("escape", "interrupt_turn", "Interrupt", show=True, priority=True),
         Binding("ctrl+c", "quit", "Quit", show=True, priority=True),
-        Binding("escape", "quit", "Quit", show=False),
         Binding("ctrl+l", "clear_log", "Clear", show=True),
         Binding("ctrl+n", "reset_chat", "New Chat", show=True),
     ]
@@ -159,6 +159,7 @@ class ChatApp(App):
         self._chat_id = client.chat_id
         self._busy = False
         self._buffer: list[str] = []
+        self._conn_status: str = "connected"
 
     # ── compose ────────────────────────────────────────────────
 
@@ -191,12 +192,12 @@ class ChatApp(App):
 
         # Start reply polling worker
         self._poll_task = asyncio.create_task(self._poll_replies())
+        self._conn_poll_task = asyncio.create_task(self._poll_connection_status())
 
         # Welcome
         log = self.query_one("#chat", RichLog)
         log.write("[bold $primary]Agent CLI ready.[/]")
-        log.write(f"[dim]Channel: HttpChannel  ·  Chat: {self._chat_id}[/]")
-        log.write("[dim]Type /help for commands · Ctrl+C to quit[/]\n")
+        log.write("[dim]Type /help for commands · Escape to interrupt · Ctrl+C to quit[/]\n")
 
         self.query_one("#prompt", Input).focus()
 
@@ -402,7 +403,13 @@ class ChatApp(App):
                 "  /tokens   — rough token estimate\n"
                 "  /chats  — list all chats\n"
                 "  /memory   — list agent memories\n"
-                "  /clear    — clear the log"
+                "  /clear    — clear the log\n"
+                "\n"
+                "[bold]Hot keys:[/]\n"
+                "  Escape    — interrupt the current turn\n"
+                "  Ctrl+C    — quit\n"
+                "  Ctrl+L    — clear the log\n"
+                "  Ctrl+N    — start a new chat"
             )
 
         elif normalized_cmd == "/new":
@@ -450,6 +457,32 @@ class ChatApp(App):
     def action_reset_chat(self) -> None:
         asyncio.create_task(self._send_command("/new"))
 
+    async def action_interrupt_turn(self) -> None:
+        """Abort the in-flight turn for the current chat."""
+        if not self._busy:
+            self._write_system("[dim]No active turn to interrupt.[/]")
+            return
+
+        try:
+            await self._client.send(
+                "",
+                content_type=MessageType.INTERRUPT_ABORT,
+                chat_id=self._chat_id,
+                metadata={"reason": "user_hotkey"},
+            )
+        except Exception as exc:
+            self._write_system(f"[yellow]⚠ Interrupt failed — reconnecting: {exc}[/]")
+            return
+
+        self._buffer.clear()
+        sidebar = self.query_one("#sidebar", RichLog)
+        sidebar.clear()
+        sidebar.display = False
+        self._busy = False
+        self._update_status()
+        self._write_system("[yellow]⏹ Turn interrupt requested.[/]")
+        self.query_one("#prompt", Input).focus()
+
     # ── helpers ────────────────────────────────────────────────
 
     def _write_system(self, text: str) -> None:
@@ -460,11 +493,18 @@ class ChatApp(App):
         self._client.update_chat_id(chat_id)
         self._update_status()
 
+    def _connection_indicator(self) -> str:
+        if self._conn_status == "connected":
+            return "[green]●[/] connected"
+        return "[yellow]○[/] reconnecting…"
+
     def _chat_status_text(self) -> str:
-        return f"  Chat: {self._chat_id}  |  Client: {self._client.client_id}"
+        conn = self._connection_indicator()
+        return f"  {conn}  |  Chat: {self._chat_id}  |  Client: {self._client.client_id}"
 
     def _header_subtitle(self) -> str:
-        return f"HttpChannel | {self._chat_id}"
+        conn = "●" if self._conn_status == "connected" else "○ reconnecting"
+        return f"{conn}  HttpChannel | {self._chat_id}"
 
     def _status_text(self) -> str:
         state = "● thinking" if self._busy else "○ ready"
@@ -474,6 +514,21 @@ class ChatApp(App):
         self.sub_title = self._header_subtitle()
         self.query_one("#chat-status", Static).update(self._chat_status_text())
         self.query_one("#status-bar", Static).update(self._status_text())
+
+    async def _poll_connection_status(self) -> None:
+        """Periodically check the WebSocket connection and update the status bar."""
+        while True:
+            try:
+                new_status = "connected" if self._client.connected else "reconnecting"
+                if new_status != self._conn_status:
+                    self._conn_status = new_status
+                    self._update_status()
+                await asyncio.sleep(1)
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                logger.debug("Connection status poll error", exc_info=True)
+
 
 # ── entrypoint ─────────────────────────────────────────────────
 

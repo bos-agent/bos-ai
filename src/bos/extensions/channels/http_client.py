@@ -10,6 +10,7 @@ import asyncio
 import json
 import logging
 import uuid
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,10 @@ from aiohttp import WSMsgType
 
 from bos.extensions.channels.http import WS_TAKEOVER_CLOSE_CODE, WS_TAKEOVER_CLOSE_REASON
 from bos.protocol import Envelope, MessageContent, MessageType
+
+# Type alias for the optional endpoint resolver callback.
+# Returns (host, port) or None if the endpoint cannot be determined.
+EndpointResolver = Callable[[], tuple[str, int] | None]
 
 logger = logging.getLogger(__name__)
 
@@ -62,9 +67,12 @@ class HttpChannelClient:
         *,
         client_id: str | None = None,
         chat_id: str | None = None,
+        endpoint_resolver: EndpointResolver | None = None,
     ) -> None:
-        self._url = f"ws://{host}:{port}/ws"
-        self._http_base_url = f"http://{host}:{port}"
+        self._host = host
+        self._port = port
+        self._endpoint_resolver = endpoint_resolver
+        self._rebuild_urls()
         self._address = address
         self._client_id = (client_id or address or uuid.uuid4().hex).strip()
         self._chat_id = (
@@ -76,6 +84,24 @@ class HttpChannelClient:
         self._reader_task: asyncio.Task | None = None
         self._closed = False  # explicit close requested
         self._connected = asyncio.Event()
+
+    def _rebuild_urls(self) -> None:
+        self._url = f"ws://{self._host}:{self._port}/ws"
+        self._http_base_url = f"http://{self._host}:{self._port}"
+
+    def _resolve_endpoint(self) -> None:
+        """Re-discover host:port via the resolver callback, if provided."""
+        if self._endpoint_resolver is None:
+            return
+        result = self._endpoint_resolver()
+        if result is None:
+            return
+        host, port = result
+        if host != self._host or port != self._port:
+            logger.info("Endpoint changed: %s:%d -> %s:%d", self._host, self._port, host, port)
+            self._host = host
+            self._port = port
+            self._rebuild_urls()
 
     @property
     def connected(self) -> bool:
@@ -142,6 +168,7 @@ class HttpChannelClient:
         delay = _RECONNECT_BASE_DELAY
         while not self._closed:
             try:
+                self._resolve_endpoint()
                 logger.info("Reconnecting to %s in %.1fs …", self._url, delay)
                 await asyncio.sleep(delay)
                 await self._do_connect()

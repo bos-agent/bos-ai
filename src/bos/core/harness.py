@@ -11,6 +11,7 @@ from typing import Any
 from ._utils import _aclose, _create_extension_instance, _load_ext_modules, _load_ext_paths
 from .agent import ChainReactInterceptor, ReactAgent
 from .contract import Consolidator, MailBox, MailRoute, MemoryStore, MessageStore, SkillsLoader, ep_agent
+from .defaults import default_agent_spec
 from .llm import LLMClient
 from .registry import ToolRegistry
 
@@ -48,10 +49,9 @@ def bootstrap_platform(
         if paths:
             _load_ext_paths(paths=paths)
 
-    if agents:
-        defaults = agent_defaults or {}
-        for agent_spec in agents:
-            ReactAgent.register(**(defaults | agent_spec))
+    defaults = agent_defaults or {}
+    for agent_spec in [default_agent_spec] + (agents or []):
+        ReactAgent.register(**(defaults | agent_spec))
 
 
 CURRENT_HARNESS: contextvars.ContextVar[AgentHarness] = contextvars.ContextVar("current_harness")

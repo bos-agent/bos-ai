@@ -59,6 +59,7 @@ from .defaults import (
     InMemMemoryStore,
     InMemMessageStore,
     NaiveConsolidator,
+    default_agent_spec,
     litellm_complete,
 )
 from .events import DerivedEventSink, MailboxEventSink, derive_event_sink
@@ -71,10 +72,7 @@ from .harness import (
 from .llm import LLMClient, LLMResponse, ToolCallRequest
 from .registry import Extension, ExtensionPoint, ToolRegistry
 
-__version__ = "0.1.0"
-
 __all__ = [
-    "__version__",
     "AbortTurn",
     "Agent",
     "AgentActor",
@@ -85,6 +83,7 @@ __all__ = [
     "ChainReactInterceptor",
     "Closeable",
     "Consolidator",
+    "default_agent_spec",
     "DerivedEventSink",
     "Envelope",
     "EventSink",

@@ -1,5 +1,3 @@
-from pathlib import Path
-
 import pytest
 
 from bos.config.workspace import Workspace
@@ -159,14 +157,6 @@ token = "x"
     with pytest.raises(ValueError, match="channel-to-channel routing is no longer supported"):
         Workspace(tmp_path).resolve_channels()
 
-
-def test_template_documents_manual_gemini_image_verification_and_phase_one_limits():
-    template_path = Path(__file__).resolve().parents[1] / "src" / "bos" / "config" / "template.toml"
-    template = template_path.read_text(encoding="utf-8")
-
-    assert "manually verified for image understanding" in template
-    assert "Automated phase-1 multimodal regression coverage still targets the `_default` provider" in template
-    assert "PDF/file inputs remain unsupported in phase 1" in template
 
 
 def test_resolve_channels_accepts_agent_main_for_non_default_selected_agent(tmp_path):

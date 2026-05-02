@@ -117,7 +117,9 @@ class AgentActor:
                         self._fire_pending(chat_id)
                     continue
 
-                if env.content_type in (MessageType.INTERRUPT_MESSAGE, MessageType.INTERRUPT_ABORT):
+                if env.content_type == MessageType.INTERRUPT_ABORT:
+                    self._abort_current_turn(session)
+                elif env.content_type == MessageType.INTERRUPT_MESSAGE:
                     session.buffers.interrupts.append(env)
                 else:
                     session.buffers.pending.append(env)
@@ -161,6 +163,36 @@ class AgentActor:
         task = asyncio.create_task(self._handle_command(env))
         self._command_tasks.add(task)
         task.add_done_callback(self._command_tasks.discard)
+
+    def _abort_current_turn(self, session: SessionState) -> None:
+        """Cancel the current execution immediately and fence stale replies."""
+        task = session.execution.task
+        session.execution.generation += 1
+        session.buffers.interrupts.clear()
+        session.execution.task = None
+        session.execution.reply_recipient = None
+        session.execution.reply_chat_id = None
+        if task is not None:
+            if task.done():
+                self._log_aborted_task_result(task)
+            else:
+                task.cancel()
+                task.add_done_callback(self._log_aborted_task_result)
+
+        if any(env.content_type == MessageType.MESSAGE for env in session.buffers.pending):
+            self._fire_pending(session.chat_id)
+
+    @staticmethod
+    def _log_aborted_task_result(task: asyncio.Task) -> None:
+        try:
+            exc = task.exception()
+        except asyncio.CancelledError:
+            return
+        if exc is not None:
+            logger.debug(
+                "Aborted ask task finished with an exception",
+                exc_info=(type(exc), exc, exc.__traceback__),
+            )
 
     async def _finalize_done_task(self, chat_id: str) -> None:
         session = self._sessions.get(chat_id)
