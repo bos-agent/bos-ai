@@ -872,6 +872,14 @@ Use Forget(entry_id) or Forget(query) to remove memories:
 
     @classmethod
     def register(cls, name: str, description: str | None = None, **kwargs):
+        # Backwards compat: map deprecated 'memories'/'exclude_memories' to 'maxims'/'exclude_maxims'
+        if "memories" in kwargs and "maxims" not in kwargs:
+            kwargs["maxims"] = kwargs.pop("memories")
+        if "exclude_memories" in kwargs and "exclude_maxims" not in kwargs:
+            kwargs["exclude_maxims"] = kwargs.pop("exclude_memories")
+        kwargs.pop("memories", None)
+        kwargs.pop("exclude_memories", None)
+
         _CAPABILITY_KEYS = ("tools", "skills", "maxims", "subagents")
 
         def map_value(key, value):

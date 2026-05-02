@@ -17,10 +17,10 @@ reasoning_effort = "medium"
 max_tokens = 131072
 max_iterations = 25
 # Agent capabilities default to [] when omitted. Use "*" to allow all, or list
-# explicit allowed names. The same pattern applies to skills, memories, and subagents.
+# explicit allowed names. The same pattern applies to skills, maxims, and subagents.
 # tools = ["ReadFile", "SearchFiles"]
 # skills = "*"
-# memories = ["user", "memory"]
+# maxims = ["user", "soul"]
 # subagents = ["researcher"]
 
 # [[platform.agents]]
@@ -51,8 +51,8 @@ max_iterations = 25
 [harness.skills_loader]
 skill_dirs = ["skills"]
 
-[harness.memory_store]
-name = "MarkdownMemoryStore"
+[harness.memory]
+name = "MarkdownMemoryExtension"
 store_dir = "memories"
 
 [harness.message_store]

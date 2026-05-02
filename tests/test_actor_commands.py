@@ -7,7 +7,7 @@ import pytest
 from bos.core.actor import AgentActor
 from bos.core.chat_state import ChatState
 from bos.core.contract import Message
-from bos.core.defaults import InMemMailRoute, InMemMemoryStore, InMemMessageStore, NaiveConsolidator
+from bos.core.defaults import InMemMailRoute, InMemMemoryExtension, InMemMessageStore, NaiveConsolidator
 from bos.extensions.actor_commands import system_cmd  # noqa: F401
 from bos.protocol import Envelope, MessageType
 
@@ -44,7 +44,7 @@ class FakeMailbox:
 class StubAgent:
     def __init__(self) -> None:
         self._message_store = InMemMessageStore()
-        self._memory_store = InMemMemoryStore()
+        self._memory = InMemMemoryExtension()
         self._consolidator = NaiveConsolidator()
 
     async def ask(self, *args, **kwargs):

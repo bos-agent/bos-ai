@@ -80,7 +80,7 @@ async def chats(actor: AgentActor) -> dict:
 async def memory(actor: AgentActor) -> dict:
     """List agent memories."""
     agent = actor._agent
-    result = await agent._memory_store.list_memories()
+    result = await agent._memory.list_maxims()
     return {"name": "memory", "ok": True, "result": result}
 
 

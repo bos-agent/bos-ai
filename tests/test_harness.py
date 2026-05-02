@@ -6,14 +6,14 @@ import pytest
 from bos.core import AgentHarness, LLMResponse, ToolCallRequest, ep_agent, ep_provider
 from bos.core.agent import ChainReactInterceptor, ReactAgent
 from bos.core.contract import SkillMeta
-from bos.core.defaults import FileSystemSkillsLoader, InMemMemoryStore, InMemMessageStore, NaiveConsolidator
+from bos.core.defaults import FileSystemSkillsLoader, InMemMemoryExtension, InMemMessageStore, NaiveConsolidator
 from bos.core.registry import ToolRegistry
 from bos.extensions.mailboxes import jsonl_mailbox  # noqa: F401
 
 
 def create_test_agent(**kwargs):
     kwargs.setdefault("message_store", InMemMessageStore())
-    kwargs.setdefault("memory_store", InMemMemoryStore())
+    kwargs.setdefault("memory", InMemMemoryExtension())
     kwargs.setdefault("consolidator", NaiveConsolidator())
     kwargs.setdefault("skills_loader", FileSystemSkillsLoader())
     kwargs.setdefault("interceptor", ChainReactInterceptor())
@@ -51,7 +51,7 @@ async def test_harness_create_agent_defaults_to_no_capabilities(tmp_path):
 
         assert agent._tools == []
         assert agent._skills == []
-        assert agent._memories == []
+        assert agent._maxims == []
         assert agent._subagents == []
         assert agent._get_tool_defs() == []
 
@@ -70,7 +70,7 @@ async def test_registered_agent_defaults_to_no_capabilities(tmp_path):
 
             assert agent._tools == []
             assert agent._skills == []
-            assert agent._memories == []
+            assert agent._maxims == []
             assert agent._subagents == []
             assert agent._get_tool_defs() == []
     finally:
@@ -90,7 +90,7 @@ async def test_registered_agent_star_capabilities_enable_all(tmp_path):
             system_prompt="Use everything.",
             tools="*",
             skills="*",
-            memories="*",
+            maxims="*",
             subagents="*",
         )
 
@@ -100,9 +100,9 @@ async def test_registered_agent_star_capabilities_enable_all(tmp_path):
 
             assert agent._tools is None
             assert agent._skills is None
-            assert agent._memories is None
+            assert agent._maxims is None
             assert agent._subagents is None
-            assert {"AskSubagent", "LoadSkill", "UpdateMemory"} <= tool_names
+            assert {"AskSubagent", "LoadSkill", "Remember"} <= tool_names
             assert "ListAgents" not in tool_names
             assert "SearchSkills" not in tool_names
             assert "UnloadSkill" not in tool_names
@@ -186,11 +186,11 @@ Use this skill to search YouTube.
 
 @pytest.mark.asyncio
 async def test_memories_render_with_shared_prompt_section_format():
-    agent = create_test_agent(memory_store=InMemMemoryStore(user="Prefers concise answers."), memories=None)
+    agent = create_test_agent(memory=InMemMemoryExtension(user="Prefers concise answers."), maxims=None)
 
-    memories_prompt = await agent._prompt_section_memories()
+    maxims_prompt = await agent._prompt_section_maxims()
 
-    assert memories_prompt == "--- ACTIVE MEMORY ---\n\n* **user**\n```\nPrefers concise answers.\n```\n\n"
+    assert maxims_prompt == "--- MAXIMS ---\n\n* **user** (your knowledge about the user — preferences, background, projects, style)\n```\nPrefers concise answers.\n```\n\n"
 
 
 @pytest.mark.asyncio
