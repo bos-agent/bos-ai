@@ -33,23 +33,3 @@
 - **core**: Update test suite for subagent_defaults
   ([#6](https://github.com/bos-agent/bos-ai/pull/6),
   [`ea1674b`](https://github.com/bos-agent/bos-ai/commit/ea1674be449110b87e4d9459056ccb199af9d013))
-
-
-## v0.1.1 (2026-04-27)
-
-### Bug Fixes
-
-- **release**: Advance past deleted PyPI 0.1.0 artifact
-  ([`33555fe`](https://github.com/bos-agent/bos-ai/commit/33555fe61234db051fceebd766492a59a73c0cd2))
-
-
-## v0.1.0 (2026-04-27)
-
-### Features
-
-- **cli**: Add oneshot task command with live progress
-  ([#1](https://github.com/bos-agent/bos-ai/pull/1),
-  [`db0c8c8`](https://github.com/bos-agent/bos-ai/commit/db0c8c894f2aa9f9116a954b745b64328ce0030d))
-
-
-## v0.0.1 (2026-04-27)
