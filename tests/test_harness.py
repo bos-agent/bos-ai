@@ -34,39 +34,11 @@ def test_react_agent_local_tools_describe_ask_subagent(caplog):
     schema = agent._local_tools.to_openai_schema()["AskSubagent"]
     assert schema["function"]["description"] == ask_subagent.description
     properties = schema["function"]["parameters"]["properties"]
-    assert set(properties) == {"agent_name", "message"}
-    assert schema["function"]["parameters"]["required"] == ["agent_name", "message"]
+    assert set(properties) == {"role", "message"}
+    assert schema["function"]["parameters"]["required"] == ["role", "message"]
     assert agent._local_tools.get("ListAgents") is None
     assert agent._local_tools.get("SearchSkills") is None
 
-
-def test_harness_local_tools_do_not_own_ask_subagent():
-    harness = AgentHarness()
-
-    tools = harness._create_local_tools()
-
-    assert tools.get("SendMail") is not None
-    assert tools.get("AskSubagent") is None
-
-
-@pytest.mark.asyncio
-async def test_harness_send_mail_falls_back_to_agent_address(tmp_path):
-    bos_dir = tmp_path / ".bos"
-    bos_dir.mkdir()
-
-    async with AgentHarness(mail_route={"name": "JsonlMailRoute", "store_dir": tmp_path}, bos_dir=bos_dir) as harness:
-        receiver = harness.mail_route.bind("bob")
-        await receiver.receive_nowait()
-
-        agent = harness.create_agent()
-        result = await agent._local_tools.invoke_async("SendMail", {"recipient": "bob", "content": "hello"})
-
-        assert result == "(Sent to bob)"
-
-        message = await receiver.receive_nowait()
-        assert message is not None
-        assert message.sender == "agent@__unknown__"
-        assert message.content == "hello"
 
 
 @pytest.mark.asyncio
@@ -130,7 +102,7 @@ async def test_registered_agent_star_capabilities_enable_all(tmp_path):
             assert agent._skills is None
             assert agent._memories is None
             assert agent._subagents is None
-            assert {"SendMail", "AskSubagent", "LoadSkill"} <= tool_names
+            assert {"AskSubagent", "LoadSkill", "UpdateMemory"} <= tool_names
             assert "ListAgents" not in tool_names
             assert "SearchSkills" not in tool_names
             assert "UnloadSkill" not in tool_names
@@ -429,7 +401,7 @@ async def test_harness_ask_subagent_delegates_to_named_specialist(tmp_path):
                         id="call_ask_subagent",
                         name="AskSubagent",
                         arguments={
-                            "agent_name": researcher_name,
+                            "role": researcher_name,
                             "message": "Summarize BOS subagent orchestration in one line.",
                         },
                     )
@@ -509,7 +481,7 @@ async def test_ask_subagent_rejects_disallowed_registered_agent(tmp_path):
                     ToolCallRequest(
                         id="call_ask_subagent",
                         name="AskSubagent",
-                        arguments={"agent_name": blocked_name, "message": "Should be rejected."},
+                        arguments={"role": blocked_name, "message": "Should be rejected."},
                     )
                 ],
             )

@@ -66,7 +66,7 @@ store_dir = "mailboxes"
 [harness.subagent_defaults]
 task_template = """
 --- Sub-agent Instructions ---
-You are a background sub-agent `{agent_name}`. Work only on the delegated task,
+You are a background sub-agent `{role}`. Work only on the delegated task,
 use only the tools available to you, do not ask the user questions, and finish with
 a concise result. You can only modify or create files under {workspace}.
 --- Task Description ---
