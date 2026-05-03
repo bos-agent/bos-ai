@@ -1,27 +1,61 @@
 [platform]
-envfile = ".env"
+# env file that will be loaded on startup. if a relateive path is provided it would be
+# resolved basing on <bos_dir>, which is the folder that this toml file is in.
+#envfile = ".env"
 
-# A list of module names or paths to the modules
-extensions = ["bos.extensions.all"]
-# External .toml and .md agent definitions from .bos/agents/ are auto-scanned by default.
-# Markdown agent frontmatter supplies settings; the Markdown body is the system_prompt.
-# Override the scan directories if needed:
-# agent_dirs = ["agents", "more_agents"]
+# the env variables can be defined inline as well, that the platform will load on startup
+#[platform.envs]
 
-[platform.envs]
-BOS_CAPABILITY_LIMIT = 50
+# The limit of the capabilites, like tools, skills and subagents, to be loaded into the context.
+#BOS_CAPABILITY_LIMIT = 50
 
+# a list of module names or paths where the platform would scan and load extendisons from.
+# by default, the platform will load all the bos built in extension as well as
+# the extensions under <bos_dir>/extensions
+#extensions = ["bos.extensions.all", "./extentions"]
+
+# a list of path where the platform would scan and load the agents definition spec, in addition
+# to the agents configured inline in this file. for the agent specs with same name (role), the
+# last loaded one will overwrite previous one. both .toml and .md are supported format for the
+# individule agent config specs
+# by default, the platform will scan the agents from <bos_dir>/agents
+#agent_dirs = ["./agents"]
+
+# defint he defualt setup for all agents
 [platform.agent_defaults]
-model = "gemini/gemini-3.1-pro-preview" # "codex/gpt-5.3-codex"
-reasoning_effort = "medium"
-max_tokens = 131072
-max_iterations = 25
-# Agent capabilities default to [] when omitted. Use "*" to allow all, or list
-# explicit allowed names. The same pattern applies to skills, maxims, and subagents.
-# tools = ["ReadFile", "SearchFiles"]
-# skills = "*"
-# maxims = ["user", "soul"]
-# subagents = ["researcher"]
+
+# a model for agent is almost mandatory unless you are using a llm provider that has built in
+# default model. if you are using a customize llm provider, the model would have format like:
+#    <provier name>/<model name the provier expects>
+model = "gemini/gemini-3.1-pro-preview"
+
+# the tools that is available for the agent. by default, the platform does not enable any tool
+# to the agents. the tools set should be set explicity for the agent to access. you can provide
+# a list of tool names or use wildcard to enable all the tools to the agent. to be noted, the
+# tool names are case sensitive
+#tools = ["ReadFile", "SearchFiles"]
+#tools = "*"
+
+# the skills that is avaialbie for the agent. the setting rules are same as tools.
+#skills = ["brainstorming"]
+#skills = "*"
+
+# the subagents the agent can use with the AskSubAgent tool. the setting rules are same as tools.
+#subagents = ["researcher"]
+#subagents = "*"
+
+# the maxims for this agent. it could be set in multiple forms. if not set, no maxims for the agent.
+# 1. enable all the built in maxims, which are soul, user, identity and rules.
+#maxims = "*"
+# 2. enable subset of the built in maxims
+#maxims = ["user", "soul"]
+# 3. use customize maxims, where you need to provide a table for maxim definition
+#maxims = {"user": "your knowledge about the user — preferences, background, projects, style", "identity": "who you are — your role, purpose, and context"}
+
+#reasoning_effort = "medium"
+#max_tokens = 131072
+#max_iterations = 25
+
 
 # [[platform.agents]]
 # name = "bosai"
@@ -55,9 +89,10 @@ skill_dirs = ["skills"]
 name = "MarkdownMemoryExtension"
 store_dir = "memories"
 
-[harness.message_store]
-name = "JsonlMessageStore"
-store_dir = "messages"
+# [harness.message_store]
+# configure the storage path for the builtin jsonl message store
+# default is <bos_dir>/messages
+# store_dir = "./messages"
 
 [harness.mail_route]
 name = "JsonlMailRoute"

@@ -9,10 +9,10 @@ from bos.core.contract import SkillMeta
 from bos.core.defaults import (
     FileSystemSkillsLoader,
     InMemMemoryExtension,
-    InMemMessageStore,
     NaiveConsolidator,
-    default_maxims,
+    bos_maxims as default_maxims,
 )
+from conftest import InMemMessageStore
 from bos.core.registry import ToolRegistry
 from bos.extensions.mailboxes import jsonl_mailbox  # noqa: F401
 

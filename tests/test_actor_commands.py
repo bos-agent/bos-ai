@@ -7,7 +7,8 @@ import pytest
 from bos.core.actor import AgentActor
 from bos.core.chat_state import ChatState
 from bos.core.contract import Message
-from bos.core.defaults import InMemMailRoute, InMemMemoryExtension, InMemMessageStore, NaiveConsolidator
+from bos.core.defaults import InMemMailRoute, InMemMemoryExtension, NaiveConsolidator
+from conftest import InMemMessageStore
 from bos.extensions.actor_commands import system_cmd  # noqa: F401
 from bos.protocol import Envelope, MessageType
 

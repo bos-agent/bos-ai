@@ -7,7 +7,8 @@ from bos.core import (
     MemoryExtension,
     ReactAgent,
 )
-from bos.core.defaults import FileSystemSkillsLoader, InMemMessageStore, NaiveConsolidator, default_maxims
+from bos.core.defaults import FileSystemSkillsLoader, NaiveConsolidator, bos_maxims as default_maxims
+from conftest import InMemMessageStore
 
 
 class TestMemoryExtensionProtocol:

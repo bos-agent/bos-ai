@@ -16,16 +16,19 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from bos.core import Message, _flock, ep_message_store
 from bos.protocol.content import content_preview
 
+from .._utils import _flock
+from ..contract import Message, ep_message_store
 
-@ep_message_store(name="JsonlMessageStore")
+
+@ep_message_store(name="_default")
 class JsonlMessageStore:
     """Persistent message store backed by JSONL files."""
 
-    def __init__(self, store_dir: str | Path | None = None) -> None:
-        self._dir = Path(store_dir or "./messages").expanduser().resolve()
+    def __init__(self, store_dir: str | Path | None = None, bos_dir: str | Path | None = None) -> None:
+        store_dir = Path(store_dir).expanduser() if store_dir else "messages"
+        self._dir = Path(bos_dir or ".").expanduser().resolve() / store_dir
         self._dir.mkdir(parents=True, exist_ok=True)
 
     # ── helpers ──────────────────────────────────────────────────

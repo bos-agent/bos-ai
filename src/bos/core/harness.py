@@ -168,7 +168,8 @@ class AgentHarness:
     def _create_and_own(self, ep_name: str, protocol: type, cfg: Any) -> Any:
         from . import __dict__ as core_exports
 
-        instance = _create_extension_instance(core_exports[ep_name], protocol, cfg)
+        config = (cfg or {}) | {"bos_dir": str(self._bos_root), "workspace_dir": str(self._workspace)}
+        instance = _create_extension_instance(core_exports[ep_name], protocol, config)
         if instance is not None:
             self._owned.append(instance)
         return instance

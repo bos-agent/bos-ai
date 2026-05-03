@@ -85,7 +85,7 @@ skills = ["writer"]
 
         assert defaults["tools"] is None
         assert defaults["skills"] == ["writer"]
-        assert defaults["maxims"] == {}
+        assert defaults["maxims"] == []
         assert defaults["subagents"] == []
     finally:
         ep_agent._extensions.pop(agent_name, None)

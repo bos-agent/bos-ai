@@ -11,19 +11,19 @@ from typing import Any
 from bos.protocol import Envelope, MessageContent, MessageType
 from bos.protocol.content import content_preview, image_source_to_model_url
 
-from ._utils import _litellm_response_to_llm_response, _read_text
-from .contract import (
+from .._utils import _litellm_response_to_llm_response, _read_text
+from ..contract import (
     MemoryEntry,
-    Message,
     SkillMeta,
     ep_consolidator,
     ep_mail_route,
     ep_memory,
-    ep_message_store,
     ep_provider,
     ep_skills_loader,
 )
-from .llm import LLMResponse
+from ..llm import LLMResponse
+from . import jsonl_message_store as _jsonl_message_store  # noqa: F401  register _default ep_message_store
+from .jsonl_message_store import JsonlMessageStore  # noqa: F401
 
 
 @ep_provider(name="_default")
@@ -41,45 +41,6 @@ async def litellm_complete(messages: list[dict], model: str, **kwargs: Any) -> L
     return _litellm_response_to_llm_response(raw)
 
 
-@ep_message_store(name="_default")
-class InMemMessageStore:
-    """In-process memory store for chat and long-term notes."""
-
-    def __init__(self) -> None:
-        self._messages: dict[str, list[Message]] = {}
-
-    async def save_messages(self, chat_id: str, messages: list[Message]) -> None:
-        self._messages.setdefault(chat_id, []).extend(messages)
-
-    async def get_messages(self, chat_id: str, original: bool = False) -> list[Message]:
-        if original:
-            return [m for m in self._messages.get(chat_id, []) if not m.is_summary]
-        result = []
-        for m in reversed(self._messages.get(chat_id, [])):
-            if m.is_summary:
-                result.append(m)
-                break
-            result.append(m)
-        result.reverse()
-        return result
-
-    async def save_summary(self, chat_id: str, summary: str) -> None:
-        self._messages.setdefault(chat_id, []).append(
-            Message(llm_message={"role": "system", "content": f"Chat summary:\n{summary}"}, is_summary=True)
-        )
-
-    async def list_chats(self) -> dict[str, Any]:
-        contexts = {}
-        for chat_id, messages in self._messages.items():
-            if not (m := next((m for m in messages if m.llm_message["role"] == "user"), None)):
-                m = messages[0]
-            contexts[chat_id] = {
-                "description": content_preview(m.llm_message["content"]),
-                "created_at": m.created_at,
-                "last_activity": messages[-1].created_at,
-                "message_count": len(messages),
-            }
-        return contexts
 
 
 @ep_memory(name="_default")
@@ -191,7 +152,7 @@ def _parse_frontmatter_fields(frontmatter: str) -> dict[str, str]:
 @ep_skills_loader(name="_default")
 class FileSystemSkillsLoader:
     def __init__(self, skill_dirs: Iterable[Path | str] | None = None) -> None:
-        self._skill_dirs = [(Path(__file__).parent / "skills").resolve()]
+        self._skill_dirs = [(Path(__file__).resolve().parent.parent / "skills").resolve()]
         self._skill_dirs.extend(Path(dir).expanduser().resolve() for dir in skill_dirs or [])
         self._skill_metas: dict[str, SkillMeta] = {}
         self._skill_metas_refreshed_at = datetime(2000, 1, 1)
