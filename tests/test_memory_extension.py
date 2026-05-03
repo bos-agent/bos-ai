@@ -22,9 +22,6 @@ class TestMemoryExtensionProtocol:
         store = InMemMemoryExtension()
         await store.set_maxim("user", "test user content")
         assert await store.get_maxim("user") == "test user content"
-        maxims = await store.list_maxims()
-        assert "user" in maxims
-        assert maxims["user"] == "test user content"
 
     @pytest.mark.asyncio
     async def test_inmem_maxims_case_insensitive(self):
@@ -84,7 +81,7 @@ class TestRememberTool:
             memory=InMemMemoryExtension(),
             consolidator=NaiveConsolidator(),
             skills_loader=FileSystemSkillsLoader(),
-            maxims=["user"],
+            maxims={"user": ""},
             system_prompt="test",
         )
         result = await agent._invoke_tool("Remember", content="test content", key="user")
@@ -93,14 +90,13 @@ class TestRememberTool:
         assert maxim_content == "test content"
 
     @pytest.mark.asyncio
-    async def test_remember_maxim_rejects_excluded_key(self):
+    async def test_remember_maxim_rejects_unknown_key(self):
         agent = ReactAgent(
             message_store=InMemMessageStore(),
             memory=InMemMemoryExtension(),
             consolidator=NaiveConsolidator(),
             skills_loader=FileSystemSkillsLoader(),
-            maxims=["user"],
-            exclude_maxims=["soul"],
+            maxims={"user": ""},
             system_prompt="test",
         )
         result = await agent._invoke_tool("Remember", content="content", key="soul")
@@ -113,7 +109,7 @@ class TestRememberTool:
             memory=InMemMemoryExtension(),
             consolidator=NaiveConsolidator(),
             skills_loader=FileSystemSkillsLoader(),
-            maxims=["user"],
+            maxims={"user": ""},
             system_prompt="test",
         )
         big_content = "x" * 3000
@@ -128,7 +124,7 @@ class TestRememberTool:
             memory=InMemMemoryExtension(),
             consolidator=NaiveConsolidator(),
             skills_loader=FileSystemSkillsLoader(),
-            maxims=["user"],
+            maxims={"user": ""},
             system_prompt="test",
         )
         result = await agent._invoke_tool("Remember", content="a new fact", tags=["test"])
@@ -141,7 +137,7 @@ class TestRememberTool:
             memory=InMemMemoryExtension(),
             consolidator=NaiveConsolidator(),
             skills_loader=FileSystemSkillsLoader(),
-            maxims=["user"],
+            maxims={"user": ""},
             system_prompt="test",
         )
         content = "x" * 2048
@@ -159,7 +155,7 @@ class TestRecallTool:
             memory=InMemMemoryExtension(),
             consolidator=NaiveConsolidator(),
             skills_loader=FileSystemSkillsLoader(),
-            maxims=["user"],
+            maxims={"user": ""},
             system_prompt="test",
         )
         await agent._memory.ingest_memory("user prefers PostgreSQL 16", tags=["db"])
@@ -173,7 +169,7 @@ class TestRecallTool:
             memory=InMemMemoryExtension(),
             consolidator=NaiveConsolidator(),
             skills_loader=FileSystemSkillsLoader(),
-            maxims=["user"],
+            maxims={"user": ""},
             system_prompt="test",
         )
         eid = await agent._memory.ingest_memory("full fact content here")
@@ -187,7 +183,7 @@ class TestRecallTool:
             memory=InMemMemoryExtension(),
             consolidator=NaiveConsolidator(),
             skills_loader=FileSystemSkillsLoader(),
-            maxims=["user"],
+            maxims={"user": ""},
             system_prompt="test",
         )
         result = await agent._invoke_tool("Recall", query="nonexistent")
@@ -204,7 +200,7 @@ class TestForgetTool:
             memory=InMemMemoryExtension(),
             consolidator=NaiveConsolidator(),
             skills_loader=FileSystemSkillsLoader(),
-            maxims=["user"],
+            maxims={"user": ""},
             system_prompt="test",
         )
         eid = await agent._memory.ingest_memory("forgettable fact")
@@ -219,7 +215,7 @@ class TestForgetTool:
             memory=InMemMemoryExtension(),
             consolidator=NaiveConsolidator(),
             skills_loader=FileSystemSkillsLoader(),
-            maxims=["user"],
+            maxims={"user": ""},
             system_prompt="test",
         )
         await agent._memory.ingest_memory("project alpha details")
@@ -238,27 +234,24 @@ class TestSystemPromptIntegration:
             memory=InMemMemoryExtension(),
             consolidator=NaiveConsolidator(),
             skills_loader=FileSystemSkillsLoader(),
-            maxims=["user"],
+            maxims={"user": "test user content"},
             system_prompt="base prompt",
         )
-        await agent._memory.set_maxim("user", "test user content")
         prompt = await agent._build_system_prompt()
         assert "MAXIMS" in prompt
         assert "test user content" in prompt
         assert "your knowledge about the user" in prompt  # scope description
 
     @pytest.mark.asyncio
-    async def test_excluded_maxims_not_injected(self):
+    async def test_only_dict_keys_appear_in_prompt(self):
         agent = ReactAgent(
             message_store=InMemMessageStore(),
             memory=InMemMemoryExtension(),
             consolidator=NaiveConsolidator(),
             skills_loader=FileSystemSkillsLoader(),
-            maxims=["user"],
-            exclude_maxims=["soul"],
+            maxims={"user": "user content"},
             system_prompt="base prompt",
         )
-        await agent._memory.set_maxim("user", "user content")
         await agent._memory.set_maxim("soul", "soul content")
         prompt = await agent._build_system_prompt()
         assert "user content" in prompt
@@ -271,7 +264,7 @@ class TestSystemPromptIntegration:
             memory=InMemMemoryExtension(),
             consolidator=NaiveConsolidator(),
             skills_loader=FileSystemSkillsLoader(),
-            maxims=["user"],
+            maxims={"user": ""},
             system_prompt="base prompt",
         )
         prompt = await agent._build_system_prompt()
@@ -284,11 +277,9 @@ class TestSystemPromptIntegration:
             memory=InMemMemoryExtension(),
             consolidator=NaiveConsolidator(),
             skills_loader=FileSystemSkillsLoader(),
-            maxims=["rules", "soul"],
+            maxims={"rules": "rule content", "soul": "soul content"},
             system_prompt="base prompt",
         )
-        await agent._memory.set_maxim("rules", "rule content")
-        await agent._memory.set_maxim("soul", "soul content")
         prompt = await agent._build_system_prompt()
         assert "hard constraints" in prompt
         assert "operating philosophy" in prompt

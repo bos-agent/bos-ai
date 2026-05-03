@@ -148,7 +148,7 @@ class AgentHarness:
                 "model": os.getenv("BOS_MODEL"),
                 "tools": [],
                 "skills": [],
-                "maxims": [],
+                "maxims": {},
                 "subagents": [],
             }
 

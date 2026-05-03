@@ -72,14 +72,6 @@ class MarkdownMemoryExtension:
 
         await asyncio.to_thread(_write)
 
-    async def list_maxims(self) -> dict[str, str]:
-        def _scan() -> dict[str, str]:
-            if not self._maxims_dir.exists():
-                return {}
-            return {p.stem.lower(): txt for p in self._maxims_dir.glob("*.md") if (txt := self._read_text_sync(p))}
-
-        return await asyncio.to_thread(_scan)
-
     # ── Memories ──
 
     async def search_memories(self, query: str, *, top_k: int = 5) -> list[MemoryEntry]:

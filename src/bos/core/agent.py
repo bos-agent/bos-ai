@@ -32,6 +32,7 @@ from .contract import (
     ep_tool,
     ep_turn_interceptor,
 )
+from .defaults import default_maxims, default_memory_usage
 from .events import derive_event_sink
 from .llm import LLMClient, ToolCallRequest
 from .registry import ToolRegistry
@@ -131,8 +132,7 @@ class ReactAgent:
         exclude_tools: list[str] | None = None,
         skills: list[str] | None = None,
         exclude_skills: list[str] | None = None,
-        maxims: list[str] | None = None,
-        exclude_maxims: list[str] | None = None,
+        maxims: dict[str, str] | None = None,
         subagents: list[str] | None = None,
         exclude_subagents: list[str] | None = None,
         name: str | None = None,
@@ -152,8 +152,7 @@ class ReactAgent:
         self._exclude_tools = exclude_tools
         self._skills = skills
         self._exclude_skills = exclude_skills
-        self._maxims = maxims and [m.lower() for m in maxims]
-        self._exclude_maxims = exclude_maxims
+        self._maxims = dict(maxims) if maxims is not None else dict(default_maxims)
         self._subagents = subagents
         self._exclude_subagents = exclude_subagents
         self._model = model
@@ -443,7 +442,7 @@ class ReactAgent:
             await self._prompt_section_tools(),
             await self._prompt_section_skills(),
             await self._prompt_section_subagents(),
-            self._prompt_section_memory_usage(),
+            default_memory_usage,
             self._prompt_section_system_info(),
         ]
         return "\n\n".join(s for s in sections if s)
@@ -451,30 +450,16 @@ class ReactAgent:
     def _prompt_section_base(self) -> str:
         return "--- SYSTEM PROMPT ---\n\n" + self._system_prompt
 
-    _MAXIM_SCOPES = {
-        "user": "your knowledge about the user — preferences, background, projects, style",
-        "soul": "your character and operating philosophy — how you work, communicate, and make decisions",
-        "identity": "who you are — your role, purpose, and context",
-        "rules": "hard constraints — things you must always or never do",
-    }
-
-    def _format_maxim_header(self, key: str) -> str:
-        scope = self._MAXIM_SCOPES.get(key, "")
-        if scope:
-            return f"* **{key}** ({scope})\n"
-        return f"* **{key}**\n"
-
     async def _prompt_section_maxims(self) -> str:
-        maxims = _pick_collection(
-            await self._memory.list_maxims(),
-            self._maxims,
-            self._exclude_maxims,
-        )
-        if not maxims:
+        if not self._maxims:
             return ""
         section = "--- MAXIMS ---\n\n"
-        for key, content in maxims.items():
-            section += self._format_maxim_header(key)
+        for key, content in self._maxims.items():
+            scope = default_maxims.get(key, "")
+            if scope:
+                section += f"* **{key}** ({scope})\n"
+            else:
+                section += f"* **{key}**\n"
             section += f"```\n{content}\n```\n\n"
         return section
 
@@ -521,98 +506,6 @@ class ReactAgent:
             f"- Platform: {platform.system()}\n"
             f"- Date: {datetime.now().strftime('%A, %B %d, %Y')}\n"
         )
-
-    def _prompt_section_memory_usage(self) -> str:
-        return """--- USING YOUR MEMORY ---
-
-You have two kinds of memory, accessed through three tools: Remember, Recall, and Forget.
-
-## Maxims (your principles)
-
-Maxims are deeply held convictions that shape how you behave and make decisions.
-They are always visible to you — they appear above in the MAXIMS section.
-Think of them as your conscience, not your notepad.
-
-Each maxim has a defined scope, described in its header. Respect the scope —
-put user preferences in "user", not in "rules".
-
-Use Remember(key, content) to update a maxim when:
-
-- The user explicitly asks you to change how you operate.
-  Example: "From now on, always use TypeScript instead of JavaScript."
-  → Remember(key="user", content="User prefers TypeScript over JavaScript for all projects.")
-
-- You discover a fundamental truth about the user that should change your default behavior.
-  Example: The user always rejects async solutions in favor of sync alternatives.
-  → Remember(key="user", content="User prefers sync patterns. Default to sync unless async is required.")
-
-- You are given a new rule or constraint you must follow.
-  Example: "Never deploy on Fridays."
-  → Remember(key="rules", content="Never deploy on Fridays. Deployments only on Mon-Thu before 14:00 UTC.")
-
-Do NOT use maxims for:
-- Facts about projects, tools, or APIs — those are memories.
-- Meeting notes, code snippets, URLs — those are memories.
-- Anything you might need once or twice but doesn't change who you should be.
-- New categories of information — maxim keys are fixed. Use memory tags instead.
-
-When updating a maxim, you are overwriting the ENTIRE content. Include all existing
-information alongside your changes. The system cannot merge for you — you must read
-the current maxim content (visible above), incorporate the new information, and write
-the complete updated text.
-
-Each maxim has a hard limit of 2048 characters. If your update would exceed this,
-you must summarize and prioritize rather than expanding. Focus on what matters most
-for shaping your future behavior. The system will reject writes that exceed the limit.
-
-## Memories (your knowledge)
-
-Memories are facts, experiences, and details you accumulate over time.
-They are NOT visible to you by default — you must Recall them when needed.
-Think of them as a searchable notebook, not your working memory.
-
-Use Remember(content, tags?) to record a memory when:
-
-- You learn a factual detail that might matter later.
-  Example: "The user's database is on AWS RDS, us-east-1, PostgreSQL 16."
-  → Remember(content="User's prod DB: AWS RDS us-east-1, PostgreSQL 16, "
-      "pgbouncer.", tags=["infra", "database"])
-
-- The user shares context you should carry forward across sessions.
-  Example: "We're building a CLI tool for managing Kubernetes secrets."
-
-- You complete a task and want to record the outcome for future reference.
-  Example: "Deployed v2.3.1 to staging. All tests passed. Rollback window: 24h."
-
-Use Recall(query, top_k?) to search your memories:
-
-- Before answering a question that might depend on past context.
-  Example: The user asks "what's the status of the migration?" → Recall(query="migration status")
-
-- When the user references something you don't fully remember.
-  Example: "Remember that bug we fixed last month?"
-
-- After Recall returns snippets: if a snippet looks relevant and you need full detail,
-  fetch it with Recall(entry_id=...).
-
-Use Forget(entry_id) or Forget(query) to remove memories:
-
-- The user explicitly asks you to forget something.
-  Example: "Stop bringing up project X — we're done with it."
-  → Recall(query="project X") → identify entries → Forget(entry_id=...) on each
-  → Then: Remember(key="user", content="...user asked to stop referencing project X...")
-
-- Information is clearly stale or contradicted by newer information.
-  Example: Two memories contradict each other about the same topic. Keep the newer one, Forget the stale one.
-
-## Memory hygiene
-
-- Write memories AFTER the conversation, not during it. If you're mid-task, "
-      "focus on the task. Record learnings when the user pauses or the topic concludes.
-- Be concise. A memory entry is a note to your future self, not a transcript.
-- Use tags. They help you find things later with Recall.
-- When in doubt, write it. A slightly noisy memory is better than a lost insight.
-- If you update a maxim, be thorough. Read the current content, merge carefully, and write the complete updated text."""
 
     @staticmethod
     def _limit_prompt_collection(collection: dict[str, Any], kind: str) -> dict[str, Any]:
@@ -673,7 +566,7 @@ Use Forget(entry_id) or Forget(query) to remove memories:
         ) -> str:
             if key:
                 # Maxim write
-                if not _allowed(key.lower(), self._maxims, self._exclude_maxims):
+                if not _allowed(key.lower(), self._maxims):
                     return f"Error: Maxim '{key}' is not allowed."
                 if len(content) > self.MAXIM_LIMIT:
                     return (
@@ -682,6 +575,7 @@ Use Forget(entry_id) or Forget(query) to remove memories:
                         f"Please summarize and try again."
                     )
                 await self._memory.set_maxim(key.lower(), content)
+                self._maxims[key.lower()] = content
                 return f"(Maxim '{key}' updated. Content length: {len(content)}/{self.MAXIM_LIMIT} characters.)"
             else:
                 # Memory ingest
@@ -866,15 +760,13 @@ Use Forget(entry_id) or Forget(query) to remove memories:
 
     @classmethod
     def register(cls, name: str, description: str | None = None, **kwargs):
-        # Backwards compat: map deprecated 'memories'/'exclude_memories' to 'maxims'/'exclude_maxims'
+        # Backwards compat: map deprecated 'memories' to 'maxims'
         if "memories" in kwargs and "maxims" not in kwargs:
             kwargs["maxims"] = kwargs.pop("memories")
-        if "exclude_memories" in kwargs and "exclude_maxims" not in kwargs:
-            kwargs["exclude_maxims"] = kwargs.pop("exclude_memories")
         kwargs.pop("memories", None)
         kwargs.pop("exclude_memories", None)
 
-        _CAPABILITY_KEYS = ("tools", "skills", "maxims", "subagents")
+        _CAPABILITY_KEYS = ("tools", "skills", "subagents")
 
         def map_value(key, value):
             if isinstance(value, list):
@@ -887,6 +779,16 @@ Use Forget(entry_id) or Forget(query) to remove memories:
 
         for key in _CAPABILITY_KEYS:
             kwargs[key] = map_value(key, kwargs.get(key))
+
+        # Maxims: dict[str, str] | None. Convert list/"*" forms.
+        if "maxims" in kwargs:
+            maxims = kwargs["maxims"]
+            if isinstance(maxims, list):
+                kwargs["maxims"] = {k: "" for k in maxims}
+            elif maxims is None or maxims == "*":
+                kwargs["maxims"] = None
+        else:
+            kwargs["maxims"] = {}
 
         @ep_agent(name=name, description=description, defaults=kwargs)
         @wraps(ReactAgent)

@@ -51,7 +51,7 @@ async def test_harness_create_agent_defaults_to_no_capabilities(tmp_path):
 
         assert agent._tools == []
         assert agent._skills == []
-        assert agent._maxims == []
+        assert agent._maxims == {}
         assert agent._subagents == []
         assert agent._get_tool_defs() == []
 
@@ -70,7 +70,7 @@ async def test_registered_agent_defaults_to_no_capabilities(tmp_path):
 
             assert agent._tools == []
             assert agent._skills == []
-            assert agent._maxims == []
+            assert agent._maxims == {}
             assert agent._subagents == []
             assert agent._get_tool_defs() == []
     finally:
@@ -100,7 +100,7 @@ async def test_registered_agent_star_capabilities_enable_all(tmp_path):
 
             assert agent._tools is None
             assert agent._skills is None
-            assert agent._maxims is None
+            assert agent._maxims.keys() == {"user", "soul", "identity", "rules"}
             assert agent._subagents is None
             assert {"AskSubagent", "LoadSkill", "Remember"} <= tool_names
             assert "ListAgents" not in tool_names
@@ -186,7 +186,7 @@ Use this skill to search YouTube.
 
 @pytest.mark.asyncio
 async def test_memories_render_with_shared_prompt_section_format():
-    agent = create_test_agent(memory=InMemMemoryExtension(user="Prefers concise answers."), maxims=None)
+    agent = create_test_agent(memory=InMemMemoryExtension(), maxims={"user": "Prefers concise answers."})
 
     maxims_prompt = await agent._prompt_section_maxims()
 
