@@ -32,7 +32,7 @@ from .contract import (
     ep_tool,
     ep_turn_interceptor,
 )
-from .defaults import default_maxims, default_memory_usage
+from .defaults import bos_maxims, bos_memory_usage
 from .events import derive_event_sink
 from .llm import LLMClient, ToolCallRequest
 from .registry import ToolRegistry
@@ -153,14 +153,20 @@ class ReactAgent:
         self._exclude_tools = exclude_tools
         self._skills = skills
         self._exclude_skills = exclude_skills
-        self._maxims = dict(maxims) if maxims is not None else dict(default_maxims)
-        self._memory_usage = memory_usage if memory_usage is not None else default_memory_usage
         self._subagents = subagents
         self._exclude_subagents = exclude_subagents
         self._model = model
         self._reasoning_effort = reasoning_effort
         self._max_tokens = max_tokens
         self._max_iterations = max_iterations
+        self._maxims = (
+            bos_maxims
+            if maxims is None
+            else _compact({key: bos_maxims.get(key) for key in maxims})
+            if isinstance(maxims, list)
+            else (dict(maxims))
+        )
+        self._memory_usage = bos_memory_usage if memory_usage in ("*", None) else str(memory_usage)
 
         self._llm = llm or LLMClient()
         self._message_store = message_store
@@ -603,8 +609,7 @@ class ReactAgent:
                     "entry_id": {
                         "type": "string",
                         "description": (
-                            "ID of a specific memory entry to retrieve in full "
-                            "(from previous Recall results)."
+                            "ID of a specific memory entry to retrieve in full (from previous Recall results)."
                         ),
                     },
                     "top_k": {
@@ -637,7 +642,7 @@ class ReactAgent:
                     snippet = e.content[:200] + "..." if len(e.content) > 200 else e.content
                     results.append(f"[{e.id}] {snippet}\n    Tags: {e.tags}")
                 header = f"Found {len(entries)} memories for '{query}':\n\n"
-                footer = "\n\nUse Recall(entry_id=\"...\") to fetch the full content of any entry."
+                footer = '\n\nUse Recall(entry_id="...") to fetch the full content of any entry.'
                 return header + "\n\n".join(results) + footer
             return "Error: Provide either 'query' to search or 'entry_id' to fetch a specific entry."
 
@@ -679,7 +684,7 @@ class ReactAgent:
                 return (
                     f"(Forgot {count} memory entries matching '{query}'. "
                     f"If the user asked you to stop referencing something, consider using "
-                    f"Remember(key=\"user\", content=\"...\") to record why you forgot it.)"
+                    f'Remember(key="user", content="...") to record why you forgot it.)'
                 )
             return "Error: Provide either 'entry_id' or 'query' to forget."
 
@@ -689,7 +694,10 @@ class ReactAgent:
             parameters={
                 "type": "object",
                 "properties": {
-                    "role": {"type": "string", "description": "The role (kind) of the subagent to delegate to, case sensitive."},
+                    "role": {
+                        "type": "string",
+                        "description": "The role (kind) of the subagent to delegate to, case sensitive.",
+                    },
                     "message": {"type": "string", "description": "Task or message to send."},
                 },
                 "required": ["role", "message"],
@@ -763,35 +771,19 @@ class ReactAgent:
 
     @classmethod
     def register(cls, name: str, description: str | None = None, **kwargs):
-        # Backwards compat: map deprecated 'memories' to 'maxims'
-        if "memories" in kwargs and "maxims" not in kwargs:
-            kwargs["maxims"] = kwargs.pop("memories")
-        kwargs.pop("memories", None)
-        kwargs.pop("exclude_memories", None)
-
-        _CAPABILITY_KEYS = ("tools", "skills", "subagents")
+        _CAPABILITY_KEYS = ("tools", "skills", "subagents", "maxims")
 
         def map_value(key, value):
-            if isinstance(value, list):
+            if isinstance(value, (list, dict)):
                 return value
             if value is None:
-                return []
+                return []  # mute the capability
             if value == "*":
-                return None
+                return None  # fully open the capability
             raise TypeError(f"{key} must be a list, '*', or None")
 
         for key in _CAPABILITY_KEYS:
             kwargs[key] = map_value(key, kwargs.get(key))
-
-        # Maxims: dict[str, str] | None. Convert list/"*" forms.
-        if "maxims" in kwargs:
-            maxims = kwargs["maxims"]
-            if isinstance(maxims, list):
-                kwargs["maxims"] = {k: "" for k in maxims}
-            elif maxims is None or maxims == "*":
-                kwargs["maxims"] = None
-        else:
-            kwargs["maxims"] = {}
 
         @ep_agent(name=name, description=description, defaults=kwargs)
         @wraps(ReactAgent)

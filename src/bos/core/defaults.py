@@ -361,14 +361,14 @@ For every user input, you must strictly follow this cycle:
 - Always wait for an Observation before proceeding to the next Thought.
 """
 
-default_maxims = {
+bos_maxims = {
     "user": "your knowledge about the user — preferences, background, projects, style",
     "soul": "your character and operating philosophy — how you work, communicate, and make decisions",
     "identity": "who you are — your role, purpose, and context",
     "rules": "hard constraints — things you must always or never do",
 }
 
-default_memory_usage = """--- USING YOUR MEMORY ---
+bos_memory_usage = """--- USING YOUR MEMORY ---
 
 You have two kinds of memory, accessed through three tools: Remember, Recall, and Forget.
 
@@ -452,16 +452,18 @@ Use Forget(entry_id) or Forget(query) to remove memories:
 
 ## Memory hygiene
 
-- Write memories AFTER the conversation, not during it. If you're mid-task, focus on the task. Record learnings when the user pauses or the topic concludes.
+- Write memories AFTER the conversation, not during it. If you're mid-task, focus on the task. Record learnings
+  when the user pauses or the topic concludes.
 - Be concise. A memory entry is a note to your future self, not a transcript.
 - Use tags. They help you find things later with Recall.
 - When in doubt, write it. A slightly noisy memory is better than a lost insight."""
 
 default_agent_spec: dict[str, Any] = {
     "name": "_default",
+    "system_prompt": _system_prompt,
     "tools": "*",
     "skills": "*",
-    "maxims": None,
+    "maxims": bos_maxims,
+    "memory_usage": bos_memory_usage,
     "subagents": "*",
-    "system_prompt": _system_prompt,
 }
