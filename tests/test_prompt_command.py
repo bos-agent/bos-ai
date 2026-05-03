@@ -33,4 +33,6 @@ subagents = []
         ep_agent._extensions.pop("prompt-inspector", None)
 
     assert result.exit_code == 0
-    assert result.output.startswith("--- SYSTEM PROMPT ---\n\nInspect this prompt.\n\n--- SYSTEM INFORMATION ---")
+    assert "--- SYSTEM PROMPT ---\n\nInspect this prompt." in result.output
+    assert "--- USING YOUR MEMORY ---" in result.output
+    assert "--- SYSTEM INFORMATION ---" in result.output

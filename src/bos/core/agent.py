@@ -24,13 +24,21 @@ from ._utils import (
     _safe_format,
     _strip_think,
 )
-from .contract import EventSink, Message, TurnInterceptor, ep_agent, ep_tool, ep_turn_interceptor
+from .contract import (
+    EventSink,
+    Message,
+    TurnInterceptor,
+    ep_agent,
+    ep_tool,
+    ep_turn_interceptor,
+)
+from .defaults import bos_maxims, bos_memory_usage
 from .events import derive_event_sink
 from .llm import LLMClient, ToolCallRequest
 from .registry import ToolRegistry
 
 if TYPE_CHECKING:
-    from .contract import Consolidator, MemoryStore, MessageStore, SkillsLoader
+    from .contract import Consolidator, MemoryExtension, MessageStore, SkillsLoader
     from .llm import LLMResponse
 
 logger = logging.getLogger(__name__)
@@ -116,7 +124,7 @@ class ReactAgent:
         self,
         *,
         message_store: MessageStore,
-        memory_store: MemoryStore,
+        memory: MemoryExtension,
         consolidator: Consolidator,
         skills_loader: SkillsLoader,
         system_prompt: str | None = None,
@@ -124,8 +132,8 @@ class ReactAgent:
         exclude_tools: list[str] | None = None,
         skills: list[str] | None = None,
         exclude_skills: list[str] | None = None,
-        memories: list[str] | None = None,
-        exclude_memories: list[str] | None = None,
+        maxims: dict[str, str] | None = None,
+        memory_usage: str | None = None,
         subagents: list[str] | None = None,
         exclude_subagents: list[str] | None = None,
         name: str | None = None,
@@ -145,18 +153,24 @@ class ReactAgent:
         self._exclude_tools = exclude_tools
         self._skills = skills
         self._exclude_skills = exclude_skills
-        self._memories = memories and [m.lower() for m in memories]
-        self._exclude_memories = exclude_memories
         self._subagents = subagents
         self._exclude_subagents = exclude_subagents
         self._model = model
         self._reasoning_effort = reasoning_effort
         self._max_tokens = max_tokens
         self._max_iterations = max_iterations
+        self._maxims = (
+            bos_maxims
+            if maxims is None
+            else _compact({key: bos_maxims.get(key) for key in maxims})
+            if isinstance(maxims, list)
+            else (dict(maxims))
+        )
+        self._memory_usage = bos_memory_usage if memory_usage in ("*", None) else str(memory_usage)
 
         self._llm = llm or LLMClient()
         self._message_store = message_store
-        self._memory_store = memory_store
+        self._memory = memory
         self._consolidator = consolidator
         self._skills_loader = skills_loader
         self._interceptor = interceptor or ChainReactInterceptor()
@@ -373,24 +387,30 @@ class ReactAgent:
         try:
             if not _allowed(tc.name, self._tools, self._exclude_tools):
                 raise Exception(f"Tool {tc.name} is not allowed")
-
-            params = tc.arguments | {
-                "chat_id": ctx.chat_id,
-                "turn_id": ctx.turn_id,
-                "event_sink": event_sink,
-                "tool_config": self._tool_configs.get(tc.name, {}),
-            }
-
-            if self._local_tools.has(tc.name):
-                return await self._local_tools.invoke_async(tc.name, params)
-
-            if ep_tool.has(tc.name):
-                return await ep_tool.invoke_async(tc.name, params)
-
-            raise Exception(f"Tool {tc.name} not found")
+            return await self._invoke_tool(
+                tc.name,
+                **tc.arguments,
+                chat_id=ctx.chat_id,
+                turn_id=ctx.turn_id,
+                event_sink=event_sink,
+            )
         except Exception as e:
             logger.error("Error in tool call [%s]: %s", tc.name, e)
             return str(e)
+
+    async def _invoke_tool(self, tool_name: str, **params: Any) -> str:
+        """Invoke a tool by name, merging runtime context into its parameters."""
+        kwargs = params | {
+            "chat_id": params.pop("chat_id", ""),
+            "turn_id": params.pop("turn_id", ""),
+            "event_sink": params.pop("event_sink", None),
+            "tool_config": self._tool_configs.get(tool_name, {}),
+        }
+        if self._local_tools.has(tool_name):
+            return await self._local_tools.invoke_async(tool_name, kwargs)
+        if ep_tool.has(tool_name):
+            return await ep_tool.invoke_async(tool_name, kwargs)
+        raise Exception(f"Tool {tool_name} not found")
 
     async def _get_chat_history(self, chat_id: str) -> list[dict]:
         def _format_content(msg: dict) -> MessageContent:
@@ -426,10 +446,11 @@ class ReactAgent:
     async def _build_system_prompt(self) -> str:
         sections = [
             self._prompt_section_base(),
-            await self._prompt_section_memories(),
+            await self._prompt_section_maxims(),
             await self._prompt_section_tools(),
             await self._prompt_section_skills(),
             await self._prompt_section_subagents(),
+            self._memory_usage,
             self._prompt_section_system_info(),
         ]
         return "\n\n".join(s for s in sections if s)
@@ -437,13 +458,20 @@ class ReactAgent:
     def _prompt_section_base(self) -> str:
         return "--- SYSTEM PROMPT ---\n\n" + self._system_prompt
 
-    async def _prompt_section_memories(self) -> str:
-        memories = _pick_collection(
-            await self._memory_store.list_memories(),
-            self._memories,
-            self._exclude_memories,
-        )
-        return self._format_prompt_section("ACTIVE MEMORY", memories)
+    async def _prompt_section_maxims(self) -> str:
+        if not self._maxims:
+            return ""
+        section = "--- MAXIMS ---\n\n"
+        for key, scope in self._maxims.items():
+            content = await self._memory.get_maxim(key)
+            if not content:
+                content = "(empty)"
+            if scope:
+                section += f"* **{key}** ({scope})\n"
+            else:
+                section += f"* **{key}**\n"
+            section += f"```\n{content}\n```\n\n"
+        return section
 
     async def _prompt_section_tools(self) -> str:
         all_tools = ep_tool.describe() | self._local_tools.describe()
@@ -507,14 +535,169 @@ class ReactAgent:
         )
         return dict(list(collection.items())[:limit])
 
+    MAXIM_LIMIT = 2048
+
     def _register_tools(self) -> None:
+        @self._local_tools(
+            name="Remember",
+            description=(
+                "Store information in your memory. Use with a 'key' parameter to update a maxim "
+                "(overwrites the entire maxim — include all existing content alongside your changes). "
+                "Use without a 'key' to create a new episodic memory entry. "
+                "Maxim keys are: user, soul, identity, rules."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "key": {
+                        "type": "string",
+                        "description": (
+                            "Maxim key to update. One of: user, soul, identity, rules. "
+                            "If provided, 'content' overwrites the entire maxim."
+                        ),
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "Content to store. For maxisms, this is the complete new content.",
+                    },
+                    "tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Tags for a new memory entry. Only used when 'key' is not provided.",
+                    },
+                },
+                "required": ["content"],
+            },
+        )
+        async def tool_remember(
+            content: str,
+            key: str | None = None,
+            tags: list[str] | None = None,
+        ) -> str:
+            if key:
+                # Maxim write
+                if not _allowed(key.lower(), self._maxims):
+                    return f"Error: Maxim '{key}' is not allowed."
+                if len(content) > self.MAXIM_LIMIT:
+                    return (
+                        f"Error: Maxim content is {len(content)} characters, "
+                        f"which exceeds the limit of {self.MAXIM_LIMIT}. "
+                        f"Please summarize and try again."
+                    )
+                await self._memory.set_maxim(key.lower(), content)
+                return f"(Maxim '{key}' updated. Content length: {len(content)}/{self.MAXIM_LIMIT} characters.)"
+            else:
+                # Memory ingest
+                entry_id = await self._memory.ingest_memory(content, tags=tags)
+                tag_note = f" Tags: {tags}." if tags else ""
+                return f"(Memory stored with entry_id: {entry_id}.{tag_note})"
+
+        @self._local_tools(
+            name="Recall",
+            description=(
+                "Retrieve information from your memories. Use with a 'query' to search "
+                "(returns snippets of matching entries). Use with an 'entry_id' to fetch "
+                "the full content of a specific entry after searching."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search query to find relevant memories.",
+                    },
+                    "entry_id": {
+                        "type": "string",
+                        "description": (
+                            "ID of a specific memory entry to retrieve in full (from previous Recall results)."
+                        ),
+                    },
+                    "top_k": {
+                        "type": "integer",
+                        "description": "Maximum number of results to return when searching (default: 5).",
+                    },
+                },
+                "required": [],
+            },
+        )
+        async def tool_recall(
+            query: str | None = None,
+            entry_id: str | None = None,
+            top_k: int = 5,
+        ) -> str:
+            if entry_id:
+                entry = await self._memory.get_memory(entry_id)
+                if entry is None:
+                    return f"(No memory found with entry_id: {entry_id}.)"
+                return (
+                    f"Memory entry {entry_id}:\n---\n{entry.content}\n---\n"
+                    f"Tags: {entry.tags}\nCreated: {entry.created_at}"
+                )
+            if query:
+                entries = await self._memory.search_memories(query, top_k=top_k)
+                if not entries:
+                    return f"(No memories found for '{query}'.)"
+                results = []
+                for e in entries:
+                    snippet = e.content[:200] + "..." if len(e.content) > 200 else e.content
+                    results.append(f"[{e.id}] {snippet}\n    Tags: {e.tags}")
+                header = f"Found {len(entries)} memories for '{query}':\n\n"
+                footer = '\n\nUse Recall(entry_id="...") to fetch the full content of any entry.'
+                return header + "\n\n".join(results) + footer
+            return "Error: Provide either 'query' to search or 'entry_id' to fetch a specific entry."
+
+        @self._local_tools(
+            name="Forget",
+            description=(
+                "Remove information from your memory. Use with an 'entry_id' to remove a specific "
+                "memory. Use with a 'query' to search and remove all matching memories."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "entry_id": {
+                        "type": "string",
+                        "description": "ID of a specific memory entry to remove.",
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "Search query — all matching memories will be removed.",
+                    },
+                },
+                "required": [],
+            },
+        )
+        async def tool_forget(
+            entry_id: str | None = None,
+            query: str | None = None,
+        ) -> str:
+            if entry_id:
+                await self._memory.forget_memory(entry_id)
+                return f"(Memory entry {entry_id} forgotten.)"
+            if query:
+                entries = await self._memory.search_memories(query, top_k=20)
+                if not entries:
+                    return f"(No memories found for '{query}' — nothing to forget.)"
+                count = len(entries)
+                for e in entries:
+                    await self._memory.forget_memory(e.id)
+                return (
+                    f"(Forgot {count} memory entries matching '{query}'. "
+                    f"If the user asked you to stop referencing something, consider using "
+                    f'Remember(key="user", content="...") to record why you forgot it.)'
+                )
+            return "Error: Provide either 'entry_id' or 'query' to forget."
+
         @self._local_tools(
             name="AskSubagent",
             description="Delegate a task to a named subagent and return its response.",
             parameters={
                 "type": "object",
                 "properties": {
-                    "role": {"type": "string", "description": "The role (kind) of the subagent to delegate to, case sensitive."},
+                    "role": {
+                        "type": "string",
+                        "description": "The role (kind) of the subagent to delegate to, case sensitive.",
+                    },
                     "message": {"type": "string", "description": "Task or message to send."},
                 },
                 "required": ["role", "message"],
@@ -570,36 +753,6 @@ class ReactAgent:
             )
 
         @self._local_tools(
-            name="UpdateMemory",
-            description="Overwrite an allowed memory partition with the complete updated content.",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "key": {
-                        "type": "string",
-                        "description": (
-                            "Memory partition key. Prefer predefined keys: soul, identity, rules, "
-                            "tasks, history, memory, user. Create new keys only if fundamentally distinct."
-                        ),
-                    },
-                    "content": {
-                        "type": "string",
-                        "description": (
-                            "The COMPLETE content for this partition. This overwrites the existing "
-                            "file, so include all existing information alongside any new updates."
-                        ),
-                    },
-                },
-                "required": ["key", "content"],
-            },
-        )
-        async def tool_update_memory(key: str, content: str) -> str:
-            if not _allowed(key.lower(), self._memories, self._exclude_memories):
-                raise ValueError(f"Update memory '{key}' is not allowed.")
-            await self._memory_store.save_memory(key, content)
-            return f"(Successfully updated memory '{key}'.)"
-
-        @self._local_tools(
             name="LoadSkill",
             description="Read an allowed skill's full instructions and return them as the tool result.",
             parameters={
@@ -618,15 +771,15 @@ class ReactAgent:
 
     @classmethod
     def register(cls, name: str, description: str | None = None, **kwargs):
-        _CAPABILITY_KEYS = ("tools", "skills", "memories", "subagents")
+        _CAPABILITY_KEYS = ("tools", "skills", "subagents", "maxims")
 
         def map_value(key, value):
-            if isinstance(value, list):
+            if isinstance(value, (list, dict)):
                 return value
             if value is None:
-                return []
+                return []  # mute the capability
             if value == "*":
-                return None
+                return None  # fully open the capability
             raise TypeError(f"{key} must be a list, '*', or None")
 
         for key in _CAPABILITY_KEYS:

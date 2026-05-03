@@ -14,13 +14,13 @@ from bos.core import (
     ep_provider,
 )
 from bos.core.agent import ChainReactInterceptor, ReactAgent
-from bos.core.defaults import FileSystemSkillsLoader, InMemMemoryStore, InMemMessageStore, NaiveConsolidator
+from bos.core.defaults import FileSystemSkillsLoader, InMemMemoryExtension, InMemMessageStore, NaiveConsolidator
 from bos.protocol import MessageType
 
 
 def create_test_agent(**kwargs):
     kwargs.setdefault("message_store", InMemMessageStore())
-    kwargs.setdefault("memory_store", InMemMemoryStore())
+    kwargs.setdefault("memory", InMemMemoryExtension())
     kwargs.setdefault("consolidator", NaiveConsolidator())
     kwargs.setdefault("skills_loader", FileSystemSkillsLoader())
     kwargs.setdefault("interceptor", ChainReactInterceptor())
