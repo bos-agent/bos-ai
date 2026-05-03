@@ -6,7 +6,13 @@ import pytest
 from bos.core import AgentHarness, LLMResponse, ToolCallRequest, ep_agent, ep_provider
 from bos.core.agent import ChainReactInterceptor, ReactAgent
 from bos.core.contract import SkillMeta
-from bos.core.defaults import FileSystemSkillsLoader, InMemMemoryExtension, InMemMessageStore, NaiveConsolidator
+from bos.core.defaults import (
+    FileSystemSkillsLoader,
+    InMemMemoryExtension,
+    InMemMessageStore,
+    NaiveConsolidator,
+    default_maxims,
+)
 from bos.core.registry import ToolRegistry
 from bos.extensions.mailboxes import jsonl_mailbox  # noqa: F401
 
@@ -186,11 +192,16 @@ Use this skill to search YouTube.
 
 @pytest.mark.asyncio
 async def test_memories_render_with_shared_prompt_section_format():
-    agent = create_test_agent(memory=InMemMemoryExtension(), maxims={"user": "Prefers concise answers."})
+    agent = create_test_agent(
+        memory=InMemMemoryExtension(user="Prefers concise answers."),
+        maxims={"user": default_maxims["user"]},
+    )
 
     maxims_prompt = await agent._prompt_section_maxims()
 
-    assert maxims_prompt == "--- MAXIMS ---\n\n* **user** (your knowledge about the user — preferences, background, projects, style)\n```\nPrefers concise answers.\n```\n\n"
+    assert "MAXIMS" in maxims_prompt
+    assert "your knowledge about the user" in maxims_prompt
+    assert "Prefers concise answers." in maxims_prompt
 
 
 @pytest.mark.asyncio

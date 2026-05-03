@@ -7,7 +7,7 @@ from bos.core import (
     MemoryExtension,
     ReactAgent,
 )
-from bos.core.defaults import FileSystemSkillsLoader, InMemMessageStore, NaiveConsolidator
+from bos.core.defaults import FileSystemSkillsLoader, InMemMessageStore, NaiveConsolidator, default_maxims
 
 
 class TestMemoryExtensionProtocol:
@@ -231,10 +231,10 @@ class TestSystemPromptIntegration:
     async def test_maxims_injected_into_prompt(self):
         agent = ReactAgent(
             message_store=InMemMessageStore(),
-            memory=InMemMemoryExtension(),
+            memory=InMemMemoryExtension(user="test user content"),
             consolidator=NaiveConsolidator(),
             skills_loader=FileSystemSkillsLoader(),
-            maxims={"user": "test user content"},
+            maxims={"user": default_maxims["user"]},
             system_prompt="base prompt",
         )
         prompt = await agent._build_system_prompt()
@@ -274,10 +274,10 @@ class TestSystemPromptIntegration:
     async def test_maxim_header_has_scope_description(self):
         agent = ReactAgent(
             message_store=InMemMessageStore(),
-            memory=InMemMemoryExtension(),
+            memory=InMemMemoryExtension(rules="rule content", soul="soul content"),
             consolidator=NaiveConsolidator(),
             skills_loader=FileSystemSkillsLoader(),
-            maxims={"rules": "rule content", "soul": "soul content"},
+            maxims={"rules": default_maxims["rules"], "soul": default_maxims["soul"]},
             system_prompt="base prompt",
         )
         prompt = await agent._build_system_prompt()

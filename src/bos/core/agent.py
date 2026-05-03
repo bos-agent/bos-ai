@@ -133,6 +133,7 @@ class ReactAgent:
         skills: list[str] | None = None,
         exclude_skills: list[str] | None = None,
         maxims: dict[str, str] | None = None,
+        memory_usage: str | None = None,
         subagents: list[str] | None = None,
         exclude_subagents: list[str] | None = None,
         name: str | None = None,
@@ -153,6 +154,7 @@ class ReactAgent:
         self._skills = skills
         self._exclude_skills = exclude_skills
         self._maxims = dict(maxims) if maxims is not None else dict(default_maxims)
+        self._memory_usage = memory_usage if memory_usage is not None else default_memory_usage
         self._subagents = subagents
         self._exclude_subagents = exclude_subagents
         self._model = model
@@ -442,7 +444,7 @@ class ReactAgent:
             await self._prompt_section_tools(),
             await self._prompt_section_skills(),
             await self._prompt_section_subagents(),
-            default_memory_usage,
+            self._memory_usage,
             self._prompt_section_system_info(),
         ]
         return "\n\n".join(s for s in sections if s)
@@ -454,8 +456,10 @@ class ReactAgent:
         if not self._maxims:
             return ""
         section = "--- MAXIMS ---\n\n"
-        for key, content in self._maxims.items():
-            scope = default_maxims.get(key, "")
+        for key, scope in self._maxims.items():
+            content = await self._memory.get_maxim(key)
+            if not content:
+                content = "(empty)"
             if scope:
                 section += f"* **{key}** ({scope})\n"
             else:
@@ -575,7 +579,6 @@ class ReactAgent:
                         f"Please summarize and try again."
                     )
                 await self._memory.set_maxim(key.lower(), content)
-                self._maxims[key.lower()] = content
                 return f"(Maxim '{key}' updated. Content length: {len(content)}/{self.MAXIM_LIMIT} characters.)"
             else:
                 # Memory ingest
