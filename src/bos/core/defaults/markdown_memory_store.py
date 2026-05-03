@@ -11,17 +11,19 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-from bos.core import MemoryEntry, _flock, ep_memory
+from .._utils import _flock
+from ..contract import MemoryEntry, ep_memory
 
 logger = logging.getLogger(__name__)
 
 
-@ep_memory(name="MarkdownMemoryExtension")
+@ep_memory(name="_default")
 class MarkdownMemoryExtension:
     """File-based memory store. Maxims in ``maxims/``, memories in ``memories/``."""
 
-    def __init__(self, store_dir: str | Path | None = None) -> None:
-        self._dir = Path(store_dir or "./memories").expanduser().resolve()
+    def __init__(self, store_dir: str | Path | None = None, bos_dir: str | Path | None = None) -> None:
+        store_dir = Path(store_dir).expanduser() if store_dir else "memory"
+        self._dir = Path(bos_dir or ".").expanduser().resolve() / store_dir
         self._maxims_dir = self._dir / "maxims"
         self._memories_dir = self._dir / "memories"
         self._maxims_dir.mkdir(parents=True, exist_ok=True)

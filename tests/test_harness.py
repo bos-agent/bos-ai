@@ -8,11 +8,10 @@ from bos.core.agent import ChainReactInterceptor, ReactAgent
 from bos.core.contract import SkillMeta
 from bos.core.defaults import (
     FileSystemSkillsLoader,
-    InMemMemoryExtension,
     NaiveConsolidator,
     bos_maxims as default_maxims,
 )
-from conftest import InMemMessageStore
+from conftest import InMemMemoryExtension, InMemMessageStore
 from bos.core.registry import ToolRegistry
 from bos.extensions.mailboxes import jsonl_mailbox  # noqa: F401
 

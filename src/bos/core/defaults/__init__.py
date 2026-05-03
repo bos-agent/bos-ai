@@ -13,17 +13,17 @@ from bos.protocol.content import content_preview, image_source_to_model_url
 
 from .._utils import _litellm_response_to_llm_response, _read_text
 from ..contract import (
-    MemoryEntry,
     SkillMeta,
     ep_consolidator,
     ep_mail_route,
-    ep_memory,
     ep_provider,
     ep_skills_loader,
 )
 from ..llm import LLMResponse
 from . import jsonl_message_store as _jsonl_message_store  # noqa: F401  register _default ep_message_store
+from . import markdown_memory_store as _markdown_memory_store  # noqa: F401  register _default ep_memory
 from .jsonl_message_store import JsonlMessageStore  # noqa: F401
+from .markdown_memory_store import MarkdownMemoryExtension  # noqa: F401
 
 
 @ep_provider(name="_default")
@@ -43,51 +43,6 @@ async def litellm_complete(messages: list[dict], model: str, **kwargs: Any) -> L
 
 
 
-@ep_memory(name="_default")
-class InMemMemoryExtension:
-    """In-memory store for maxims and episodic memories."""
-
-    def __init__(self, **maxims: str) -> None:
-        self._maxims = {k.lower(): v for k, v in maxims.items()}
-        self._memories: dict[str, MemoryEntry] = {}
-        self._counter = 0
-
-    # ── Maxims ──
-
-    async def get_maxim(self, key: str) -> str:
-        return self._maxims.get(key.lower(), "")
-
-    async def set_maxim(self, key: str, content: str) -> None:
-        self._maxims[key.lower()] = content
-
-    # ── Memories ──
-
-    async def search_memories(self, query: str, *, top_k: int = 5) -> list[MemoryEntry]:
-        q = query.lower()
-        results = [e for e in self._memories.values() if q in e.content.lower() or any(q in t.lower() for t in e.tags)]
-        return sorted(results, key=lambda e: e.created_at, reverse=True)[:top_k]
-
-    async def ingest_memory(self, content: str, *, tags: list[str] | None = None) -> str:
-        self._counter += 1
-        entry_id = f"mem_{self._counter}"
-        self._memories[entry_id] = MemoryEntry(
-            id=entry_id,
-            content=content,
-            tags=tags or [],
-            created_at=datetime.now().isoformat(),
-        )
-        return entry_id
-
-    async def get_memory(self, entry_id: str) -> MemoryEntry | None:
-        return self._memories.get(entry_id)
-
-    async def forget_memory(self, entry_id: str) -> None:
-        self._memories.pop(entry_id, None)
-
-    # ── Optimization ──
-
-    async def optimize(self) -> None:
-        pass
 
 
 @ep_consolidator(name="_default")

@@ -14,8 +14,8 @@ from bos.core import (
     ep_provider,
 )
 from bos.core.agent import ChainReactInterceptor, ReactAgent
-from bos.core.defaults import FileSystemSkillsLoader, InMemMemoryExtension, NaiveConsolidator
-from conftest import InMemMessageStore
+from bos.core.defaults import FileSystemSkillsLoader, NaiveConsolidator
+from conftest import InMemMemoryExtension, InMemMessageStore
 from bos.protocol import MessageType
 
 

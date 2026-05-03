@@ -21,7 +21,7 @@
 # by default, the platform will scan the agents from <bos_dir>/agents
 #agent_dirs = ["./agents"]
 
-# defint he defualt setup for all agents
+# define he defualt setup for all agents
 [platform.agent_defaults]
 
 # a model for agent is almost mandatory unless you are using a llm provider that has built in
@@ -52,23 +52,28 @@ model = "gemini/gemini-3.1-pro-preview"
 # 3. use customize maxims, where you need to provide a table for maxim definition
 #maxims = {"user": "your knowledge about the user — preferences, background, projects, style", "identity": "who you are — your role, purpose, and context"}
 
+# llm reasonging effort level, which would be sent along the llm model call
 #reasoning_effort = "medium"
+
+# the context window size limit. once exceeded, compaction would happen
 #max_tokens = 131072
+
+# the max tool call iteration limit for a turn
 #max_iterations = 25
 
-
-# [[platform.agents]]
-# name = "bosai"
-# description = "The main agent."
-
-# # Agent `bosai` is authoritative. If an external file under .bos/agents/
-# # defines the same exact name, e.g. `bosai.md`, the later-loaded definition wins.
-# system_prompt = """
-# You are an AI agent.
-# """
+# inline agent specs. define the agents, which can be used as the main agent or subagent
+# all the keys in the agent_defaults above are valid for each agent here to override.
+#[[platform.agents]]
+#name = "main"
+#description = "The main agent."
+#tools = ["AskSubAgent"]
+#system_prompt = """
+#You are an personal assistant.
+#"""
 
 
 [harness]
+
 # Tool-specific runtime configuration is passed to tools as `tool_config`.
 # Uncomment to prefer Tavily for WebSearch and fall back to DuckDuckGo on quota/rate-limit/server errors.
 #
@@ -82,17 +87,22 @@ model = "gemini/gemini-3.1-pro-preview"
 #search_depth = "basic"
 #fallback_on_status = [429, 432, 433, 500, 502, 503, 504]
 
+# cofigure the message store extension
+#[harness.message_store]
+#configure the storage path for the builtin jsonl message store default is <bos_dir>/message
+#name = "_default"
+#store_dir = "./messages"
+
+# cofigure the memory extension
+#[harness.memory]
+#configure the storage path for the builtin jsonl message store default is <bos_dir>/memory
+#name = "_default"
+#store_dir = "./memory"
+
+
 [harness.skills_loader]
 skill_dirs = ["skills"]
 
-[harness.memory]
-name = "MarkdownMemoryExtension"
-store_dir = "memories"
-
-# [harness.message_store]
-# configure the storage path for the builtin jsonl message store
-# default is <bos_dir>/messages
-# store_dir = "./messages"
 
 [harness.mail_route]
 name = "JsonlMailRoute"

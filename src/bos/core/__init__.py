@@ -57,7 +57,7 @@ from .contract import (
 from .defaults import (
     FileSystemSkillsLoader,
     InMemMailRoute,
-    InMemMemoryExtension,
+    MarkdownMemoryExtension,
     NaiveConsolidator,
     default_agent_spec,
     litellm_complete,
@@ -91,7 +91,7 @@ __all__ = [
     "ExtensionPoint",
     "FileSystemSkillsLoader",
     "InMemMailRoute",
-    "InMemMemoryExtension",
+    "MarkdownMemoryExtension",
     "LLMClient",
     "LLMResponse",
     "MailBox",

@@ -3,12 +3,11 @@
 import pytest
 
 from bos.core import (
-    InMemMemoryExtension,
     MemoryExtension,
     ReactAgent,
 )
 from bos.core.defaults import FileSystemSkillsLoader, NaiveConsolidator, bos_maxims as default_maxims
-from conftest import InMemMessageStore
+from conftest import InMemMemoryExtension, InMemMessageStore
 
 
 class TestMemoryExtensionProtocol:
