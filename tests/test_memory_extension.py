@@ -1,13 +1,15 @@
 """Tests for MemoryExtension protocol, Remember/Recall/Forget tools, and maxim limit."""
 
 import pytest
+from conftest import InMemMemoryExtension, InMemMessageStore
 
 from bos.core import (
     MemoryExtension,
     ReactAgent,
 )
-from bos.core.defaults import FileSystemSkillsLoader, NaiveConsolidator, bos_maxims as default_maxims
-from conftest import InMemMemoryExtension, InMemMessageStore
+from bos.core.defaults.agent_spec import bos_maxims as default_maxims
+from bos.core.defaults.consolidator import NaiveConsolidator
+from bos.core.defaults.skills_loader import FileSystemSkillsLoader
 
 
 class TestMemoryExtensionProtocol:

@@ -7,7 +7,7 @@ import asyncio
 import pytest
 
 from bos.core import Envelope, MailBox, MailRoute
-from bos.extensions.mailboxes.jsonl_mailbox import JsonlMailRoute
+from bos.core.defaults.jsonl_mailbox import JsonlMailRoute
 
 
 class FakeAgent:

@@ -5,18 +5,17 @@ import sys
 import types
 
 import pytest
+from conftest import InMemMailRoute, InMemMessageStore
 
 from bos.core import (
     Envelope,
-    InMemMailRoute,
     Message,
     NaiveConsolidator,
     TurnContext,
     _as_parts,
     litellm_complete,
 )
-from conftest import InMemMessageStore
-from bos.core.defaults import _normalize_litellm_message
+from bos.core.defaults.litellm_provider import _normalize_litellm_message
 from bos.extensions.providers.antigravity_provider import _convert_messages as convert_antigravity_messages
 from bos.extensions.providers.codex_provider import _convert_user_message as convert_codex_user_message
 from bos.protocol import MessageType

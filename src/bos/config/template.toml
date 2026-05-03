@@ -99,32 +99,47 @@ model = "gemini/gemini-3.1-pro-preview"
 #name = "_default"
 #store_dir = "./memory"
 
+# cofigure the mail route extension
+#[harness.mail_route]
+# configure the storage path for the builtin jsonl mail route default is <bos_dir>/mailboxes
+#name = "_default"
+#store_dir = "./mailboxes"
 
-[harness.skills_loader]
-skill_dirs = ["skills"]
+# conifgure the folders to find the skills for the built in skills loader
+#[harness.skills_loader]
+#name = "_default"
+#skill_dirs = ["skills"]
 
-
-[harness.mail_route]
-name = "JsonlMailRoute"
-store_dir = "mailboxes"
-
+# conifgure the default subagent settings. all the keys in the agent_defaults are applicable
+# here. in addition, you can define a task_template which is used for rendering the task message
+# that is sent to the subagent.
 [harness.subagent_defaults]
 task_template = """
 --- Sub-agent Instructions ---
 You are a background sub-agent `{role}`. Work only on the delegated task,
 use only the tools available to you, do not ask the user questions, and finish with
 a concise result. You can only modify or create files under {workspace}.
+If you cannot finish the task for some reason, please call it out in the response,
+instead of return empty message
 --- Task Description ---
 {task}
 """
 
-[main]
-# agent = "main"
+# run time configurations
+#[main]
 
-[main.runtime]
-kind = "process" # set to "docker" to make `bos start` launch a container
-# image = "ghcr.io/your-org/bos-ai:latest"
+# the agent name (kind) to be used as the main agent
+#agent = "main"
 
+#[main.runtime]
+
+# runtime settings: process or docker. default is process
+#kind = "process"
+
+# you can specify the docker image, if the runtime is docker
+#image = "ghcr.io/your-org/bos-ai:latest"
+
+# the http channel settings. http channle is where the tui connected
 [[main.channels]]
 name = "HttpChannel"
 bind_address = "channel@http"
@@ -132,6 +147,7 @@ target_address = "agent@main"
 host = "127.0.0.1"            # automatically becomes 0.0.0.0 in Docker
 port = 5920
 
+# the telegram channel settings.
 #[[main.channels]]
 #name = "TelegramChannel"
 #bind_address = "channel@telegram"

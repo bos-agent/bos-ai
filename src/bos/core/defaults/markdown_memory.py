@@ -36,7 +36,7 @@ class MarkdownMemoryExtension:
         try:
             return path.read_text(encoding="utf-8")
         except Exception:
-            logger.warning("Failed to read text from %s", path, exc_info=True)
+            logger.warning("Failed to read text from %s", path, exc_info=False)
             return ""
 
     @staticmethod

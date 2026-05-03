@@ -54,14 +54,12 @@ from .contract import (
     ep_tool,
     ep_turn_interceptor,
 )
-from .defaults import (
-    FileSystemSkillsLoader,
-    InMemMailRoute,
-    MarkdownMemoryExtension,
-    NaiveConsolidator,
-    default_agent_spec,
-    litellm_complete,
-)
+from .defaults.agent_spec import default_agent_spec
+from .defaults.consolidator import NaiveConsolidator
+from .defaults.jsonl_mailbox import JsonlMailRoute
+from .defaults.litellm_provider import litellm_complete
+from .defaults.markdown_memory import MarkdownMemoryExtension
+from .defaults.skills_loader import FileSystemSkillsLoader
 from .events import DerivedEventSink, MailboxEventSink, derive_event_sink
 from .harness import (
     CURRENT_HARNESS,
@@ -90,7 +88,7 @@ __all__ = [
     "Extension",
     "ExtensionPoint",
     "FileSystemSkillsLoader",
-    "InMemMailRoute",
+    "JsonlMailRoute",
     "MarkdownMemoryExtension",
     "LLMClient",
     "LLMResponse",

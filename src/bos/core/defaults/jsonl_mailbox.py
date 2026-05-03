@@ -14,8 +14,10 @@ from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 
-from bos.core import _flock, ep_mail_route
 from bos.protocol import Envelope, MessageContent, MessageType
+
+from .._utils import _flock
+from ..contract import ep_mail_route
 
 
 def _slugify(address: str) -> str:
@@ -67,12 +69,13 @@ class _JsonlMailBox:
         return await self._route.receive_nowait(self._address)
 
 
-@ep_mail_route(name="JsonlMailRoute")
+@ep_mail_route(name="_default")
 class JsonlMailRoute:
     """File-based mail route using JSONL inbox files."""
 
-    def __init__(self, store_dir: str | Path = None) -> None:
-        self._dir = Path(store_dir or "./mailboxs").expanduser().resolve()
+    def __init__(self, store_dir: str | Path = None, bos_dir: str | Path | None = None) -> None:
+        store_dir = Path(store_dir).expanduser() if store_dir else "mailboxes"
+        self._dir = Path(bos_dir or ".").expanduser().resolve() / store_dir
         self._dir.mkdir(parents=True, exist_ok=True)
         self._byte_offsets: dict[str, int] = {}
 

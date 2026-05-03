@@ -52,6 +52,9 @@ def bootstrap_platform(
     for agent_spec in [default_agent_spec] + (agents or []):
         ReactAgent.register(**(defaults | agent_spec))
 
+    os.environ["LITELLM_MODE"] = "extension"
+    logging.getLogger("LiteLLM").setLevel(logging.ERROR)
+
 
 CURRENT_HARNESS: contextvars.ContextVar[AgentHarness] = contextvars.ContextVar("current_harness")
 CURRENT_MAILBOX: contextvars.ContextVar[MailBox] = contextvars.ContextVar("current_mailbox")
