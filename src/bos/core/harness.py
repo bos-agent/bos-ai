@@ -52,6 +52,9 @@ def bootstrap_platform(
     for agent_spec in [default_agent_spec] + (agents or []):
         ReactAgent.register(**(defaults | agent_spec))
 
+    os.environ["LITELLM_MODE"] = "extension"
+    logging.getLogger("LiteLLM").setLevel(logging.ERROR)
+
 
 CURRENT_HARNESS: contextvars.ContextVar[AgentHarness] = contextvars.ContextVar("current_harness")
 CURRENT_MAILBOX: contextvars.ContextVar[MailBox] = contextvars.ContextVar("current_mailbox")
@@ -168,7 +171,8 @@ class AgentHarness:
     def _create_and_own(self, ep_name: str, protocol: type, cfg: Any) -> Any:
         from . import __dict__ as core_exports
 
-        instance = _create_extension_instance(core_exports[ep_name], protocol, cfg)
+        config = (cfg or {}) | {"bos_dir": str(self._bos_root), "workspace_dir": str(self._workspace)}
+        instance = _create_extension_instance(core_exports[ep_name], protocol, config)
         if instance is not None:
             self._owned.append(instance)
         return instance

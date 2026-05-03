@@ -3,11 +3,12 @@ import json
 import uuid
 
 import pytest
+from conftest import InMemMailRoute, InMemMemoryExtension, InMemMessageStore
 
 from bos.core.actor import AgentActor
 from bos.core.chat_state import ChatState
 from bos.core.contract import Message
-from bos.core.defaults import InMemMailRoute, InMemMemoryExtension, InMemMessageStore, NaiveConsolidator
+from bos.core.defaults.consolidator import NaiveConsolidator
 from bos.extensions.actor_commands import system_cmd  # noqa: F401
 from bos.protocol import Envelope, MessageType
 

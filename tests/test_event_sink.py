@@ -3,18 +3,19 @@ import json
 import uuid
 
 import pytest
+from conftest import InMemMailRoute, InMemMemoryExtension, InMemMessageStore
 
 from bos.core import (
     AgentActor,
     AgentHarness,
-    InMemMailRoute,
     LLMResponse,
     ToolCallRequest,
     ep_agent,
     ep_provider,
 )
 from bos.core.agent import ChainReactInterceptor, ReactAgent
-from bos.core.defaults import FileSystemSkillsLoader, InMemMemoryExtension, InMemMessageStore, NaiveConsolidator
+from bos.core.defaults.consolidator import NaiveConsolidator
+from bos.core.defaults.skills_loader import FileSystemSkillsLoader
 from bos.protocol import MessageType
 
 

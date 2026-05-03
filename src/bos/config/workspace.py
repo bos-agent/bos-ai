@@ -61,8 +61,7 @@ def _find_discovered_config(workspace: Path) -> _DiscoveredConfig | None:
 
         if has_dotbos and has_bostoml:
             raise WorkspaceResolutionError(
-                f"Ambiguous BOS config: found both .bos/ and bos.toml in {parent}. "
-                "Remove one to resolve the ambiguity."
+                f"Ambiguous BOS config: found both .bos/ and bos.toml in {parent}. Remove one to resolve the ambiguity."
             )
 
         if has_dotbos:
@@ -123,8 +122,7 @@ def initialize_workspace(workspace: str | Path = ".", *, dotbos: bool = False) -
     existing = _find_discovered_config(workspace)
     if existing is not None:
         raise WorkspaceResolutionError(
-            f"Workspace already initialized: found {existing.config_file}. "
-            "Remove it before re-initializing."
+            f"Workspace already initialized: found {existing.config_file}. Remove it before re-initializing."
         )
 
     if dotbos:
@@ -381,6 +379,13 @@ class Workspace:
             raise ValueError("[platform] must be a table.")
 
         resolved_platform_cfg = copy.deepcopy({k: v for k, v in raw_platform_cfg.items() if k != "agent_dirs"})
+
+        if resolved_platform_cfg.get("extensions") is None:
+            resolved_platform_cfg["extensions"] = ["bos.extensions.all", "./extensions"]
+
+        if resolved_platform_cfg.get("agent_dirs") is None:
+            resolved_platform_cfg["agent_dirs"] = ["./agents"]
+
         try:
             resolved_agents, source_history = self._resolve_platform_agents(raw_platform_cfg)
         except Exception:

@@ -2,19 +2,15 @@ import logging
 import uuid
 
 import pytest
+from conftest import InMemMemoryExtension, InMemMessageStore
 
 from bos.core import AgentHarness, LLMResponse, ToolCallRequest, ep_agent, ep_provider
 from bos.core.agent import ChainReactInterceptor, ReactAgent
 from bos.core.contract import SkillMeta
-from bos.core.defaults import (
-    FileSystemSkillsLoader,
-    InMemMemoryExtension,
-    InMemMessageStore,
-    NaiveConsolidator,
-    default_maxims,
-)
+from bos.core.defaults.agent_spec import bos_maxims as default_maxims
+from bos.core.defaults.consolidator import NaiveConsolidator
+from bos.core.defaults.skills_loader import FileSystemSkillsLoader
 from bos.core.registry import ToolRegistry
-from bos.extensions.mailboxes import jsonl_mailbox  # noqa: F401
 
 
 def create_test_agent(**kwargs):
