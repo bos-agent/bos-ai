@@ -45,6 +45,7 @@ WS_TAKEOVER_CLOSE_REASON = "Another interactive client took over this HttpChanne
 
 APP_MAILBOX = web.AppKey("mailbox", MailBox)
 APP_TARGET_ADDRESS = web.AppKey("target_address", str)
+APP_ACTOR_REGISTRY = web.AppKey("actor_registry", object)
 APP_UPLOAD_DIR = web.AppKey("upload_dir", Path)
 APP_STATUS_INFO = web.AppKey("status_info", dict)
 APP_RUNTIME_STATE = web.AppKey("runtime_state", dict)
@@ -163,6 +164,7 @@ async def _ws_handler(request: web.Request) -> web.WebSocketResponse:
     """Bidirectional WebSocket bridge between an external client and the mailbox."""
     mailbox: MailBox = request.app[APP_MAILBOX]
     target_address: str = request.app[APP_TARGET_ADDRESS]
+    registry = request.app.get(APP_ACTOR_REGISTRY)
     runtime_state = request.app[APP_RUNTIME_STATE]
     chat_state: ChatState = request.app[APP_CHAT_STATE]
     client_id = request.query.get("client_id", "").strip()
@@ -220,9 +222,20 @@ async def _ws_handler(request: web.Request) -> web.WebSocketResponse:
                         client_id=client_id,
                         chat_id=conn.chat_id,
                     )
+
+                    recipient = env.recipient
+                    content = env.content
+                    if registry is not None:
+                        route_result = registry.route(
+                            str(content) if isinstance(content, str) else content,
+                            metadata=metadata,
+                        )
+                        recipient = route_result.target_address
+                        content = route_result.content
+
                     await mailbox.send(
-                        env.recipient,
-                        env.content,
+                        recipient,
+                        content,
                         content_type=env.content_type,
                         chat_id=conn.chat_id,
                         metadata=metadata,
@@ -344,6 +357,7 @@ async def _send_handler(request: web.Request) -> web.Response:
     mailbox: MailBox = request.app[APP_MAILBOX]
     target_address: str = request.app[APP_TARGET_ADDRESS]
     chat_state: ChatState = request.app[APP_CHAT_STATE]
+    registry = request.app.get(APP_ACTOR_REGISTRY)
     try:
         data = await request.json()
         routing = data.get("metadata", {}).get("routing") if isinstance(data.get("metadata"), dict) else {}
@@ -363,9 +377,20 @@ async def _send_handler(request: web.Request) -> web.Response:
             metadata = env.metadata
         else:
             raise ValueError("POST /api/send requires chat_id or client_id.")
+
+        recipient = env.recipient
+        content = env.content
+        if registry is not None:
+            route_result = registry.route(
+                str(content) if isinstance(content, str) else content,
+                metadata=metadata,
+            )
+            recipient = route_result.target_address
+            content = route_result.content
+
         await mailbox.send(
-            env.recipient,
-            env.content,
+            recipient,
+            content,
             content_type=env.content_type,
             chat_id=chat_id,
             metadata=metadata,
@@ -420,6 +445,7 @@ class HttpChannel:
         max_upload_bytes: int = 20 * 1024 * 1024,
         bos_dir: str | Path | None = None,
         chat_state_path: str | Path | None = None,
+        actor_registry: Any = None,
     ) -> None:
         self._host = host
         self._port = int(port)
@@ -429,6 +455,7 @@ class HttpChannel:
         self._upload_dir = Path(upload_dir or ".bos/uploads/http").expanduser().resolve()
         self._max_upload_bytes = int(max_upload_bytes)
         self._chat_state = ChatState(bos_dir=bos_dir, path=chat_state_path)
+        self._actor_registry = actor_registry
 
     def _build_app(self, mailbox: MailBox) -> web.Application:
         address = mailbox.address
@@ -436,6 +463,7 @@ class HttpChannel:
         app = web.Application(client_max_size=self._max_upload_bytes)
         app[APP_MAILBOX] = mailbox
         app[APP_TARGET_ADDRESS] = target
+        app[APP_ACTOR_REGISTRY] = self._actor_registry
         app[APP_UPLOAD_DIR] = self._upload_dir
         app[APP_CHAT_STATE] = self._chat_state
         app[APP_RUNTIME_STATE] = {"clients": {}, "dispatcher_task": None}
