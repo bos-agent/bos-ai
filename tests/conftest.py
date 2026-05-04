@@ -51,6 +51,33 @@ class InMemMessageStore:
         return contexts
 
 
+class RecordingConsolidator:
+    """Message-based consolidator double for tests that do not exercise summarization."""
+
+    def __init__(self, summary: str = "recorded summary") -> None:
+        self.summary = summary
+        self.calls: list[tuple[list[Message], str | None]] = []
+
+    async def consolidate(self, messages: list[Message], instruction: str | None = None) -> str:
+        self.calls.append((messages, instruction))
+        return self.summary
+
+
+class MessageOnlyConsolidator(RecordingConsolidator):
+    async def consolidate(self, messages: list[Message], instruction: str | None = None) -> str:
+        assert all(isinstance(message, Message) for message in messages)
+        return await super().consolidate(messages, instruction)
+
+
+class CloseTrackingConsolidator(RecordingConsolidator):
+    def __init__(self, summary: str = "recorded summary") -> None:
+        super().__init__(summary)
+        self.closed = False
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
 class InMemMemoryExtension:
     """In-memory store for maxims and episodic memories (test-only)."""
 

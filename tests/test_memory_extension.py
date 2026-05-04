@@ -1,14 +1,13 @@
 """Tests for MemoryExtension protocol, Remember/Recall/Forget tools, and maxim limit."""
 
 import pytest
-from conftest import InMemMemoryExtension, InMemMessageStore
+from conftest import InMemMemoryExtension, InMemMessageStore, MessageOnlyConsolidator
 
 from bos.core import (
     MemoryExtension,
     ReactAgent,
 )
 from bos.core.defaults.agent_spec import bos_maxims as default_maxims
-from bos.core.defaults.consolidator import NaiveConsolidator
 from bos.core.defaults.skills_loader import FileSystemSkillsLoader
 
 
@@ -81,7 +80,7 @@ class TestRememberTool:
         agent = ReactAgent(
             message_store=InMemMessageStore(),
             memory=InMemMemoryExtension(),
-            consolidator=NaiveConsolidator(),
+            consolidator=MessageOnlyConsolidator(),
             skills_loader=FileSystemSkillsLoader(),
             maxims={"user": ""},
             system_prompt="test",
@@ -96,7 +95,7 @@ class TestRememberTool:
         agent = ReactAgent(
             message_store=InMemMessageStore(),
             memory=InMemMemoryExtension(),
-            consolidator=NaiveConsolidator(),
+            consolidator=MessageOnlyConsolidator(),
             skills_loader=FileSystemSkillsLoader(),
             maxims={"user": ""},
             system_prompt="test",
@@ -109,7 +108,7 @@ class TestRememberTool:
         agent = ReactAgent(
             message_store=InMemMessageStore(),
             memory=InMemMemoryExtension(),
-            consolidator=NaiveConsolidator(),
+            consolidator=MessageOnlyConsolidator(),
             skills_loader=FileSystemSkillsLoader(),
             maxims={"user": ""},
             system_prompt="test",
@@ -124,7 +123,7 @@ class TestRememberTool:
         agent = ReactAgent(
             message_store=InMemMessageStore(),
             memory=InMemMemoryExtension(),
-            consolidator=NaiveConsolidator(),
+            consolidator=MessageOnlyConsolidator(),
             skills_loader=FileSystemSkillsLoader(),
             maxims={"user": ""},
             system_prompt="test",
@@ -137,7 +136,7 @@ class TestRememberTool:
         agent = ReactAgent(
             message_store=InMemMessageStore(),
             memory=InMemMemoryExtension(),
-            consolidator=NaiveConsolidator(),
+            consolidator=MessageOnlyConsolidator(),
             skills_loader=FileSystemSkillsLoader(),
             maxims={"user": ""},
             system_prompt="test",
@@ -155,7 +154,7 @@ class TestRecallTool:
         agent = ReactAgent(
             message_store=InMemMessageStore(),
             memory=InMemMemoryExtension(),
-            consolidator=NaiveConsolidator(),
+            consolidator=MessageOnlyConsolidator(),
             skills_loader=FileSystemSkillsLoader(),
             maxims={"user": ""},
             system_prompt="test",
@@ -169,7 +168,7 @@ class TestRecallTool:
         agent = ReactAgent(
             message_store=InMemMessageStore(),
             memory=InMemMemoryExtension(),
-            consolidator=NaiveConsolidator(),
+            consolidator=MessageOnlyConsolidator(),
             skills_loader=FileSystemSkillsLoader(),
             maxims={"user": ""},
             system_prompt="test",
@@ -183,7 +182,7 @@ class TestRecallTool:
         agent = ReactAgent(
             message_store=InMemMessageStore(),
             memory=InMemMemoryExtension(),
-            consolidator=NaiveConsolidator(),
+            consolidator=MessageOnlyConsolidator(),
             skills_loader=FileSystemSkillsLoader(),
             maxims={"user": ""},
             system_prompt="test",
@@ -200,7 +199,7 @@ class TestForgetTool:
         agent = ReactAgent(
             message_store=InMemMessageStore(),
             memory=InMemMemoryExtension(),
-            consolidator=NaiveConsolidator(),
+            consolidator=MessageOnlyConsolidator(),
             skills_loader=FileSystemSkillsLoader(),
             maxims={"user": ""},
             system_prompt="test",
@@ -215,7 +214,7 @@ class TestForgetTool:
         agent = ReactAgent(
             message_store=InMemMessageStore(),
             memory=InMemMemoryExtension(),
-            consolidator=NaiveConsolidator(),
+            consolidator=MessageOnlyConsolidator(),
             skills_loader=FileSystemSkillsLoader(),
             maxims={"user": ""},
             system_prompt="test",
@@ -234,7 +233,7 @@ class TestSystemPromptIntegration:
         agent = ReactAgent(
             message_store=InMemMessageStore(),
             memory=InMemMemoryExtension(user="test user content"),
-            consolidator=NaiveConsolidator(),
+            consolidator=MessageOnlyConsolidator(),
             skills_loader=FileSystemSkillsLoader(),
             maxims={"user": default_maxims["user"]},
             system_prompt="base prompt",
@@ -249,7 +248,7 @@ class TestSystemPromptIntegration:
         agent = ReactAgent(
             message_store=InMemMessageStore(),
             memory=InMemMemoryExtension(),
-            consolidator=NaiveConsolidator(),
+            consolidator=MessageOnlyConsolidator(),
             skills_loader=FileSystemSkillsLoader(),
             maxims={"user": "user content"},
             system_prompt="base prompt",
@@ -264,7 +263,7 @@ class TestSystemPromptIntegration:
         agent = ReactAgent(
             message_store=InMemMessageStore(),
             memory=InMemMemoryExtension(),
-            consolidator=NaiveConsolidator(),
+            consolidator=MessageOnlyConsolidator(),
             skills_loader=FileSystemSkillsLoader(),
             maxims={"user": ""},
             system_prompt="base prompt",
@@ -277,7 +276,7 @@ class TestSystemPromptIntegration:
         agent = ReactAgent(
             message_store=InMemMessageStore(),
             memory=InMemMemoryExtension(rules="rule content", soul="soul content"),
-            consolidator=NaiveConsolidator(),
+            consolidator=MessageOnlyConsolidator(),
             skills_loader=FileSystemSkillsLoader(),
             maxims={"rules": default_maxims["rules"], "soul": default_maxims["soul"]},
             system_prompt="base prompt",

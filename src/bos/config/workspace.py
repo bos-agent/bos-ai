@@ -383,9 +383,6 @@ class Workspace:
         if resolved_platform_cfg.get("extensions") is None:
             resolved_platform_cfg["extensions"] = ["bos.extensions.all", "./extensions"]
 
-        if resolved_platform_cfg.get("agent_dirs") is None:
-            resolved_platform_cfg["agent_dirs"] = ["./agents"]
-
         try:
             resolved_agents, source_history = self._resolve_platform_agents(raw_platform_cfg)
         except Exception:
@@ -584,12 +581,8 @@ class Workspace:
             if not isinstance(raw_dir, str) or not raw_dir.strip():
                 raise ValueError("Each entry in platform.agent_dirs must be a non-empty string.")
 
-            # Resolve: expand ~, then resolve relative paths against .bos/
-            agents_root = Path(raw_dir.strip()).expanduser()
-            if not agents_root.is_absolute():
-                agents_root = (self.bos_dir / agents_root).resolve()
-            else:
-                agents_root = agents_root.resolve()
+            # Resolve relative entries against .bos/; absolute entries remain absolute.
+            agents_root = (self.bos_dir / Path(raw_dir.strip()).expanduser()).resolve()
 
             if not agents_root.exists() or not agents_root.is_dir():
                 logging.getLogger(__name__).warning(

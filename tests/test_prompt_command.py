@@ -14,6 +14,9 @@ agent = "prompt-inspector"
 
 [platform]
 
+[harness.consolidator]
+model = "test/consolidator"
+
 [[platform.agents]]
 name = "prompt-inspector"
 description = "Prompt inspector"

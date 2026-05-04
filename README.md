@@ -246,6 +246,27 @@ short agent tag and random suffix, for example
 
 The framework is designed to be reconfigured and extended, not forked.
 
+## Harness Consolidator
+
+Chat history compaction is handled by a harness-level consolidator service. The
+agent owns the dynamic history budget (`max_tokens`) and decides when compaction
+is needed; the consolidator owns the model and instruction used to summarize.
+
+Configure the default LLM-backed consolidator with:
+
+```toml
+[harness.consolidator]
+model = "gemini/gemini-2.5-flash"
+instruction = """
+Summarize the conversation history for future turns.
+Preserve user intent, decisions, unresolved tasks, tool results, and important constraints.
+"""
+```
+
+The consolidator model is resolved from `harness.consolidator.model`, then
+`BOS_CONSOLIDATOR_MODEL`, then `BOS_MODEL`. It does not fall back to
+`platform.agent_defaults.model`.
+
 Core extension points include:
 
 - `@ep_provider` for model backends
