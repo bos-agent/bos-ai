@@ -3,12 +3,12 @@ import json
 import uuid
 
 import pytest
-from conftest import InMemMailRoute, InMemMemoryExtension, InMemMessageStore
+from conftest import InMemMailRoute, InMemMemoryExtension, InMemMessageStore, MessageOnlyConsolidator
 
 from bos.core.actor import AgentActor
 from bos.core.chat_state import ChatState
 from bos.core.contract import Message
-from bos.core.defaults.consolidator import NaiveConsolidator
+from bos.core.history import HistoryProjection
 from bos.extensions.actor_commands import system_cmd  # noqa: F401
 from bos.protocol import Envelope, MessageType
 
@@ -46,7 +46,8 @@ class StubAgent:
     def __init__(self) -> None:
         self._message_store = InMemMessageStore()
         self._memory = InMemMemoryExtension()
-        self._consolidator = NaiveConsolidator()
+        self._consolidator = MessageOnlyConsolidator()
+        self._model = "test/model"
 
     async def ask(self, *args, **kwargs):
         raise AssertionError("ask should not be used in direct command tests")
@@ -258,6 +259,77 @@ async def test_history_command_uses_envelope_chat_id():
     payload = json.loads(mailbox.sent[-1].content)
     assert payload["name"] == "history"
     assert payload["result"][0]["content"] == "saved under chat"
+
+
+@pytest.mark.asyncio
+async def test_compact_command_passes_message_objects_and_saves_summary():
+    mailbox = FakeMailbox("agent@main")
+    agent = StubAgent()
+    actor = AgentActor(agent, mailbox)
+    chat_id = "compact-chat"
+    await agent._message_store.save_messages(
+        chat_id,
+        [Message(llm_message={"role": "user", "content": "history"})],
+    )
+
+    await actor._handle_command(
+        Envelope(
+            sender="channel@http",
+            recipient="agent@main",
+            content="/compact",
+            content_type=MessageType.COMMAND,
+            chat_id=chat_id,
+        )
+    )
+
+    payload = json.loads(mailbox.sent[-1].content)
+    messages = await agent._message_store.get_messages(chat_id)
+    assert payload["name"] == "compact"
+    assert payload["ok"] is True
+    assert agent._consolidator.calls
+    assert all(isinstance(message, Message) for message in agent._consolidator.calls[0][0])
+    assert messages[-1].is_summary is True
+    assert messages[-1].llm_message["content"] == "Chat summary:\nrecorded summary"
+
+
+@pytest.mark.asyncio
+async def test_tokens_command_returns_estimate_metadata(monkeypatch):
+    mailbox = FakeMailbox("agent@main")
+    agent = StubAgent()
+    actor = AgentActor(agent, mailbox)
+    chat_id = "tokens-chat"
+    await agent._message_store.save_messages(
+        chat_id,
+        [Message(llm_message={"role": "user", "content": "history"})],
+    )
+
+    def fake_estimate(messages, *, budget_model):
+        assert all(isinstance(message, Message) for message in messages)
+        return HistoryProjection(
+            messages=[message.llm_message for message in messages],
+            estimated_tokens=123,
+            model=budget_model,
+            source="fallback",
+        )
+
+    monkeypatch.setattr(system_cmd, "estimate_message_history_tokens", fake_estimate)
+    await actor._handle_command(
+        Envelope(
+            sender="channel@http",
+            recipient="agent@main",
+            content="/tokens",
+            content_type=MessageType.COMMAND,
+            chat_id=chat_id,
+        )
+    )
+
+    payload = json.loads(mailbox.sent[-1].content)
+    assert payload["name"] == "tokens"
+    assert payload["ok"] is True
+    assert payload["estimated_tokens"] == 123
+    assert payload["model"] == "test/model"
+    assert payload["source"] == "fallback"
+    assert "Estimated tokens: 123" in payload["result"]
 
 
 @pytest.mark.asyncio

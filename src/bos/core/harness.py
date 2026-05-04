@@ -118,10 +118,10 @@ class AgentHarness:
         self.mail_route = self._create_and_own("ep_mail_route", MailRoute, self._mail_route_cfg)
         self.message_store = self._create_and_own("ep_message_store", MessageStore, self._message_store_cfg)
         self.memory = self._create_and_own("ep_memory", MemoryExtension, self._memory_cfg)
-        self.consolidator = self._create_and_own("ep_consolidator", Consolidator, self._consolidator_cfg)
+        self.llm = LLMClient(self._providers_cfg)
+        self.consolidator = self._create_consolidator()
         self.skills_loader = self._create_and_own("ep_skills_loader", SkillsLoader, self._skills_loader_cfg)
         self.interceptor = ChainReactInterceptor(self._interceptors_cfg)
-        self.llm = LLMClient(self._providers_cfg)
 
         os.chdir(self._workspace)
         self._token = CURRENT_HARNESS.set(self)
@@ -176,6 +176,22 @@ class AgentHarness:
         if instance is not None:
             self._owned.append(instance)
         return instance
+
+    def _create_consolidator(self) -> Consolidator:
+        if isinstance(self._consolidator_cfg, Consolidator):
+            self._owned.append(self._consolidator_cfg)
+            return self._consolidator_cfg
+
+        cfg = (self._consolidator_cfg or {}).copy()
+        model = cfg.get("model") or os.getenv("BOS_CONSOLIDATOR_MODEL") or os.getenv("BOS_MODEL")
+        if not model:
+            raise RuntimeError(
+                "Consolidator model is required. Configure harness.consolidator.model, "
+                "BOS_CONSOLIDATOR_MODEL, or BOS_MODEL."
+            )
+        cfg["model"] = model
+        cfg["llm"] = self.llm
+        return self._create_and_own("ep_consolidator", Consolidator, cfg)
 
     def _get_subagent_config(self, role: str) -> dict[str, Any]:
         return self._subagent_defaults | (self._subagents_cfg.get(role) or {})

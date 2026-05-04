@@ -115,7 +115,7 @@ ep_consolidator = ExtensionPoint(
 
 @runtime_checkable
 class Consolidator(Protocol):
-    async def consolidate(self, messages: list[dict], instruction: str | None = None) -> str: ...
+    async def consolidate(self, messages: list[Message], instruction: str | None = None) -> str: ...
 
 
 ep_skills_loader = ExtensionPoint(
