@@ -145,6 +145,7 @@ async def _run_actor_and_channels(
 
 
 def _build_squad_agent(harness, agent_name: str, config: dict[str, Any]):
+    from bos.core._utils import _build_params
     from bos.squad.actor import SquadAgent
 
     agents = config.get("platform", {}).get("agents", [])
@@ -159,14 +160,16 @@ def _build_squad_agent(harness, agent_name: str, config: dict[str, Any]):
         for k, v in defaults.items():
             agent_spec.setdefault(k, v)
 
-    return SquadAgent(
-        name=agent_name,
-        llm=harness.llm,
-        message_store=harness.message_store,
-        memory=harness.memory,
-        consolidator=harness.consolidator,
-        skills_loader=harness.skills_loader,
-        interceptor=harness.interceptor,
-        tool_configs=harness._tools_cfg,
+    kwargs = {
+        "name": agent_name,
+        "llm": harness.llm,
+        "message_store": harness.message_store,
+        "memory": harness.memory,
+        "consolidator": harness.consolidator,
+        "skills_loader": harness.skills_loader,
+        "interceptor": harness.interceptor,
+        "tool_configs": harness._tools_cfg,
         **agent_spec,
-    )
+    }
+    _, filtered = _build_params(SquadAgent.__init__, kwargs)
+    return SquadAgent(**filtered)
