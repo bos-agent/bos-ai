@@ -155,3 +155,25 @@ port = 5920
 #token = "123456:telegram-bot-token"
 #poll_timeout = 30
 #allowed_chat_ids = [123456789]        # optional allowlist
+
+# Squad mode: define multiple actors that run concurrently. Each actor gets its own
+# mailbox at agent@<key> and can be addressed via @<key> in the chat (e.g. "@researcher
+# find papers on topic X"). The "main" actor is the default when no @mention is used.
+# Actors share the same channel(s) — all channels can reach all actors.
+#
+# When [main.actors] is NOT set, the system falls back to a single agent (non-squad mode).
+#
+#[main.actors.main]
+#agent = "main"
+#tools = ["AskSubAgent"]
+#subagents = ["researcher", "reviewer"]
+#
+#[main.actors.researcher]
+#agent = "researcher"
+#description = "Research assistant for finding and summarizing information."
+#tools = ["WebSearch", "ReadFile"]
+#skills = ["brainstorming"]
+#
+#[main.actors.reviewer]
+#agent = "reviewer"
+#description = "Code reviewer for quality and correctness checks."
