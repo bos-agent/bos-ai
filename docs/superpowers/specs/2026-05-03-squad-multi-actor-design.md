@@ -3,9 +3,12 @@
 ## Summary
 
 Add a `src/bos/squad/` extension module that runs multiple actors simultaneously.
-Users address specific actors via `@agentname` in message text; the frontend parses this
-and sends `target_actor` metadata. A new `ActorRegistry` resolves actor names to
-mailbox addresses. Channels use the registry to route messages to the correct actor.
+Users address specific actors via `@agentname` in message text. A new `ActorRegistry`
+parses @mentions from raw message content, resolves actor names to mailbox addresses,
+and sets routing metadata. Channels delegate routing to the registry.
+
+The same @mention parsing serves actor-to-actor relay in the future — when an actor's
+response contains `@reviewer`, the registry extracts it on the return path.
 
 Zero or minimal core changes. The extension inherits from core primitives where it needs
 different behavior.
@@ -68,7 +71,7 @@ src/bos/squad/
 
 ### ActorRegistry (`registry.py`)
 
-Lightweight address resolver. Not a forwarding mailbox — no extra message hop.
+Owns @mention parsing and actor address resolution. Not a forwarding mailbox — no extra message hop.
 
 ```python
 @dataclass
@@ -83,7 +86,19 @@ class ActorRegistry:
     def resolve(self, target_actor: str | None) -> str           # → address
     def resolve_mailbox(self, target_actor: str | None) -> MailBox
     def list_actors(self) -> dict[str, ActorRecord]              # for diagnostics
+
+    # @mention parsing + routing
+    def route(self, content: str, metadata: dict) -> RouteResult:
+        """Parse @agentname from content, return routing target and cleaned content.
+
+        - Extracts leading @agentname (e.g. "@researcher do X" → "do X" + target="researcher")
+        - Falls back to metadata.target_actor if no @mention in content
+        - Falls back to the default actor if neither is present
+        """
 ```
+
+`route()` is the single place @mention syntax is parsed. Every incoming message —
+whether from a user channel or from an actor relay — passes through this method.
 
 ### SquadActor (`actor.py`)
 
@@ -109,13 +124,12 @@ Extension point for actor-to-actor messaging later.
 
 ```
 1. User types "@researcher find papers on X" in TUI
-2. TUI parses "@researcher", strips it, builds:
-   content = "find papers on X"
-   metadata.target_actor = "researcher"
-3. TUI sends via WebSocket to HttpChannel
-4. HttpChannel reads metadata.target_actor
-   → registry.resolve("researcher")
-   → "agent@researcher"
+2. TUI sends raw content via WebSocket to HttpChannel (no parsing)
+3. HttpChannel hands envelope to ActorRegistry.route()
+4. route() parses "@researcher", strips it:
+   content  = "find papers on X"
+   target   = "researcher"
+   → registry.resolve("researcher") → "agent@researcher"
 5. HttpChannel calls mailbox.send("agent@researcher", content, metadata=...)
 6. SquadActor at agent@researcher polls its mailbox, picks up the message
 7. SquadActor drives SquadAgent.ask():
@@ -170,20 +184,29 @@ All other logic lives in `src/bos/squad/`.
 
 ## Actor-to-actor (future)
 
-Not implemented now, but the design supports it:
+Not implemented now, but the design supports three relay forms:
 
-- Actors get a reference to the `ActorRegistry`
-- An actor calls `registry.resolve_mailbox("reviewer")` and sends a message
-- The registry pattern works identically for channels and actors
+**1. Synchronous delegation** — actor calls another actor like a tool, blocks, gets result.
+Mirrors `AskSubAgent` but routed through `registry.resolve_mailbox()`.
+
+**2. Async fire-and-forget** — actor sends to peer mailbox, continues without waiting.
+Peer response goes back to the channel independently.
+
+**3. Mention-based relay** — an actor's response includes `@reviewer do X`. The same
+`ActorRegistry.route()` that parses user messages also parses actor responses on the
+return path. No new mechanism — the registry is the single @mention authority.
+
+All three use `registry.resolve_mailbox(name)` under the hood. The registry pattern
+works identically whether the sender is a channel or an actor.
 
 ## Tests
 
 ```
 tests/squad/
-  test_registry.py      # resolve, fallback, missing, list_actors
+  test_registry.py      # resolve, fallback, missing, list_actors, @mention parsing
   test_actor.py         # SquadActor._merge_pending_messages attribution
   test_runner.py        # multi-actor startup, registry wiring, backwards compat
-  test_history.py        # tool filter + attribution annotation
+  test_history.py       # tool filter + attribution annotation
 ```
 
 One core test update: channel validation test for the relaxed topology check.
