@@ -34,3 +34,32 @@ class TestParseActorsConfig:
             }
         })
         assert len(actors) == 1
+
+    def test_no_main_key_returns_empty(self):
+        actors = _parse_actors_config({"platform": {}})
+        assert actors == {}
+
+    def test_main_not_dict_returns_empty(self):
+        actors = _parse_actors_config({"main": "not-a-dict"})
+        assert actors == {}
+
+    def test_actors_not_dict_returns_empty(self):
+        actors = _parse_actors_config({"main": {"actors": ["list", "not", "dict"]}})
+        assert actors == {}
+
+    def test_filters_non_dict_actor_values(self):
+        actors = _parse_actors_config({
+            "main": {
+                "actors": {
+                    "valid": {"agent": "valid"},
+                    "also_valid": {"agent": "also"},
+                    "not_dict": "just-a-string",
+                    "also_not": 42,
+                },
+            }
+        })
+        assert len(actors) == 2
+        assert "valid" in actors
+        assert "also_valid" in actors
+        assert "not_dict" not in actors
+        assert "also_not" not in actors
