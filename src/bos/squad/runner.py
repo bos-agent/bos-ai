@@ -47,7 +47,10 @@ async def start_squad(workspace: Workspace) -> None:
                 agent, harness.mail_route.bind(actor_address), chat_state=chat_state
             )
             channels = _create_channels(channels_cfg, ep_channel, Channel)
-            await _run_actor_and_channels(actor, channels, harness)
+            task = asyncio.create_task(_run_actor_and_channels(actor, channels, harness))
+            await asyncio.sleep(0.2)
+            _write_channel_state(workspace, channels)
+            await task
         return
 
     actor_names = list(actors_cfg.keys())
@@ -77,14 +80,38 @@ async def start_squad(workspace: Workspace) -> None:
 
         channels = _create_channels(channels_cfg, ep_channel, Channel, registry=registry)
 
-        async with asyncio.TaskGroup() as tg:
-            for actor in actors:
-                tg.create_task(actor.run(), name=f"actor:{actor.actor_name}")
-            for ch, address in channels:
-                tg.create_task(
-                    ch.run(harness.mail_route.bind(address)),
-                    name=f"channel:{address}",
-                )
+        async def _run_squad() -> None:
+            async with asyncio.TaskGroup() as tg:
+                for actor in actors:
+                    tg.create_task(actor.run(), name=f"actor:{actor.actor_name}")
+                for ch, address in channels:
+                    tg.create_task(
+                        ch.run(harness.mail_route.bind(address)),
+                        name=f"channel:{address}",
+                    )
+
+        task = asyncio.create_task(_run_squad())
+        await asyncio.sleep(0.2)
+        _write_channel_state(workspace, channels)
+        await task
+
+
+def _write_channel_state(workspace, channels) -> None:
+    try:
+        from bos.runner.proc import RunDir, write_state
+
+        rd = RunDir(workspace.bos_dir)
+        if rd.root.exists():
+            channel_info = []
+            for ch, _address in channels:
+                info: dict = {"address": _address, "name": type(ch).__name__}
+                if hasattr(ch, "actual_host"):
+                    info["host"] = ch.actual_host
+                    info["port"] = ch.actual_port
+                channel_info.append(info)
+            write_state(rd, channels=channel_info)
+    except Exception as exc:
+        logger.debug("Could not update agent.state with channel info: %s", exc)
 
 
 def _create_channels(
