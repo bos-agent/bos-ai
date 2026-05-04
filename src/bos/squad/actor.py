@@ -27,3 +27,37 @@ class SquadAgent(ReactAgent):
     async def _get_chat_history(self, chat_id: str) -> list[dict[str, Any]]:
         history = await super()._get_chat_history(chat_id)
         return _filter_tool_noise(history)
+
+
+class SquadActor:
+    """Actor that annotates incoming messages with target_actor attribution.
+
+    Inherits from AgentActor, adding attribution annotation in
+    _merge_pending_messages so the agent sees which actor each message was
+    addressed to.
+    """
+
+    def __init__(self, agent, mailbox, chat_state=None, *, actor_name=None):
+        from bos.core import AgentActor
+
+        self._wrapped = AgentActor(agent, mailbox, chat_state)
+        self.actor_name = actor_name
+
+    def __getattr__(self, name):
+        return getattr(self._wrapped, name)
+
+    def _merge_pending_messages(self, messages):
+        from bos.protocol import Envelope, MessageContent
+
+        merged = self._wrapped._merge_pending_messages(messages)
+        if self.actor_name is None:
+            return merged
+
+        attribution = f"[user → @{self.actor_name}]: "
+        if isinstance(merged, str):
+            return attribution + merged
+
+        if isinstance(merged, list):
+            return [{"type": "text", "text": attribution}] + merged
+
+        return merged
