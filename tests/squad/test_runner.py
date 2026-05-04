@@ -1,5 +1,4 @@
 # tests/squad/test_runner.py
-import pytest
 from bos.squad.runner import _parse_actors_config
 
 

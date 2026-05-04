@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from bos.config import Workspace
+    from bos.core import Channel
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +23,7 @@ def _parse_actors_config(config: dict[str, Any]) -> dict[str, dict[str, Any]]:
 
 
 async def start_squad(workspace: Workspace) -> None:
-    from bos.core import AgentActor, Channel, _create_extension_instance, ep_channel
+    from bos.core import AgentActor, Channel, ep_channel
     from bos.core.chat_state import ChatState
     from bos.squad.actor import SquadActor
     from bos.squad.registry import ActorRegistry

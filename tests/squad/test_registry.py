@@ -1,6 +1,7 @@
 # tests/squad/test_registry.py
 import pytest
-from bos.squad.registry import ActorRegistry, ActorRecord, RouteResult
+
+from bos.squad.registry import ActorRegistry
 
 
 class FakeMailBox:

@@ -1,6 +1,6 @@
 # tests/squad/test_http_routing.py
 import asyncio
-import json
+import re
 
 import aiohttp
 import pytest
@@ -8,8 +8,6 @@ from aiohttp import web
 
 from bos.extensions.channels.http import HttpChannel
 
-
-import re
 
 class FakeRegistry:
     _MENTION_RE = re.compile(r"@([\w][\w-]*)\s+")

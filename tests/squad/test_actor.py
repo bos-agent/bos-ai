@@ -1,5 +1,6 @@
 # tests/squad/test_actor.py
 from datetime import datetime
+
 from bos.protocol import Envelope, MessageType
 from bos.squad.actor import SquadActor
 

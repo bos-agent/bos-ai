@@ -1,5 +1,6 @@
 # tests/squad/test_history.py
 import pytest
+
 from bos.squad.actor import SquadAgent, _filter_tool_noise
 
 

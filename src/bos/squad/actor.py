@@ -47,7 +47,6 @@ class SquadActor:
         return getattr(self._wrapped, name)
 
     def _merge_pending_messages(self, messages):
-        from bos.protocol import Envelope, MessageContent
 
         merged = self._wrapped._merge_pending_messages(messages)
         if self.actor_name is None:
