@@ -228,6 +228,48 @@ async def test_actor_serializes_turn_events_to_mailbox():
 
 
 @pytest.mark.asyncio
+async def test_actor_run_passes_inbound_envelope_to_metadata_hooks():
+    suffix = uuid.uuid4().hex
+    route = InMemMailRoute()
+    actor_address = f"agent@hook-{suffix}"
+    sender_address = f"channel@http-{suffix}"
+    actor_mailbox = route.bind(actor_address)
+    sender_mailbox = route.bind(sender_address)
+
+    class RecordingAgent:
+        def __init__(self):
+            self.calls = []
+
+        async def ask(self, chat_id, message, **kwargs):
+            self.calls.append((chat_id, message, kwargs))
+            return "done"
+
+    class HookActor(AgentActor):
+        def _turn_metadata(self, reply_recipient, inbound_env=None):
+            metadata = super()._turn_metadata(reply_recipient, inbound_env)
+            metadata["target"] = inbound_env.metadata["target"]
+            return metadata
+
+        def _reply_metadata(self, reply_recipient, inbound_env=None):
+            return {"target": inbound_env.metadata["target"]}
+
+    agent = RecordingAgent()
+    actor = HookActor(agent, actor_mailbox)
+
+    task = asyncio.create_task(actor.run())
+    try:
+        await sender_mailbox.send(actor_address, "hello", chat_id="hook-chat", metadata={"target": "researcher"})
+        reply = await asyncio.wait_for(sender_mailbox.receive(), timeout=1)
+
+        assert reply.content == "done"
+        assert reply.metadata == {"target": "researcher"}
+        assert agent.calls[0][2]["ctx_metadata"]["target"] == "researcher"
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_actor_turn_event_tool_payload_uses_canonical_shape():
     suffix = uuid.uuid4().hex
     provider_name = f"test_event_sink_actor_tool_{suffix}"
