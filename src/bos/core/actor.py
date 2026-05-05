@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from bos.protocol import Envelope, MessageContent, MessageType
+
 from .agent import AbortTurn
 from .chat_state import ChatState
 from .contract import ep_actor_command
@@ -98,7 +99,11 @@ class AgentActor:
                 session = self._get_or_create_session(chat_id)
 
                 if env.content_type == MessageType.COMMAND:
-                    if env.content.strip().startswith("/"):
+                    command_content = self._command_content(env)
+                    if command_content is None:
+                        await self._send_command_content_error(env, content_type=MessageType.SYSTEM)
+                        continue
+                    if command_content.strip().startswith("/"):
                         self._spawn_command_task(env)
                         continue
                     env.content_type = MessageType.MESSAGE
@@ -116,6 +121,7 @@ class AgentActor:
                                 reply_recipient=env.sender,
                                 reply_chat_id=env.chat_id,
                                 content=env.content,
+                                inbound_env=env,
                             )
                         )
                     continue
@@ -236,6 +242,7 @@ class AgentActor:
         reply_recipient: str,
         reply_chat_id: str | None,
         content: MessageContent,
+        inbound_env: Envelope | None = None,
     ) -> None:
         token: contextvars.Token | None = None
         try:
@@ -245,7 +252,7 @@ class AgentActor:
                 chat_id,
                 content,
                 interrupt=self._make_interrupt(chat_id, generation),
-                ctx_metadata={"sender": reply_recipient, "actor_address": self._address},
+                ctx_metadata=self._turn_metadata(reply_recipient, inbound_env),
                 event_sink=event_sink,
             )
         finally:
@@ -255,14 +262,30 @@ class AgentActor:
         if not self._execution_is_current(chat_id, generation):
             return
 
+        metadata = self._reply_metadata(reply_recipient, inbound_env)
+        send_kwargs: dict[str, Any] = {"chat_id": reply_chat_id}
+        if metadata:
+            send_kwargs["metadata"] = metadata
+
         await self._mailbox.send(
             reply_recipient,
             response,
-            chat_id=reply_chat_id,
+            **send_kwargs,
         )
 
+    def _turn_metadata(self, reply_recipient: str, inbound_env: Envelope | None = None) -> dict[str, Any]:
+        return {"sender": reply_recipient, "actor_address": self._address}
+
+    def _reply_metadata(self, reply_recipient: str, inbound_env: Envelope | None = None) -> dict[str, Any]:
+        return {}
+
     async def _handle_command(self, env: Envelope) -> None:
-        parts = env.content.split(None, 1)
+        command_content = self._command_content(env)
+        if command_content is None:
+            await self._send_command_content_error(env, content_type=MessageType.COMMAND_RESULT)
+            return
+
+        parts = command_content.split(None, 1)
         cmd_name, input = parts[0].lstrip("/"), "" if len(parts) == 1 else parts[1]
 
         if not ep_actor_command.has(cmd_name):
@@ -295,6 +318,18 @@ class AgentActor:
         if isinstance(routing, dict) and routing:
             return {"routing": routing}
         return {}
+
+    @staticmethod
+    def _command_content(env: Envelope) -> str | None:
+        return env.content if isinstance(env.content, str) else None
+
+    async def _send_command_content_error(self, env: Envelope, *, content_type: MessageType) -> None:
+        await self._mailbox.send(
+            env.sender,
+            "(error: command content must be text)",
+            content_type=content_type,
+            chat_id=env.chat_id,
+        )
 
     def _make_interrupt(self, chat_id: str, generation: int):
         def _interrupt() -> dict[str, Any] | None:
@@ -334,4 +369,3 @@ class AgentActor:
             and session.execution.generation == generation
             and session.execution.task is not None
         )
-
