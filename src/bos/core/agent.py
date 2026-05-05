@@ -205,13 +205,17 @@ class ReactAgent:
         if event_sink is not None:
             ctx.metadata["event_sink"] = event_sink
         ctx.set_system_prompt(await self._build_system_prompt())
-        ctx.add_message({"role": "user", "content": content or ""})
+        user_message_metadata = ctx.metadata.get("user_message_metadata")
+        ctx.add_message(
+            {"role": "user", "content": content or ""},
+            **(user_message_metadata if isinstance(user_message_metadata, dict) else {}),
+        )
 
         cache_index = 0
 
-        def _add_message(message: dict[str, Any]) -> None:
+        def _add_message(message: dict[str, Any], metadata: dict[str, Any] | None = None) -> None:
             nonlocal cache_index
-            ctx.add_message(_compact(message))
+            ctx.add_message(_compact(message), **(metadata or {}))
             cache_index -= 1
 
         async def _run_interceptor(stage: str):
@@ -313,7 +317,12 @@ class ReactAgent:
                             "content": final_content,
                             "reasoning_content": response.reasoning_content,
                             "thinking_blocks": response.thinking_blocks,
-                        }
+                        },
+                        metadata=(
+                            ctx.metadata.get("assistant_message_metadata")
+                            if isinstance(ctx.metadata.get("assistant_message_metadata"), dict)
+                            else None
+                        ),
                     )
                     ctx.final_content = final_content
                     await _run_interceptor("final_response")

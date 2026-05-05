@@ -40,7 +40,7 @@ model = "gemini/gemini-3.1-pro-preview"
 #skills = ["brainstorming"]
 #skills = "*"
 
-# the subagents the agent can use with the AskSubAgent tool. the setting rules are same as tools.
+# the subagents the agent can use with the AskSubagent tool. the setting rules are same as tools.
 #subagents = ["researcher"]
 #subagents = "*"
 
@@ -68,7 +68,7 @@ model = "gemini/gemini-3.1-pro-preview"
 #[[platform.agents]]
 #name = "main"
 #description = "The main agent."
-#tools = ["AskSubAgent"]
+#tools = ["AskSubagent"]
 #system_prompt = """
 #You are an personal assistant.
 #"""
@@ -167,3 +167,33 @@ port = 5920
 #token = "123456:telegram-bot-token"
 #poll_timeout = 30
 #allowed_chat_ids = [123456789]        # optional allowlist
+
+# Named actors: define multiple long-lived actors in one runtime. Each actor gets
+# its own mailbox at agent@<key> and can be addressed via @<key> in channels that
+# support mention routing (e.g. "@researcher find papers on topic X"). The actor
+# key is also the actor's identity and memory scope. The "main" actor is the
+# default when no @mention is used.
+#
+# When [main.actors] is NOT set, the system falls back to a single agent.
+#
+#[main.actors.main]
+#agent = "main"
+#display_name = "Main"
+#tools = ["AskSubagent"]
+#subagents = ["researcher", "reviewer"]
+#
+#[main.actors.bob]
+#agent = "architect"
+#display_name = "Bob"
+#tools = ["ReadFile", "AskSubagent"]
+#
+#[main.actors.researcher]
+#agent = "assistant"
+#display_name = "Researcher"
+#description = "Research assistant for finding and summarizing information."
+#tools = ["WebSearch", "ReadFile"]
+#skills = ["brainstorming"]
+#
+#[main.actors.reviewer]
+#agent = "reviewer"
+#description = "Code reviewer for quality and correctness checks."

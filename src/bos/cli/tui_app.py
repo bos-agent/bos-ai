@@ -144,6 +144,7 @@ class ChatApp(App):
         Binding("ctrl+c", "quit", "Quit", show=True, priority=True),
         Binding("ctrl+l", "clear_log", "Clear", show=True),
         Binding("ctrl+n", "reset_chat", "New Chat", show=True),
+        Binding("ctrl+r", "restart_bos", "Restart", show=True),
     ]
 
     theme = "tokyo-night"
@@ -401,15 +402,17 @@ class ChatApp(App):
                 "  /history  — show chat history\n"
                 "  /compact  — compact chat\n"
                 "  /tokens   — rough token estimate\n"
-                "  /chats  — list all chats\n"
+                "  /chats    — list all chats\n"
                 "  /memory   — list agent memories\n"
                 "  /clear    — clear the log\n"
+                "  /restart  — restart the agent process\n"
                 "\n"
                 "[bold]Hot keys:[/]\n"
                 "  Escape    — interrupt the current turn\n"
                 "  Ctrl+C    — quit\n"
                 "  Ctrl+L    — clear the log\n"
-                "  Ctrl+N    — start a new chat"
+                "  Ctrl+N    — start a new chat\n"
+                "  Ctrl+R    — restart the agent process"
             )
 
         elif normalized_cmd == "/new":
@@ -417,6 +420,9 @@ class ChatApp(App):
 
         elif normalized_cmd == "/clear":
             self.query_one("#chat", RichLog).clear()
+
+        elif normalized_cmd == "/restart":
+            await self.action_restart_bos()
 
         elif normalized_cmd in (
             "/resume",
@@ -456,6 +462,20 @@ class ChatApp(App):
 
     def action_reset_chat(self) -> None:
         asyncio.create_task(self._send_command("/new"))
+
+    async def action_restart_bos(self) -> None:
+        """Restart the background BOS agent."""
+        self._write_system("[yellow]↻ Restarting agent process…[/]")
+        import sys
+        try:
+            process = await asyncio.create_subprocess_exec(
+                sys.argv[0], "restart",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            asyncio.create_task(process.wait())
+        except Exception as exc:
+            self._write_system(f"[red]⚠ Failed to restart agent: {exc}[/]")
 
     async def action_interrupt_turn(self) -> None:
         """Abort the in-flight turn for the current chat."""

@@ -23,7 +23,6 @@ src/bos/
   extensions/   - Channel, provider, tool, store, interceptor implementations
   protocol/     - Message envelope, content types, turn events
   runner/       - Runtime assembly: wires harness + actor + channels in-process
-  team/         - (reserved for future multi-agent team orchestration)
 tests/           - pytest coverage mirroring the above
 docs/architecture/ - Design docs for core, config, protocol, runner
 ```

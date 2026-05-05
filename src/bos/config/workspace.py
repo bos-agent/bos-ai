@@ -512,10 +512,6 @@ class Workspace:
                 raise ValueError(f"Channel {channel.bind_address!r} cannot target itself.")
 
             if channel.target_address.startswith("agent@"):
-                if channel.target_address != actor_address:
-                    raise ValueError(
-                        f"Channel {channel.bind_address!r} targets unknown actor address {channel.target_address!r}."
-                    )
                 continue
 
             if not channel.target_address.startswith("channel@"):

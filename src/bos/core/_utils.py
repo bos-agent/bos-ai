@@ -184,7 +184,7 @@ def _load_ext_modules(modules: list[str]) -> None:
         try:
             importlib.import_module(modname)
         except Exception:
-            logger.error("Failed to import extension module %s", modname, exc_info=True)
+            logger.warning("Failed to import extension module %s", modname)
 
 
 def _load_ext_paths(paths: list[str | Path]) -> None:
@@ -196,9 +196,9 @@ def _load_ext_paths(paths: list[str | Path]) -> None:
                 module = importlib.util.module_from_spec(spec)
                 spec.loader.exec_module(module)
             except Exception:
-                logger.error("Failed to load extension file %s", path, exc_info=True)
+                logger.warning("Failed to load extension file %s", path)
         else:
-            logger.error("Could not create import spec for extension file %s", path)
+            logger.warning("Could not create import spec for extension file %s", path)
 
     files = {
         f.expanduser().resolve()

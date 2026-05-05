@@ -96,8 +96,8 @@ runtime-facing agent config is produced through a resolved platform view.
 For the full rule set and resolver behavior, see
 `docs/architecture/config-workspace.md`.
 
-The primary actor is always addressed as `agent@main`. The selected main agent
-implementation is configured separately under `[main].agent`.
+By default, the primary actor is addressed as `agent@main`. The selected main
+agent implementation is configured separately under `[main].agent`.
 
 Example channel configuration:
 
@@ -126,6 +126,35 @@ This keeps routing explicit:
 - channels target `agent@main` directly
 - client cursors are stored server-side by `client_id`
 - aliases can point to durable `chat_id` values for cross-client resume
+
+### Named Actors
+
+Named Actors let one runtime host multiple long-lived, addressable actors. The
+actor key under `[main.actors]` is the route name, mailbox identity, and memory
+scope. The `agent` field is the reusable agent kind, so multiple actors can
+instantiate the same agent definition with different runtime identities.
+
+```toml
+[main.actors.main]
+agent = "assistant"
+display_name = "Main"
+
+[main.actors.bob]
+agent = "architect"
+display_name = "Bob"
+
+[main.actors.investment]
+agent = "assistant"
+display_name = "Investment"
+```
+
+Channels that support mention routing can route a message such as `@bob review
+this design` to `agent@bob`. Channels can also bind directly to a specific actor
+with `target_address = "agent@investment"`.
+
+Named Actors is a routing feature, not autonomous swarm orchestration. Planning,
+delegation lifecycle, actor-to-actor relay, and result synthesis belong in a
+separate orchestration layer.
 
 ## Runtime
 
