@@ -9,8 +9,6 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from bos.protocol import Envelope, MessageContent, MessageType
-from bos.protocol.content import content_as_parts
-
 from .agent import AbortTurn
 from .chat_state import ChatState
 from .contract import ep_actor_command
@@ -18,12 +16,6 @@ from .events import MailboxEventSink
 from .harness import CURRENT_HARNESS, CURRENT_MAILBOX
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class SessionBuffers:
-    pending: list[Envelope] = field(default_factory=list)
-    interrupts: list[Envelope] = field(default_factory=list)
 
 
 @dataclass
@@ -38,7 +30,7 @@ class SessionExecution:
 class SessionState:
     chat_id: str
     execution: SessionExecution = field(default_factory=SessionExecution)
-    buffers: SessionBuffers = field(default_factory=SessionBuffers)
+    interrupts: list[Envelope] = field(default_factory=list)
 
 
 class _RouteAwareMailboxEventSink(MailboxEventSink):
@@ -59,9 +51,9 @@ class _RouteAwareMailboxEventSink(MailboxEventSink):
 class AgentActor:
     """Actor that drives an Agent via a bound MailBox.
 
-    Sessions are keyed by ``chat_id``.  Each distinct
-    ``chat_id`` gets its own concurrent task slot, pending/interrupt
-    buffers, and generation counter.
+    Sessions are keyed by ``chat_id``.  Each distinct ``chat_id`` gets its
+    own concurrent task slot, interrupt buffer, and generation counter.
+    Messages arriving during an active turn are rejected immediately.
     """
 
     def __init__(self, agent: Any, mailbox: Any, chat_state: ChatState | None = None):
@@ -113,16 +105,32 @@ class AgentActor:
 
                 if session.execution.task is None:
                     if env.content_type == MessageType.MESSAGE:
-                        session.buffers.pending.append(env)
-                        self._fire_pending(chat_id)
+                        session.interrupts.clear()
+                        session.execution.reply_recipient = env.sender
+                        session.execution.reply_chat_id = env.chat_id
+                        generation = session.execution.generation
+                        session.execution.task = asyncio.create_task(
+                            self._run_ask(
+                                chat_id=chat_id,
+                                generation=generation,
+                                reply_recipient=env.sender,
+                                reply_chat_id=env.chat_id,
+                                content=env.content,
+                            )
+                        )
                     continue
 
                 if env.content_type == MessageType.INTERRUPT_ABORT:
                     self._abort_current_turn(session)
                 elif env.content_type == MessageType.INTERRUPT_MESSAGE:
-                    session.buffers.interrupts.append(env)
+                    session.interrupts.append(env)
                 else:
-                    session.buffers.pending.append(env)
+                    await self._mailbox.send(
+                        env.sender,
+                        "(busy: a response is already in progress for this chat)",
+                        content_type=MessageType.SYSTEM,
+                        chat_id=env.chat_id,
+                    )
 
         except asyncio.CancelledError:
             await self.aclose()
@@ -149,8 +157,7 @@ class AgentActor:
         if session is None:
             return
         session.execution.generation += 1
-        session.buffers.pending.clear()
-        session.buffers.interrupts.clear()
+        session.interrupts.clear()
         task = session.execution.task
         session.execution.task = None
         session.execution.reply_recipient = None
@@ -168,7 +175,7 @@ class AgentActor:
         """Cancel the current execution immediately and fence stale replies."""
         task = session.execution.task
         session.execution.generation += 1
-        session.buffers.interrupts.clear()
+        session.interrupts.clear()
         session.execution.task = None
         session.execution.reply_recipient = None
         session.execution.reply_chat_id = None
@@ -178,9 +185,6 @@ class AgentActor:
             else:
                 task.cancel()
                 task.add_done_callback(self._log_aborted_task_result)
-
-        if any(env.content_type == MessageType.MESSAGE for env in session.buffers.pending):
-            self._fire_pending(session.chat_id)
 
     @staticmethod
     def _log_aborted_task_result(task: asyncio.Task) -> None:
@@ -219,35 +223,10 @@ class AgentActor:
         session.execution.reply_recipient = None
         session.execution.reply_chat_id = None
 
-        if any(env.content_type == MessageType.MESSAGE for env in session.buffers.pending):
-            self._fire_pending(chat_id)
-
     def _get_or_create_session(self, chat_id: str) -> SessionState:
         if chat_id not in self._sessions:
             self._sessions[chat_id] = SessionState(chat_id=chat_id)
         return self._sessions[chat_id]
-
-    def _fire_pending(self, chat_id: str) -> None:
-        session = self._sessions[chat_id]
-        messages = [env for env in session.buffers.pending if env.content_type == MessageType.MESSAGE]
-        session.buffers.pending.clear()
-        if not messages:
-            return
-
-        content = self._merge_pending_messages(messages)
-        session.buffers.interrupts.clear()
-        session.execution.reply_recipient = messages[-1].sender
-        session.execution.reply_chat_id = messages[-1].chat_id
-        generation = session.execution.generation
-        session.execution.task = asyncio.create_task(
-            self._run_ask(
-                chat_id=chat_id,
-                generation=generation,
-                reply_recipient=messages[-1].sender,
-                reply_chat_id=messages[-1].chat_id,
-                content=content,
-            )
-        )
 
     async def _run_ask(
         self,
@@ -258,45 +237,29 @@ class AgentActor:
         reply_chat_id: str | None,
         content: MessageContent,
     ) -> None:
-        while True:
-            token: contextvars.Token | None = None
-            try:
-                token = CURRENT_MAILBOX.set(self._mailbox)
-                event_sink = _RouteAwareMailboxEventSink(self._mailbox, reply_recipient, reply_chat_id)
-                response = await self._agent.ask(
-                    chat_id,
-                    content,
-                    interrupt=self._make_interrupt(chat_id, generation),
-                    ctx_metadata={"sender": reply_recipient, "actor_address": self._address},
-                    event_sink=event_sink,
-                )
-            finally:
-                if token is not None:
-                    CURRENT_MAILBOX.reset(token)
-
-            if not self._execution_is_current(chat_id, generation):
-                return
-
-            await self._mailbox.send(
-                reply_recipient,
-                response,
-                chat_id=reply_chat_id,
+        token: contextvars.Token | None = None
+        try:
+            token = CURRENT_MAILBOX.set(self._mailbox)
+            event_sink = _RouteAwareMailboxEventSink(self._mailbox, reply_recipient, reply_chat_id)
+            response = await self._agent.ask(
+                chat_id,
+                content,
+                interrupt=self._make_interrupt(chat_id, generation),
+                ctx_metadata={"sender": reply_recipient, "actor_address": self._address},
+                event_sink=event_sink,
             )
+        finally:
+            if token is not None:
+                CURRENT_MAILBOX.reset(token)
 
-            if not self._execution_is_current(chat_id, generation):
-                return
+        if not self._execution_is_current(chat_id, generation):
+            return
 
-            session = self._sessions[chat_id]
-            messages = [env for env in session.buffers.pending if env.content_type == MessageType.MESSAGE]
-            session.buffers.pending.clear()
-            if not messages:
-                break
-
-            reply_recipient = messages[-1].sender
-            reply_chat_id = messages[-1].chat_id
-            session.execution.reply_recipient = reply_recipient
-            session.execution.reply_chat_id = reply_chat_id
-            content = self._merge_pending_messages(messages)
+        await self._mailbox.send(
+            reply_recipient,
+            response,
+            chat_id=reply_chat_id,
+        )
 
     async def _handle_command(self, env: Envelope) -> None:
         parts = env.content.split(None, 1)
@@ -342,18 +305,18 @@ class AgentActor:
             if session is None:
                 return None
 
-            buf = session.buffers.interrupts
+            buf = session.interrupts
             parts: list[str] = []
             remaining: list[Envelope] = []
             for env in buf:
                 if env.content_type == MessageType.INTERRUPT_ABORT:
-                    session.buffers.interrupts = remaining
+                    session.interrupts = remaining
                     raise AbortTurn()
                 if env.content_type == MessageType.INTERRUPT_MESSAGE:
                     parts.append(f"[from {env.sender}]: {env.content}")
                 else:
                     remaining.append(env)
-            session.buffers.interrupts = remaining
+            session.interrupts = remaining
             if parts:
                 return {"role": "user", "content": "\n\n".join(parts)}
             return None
@@ -372,15 +335,3 @@ class AgentActor:
             and session.execution.task is not None
         )
 
-    @staticmethod
-    def _merge_pending_messages(messages: list[Envelope]) -> MessageContent:
-        if len(messages) == 1:
-            return messages[0].content
-
-        parts: list[dict[str, Any]] = []
-        for idx, env in enumerate(messages):
-            if idx:
-                parts.append({"type": "text", "text": "\n\n"})
-            parts.append({"type": "text", "text": f"[from {env.sender} {env.timestamp.isoformat()}]: "})
-            parts.extend(content_as_parts(env.content))
-        return parts
