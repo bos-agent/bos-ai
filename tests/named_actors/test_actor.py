@@ -1,6 +1,9 @@
+import asyncio
+import uuid
 from datetime import datetime
 
 import pytest
+from conftest import InMemMailRoute
 
 from bos.named_actors.actor import NamedActor
 from bos.protocol import Envelope, MessageType
@@ -12,6 +15,19 @@ class FakeAgent:
 
     async def ask(self, chat_id, message, **kwargs):
         self.calls.append((chat_id, message, kwargs))
+        return "done"
+
+
+class BlockingFakeAgent:
+    def __init__(self):
+        self.calls = []
+        self.started = asyncio.Event()
+        self.finish = asyncio.Event()
+
+    async def ask(self, chat_id, message, **kwargs):
+        self.calls.append((chat_id, message, kwargs))
+        self.started.set()
+        await self.finish.wait()
         return "done"
 
 
@@ -48,6 +64,83 @@ def test_named_actor_builds_turn_metadata():
     assert metadata["user_message_metadata"]["to_actor"] == "bob"
     assert metadata["user_message_metadata"]["to_display"] == "Bob (architect)"
     assert metadata["assistant_message_metadata"]["from_actor"] == "bob"
+
+
+@pytest.mark.asyncio
+async def test_named_actor_rejects_message_during_active_turn_with_busy():
+    agent = BlockingFakeAgent()
+    route = InMemMailRoute()
+    actor_address = f"agent@bob-{uuid.uuid4().hex}"
+    sender_address = f"channel@{uuid.uuid4().hex}"
+    actor_mailbox = route.bind(actor_address)
+    sender_mailbox = route.bind(sender_address)
+    actor = NamedActor(agent, actor_mailbox, actor_name="bob", display_name="Bob", agent_kind="architect")
+    chat_id = "busy-chat"
+
+    actor_task = asyncio.create_task(actor.run())
+    try:
+        await sender_mailbox.send(
+            actor_address,
+            "first",
+            chat_id=chat_id,
+            metadata={"target_actor": "bob", "target_display": "Bob (architect)"},
+        )
+        await asyncio.wait_for(agent.started.wait(), timeout=1)
+
+        await sender_mailbox.send(actor_address, "second", chat_id=chat_id)
+
+        rejection = await asyncio.wait_for(sender_mailbox.receive(), timeout=1)
+        assert rejection.content == "(busy: a response is already in progress for this chat)"
+        assert rejection.content_type == MessageType.SYSTEM
+        assert rejection.chat_id == chat_id
+        assert len(agent.calls) == 1
+        assert agent.calls[0][1] == "first"
+        assert agent.calls[0][2]["ctx_metadata"]["target_actor"] == "bob"
+
+        agent.finish.set()
+        reply = await asyncio.wait_for(sender_mailbox.receive(), timeout=1)
+        assert reply.content == "done"
+        assert reply.metadata["from_actor"] == "bob"
+    finally:
+        agent.finish.set()
+        actor_task.cancel()
+        await asyncio.gather(actor_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_named_actor_accepts_message_after_turn_completes():
+    agent = BlockingFakeAgent()
+    route = InMemMailRoute()
+    actor_address = f"agent@bob-{uuid.uuid4().hex}"
+    sender_address = f"channel@{uuid.uuid4().hex}"
+    actor_mailbox = route.bind(actor_address)
+    sender_mailbox = route.bind(sender_address)
+    actor = NamedActor(agent, actor_mailbox, actor_name="bob", display_name="Bob", agent_kind="architect")
+    chat_id = "sequential-chat"
+
+    actor_task = asyncio.create_task(actor.run())
+    try:
+        await sender_mailbox.send(actor_address, "first", chat_id=chat_id)
+        await asyncio.wait_for(agent.started.wait(), timeout=1)
+
+        agent.finish.set()
+        first_reply = await asyncio.wait_for(sender_mailbox.receive(), timeout=1)
+        assert first_reply.content == "done"
+
+        agent.started.clear()
+        agent.finish.clear()
+
+        await sender_mailbox.send(actor_address, "second", chat_id=chat_id)
+        await asyncio.wait_for(agent.started.wait(), timeout=1)
+
+        agent.finish.set()
+        second_reply = await asyncio.wait_for(sender_mailbox.receive(), timeout=1)
+        assert second_reply.content == "done"
+        assert [call[1] for call in agent.calls] == ["first", "second"]
+    finally:
+        agent.finish.set()
+        actor_task.cancel()
+        await asyncio.gather(actor_task, return_exceptions=True)
 
 
 @pytest.mark.asyncio

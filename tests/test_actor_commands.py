@@ -397,3 +397,71 @@ async def test_resume_retires_previous_in_flight_session():
     finally:
         actor_task.cancel()
         await asyncio.gather(actor_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_message_during_active_turn_is_rejected_with_busy():
+    """Normal messages arriving while a turn is in-flight get an immediate
+    SYSTEM rejection so the sender can decide its own retry strategy."""
+    route = InMemMailRoute()
+    actor_address = f"agent@{uuid.uuid4().hex}"
+    sender_address = f"channel@{uuid.uuid4().hex}"
+    actor_mailbox = route.bind(actor_address)
+    sender_mailbox = route.bind(sender_address)
+    agent = SlowAgent()
+    actor = AgentActor(agent, actor_mailbox)
+
+    actor_task = asyncio.create_task(actor.run())
+    try:
+        await sender_mailbox.send(actor_address, "hello", chat_id="busy-chat")
+        await asyncio.wait_for(agent.started.wait(), timeout=1)
+
+        # Second message while turn is still in-flight
+        await sender_mailbox.send(actor_address, "ping", chat_id="busy-chat")
+
+        rejection = await asyncio.wait_for(sender_mailbox.receive(), timeout=1)
+        assert rejection.content == "(busy: a response is already in progress for this chat)"
+        assert rejection.content_type == MessageType.SYSTEM
+        assert rejection.chat_id == "busy-chat"
+    finally:
+        agent.finish.set()
+        actor_task.cancel()
+        await asyncio.gather(actor_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_message_after_turn_completes_is_accepted():
+    """After the in-flight turn finishes, a new message starts a fresh turn."""
+    route = InMemMailRoute()
+    actor_address = f"agent@{uuid.uuid4().hex}"
+    sender_address = f"channel@{uuid.uuid4().hex}"
+    actor_mailbox = route.bind(actor_address)
+    sender_mailbox = route.bind(sender_address)
+    agent = SlowAgent()
+    actor = AgentActor(agent, actor_mailbox)
+
+    actor_task = asyncio.create_task(actor.run())
+    try:
+        await sender_mailbox.send(actor_address, "first", chat_id="seq-chat")
+        await asyncio.wait_for(agent.started.wait(), timeout=1)
+
+        # Let the turn finish
+        agent.finish.set()
+        reply = await asyncio.wait_for(sender_mailbox.receive(), timeout=1)
+        assert reply.content == "reply for seq-chat"
+
+        # Reset for the next turn
+        agent.started.clear()
+        agent.finish.clear()
+
+        # Next message should be accepted and start a new turn
+        await sender_mailbox.send(actor_address, "second", chat_id="seq-chat")
+        await asyncio.wait_for(agent.started.wait(), timeout=1)
+
+        agent.finish.set()
+        reply2 = await asyncio.wait_for(sender_mailbox.receive(), timeout=1)
+        assert reply2.content == "reply for seq-chat"
+    finally:
+        agent.finish.set()
+        actor_task.cancel()
+        await asyncio.gather(actor_task, return_exceptions=True)

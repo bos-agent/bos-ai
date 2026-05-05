@@ -1,14 +1,10 @@
 from __future__ import annotations
 
-import asyncio
-import contextvars
 from typing import Any
 
 from bos.core import AgentActor, Message, ReactAgent
 from bos.core._utils import _compact
-from bos.core.actor import _RouteAwareMailboxEventSink
-from bos.core.harness import CURRENT_MAILBOX
-from bos.protocol import Envelope, MessageContent, MessageType
+from bos.protocol import Envelope, MessageContent
 from bos.protocol.content import content_as_parts, content_length
 
 
@@ -115,84 +111,13 @@ class NamedActor(AgentActor):
         self.agent_kind = agent_kind
         self.display_label = _display_label(display_name, actor_name, agent_kind)
 
-    def _fire_pending(self, chat_id: str) -> None:
-        session = self._sessions[chat_id]
-        messages = [env for env in session.buffers.pending if env.content_type == MessageType.MESSAGE]
-        session.buffers.pending.clear()
-        if not messages:
-            return
-
-        content = self._merge_pending_messages(messages)
-        last_message = messages[-1]
-        session.buffers.interrupts.clear()
-        session.execution.reply_recipient = last_message.sender
-        session.execution.reply_chat_id = last_message.chat_id
-        generation = session.execution.generation
-        session.execution.task = asyncio.create_task(
-            self._run_ask(
-                chat_id=chat_id,
-                generation=generation,
-                reply_recipient=last_message.sender,
-                reply_chat_id=last_message.chat_id,
-                content=content,
-                inbound_env=last_message,
-            )
+    def _turn_metadata(self, reply_recipient: str, inbound_env: Envelope | None = None) -> dict[str, Any]:
+        inbound_env = inbound_env or Envelope(
+            sender=reply_recipient,
+            recipient=self._address,
+            content="",
+            chat_id=None,
         )
-
-    async def _run_ask(
-        self,
-        *,
-        chat_id: str,
-        generation: int,
-        reply_recipient: str,
-        reply_chat_id: str | None,
-        content: MessageContent,
-        inbound_env: Envelope,
-    ) -> None:
-        while True:
-            token: contextvars.Token | None = None
-            try:
-                token = CURRENT_MAILBOX.set(self._mailbox)
-                event_sink = _RouteAwareMailboxEventSink(self._mailbox, reply_recipient, reply_chat_id)
-                response = await self._agent.ask(
-                    chat_id,
-                    content,
-                    interrupt=self._make_interrupt(chat_id, generation),
-                    ctx_metadata=self._turn_metadata(reply_recipient, inbound_env),
-                    event_sink=event_sink,
-                )
-            finally:
-                if token is not None:
-                    CURRENT_MAILBOX.reset(token)
-
-            if not self._execution_is_current(chat_id, generation):
-                return
-
-            assistant_metadata = self._assistant_metadata(reply_recipient)
-            await self._mailbox.send(
-                reply_recipient,
-                response,
-                chat_id=reply_chat_id,
-                metadata=assistant_metadata,
-            )
-
-            if not self._execution_is_current(chat_id, generation):
-                return
-
-            session = self._sessions[chat_id]
-            messages = [env for env in session.buffers.pending if env.content_type == MessageType.MESSAGE]
-            session.buffers.pending.clear()
-            if not messages:
-                break
-
-            inbound_env = messages[-1]
-            reply_recipient = inbound_env.sender
-            reply_chat_id = inbound_env.chat_id
-            session.execution.reply_recipient = reply_recipient
-            session.execution.reply_chat_id = reply_chat_id
-            content = self._merge_pending_messages(messages)
-
-    def _turn_metadata(self, reply_recipient: str, inbound_env: Envelope) -> dict[str, Any]:
         return {
             "sender": reply_recipient,
             "actor_name": self.actor_name,
@@ -202,6 +127,9 @@ class NamedActor(AgentActor):
             "user_message_metadata": self._user_metadata(inbound_env),
             "assistant_message_metadata": self._assistant_metadata(reply_recipient),
         }
+
+    def _reply_metadata(self, reply_recipient: str, inbound_env: Envelope | None = None) -> dict[str, Any]:
+        return self._assistant_metadata(reply_recipient)
 
     def _user_metadata(self, env: Envelope) -> dict[str, Any]:
         target_actor = env.metadata.get("target_actor") or self.actor_name
