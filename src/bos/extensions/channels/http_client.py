@@ -297,6 +297,16 @@ class HttpChannelClient:
 
         return payload["part"]
 
+    async def list_actors(self) -> dict[str, dict[str, Any]]:
+        """Fetch the list of available named actors from the server."""
+        if self._session is None or self._session.closed:
+            raise RuntimeError("Not connected — connect the HttpChannelClient before listing actors.")
+        async with self._session.get(f"{self._http_base_url}/api/actors") as response:
+            payload = await response.json()
+        if response.status >= 400:
+            raise RuntimeError(payload.get("error") or f"List actors failed with HTTP {response.status}")
+        return payload.get("actors", {})
+
     async def aclose(self) -> None:
         """Close the WebSocket connection and clean up."""
         self._closed = True

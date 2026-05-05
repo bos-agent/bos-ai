@@ -22,7 +22,7 @@ from textual.binding import Binding
 from textual.containers import Horizontal
 from textual.message import Message
 from textual.widgets import Footer, Header, Input, RichLog, Static
-from textual_autocomplete import AutoComplete
+from textual_autocomplete import AutoComplete, DropdownItem
 
 from bos.extensions.channels.http import WS_TAKEOVER_CLOSE_REASON
 from bos.extensions.channels.http_client import HttpChannelClient
@@ -93,12 +93,18 @@ SLASH_COMMANDS = [
 
 
 class SlashAutoComplete(AutoComplete):
-    """AutoComplete that only activates for slash commands."""
+    """AutoComplete that activates for slash commands and @mentions."""
 
     def should_show_dropdown(self, search_string: str) -> bool:
-        if not search_string.startswith("/"):
+        if not (search_string.startswith("/") or search_string.startswith("@")):
             return False
         return super().should_show_dropdown(search_string)
+
+    def apply_completion(self, value: str, state: Any) -> None:
+        """Apply the completion, appending a space after @mentions for routing."""
+        if value.startswith("@"):
+            value = value + " "
+        super().apply_completion(value, state)
 
 
 # ── ChatApp ────────────────────────────────────────────────────
@@ -189,6 +195,7 @@ class ChatApp(App):
         self._busy = False
         self._buffer: list[str] = []
         self._conn_status: str = "connected"
+        self._known_actors: list[str] = []
 
     # ── compose ────────────────────────────────────────────────
 
@@ -212,7 +219,7 @@ class ChatApp(App):
             )
         yield Static(self._status_text(), id="status-bar")
         yield Input(placeholder="Send a message…", id="prompt")
-        yield SlashAutoComplete("#prompt", candidates=SLASH_COMMANDS)
+        yield SlashAutoComplete("#prompt", candidates=self._get_candidates)
         yield Footer()
 
     # ── lifecycle ──────────────────────────────────────────────
@@ -228,6 +235,13 @@ class ChatApp(App):
         log = self.query_one("#chat", RichLog)
         log.write("[bold $primary]Agent CLI ready.[/]")
         log.write("[dim]Type /help for commands · Escape to abort · Ctrl+Enter to interject · Ctrl+C to quit[/]\n")
+
+        # Fetch actor list for @mention autocomplete
+        try:
+            actors = await self._client.list_actors()
+            self._known_actors = list(actors.keys())
+        except Exception:
+            logger.debug("Failed to fetch actor list", exc_info=True)
 
         self.query_one("#prompt", Input).focus()
 
@@ -568,6 +582,17 @@ class ChatApp(App):
                 self._busy = False
                 self._update_status()
                 self._write_system(f"[yellow]⚠ Send failed — reconnecting: {exc}[/]")
+
+    # ── autocomplete ───────────────────────────────────────────
+
+    def _get_candidates(self, state: Any) -> list[str]:
+        """Return candidate completions based on the current input prefix."""
+        text = state.text[: state.cursor_position]
+        if text.startswith("/"):
+            return [DropdownItem(cmd) for cmd in SLASH_COMMANDS]
+        if text.startswith("@"):
+            return [DropdownItem(f"@{a}") for a in self._known_actors]
+        return []
 
     # ── helpers ────────────────────────────────────────────────
 

@@ -431,6 +431,22 @@ async def _status_handler(request: web.Request) -> web.Response:
     return web.json_response({"ok": True, **info})
 
 
+async def _actors_handler(request: web.Request) -> web.Response:
+    """GET /api/actors — list available named actors for autocomplete."""
+    registry = request.app.get(APP_ACTOR_REGISTRY)
+    if registry is None:
+        return web.json_response({"ok": True, "actors": {}})
+    actors = {
+        name: {
+            "display_name": rec.display_name,
+            "agent_kind": rec.agent_kind,
+            "is_default": rec.is_default,
+        }
+        for name, rec in registry.list_actors().items()
+    }
+    return web.json_response({"ok": True, "actors": actors})
+
+
 # ── HttpChannel (server) ───────────────────────────────────────
 
 
@@ -488,6 +504,7 @@ class HttpChannel:
         app.router.add_post("/api/send", _send_handler)
         app.router.add_post("/api/upload-image", _upload_image_handler)
         app.router.add_get("/api/status", _status_handler)
+        app.router.add_get("/api/actors", _actors_handler)
         app.on_cleanup.append(_cleanup_runtime_state)
         return app
 
