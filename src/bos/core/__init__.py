@@ -54,13 +54,6 @@ from .contract import (
     ep_tool,
     ep_turn_interceptor,
 )
-from .defaults.agent_spec import default_agent_spec
-from .defaults.consolidator import NaiveConsolidator
-from .defaults.jsonl_mailbox import JsonlMailRoute
-from .defaults.litellm_provider import litellm_complete
-from .defaults.markdown_memory import MarkdownMemoryExtension
-from .defaults.skills_loader import FileSystemSkillsLoader
-from .events import DerivedEventSink, MailboxEventSink, derive_event_sink
 from .harness import (
     CURRENT_HARNESS,
     CURRENT_MAILBOX,
@@ -81,25 +74,18 @@ __all__ = [
     "ChainReactInterceptor",
     "Closeable",
     "Consolidator",
-    "default_agent_spec",
-    "DerivedEventSink",
     "Envelope",
     "EventSink",
     "Extension",
     "ExtensionPoint",
-    "FileSystemSkillsLoader",
-    "JsonlMailRoute",
-    "MarkdownMemoryExtension",
     "LLMClient",
     "LLMResponse",
     "MailBox",
-    "MailboxEventSink",
     "MailRoute",
     "MemoryEntry",
     "MemoryExtension",
     "Message",
     "MessageStore",
-    "NaiveConsolidator",
     "ReactAgent",
     "SkillsLoader",
     "ToolCallRequest",
@@ -108,7 +94,6 @@ __all__ = [
     "TurnInterceptor",
     "TurnEvent",
     "bootstrap_platform",
-    "derive_event_sink",
     "ep_actor_command",
     "ep_agent",
     "ep_channel",
@@ -120,7 +105,6 @@ __all__ = [
     "ep_skills_loader",
     "ep_tool",
     "ep_turn_interceptor",
-    "litellm_complete",
     "_aclose",
     "_allowed",
     "_apply",

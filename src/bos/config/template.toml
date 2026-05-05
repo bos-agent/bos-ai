@@ -55,7 +55,9 @@ model = "gemini/gemini-3.1-pro-preview"
 # llm reasonging effort level, which would be sent along the llm model call
 #reasoning_effort = "medium"
 
-# the context window size limit. once exceeded, compaction would happen
+# the dynamic history budget for this agent. once exceeded, chat history compaction
+# may happen. this does not describe the full model context window and does not
+# include built system prompt, tool definitions, maxims, or other static prompt parts.
 #max_tokens = 131072
 
 # the max tool call iteration limit for a turn
@@ -98,6 +100,16 @@ model = "gemini/gemini-3.1-pro-preview"
 #configure the storage path for the builtin jsonl message store default is <bos_dir>/memory
 #name = "_default"
 #store_dir = "./memory"
+
+# configure the harness-level consolidator service. this is separate from
+# platform.agent_defaults.model. model resolution is:
+# harness.consolidator.model -> BOS_CONSOLIDATOR_MODEL -> BOS_MODEL.
+#[harness.consolidator]
+#model = "gemini/gemini-2.5-flash"
+#instruction = """
+#Summarize the conversation history for future turns.
+#Preserve user intent, decisions, unresolved tasks, tool results, and important constraints.
+#"""
 
 # cofigure the mail route extension
 #[harness.mail_route]

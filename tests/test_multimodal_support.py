@@ -9,13 +9,13 @@ from conftest import InMemMailRoute, InMemMessageStore
 
 from bos.core import (
     Envelope,
+    LLMResponse,
     Message,
-    NaiveConsolidator,
     TurnContext,
     _as_parts,
-    litellm_complete,
 )
-from bos.core.defaults.litellm_provider import _normalize_litellm_message
+from bos.core.defaults.consolidator import LLMConsolidator
+from bos.core.defaults.litellm_provider import _normalize_litellm_message, litellm_complete
 from bos.extensions.providers.antigravity_provider import _convert_messages as convert_antigravity_messages
 from bos.extensions.providers.codex_provider import _convert_user_message as convert_codex_user_message
 from bos.protocol import MessageType
@@ -162,15 +162,25 @@ async def test_inmem_message_store_list_chats_uses_structured_content_preview():
 
 
 @pytest.mark.asyncio
-async def test_naive_consolidator_summarizes_structured_message_content_without_error():
-    summary = await NaiveConsolidator().consolidate(
+async def test_default_consolidator_preserves_structured_message_content_in_prompt():
+    captured: dict[str, object] = {}
+
+    class FakeLLM:
+        async def complete(self, messages, **kwargs):
+            captured["messages"] = messages
+            captured["kwargs"] = kwargs
+            return LLMResponse(content="Structured content summary.")
+
+    summary = await LLMConsolidator(llm=FakeLLM(), model="test/consolidator").consolidate(
         [
-            {"role": "user", "content": _structured_message_content()},
-            {"role": "assistant", "content": "Processed."},
+            Message(llm_message={"role": "user", "content": _structured_message_content()}),
+            Message(llm_message={"role": "assistant", "content": "Processed."}),
         ]
     )
 
-    assert summary == "user: Describe this image. [image]\nassistant: Processed."
+    assert summary == "Structured content summary."
+    assert captured["kwargs"] == {"model": "test/consolidator"}
+    assert captured["messages"][1]["content"] == _structured_message_content()
 
 
 @pytest.mark.asyncio

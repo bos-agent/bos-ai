@@ -11,7 +11,6 @@ from functools import wraps
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal
 
 from bos.protocol import MessageContent, TurnEvent
-from bos.protocol.content import content_length
 
 from ._utils import (
     _aclose,
@@ -34,6 +33,7 @@ from .contract import (
 )
 from .defaults import bos_maxims, bos_memory_usage
 from .events import derive_event_sink
+from .history import estimate_message_history_tokens
 from .llm import LLMClient, ToolCallRequest
 from .registry import ToolRegistry
 
@@ -189,10 +189,16 @@ class ReactAgent:
         llm_args: dict[str, Any] | None = None,
         event_sink: EventSink | None = None,
     ) -> str:
+        llm_params = {
+            "model": self._model,
+            "reasoning_effort": self._reasoning_effort,
+        } | (llm_args or {})
+        budget_model = llm_params.get("model")
+
         ctx = TurnContext(
             chat_id=chat_id,
             turn_id=uuid.uuid4().hex,
-            history=await self._get_chat_history(chat_id),
+            history=await self._get_chat_history(chat_id, budget_model=budget_model),
             tool_defs=self._get_tool_defs(),
             metadata=(ctx_metadata or {}).copy(),
         )
@@ -204,11 +210,6 @@ class ReactAgent:
             {"role": "user", "content": content or ""},
             **(user_message_metadata if isinstance(user_message_metadata, dict) else {}),
         )
-
-        llm_params = {
-            "model": self._model,
-            "reasoning_effort": self._reasoning_effort,
-        } | (llm_args or {})
 
         cache_index = 0
 
@@ -421,36 +422,17 @@ class ReactAgent:
             return await ep_tool.invoke_async(tool_name, kwargs)
         raise Exception(f"Tool {tool_name} not found")
 
-    async def _get_chat_history(self, chat_id: str) -> list[dict]:
-        def _format_content(msg: dict) -> MessageContent:
-            content = msg.get("content", "")
-            if msg.get("role") == "tool" and isinstance(content, str) and len(content) > 150:
-                return content[:147] + "..."
-            return content
+    async def _get_chat_history(self, chat_id: str, *, budget_model: str | None) -> list[dict]:
+        messages = list(await self._message_store.get_messages(chat_id))
+        projection = estimate_message_history_tokens(messages, budget_model=budget_model)
 
-        async def _get_messages() -> list[dict]:
-            messages = await self._message_store.get_messages(chat_id)
-            return [
-                _compact(
-                    {
-                        "role": m.llm_message["role"],
-                        "content": _format_content(m.llm_message),
-                        "tool_calls": m.llm_message.get("tool_calls", None),
-                        "tool_call_id": m.llm_message.get("tool_call_id", None),
-                        "name": m.llm_message.get("name", None),
-                    }
-                )
-                for m in messages
-            ]
-
-        history = await _get_messages()
-
-        if sum(content_length(m.get("content", "")) for m in history) > self._max_tokens:
-            summary = await self._consolidator.consolidate(history)
+        if projection.estimated_tokens > self._max_tokens:
+            summary = await self._consolidator.consolidate(messages)
             await self._message_store.save_summary(chat_id, summary)
-            history = await _get_messages()
+            messages = list(await self._message_store.get_messages(chat_id))
+            projection = estimate_message_history_tokens(messages, budget_model=budget_model)
 
-        return history
+        return projection.messages
 
     async def _build_system_prompt(self) -> str:
         sections = [

@@ -3,7 +3,7 @@ import json
 import uuid
 
 import pytest
-from conftest import InMemMailRoute, InMemMemoryExtension, InMemMessageStore
+from conftest import InMemMailRoute, InMemMemoryExtension, InMemMessageStore, MessageOnlyConsolidator
 
 from bos.core import (
     AgentActor,
@@ -14,7 +14,6 @@ from bos.core import (
     ep_provider,
 )
 from bos.core.agent import ChainReactInterceptor, ReactAgent
-from bos.core.defaults.consolidator import NaiveConsolidator
 from bos.core.defaults.skills_loader import FileSystemSkillsLoader
 from bos.protocol import MessageType
 
@@ -22,7 +21,7 @@ from bos.protocol import MessageType
 def create_test_agent(**kwargs):
     kwargs.setdefault("message_store", InMemMessageStore())
     kwargs.setdefault("memory", InMemMemoryExtension())
-    kwargs.setdefault("consolidator", NaiveConsolidator())
+    kwargs.setdefault("consolidator", MessageOnlyConsolidator())
     kwargs.setdefault("skills_loader", FileSystemSkillsLoader())
     kwargs.setdefault("interceptor", ChainReactInterceptor())
     return ReactAgent(**kwargs)
@@ -157,6 +156,7 @@ async def test_ask_subagent_emits_child_lineage_events(tmp_path):
         async with AgentHarness(
             bos_dir=bos_dir,
             workspace=tmp_path,
+            consolidator=MessageOnlyConsolidator(),
             subagent_defaults={"task_template": "--- Sub-agent Instructions ---\n{task}"},
         ) as harness:
             manager = harness.create_agent(manager_name)

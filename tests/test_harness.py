@@ -2,21 +2,22 @@ import logging
 import uuid
 
 import pytest
-from conftest import InMemMemoryExtension, InMemMessageStore
+from conftest import CloseTrackingConsolidator, InMemMemoryExtension, InMemMessageStore, MessageOnlyConsolidator
 
-from bos.core import AgentHarness, LLMResponse, ToolCallRequest, ep_agent, ep_provider
+from bos.config.workspace import Workspace
+from bos.core import AgentHarness, LLMResponse, Message, ToolCallRequest, bootstrap_platform, ep_agent, ep_provider
 from bos.core.agent import ChainReactInterceptor, ReactAgent
 from bos.core.contract import SkillMeta
 from bos.core.defaults.agent_spec import bos_maxims as default_maxims
-from bos.core.defaults.consolidator import NaiveConsolidator
 from bos.core.defaults.skills_loader import FileSystemSkillsLoader
+from bos.core.history import HistoryProjection
 from bos.core.registry import ToolRegistry
 
 
 def create_test_agent(**kwargs):
     kwargs.setdefault("message_store", InMemMessageStore())
     kwargs.setdefault("memory", InMemMemoryExtension())
-    kwargs.setdefault("consolidator", NaiveConsolidator())
+    kwargs.setdefault("consolidator", MessageOnlyConsolidator())
     kwargs.setdefault("skills_loader", FileSystemSkillsLoader())
     kwargs.setdefault("interceptor", ChainReactInterceptor())
     return ReactAgent(**kwargs)
@@ -48,7 +49,7 @@ async def test_harness_create_agent_defaults_to_no_capabilities(tmp_path):
     bos_dir = tmp_path / ".bos"
     bos_dir.mkdir()
 
-    async with AgentHarness(bos_dir=bos_dir, workspace=tmp_path) as harness:
+    async with AgentHarness(bos_dir=bos_dir, workspace=tmp_path, consolidator=MessageOnlyConsolidator()) as harness:
         agent = harness.create_agent()
 
         assert agent._tools == []
@@ -67,7 +68,7 @@ async def test_registered_agent_defaults_to_no_capabilities(tmp_path):
     try:
         ReactAgent.register(name=agent_name, description="Locked", system_prompt="Stay locked down.")
 
-        async with AgentHarness(bos_dir=bos_dir, workspace=tmp_path) as harness:
+        async with AgentHarness(bos_dir=bos_dir, workspace=tmp_path, consolidator=MessageOnlyConsolidator()) as harness:
             agent = harness.create_agent(agent_name)
 
             assert agent._tools == []
@@ -96,7 +97,7 @@ async def test_registered_agent_star_capabilities_enable_all(tmp_path):
             subagents="*",
         )
 
-        async with AgentHarness(bos_dir=bos_dir, workspace=tmp_path) as harness:
+        async with AgentHarness(bos_dir=bos_dir, workspace=tmp_path, consolidator=MessageOnlyConsolidator()) as harness:
             agent = harness.create_agent(agent_name)
             tool_names = {tool_def["function"]["name"] for tool_def in agent._get_tool_defs()}
 
@@ -164,6 +165,7 @@ Use this skill to search YouTube.
     async with AgentHarness(
         bos_dir=bos_dir,
         workspace=tmp_path,
+        consolidator=MessageOnlyConsolidator(),
         skills_loader={"skill_dirs": [skills_dir]},
     ) as harness:
         agent = harness.create_agent(
@@ -369,6 +371,7 @@ async def test_harness_passes_tool_config_to_agent_tools(tmp_path):
         async with AgentHarness(
             bos_dir=bos_dir,
             workspace=tmp_path,
+            consolidator=MessageOnlyConsolidator(),
             tools={"EchoWithConfig": {"mode": "strict", "timeout_seconds": 15}},
         ) as harness:
             agent = harness.create_agent(
@@ -445,6 +448,7 @@ async def test_harness_ask_subagent_delegates_to_named_specialist(tmp_path):
         async with AgentHarness(
             bos_dir=bos_dir,
             workspace=tmp_path,
+            consolidator=MessageOnlyConsolidator(),
             subagent_defaults={
                 "task_template": "--- Sub-agent Instructions ---\n{task}",
             },
@@ -517,7 +521,11 @@ async def test_ask_subagent_rejects_disallowed_registered_agent(tmp_path):
 
         bos_dir = tmp_path / ".bos"
         bos_dir.mkdir()
-        async with AgentHarness(bos_dir=bos_dir, workspace=tmp_path) as harness:
+        async with AgentHarness(
+            bos_dir=bos_dir,
+            workspace=tmp_path,
+            consolidator=MessageOnlyConsolidator(),
+        ) as harness:
             manager = harness.create_agent(manager_name)
             result = await manager.ask("parent-chat", "Try the blocked subagent.")
             chats = await harness.message_store.list_chats()
@@ -529,3 +537,134 @@ async def test_ask_subagent_rejects_disallowed_registered_agent(tmp_path):
         ep_agent._extensions.pop(manager_name, None)
         ep_agent._extensions.pop(allowed_name, None)
         ep_agent._extensions.pop(blocked_name, None)
+
+
+@pytest.mark.asyncio
+async def test_harness_consolidator_model_precedence(tmp_path, monkeypatch):
+    bos_dir = tmp_path / ".bos"
+    bos_dir.mkdir()
+
+    monkeypatch.setenv("BOS_CONSOLIDATOR_MODEL", "env/consolidator")
+    monkeypatch.setenv("BOS_MODEL", "env/base")
+    async with AgentHarness(
+        bos_dir=bos_dir,
+        workspace=tmp_path,
+        consolidator={"model": "explicit/consolidator"},
+    ) as harness:
+        assert harness.consolidator._model == "explicit/consolidator"
+
+    monkeypatch.delenv("BOS_CONSOLIDATOR_MODEL")
+    async with AgentHarness(bos_dir=bos_dir, workspace=tmp_path) as harness:
+        assert harness.consolidator._model == "env/base"
+
+
+@pytest.mark.asyncio
+async def test_harness_uses_bos_consolidator_model_before_bos_model(tmp_path, monkeypatch):
+    bos_dir = tmp_path / ".bos"
+    bos_dir.mkdir()
+    monkeypatch.setenv("BOS_CONSOLIDATOR_MODEL", "env/consolidator")
+    monkeypatch.setenv("BOS_MODEL", "env/base")
+
+    async with AgentHarness(bos_dir=bos_dir, workspace=tmp_path) as harness:
+        assert harness.consolidator._model == "env/consolidator"
+
+
+@pytest.mark.asyncio
+async def test_harness_requires_consolidator_model_at_entry(tmp_path, monkeypatch):
+    bos_dir = tmp_path / ".bos"
+    bos_dir.mkdir()
+    monkeypatch.delenv("BOS_CONSOLIDATOR_MODEL", raising=False)
+    monkeypatch.delenv("BOS_MODEL", raising=False)
+
+    with pytest.raises(RuntimeError, match="harness.consolidator.model.*BOS_CONSOLIDATOR_MODEL.*BOS_MODEL"):
+        async with AgentHarness(bos_dir=bos_dir, workspace=tmp_path):
+            pass
+
+
+def test_bootstrap_platform_does_not_require_consolidator_model(tmp_path, monkeypatch):
+    monkeypatch.delenv("BOS_CONSOLIDATOR_MODEL", raising=False)
+    monkeypatch.delenv("BOS_MODEL", raising=False)
+
+    bootstrap_platform(tmp_path / ".bos")
+
+
+@pytest.mark.asyncio
+async def test_platform_agent_defaults_model_is_not_consolidator_fallback(tmp_path, monkeypatch):
+    bos_dir = tmp_path / ".bos"
+    bos_dir.mkdir()
+    (bos_dir / "config.toml").write_text(
+        """
+[platform.agent_defaults]
+model = "agent/default"
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("BOS_CONSOLIDATOR_MODEL", raising=False)
+    monkeypatch.delenv("BOS_MODEL", raising=False)
+
+    workspace = Workspace(tmp_path)
+    with pytest.raises(RuntimeError, match="harness.consolidator.model.*BOS_CONSOLIDATOR_MODEL.*BOS_MODEL"):
+        async with workspace.harness():
+            pass
+
+
+@pytest.mark.asyncio
+async def test_harness_closes_custom_consolidator(tmp_path):
+    bos_dir = tmp_path / ".bos"
+    bos_dir.mkdir()
+    consolidator = CloseTrackingConsolidator()
+
+    async with AgentHarness(bos_dir=bos_dir, workspace=tmp_path, consolidator=consolidator):
+        pass
+
+    assert consolidator.closed is True
+
+
+@pytest.mark.asyncio
+async def test_agent_history_budget_uses_resolved_turn_model(monkeypatch):
+    suffix = uuid.uuid4().hex
+    provider_name = f"test_budget_model_provider_{suffix}"
+    seen_budget_models: list[str | None] = []
+
+    def fake_estimate(messages, *, budget_model):
+        seen_budget_models.append(budget_model)
+        return HistoryProjection(messages=[], estimated_tokens=0, model=budget_model, source="fallback")
+
+    @ep_provider(name=provider_name)
+    async def provider(messages, model=None, **kwargs):
+        return LLMResponse(content="ok")
+
+    monkeypatch.setattr("bos.core.agent.estimate_message_history_tokens", fake_estimate)
+    try:
+        agent = create_test_agent(model=f"{provider_name}/base")
+        result = await agent.ask("budget-model-chat", "Hello.", llm_args={"model": f"{provider_name}/override"})
+
+        assert result == "ok"
+        assert seen_budget_models == [f"{provider_name}/override"]
+    finally:
+        ep_provider._extensions.pop(provider_name, None)
+
+
+@pytest.mark.asyncio
+async def test_agent_auto_compaction_passes_message_objects(monkeypatch):
+    store = InMemMessageStore()
+    consolidator = MessageOnlyConsolidator()
+    await store.save_messages(
+        "compact-chat",
+        [Message(llm_message={"role": "user", "content": "large history"})],
+    )
+
+    def fake_estimate(messages, *, budget_model):
+        projected = [message.llm_message for message in messages]
+        return HistoryProjection(messages=projected, estimated_tokens=999, model=budget_model, source="fallback")
+
+    monkeypatch.setattr("bos.core.agent.estimate_message_history_tokens", fake_estimate)
+    agent = create_test_agent(message_store=store, consolidator=consolidator, max_tokens=1)
+
+    history = await agent._get_chat_history("compact-chat", budget_model="test/model")
+
+    assert consolidator.calls
+    assert all(isinstance(message, Message) for message in consolidator.calls[0][0])
+    assert any(message.is_summary for message in store._messages["compact-chat"])
+    assert history[-1]["content"].startswith("Chat summary:")
