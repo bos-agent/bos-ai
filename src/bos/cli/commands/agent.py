@@ -298,8 +298,8 @@ def start(ctx, foreground: bool, docker: bool):
     ws, rd = _get_ws_and_rd(ctx)
     ws.bootstrap_platform()
 
+    from bos.named_actors.runner import start_named_actors
     from bos.runner.proc import is_running, read_state, run_docker_foreground, start_background, start_docker
-    from bos.squad.runner import start_squad
 
     if is_running(rd):
         state = read_state(rd)
@@ -321,7 +321,7 @@ def start(ctx, foreground: bool, docker: bool):
         click.echo(f"Agent starting in Docker ({container_id[:12]})…")
     elif foreground:
         click.echo("Starting agent in foreground…")
-        asyncio.run(start_squad(ws))
+        asyncio.run(start_named_actors(ws))
         return
     else:
         argv = [sys.executable, "-m", "bos.runner._main", "--workspace", str(ws.workspace)]

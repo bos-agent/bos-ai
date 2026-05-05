@@ -222,6 +222,8 @@ async def _ws_handler(request: web.Request) -> web.WebSocketResponse:
                         client_id=client_id,
                         chat_id=conn.chat_id,
                     )
+                    if env.recipient.startswith("agent@"):
+                        metadata.setdefault("target_actor", env.recipient.split("@", 1)[1])
 
                     recipient = env.recipient
                     content = env.content
@@ -232,6 +234,7 @@ async def _ws_handler(request: web.Request) -> web.WebSocketResponse:
                         )
                         recipient = route_result.target_address
                         content = route_result.content
+                        metadata = route_result.metadata
 
                     await mailbox.send(
                         recipient,
@@ -377,6 +380,8 @@ async def _send_handler(request: web.Request) -> web.Response:
             metadata = env.metadata
         else:
             raise ValueError("POST /api/send requires chat_id or client_id.")
+        if env.recipient.startswith("agent@"):
+            metadata.setdefault("target_actor", env.recipient.split("@", 1)[1])
 
         recipient = env.recipient
         content = env.content
@@ -387,6 +392,7 @@ async def _send_handler(request: web.Request) -> web.Response:
             )
             recipient = route_result.target_address
             content = route_result.content
+            metadata = route_result.metadata
 
         await mailbox.send(
             recipient,

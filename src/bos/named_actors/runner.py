@@ -11,6 +11,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_ACTOR_RUNTIME_KEYS = {"agent", "display_name"}
+_FORBIDDEN_ACTOR_KEYS = {"identity", "memory_scope", "role_label", "name"}
+
 
 def _parse_actors_config(config: dict[str, Any]) -> dict[str, dict[str, Any]]:
     main = config.get("main", {})
@@ -19,33 +22,48 @@ def _parse_actors_config(config: dict[str, Any]) -> dict[str, dict[str, Any]]:
     actors = main.get("actors", {})
     if not isinstance(actors, dict):
         return {}
-    return {str(k): dict(v) for k, v in actors.items() if isinstance(v, dict)}
+    parsed: dict[str, dict[str, Any]] = {}
+    for key, value in actors.items():
+        if not isinstance(value, dict):
+            continue
+        actor_name = str(key)
+        cfg = dict(value)
+        _validate_actor_config(actor_name, cfg)
+        parsed[actor_name] = cfg
+    return parsed
 
 
-async def start_squad(workspace: Workspace) -> None:
+def _validate_actor_config(actor_name: str, cfg: dict[str, Any]) -> None:
+    forbidden = sorted(_FORBIDDEN_ACTOR_KEYS.intersection(cfg))
+    if forbidden:
+        names = ", ".join(forbidden)
+        raise ValueError(
+            f"main.actors.{actor_name} uses forbidden field(s): {names}. "
+            "The actor table key is the identity and memory scope; use 'agent' for the reusable agent kind."
+        )
+
+
+def _agent_overrides(actor_cfg: dict[str, Any]) -> dict[str, Any]:
+    return {k: v for k, v in actor_cfg.items() if k not in _ACTOR_RUNTIME_KEYS}
+
+
+async def start_named_actors(workspace: Workspace) -> None:
     from bos.core import AgentActor, Channel, ep_channel
     from bos.core.chat_state import ChatState
-    from bos.squad.actor import SquadActor
-    from bos.squad.registry import ActorRegistry
+    from bos.named_actors.actor import NamedActor
+    from bos.named_actors.registry import ActorRegistry
 
     actors_cfg = _parse_actors_config(workspace.config)
-    channels_cfg = workspace.resolve_channels(
-        runtime_kind=os.environ.get("BOS_RUNTIME", "process")
-    )
+    channels_cfg = workspace.resolve_channels(runtime_kind=os.environ.get("BOS_RUNTIME", "process"))
 
     if not actors_cfg:
         agent_name = workspace.get_main_agent_name()
         actor_address = workspace.get_main_agent_address()
-        logger.info(
-            "No [main.actors] configured; starting single actor agent=%r",
-            agent_name,
-        )
+        logger.info("No [main.actors] configured; starting single actor agent=%r", agent_name)
         async with workspace.harness() as harness:
             chat_state = ChatState(workspace.bos_dir)
             agent = harness.create_agent(agent_name)
-            actor = AgentActor(
-                agent, harness.mail_route.bind(actor_address), chat_state=chat_state
-            )
+            actor = AgentActor(agent, harness.mail_route.bind(actor_address), chat_state=chat_state)
             channels = _create_channels(channels_cfg, ep_channel, Channel)
             task = asyncio.create_task(_run_actor_and_channels(actor, channels, harness))
             await asyncio.sleep(0.2)
@@ -54,43 +72,49 @@ async def start_squad(workspace: Workspace) -> None:
         return
 
     actor_names = list(actors_cfg.keys())
-    logger.info(
-        "Starting squad with %d actor(s): %s",
-        len(actor_names),
-        ", ".join(actor_names),
-    )
+    logger.info("Starting named actors with %d actor(s): %s", len(actor_names), ", ".join(actor_names))
 
     async with workspace.harness() as harness:
         chat_state = ChatState(workspace.bos_dir)
         registry = ActorRegistry()
-        actors: list[SquadActor] = []
+        actors: list[NamedActor] = []
 
-        for routing_name, cfg in actors_cfg.items():
-            agent_name = cfg.get("agent", routing_name)
-            address = f"agent@{routing_name}"
+        for actor_name, cfg in actors_cfg.items():
+            agent_kind = str(cfg.get("agent") or actor_name)
+            display_name = cfg.get("display_name")
+            display_name = str(display_name) if display_name is not None else None
+            address = f"agent@{actor_name}"
             mailbox = harness.mail_route.bind(address)
-            is_default = routing_name == "main"
+            is_default = actor_name == "main"
 
-            agent = _build_squad_agent(harness, agent_name, workspace.config)
-            actor = SquadActor(
-                agent, mailbox, chat_state=chat_state, actor_name=routing_name
+            agent = _build_named_agent(harness, agent_kind, actor_name, _agent_overrides(cfg))
+            actor = NamedActor(
+                agent,
+                mailbox,
+                chat_state=chat_state,
+                actor_name=actor_name,
+                display_name=display_name,
+                agent_kind=agent_kind,
             )
             actors.append(actor)
-            registry.register(routing_name, mailbox, is_default=is_default)
+            registry.register(
+                actor_name,
+                mailbox,
+                is_default=is_default,
+                display_name=display_name,
+                agent_kind=agent_kind,
+            )
 
         channels = _create_channels(channels_cfg, ep_channel, Channel, registry=registry)
 
-        async def _run_squad() -> None:
+        async def _run_named_actors() -> None:
             async with asyncio.TaskGroup() as tg:
                 for actor in actors:
                     tg.create_task(actor.run(), name=f"actor:{actor.actor_name}")
                 for ch, address in channels:
-                    tg.create_task(
-                        ch.run(harness.mail_route.bind(address)),
-                        name=f"channel:{address}",
-                    )
+                    tg.create_task(ch.run(harness.mail_route.bind(address)), name=f"channel:{address}")
 
-        task = asyncio.create_task(_run_squad())
+        task = asyncio.create_task(_run_named_actors())
         await asyncio.sleep(0.2)
         _write_channel_state(workspace, channels)
         await task
@@ -114,9 +138,7 @@ def _write_channel_state(workspace, channels) -> None:
         logger.debug("Could not update agent.state with channel info: %s", exc)
 
 
-def _create_channels(
-    channels_cfg, ep_channel, Channel, registry=None
-) -> list[tuple[Channel, str]]:
+def _create_channels(channels_cfg, ep_channel, Channel, registry=None) -> list[tuple[Channel, str]]:
     from bos.core import _create_extension_instance
 
     channels: list[tuple[Channel, str]] = []
@@ -132,43 +154,32 @@ def _create_channels(
     return channels
 
 
-async def _run_actor_and_channels(
-    actor, channels, harness
-) -> None:
+async def _run_actor_and_channels(actor, channels, harness) -> None:
     async with asyncio.TaskGroup() as tg:
         tg.create_task(actor.run(), name="actor")
         for ch, address in channels:
-            tg.create_task(
-                ch.run(harness.mail_route.bind(address)),
-                name=f"channel:{address}",
-            )
+            tg.create_task(ch.run(harness.mail_route.bind(address)), name=f"channel:{address}")
 
 
-def _build_squad_agent(harness, agent_name: str, config: dict[str, Any]):
+def _build_named_agent(harness, agent_kind: str, scope: str, actor_overrides: dict[str, Any]):
+    from bos.core import ep_agent
     from bos.core._utils import _apply
-    from bos.squad.actor import SquadAgent
+    from bos.named_actors.actor import NamedAgent
+    from bos.named_actors.memory import ScopedMemory
 
-    agents = config.get("platform", {}).get("agents", [])
     agent_spec: dict[str, Any] = {}
-    for a in agents:
-        if isinstance(a, dict) and a.get("name") == agent_name:
-            agent_spec = {k: v for k, v in a.items() if k != "name"}
-            break
+    if ep_agent.has(agent_kind):
+        agent_spec.update(ep_agent.get(agent_kind).defaults)
+    agent_spec.update(actor_overrides)
 
-    defaults = config.get("platform", {}).get("agent_defaults", {})
-    if isinstance(defaults, dict):
-        for k, v in defaults.items():
-            agent_spec.setdefault(k, v)
-
-    kwargs = {
-        "name": agent_name,
+    kwargs = agent_spec | {
+        "name": agent_kind,
         "llm": harness.llm,
         "message_store": harness.message_store,
-        "memory": harness.memory,
+        "memory": ScopedMemory(harness.memory, scope),
         "consolidator": harness.consolidator,
         "skills_loader": harness.skills_loader,
         "interceptor": harness.interceptor,
         "tool_configs": harness._tools_cfg,
-        **agent_spec,
     }
-    return _apply(SquadAgent, kwargs)
+    return _apply(NamedAgent, kwargs)

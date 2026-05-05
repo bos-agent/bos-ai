@@ -46,8 +46,8 @@ def main() -> None:
 
     # Bootstrap workspace
     from bos.config import Workspace
+    from bos.named_actors.runner import start_named_actors
     from bos.runner.proc import RunDir, write_state
-    from bos.squad.runner import start_squad
 
     ws = Workspace(args.workspace)
     ws.bootstrap_platform()
@@ -99,7 +99,7 @@ def main() -> None:
         )
         logger.info("Actor process started (PID %d, workspace=%s)", os.getpid(), ws.workspace)
         try:
-            await start_squad(ws)
+            await start_named_actors(ws)
         except asyncio.CancelledError:
             logger.info("Actor cancelled — exiting cleanly")
         finally:

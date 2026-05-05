@@ -1,7 +1,6 @@
-# tests/squad/test_registry.py
 import pytest
 
-from bos.squad.registry import ActorRegistry
+from bos.named_actors.registry import ActorRegistry
 
 
 class FakeMailBox:
@@ -12,8 +11,8 @@ class FakeMailBox:
 @pytest.fixture
 def registry():
     reg = ActorRegistry()
-    reg.register("main", FakeMailBox("agent@main"), is_default=True)
-    reg.register("researcher", FakeMailBox("agent@researcher"))
+    reg.register("main", FakeMailBox("agent@main"), is_default=True, display_name="Main", agent_kind="assistant")
+    reg.register("researcher", FakeMailBox("agent@researcher"), display_name="Rae", agent_kind="assistant")
     reg.register("reviewer", FakeMailBox("agent@reviewer"))
     return reg
 
@@ -36,7 +35,7 @@ class TestResolveAddress:
         actors = registry.list_actors()
         assert set(actors.keys()) == {"main", "researcher", "reviewer"}
         assert actors["main"].is_default is True
-        assert actors["researcher"].is_default is False
+        assert actors["researcher"].display_label == "Rae (assistant)"
 
 
 class TestRoute:
@@ -45,12 +44,14 @@ class TestRoute:
         assert result.target_address == "agent@researcher"
         assert result.target_actor == "researcher"
         assert result.content == "find papers on X"
+        assert result.metadata["target_actor"] == "researcher"
+        assert result.metadata["target_display"] == "Rae (assistant)"
 
-    def test_mention_with_hyphenated_name(self, registry):
-        reg2 = ActorRegistry()
-        reg2.register("main", FakeMailBox("agent@main"), is_default=True)
-        reg2.register("code-reviewer", FakeMailBox("agent@code-reviewer"))
-        result = reg2.route("@code-reviewer review this")
+    def test_mention_with_hyphenated_name(self):
+        reg = ActorRegistry()
+        reg.register("main", FakeMailBox("agent@main"), is_default=True)
+        reg.register("code-reviewer", FakeMailBox("agent@code-reviewer"))
+        result = reg.route("@code-reviewer review this")
         assert result.target_address == "agent@code-reviewer"
         assert result.content == "review this"
 
@@ -59,6 +60,13 @@ class TestRoute:
         assert result.target_address == "agent@main"
         assert result.target_actor is None
         assert result.content == "hello world"
+
+    def test_non_string_content_uses_metadata_target(self, registry):
+        content = [{"type": "text", "text": "hello"}]
+        result = registry.route(content, metadata={"target_actor": "researcher"})
+        assert result.target_address == "agent@researcher"
+        assert result.target_actor == "researcher"
+        assert result.content == content
 
     def test_mention_unknown_actor_treated_as_text(self, registry):
         result = registry.route("@unknown do something")
@@ -73,10 +81,7 @@ class TestRoute:
         assert result.content == "do something"
 
     def test_mention_wins_over_metadata(self, registry):
-        result = registry.route(
-            "@researcher find papers",
-            metadata={"target_actor": "reviewer"},
-        )
+        result = registry.route("@researcher find papers", metadata={"target_actor": "reviewer"})
         assert result.target_address == "agent@researcher"
         assert result.target_actor == "researcher"
         assert result.content == "find papers"

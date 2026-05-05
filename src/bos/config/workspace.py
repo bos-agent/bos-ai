@@ -383,9 +383,6 @@ class Workspace:
         if resolved_platform_cfg.get("extensions") is None:
             resolved_platform_cfg["extensions"] = ["bos.extensions.all", "./extensions"]
 
-        if resolved_platform_cfg.get("agent_dirs") is None:
-            resolved_platform_cfg["agent_dirs"] = ["./agents"]
-
         try:
             resolved_agents, source_history = self._resolve_platform_agents(raw_platform_cfg)
         except Exception:
