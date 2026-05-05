@@ -141,6 +141,7 @@ class ChatApp(App):
 
     BINDINGS = [
         Binding("escape", "interrupt_turn", "Interrupt", show=True, priority=True),
+        Binding("ctrl+enter", "interrupt_message", "Interject", show=True, priority=True),
         Binding("ctrl+c", "quit", "Quit", show=True, priority=True),
         Binding("ctrl+l", "clear_log", "Clear", show=True),
         Binding("ctrl+n", "reset_chat", "New Chat", show=True),
@@ -198,7 +199,7 @@ class ChatApp(App):
         # Welcome
         log = self.query_one("#chat", RichLog)
         log.write("[bold $primary]Agent CLI ready.[/]")
-        log.write("[dim]Type /help for commands · Escape to interrupt · Ctrl+C to quit[/]\n")
+        log.write("[dim]Type /help for commands · Escape to abort · Ctrl+Enter to interject · Ctrl+C to quit[/]\n")
 
         self.query_one("#prompt", Input).focus()
 
@@ -408,11 +409,12 @@ class ChatApp(App):
                 "  /restart  — restart the agent process\n"
                 "\n"
                 "[bold]Hot keys:[/]\n"
-                "  Escape    — interrupt the current turn\n"
-                "  Ctrl+C    — quit\n"
-                "  Ctrl+L    — clear the log\n"
-                "  Ctrl+N    — start a new chat\n"
-                "  Ctrl+R    — restart the agent process"
+                "  Escape      — abort the current turn\n"
+                "  Ctrl+Enter  — inject a message into the current turn\n"
+                "  Ctrl+C      — quit\n"
+                "  Ctrl+L      — clear the log\n"
+                "  Ctrl+N      — start a new chat\n"
+                "  Ctrl+R      — restart the agent process"
             )
 
         elif normalized_cmd == "/new":
@@ -502,6 +504,42 @@ class ChatApp(App):
         self._update_status()
         self._write_system("[yellow]⏹ Turn interrupt requested.[/]")
         self.query_one("#prompt", Input).focus()
+
+    async def action_interrupt_message(self) -> None:
+        """Send the current input as an interrupt message (inject into the ongoing turn)."""
+        prompt = self.query_one("#prompt", Input)
+        text = prompt.value.strip()
+        if not text:
+            return
+        prompt.clear()
+
+        log = self.query_one("#chat", RichLog)
+
+        if self._busy:
+            try:
+                await self._client.send(
+                    text,
+                    content_type=MessageType.INTERRUPT_MESSAGE,
+                    chat_id=self._chat_id,
+                )
+            except Exception as exc:
+                self._write_system(f"[yellow]⚠ Interrupt message failed — reconnecting: {exc}[/]")
+                return
+
+            log.write("\n[bold yellow]❯ You (interrupt)[/]")
+            log.write(f"  {text}")
+            self._write_system("[yellow]⏎ Interrupt message sent.[/]")
+        else:
+            log.write("\n[bold cyan]❯ You[/]")
+            log.write(f"  {text}")
+            self._busy = True
+            self._update_status()
+            try:
+                await self._client.send(text, chat_id=self._chat_id)
+            except Exception as exc:
+                self._busy = False
+                self._update_status()
+                self._write_system(f"[yellow]⚠ Send failed — reconnecting: {exc}[/]")
 
     # ── helpers ────────────────────────────────────────────────
 
