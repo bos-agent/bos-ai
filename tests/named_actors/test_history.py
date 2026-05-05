@@ -29,6 +29,15 @@ class FakeLLM:
         return LLMResponse(content="test response", finish_reason="stop")
 
 
+class RecordingConsolidator:
+    def __init__(self):
+        self.calls: list[list[Message]] = []
+
+    async def consolidate(self, messages: list[Message], instruction: str | None = None) -> str:
+        self.calls.append(messages)
+        return "summary"
+
+
 class TestFilterToolNoise:
     def test_removes_tool_role_messages(self):
         messages = [
@@ -90,7 +99,7 @@ async def test_named_agent_renders_metadata_attribution():
         llm=FakeLLM(),
         tools=[],
     )
-    history = await agent._get_chat_history("abc123")
+    history = await agent._get_chat_history("abc123", budget_model="test/model")
     assert history[0] == {"role": "user", "content": "[user -> Bob (architect)]: review this"}
     assert history[1] == {"role": "assistant", "content": "[Bob (architect) -> user]: Looks good."}
 
@@ -125,3 +134,35 @@ async def test_named_agent_filters_tool_noise_from_history():
         {"role": "assistant", "content": "Looking..."},
         {"role": "assistant", "content": "Found X."},
     ]
+
+
+@pytest.mark.asyncio
+async def test_named_agent_compaction_passes_message_objects():
+    store = FakeMessageStore(
+        [
+            Message(
+                llm_message={"role": "user", "content": "review this large history"},
+                metadata={
+                    "speaker_type": "user",
+                    "to_actor": "bob",
+                    "to_display": "Bob (architect)",
+                },
+            ),
+        ]
+    )
+    consolidator = RecordingConsolidator()
+    agent = NamedAgent(
+        message_store=store,
+        memory=None,
+        consolidator=consolidator,
+        skills_loader=None,
+        llm=FakeLLM(),
+        tools=[],
+        max_tokens=1,
+    )
+
+    await agent._get_chat_history("abc123", budget_model="test/model")
+
+    assert consolidator.calls
+    assert all(isinstance(message, Message) for message in consolidator.calls[0])
+    assert consolidator.calls[0][0].llm_message["content"] == "[user -> Bob (architect)]: review this large history"
