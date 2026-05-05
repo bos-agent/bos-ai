@@ -22,6 +22,7 @@ from textual.binding import Binding
 from textual.containers import Horizontal
 from textual.message import Message
 from textual.widgets import Footer, Header, Input, RichLog, Static
+from textual_autocomplete import AutoComplete
 
 from bos.extensions.channels.http import WS_TAKEOVER_CLOSE_REASON
 from bos.extensions.channels.http_client import HttpChannelClient
@@ -72,6 +73,32 @@ class SystemEvent(Message):
         super().__init__()
         self.content = content
         self.chat_id = chat_id
+
+
+SLASH_COMMANDS = [
+    "/help",
+    "/new",
+    "/resume",
+    "/alias",
+    "/aliases",
+    "/unalias",
+    "/history",
+    "/compact",
+    "/tokens",
+    "/chats",
+    "/memory",
+    "/clear",
+    "/restart",
+]
+
+
+class SlashAutoComplete(AutoComplete):
+    """AutoComplete that only activates for slash commands."""
+
+    def should_show_dropdown(self, search_string: str) -> bool:
+        if not search_string.startswith("/"):
+            return False
+        return super().should_show_dropdown(search_string)
 
 
 # ── ChatApp ────────────────────────────────────────────────────
@@ -185,6 +212,7 @@ class ChatApp(App):
             )
         yield Static(self._status_text(), id="status-bar")
         yield Input(placeholder="Send a message…", id="prompt")
+        yield SlashAutoComplete("#prompt", candidates=SLASH_COMMANDS)
         yield Footer()
 
     # ── lifecycle ──────────────────────────────────────────────

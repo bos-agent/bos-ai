@@ -154,7 +154,7 @@ wheels = [
 
 [[package]]
 name = "bos-ai"
-version = "1.0.0"
+version = "1.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "aiohttp" },
@@ -165,6 +165,7 @@ dependencies = [
     { name = "python-dotenv" },
     { name = "rich" },
     { name = "textual" },
+    { name = "textual-autocomplete" },
 ]
 
 [package.optional-dependencies]
@@ -202,6 +203,7 @@ requires-dist = [
     { name = "tavily-python", marker = "extra == 'all'", specifier = ">=0.7.23" },
     { name = "tavily-python", marker = "extra == 'search'", specifier = ">=0.7.23" },
     { name = "textual", specifier = ">=1.0.0" },
+    { name = "textual-autocomplete", specifier = ">=4.0.6" },
     { name = "tomli", marker = "python_full_version < '3.11'", specifier = ">=2.0.0" },
 ]
 provides-extras = ["providers", "search", "all"]
@@ -1624,6 +1626,19 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/cf/2f/d44f0f12b3ddb1f0b88f7775652e99c6b5a43fd733badf4ce064bdbfef4a/textual-8.2.3.tar.gz", hash = "sha256:beea7b86b03b03558a2224f0cc35252e60ef8b0c4353b117b2f40972902d976a", size = 1848738, upload-time = "2026-04-05T09:12:45.338Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/0e/28/a81d6ce9f4804818bd1231a9a6e4d56ea84ebbe8385c49591444f0234fa2/textual-8.2.3-py3-none-any.whl", hash = "sha256:5008ac581bebf1f6fa0520404261844a231e5715fdbddd10ca73916a3af48ca2", size = 724231, upload-time = "2026-04-05T09:12:48.747Z" },
+]
+
+[[package]]
+name = "textual-autocomplete"
+version = "4.0.6"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "textual" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/1e/3a/80411bc7b94969eb116ad1b18db90f8dce8a1de441278c4a81fee55a27ca/textual_autocomplete-4.0.6.tar.gz", hash = "sha256:2ba2f0d767be4480ecacb3e4b130cf07340e033c3500fc424fed9125d27a4586", size = 97967, upload-time = "2025-09-24T21:19:20.213Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/9f/66/ebe744d79c87f25a42d2654dddbd09462edd595f2ded715245a51a546461/textual_autocomplete-4.0.6-py3-none-any.whl", hash = "sha256:bff69c19386e2cbb4a007503b058dc37671d480a4fa2ddb3959c15ceb4aff9b5", size = 16499, upload-time = "2025-09-24T21:19:18.489Z" },
 ]
 
 [[package]]
