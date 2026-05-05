@@ -2,6 +2,104 @@
 
 <!-- version list -->
 
+## v1.1.0 (2026-05-05)
+
+### Bug Fixes
+
+- **config**: Accept any agent@* address in channel topology validation
+  ([#13](https://github.com/bos-agent/bos-ai/pull/13),
+  [`420dcf0`](https://github.com/bos-agent/bos-ai/commit/420dcf0c1bb34161431ac8276051f7f8b517d030))
+
+- **consolidator**: Ensure LLMs respond to summarization and update prompt
+  ([#16](https://github.com/bos-agent/bos-ai/pull/16),
+  [`96dfc00`](https://github.com/bos-agent/bos-ai/commit/96dfc0096f5e084bf328b36974d91091168260a7))
+
+- **squad**: Filter agent_spec to valid SquadAgent params via _build_params
+  ([#13](https://github.com/bos-agent/bos-ai/pull/13),
+  [`420dcf0`](https://github.com/bos-agent/bos-ai/commit/420dcf0c1bb34161431ac8276051f7f8b517d030))
+
+- **squad**: Wire start_squad() into bos start and bos tui startup paths
+  ([#13](https://github.com/bos-agent/bos-ai/pull/13),
+  [`420dcf0`](https://github.com/bos-agent/bos-ai/commit/420dcf0c1bb34161431ac8276051f7f8b517d030))
+
+- **squad**: Write channel info to agent.state so TUI can discover endpoints
+  ([#13](https://github.com/bos-agent/bos-ai/pull/13),
+  [`420dcf0`](https://github.com/bos-agent/bos-ai/commit/420dcf0c1bb34161431ac8276051f7f8b517d030))
+
+### Chores
+
+- **squad**: Fix lint issues — unused imports, import ordering, type annotation
+  ([#13](https://github.com/bos-agent/bos-ai/pull/13),
+  [`420dcf0`](https://github.com/bos-agent/bos-ai/commit/420dcf0c1bb34161431ac8276051f7f8b517d030))
+
+### Documentation
+
+- Amend BEP ([#13](https://github.com/bos-agent/bos-ai/pull/13),
+  [`420dcf0`](https://github.com/bos-agent/bos-ai/commit/420dcf0c1bb34161431ac8276051f7f8b517d030))
+
+- **config**: Add squad multi-actor example to template.toml
+  ([#13](https://github.com/bos-agent/bos-ai/pull/13),
+  [`420dcf0`](https://github.com/bos-agent/bos-ai/commit/420dcf0c1bb34161431ac8276051f7f8b517d030))
+
+- **squad**: Add implementation plan for multi-actor runtime
+  ([#13](https://github.com/bos-agent/bos-ai/pull/13),
+  [`420dcf0`](https://github.com/bos-agent/bos-ai/commit/420dcf0c1bb34161431ac8276051f7f8b517d030))
+
+- **squad**: Design spec for multi-actor runtime
+  ([#13](https://github.com/bos-agent/bos-ai/pull/13),
+  [`420dcf0`](https://github.com/bos-agent/bos-ai/commit/420dcf0c1bb34161431ac8276051f7f8b517d030))
+
+- **squad**: Move @mention parsing from frontend into ActorRegistry
+  ([#13](https://github.com/bos-agent/bos-ai/pull/13),
+  [`420dcf0`](https://github.com/bos-agent/bos-ai/commit/420dcf0c1bb34161431ac8276051f7f8b517d030))
+
+### Features
+
+- **core**: Add harness-level consolidator service
+  ([#14](https://github.com/bos-agent/bos-ai/pull/14),
+  [`3e85b37`](https://github.com/bos-agent/bos-ai/commit/3e85b37be9c8d5f544e130e6151206d0e8898041))
+
+- **named-actors**: Implement runtime actor routing
+  ([#13](https://github.com/bos-agent/bos-ai/pull/13),
+  [`420dcf0`](https://github.com/bos-agent/bos-ai/commit/420dcf0c1bb34161431ac8276051f7f8b517d030))
+
+- **squad**: Add ActorRegistry with @mention parsing and routing
+  ([#13](https://github.com/bos-agent/bos-ai/pull/13),
+  [`420dcf0`](https://github.com/bos-agent/bos-ai/commit/420dcf0c1bb34161431ac8276051f7f8b517d030))
+
+- **squad**: Add SquadActor with target_actor attribution
+  ([#13](https://github.com/bos-agent/bos-ai/pull/13),
+  [`420dcf0`](https://github.com/bos-agent/bos-ai/commit/420dcf0c1bb34161431ac8276051f7f8b517d030))
+
+- **squad**: Add SquadAgent with tool-noise filtering
+  ([#13](https://github.com/bos-agent/bos-ai/pull/13),
+  [`420dcf0`](https://github.com/bos-agent/bos-ai/commit/420dcf0c1bb34161431ac8276051f7f8b517d030))
+
+- **squad**: Add start_squad runner with multi-actor wiring
+  ([#13](https://github.com/bos-agent/bos-ai/pull/13),
+  [`420dcf0`](https://github.com/bos-agent/bos-ai/commit/420dcf0c1bb34161431ac8276051f7f8b517d030))
+
+- **squad**: Wire ActorRegistry into HttpChannel for @mention routing
+  ([#13](https://github.com/bos-agent/bos-ai/pull/13),
+  [`420dcf0`](https://github.com/bos-agent/bos-ai/commit/420dcf0c1bb34161431ac8276051f7f8b517d030))
+
+### Refactoring
+
+- **core**: Reject new messages during active turn instead of buffering
+  ([#15](https://github.com/bos-agent/bos-ai/pull/15),
+  [`b7eacb0`](https://github.com/bos-agent/bos-ai/commit/b7eacb00cd213a22508f5590c3f5fdd7bee61e79))
+
+- **squad**: Use _apply for agent construction in _build_squad_agent
+  ([#13](https://github.com/bos-agent/bos-ai/pull/13),
+  [`420dcf0`](https://github.com/bos-agent/bos-ai/commit/420dcf0c1bb34161431ac8276051f7f8b517d030))
+
+### Testing
+
+- **squad**: Add backwards-compat edge case tests for config parsing
+  ([#13](https://github.com/bos-agent/bos-ai/pull/13),
+  [`420dcf0`](https://github.com/bos-agent/bos-ai/commit/420dcf0c1bb34161431ac8276051f7f8b517d030))
+
+
 ## v1.0.0 (2026-05-03)
 
 ### Bug Fixes
