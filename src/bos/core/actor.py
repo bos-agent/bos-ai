@@ -9,7 +9,6 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from bos.protocol import Envelope, MessageContent, MessageType
-
 from .agent import AbortTurn
 from .chat_state import ChatState
 from .contract import ep_actor_command
@@ -117,7 +116,6 @@ class AgentActor:
                                 reply_recipient=env.sender,
                                 reply_chat_id=env.chat_id,
                                 content=env.content,
-                                inbound_env=env,
                             )
                         )
                     continue
@@ -238,7 +236,6 @@ class AgentActor:
         reply_recipient: str,
         reply_chat_id: str | None,
         content: MessageContent,
-        inbound_env: Envelope | None = None,
     ) -> None:
         token: contextvars.Token | None = None
         try:
@@ -248,7 +245,7 @@ class AgentActor:
                 chat_id,
                 content,
                 interrupt=self._make_interrupt(chat_id, generation),
-                ctx_metadata=self._turn_metadata(reply_recipient, inbound_env),
+                ctx_metadata={"sender": reply_recipient, "actor_address": self._address},
                 event_sink=event_sink,
             )
         finally:
@@ -258,16 +255,11 @@ class AgentActor:
         if not self._execution_is_current(chat_id, generation):
             return
 
-        kwargs: dict[str, Any] = {"chat_id": reply_chat_id}
-        if metadata := self._reply_metadata(reply_recipient, inbound_env):
-            kwargs["metadata"] = metadata
-        await self._mailbox.send(reply_recipient, response, **kwargs)
-
-    def _turn_metadata(self, reply_recipient: str, inbound_env: Envelope | None = None) -> dict[str, Any]:
-        return {"sender": reply_recipient, "actor_address": self._address}
-
-    def _reply_metadata(self, reply_recipient: str, inbound_env: Envelope | None = None) -> dict[str, Any] | None:
-        return None
+        await self._mailbox.send(
+            reply_recipient,
+            response,
+            chat_id=reply_chat_id,
+        )
 
     async def _handle_command(self, env: Envelope) -> None:
         parts = env.content.split(None, 1)
@@ -342,3 +334,4 @@ class AgentActor:
             and session.execution.generation == generation
             and session.execution.task is not None
         )
+

@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import asyncio
+import contextvars
 from typing import Any
 
 from bos.core import AgentActor, Message, ReactAgent
 from bos.core._utils import _compact
-from bos.protocol import Envelope, MessageContent
+from bos.core.actor import _RouteAwareMailboxEventSink
+from bos.core.harness import CURRENT_MAILBOX
+from bos.protocol import Envelope, MessageContent, MessageType
 from bos.protocol.content import content_as_parts, content_length
 
 
@@ -111,13 +115,104 @@ class NamedActor(AgentActor):
         self.agent_kind = agent_kind
         self.display_label = _display_label(display_name, actor_name, agent_kind)
 
-    def _turn_metadata(self, reply_recipient: str, inbound_env: Envelope | None = None) -> dict[str, Any]:
-        inbound_env = inbound_env or Envelope(
-            sender=reply_recipient,
-            recipient=self._address,
-            content="",
-            chat_id=None,
+    async def run(self) -> None:
+        try:
+            while True:
+                for chat_id in list(self._sessions.keys()):
+                    await self._finalize_done_task(chat_id)
+
+                env = await self._mailbox.receive_nowait()
+                if env is None:
+                    await asyncio.sleep(0.1)
+                    continue
+
+                if not env.chat_id:
+                    await self._mailbox.send(
+                        env.sender,
+                        "(error: missing chat_id)",
+                        content_type=MessageType.SYSTEM,
+                    )
+                    continue
+
+                chat_id = env.chat_id
+                session = self._get_or_create_session(chat_id)
+
+                if env.content_type == MessageType.COMMAND:
+                    if env.content.strip().startswith("/"):
+                        self._spawn_command_task(env)
+                        continue
+                    env.content_type = MessageType.MESSAGE
+
+                if session.execution.task is None:
+                    if env.content_type == MessageType.MESSAGE:
+                        session.interrupts.clear()
+                        session.execution.reply_recipient = env.sender
+                        session.execution.reply_chat_id = env.chat_id
+                        generation = session.execution.generation
+                        session.execution.task = asyncio.create_task(
+                            self._run_ask(
+                                chat_id=chat_id,
+                                generation=generation,
+                                reply_recipient=env.sender,
+                                reply_chat_id=env.chat_id,
+                                content=env.content,
+                                inbound_env=env,
+                            )
+                        )
+                    continue
+
+                if env.content_type == MessageType.INTERRUPT_ABORT:
+                    self._abort_current_turn(session)
+                elif env.content_type == MessageType.INTERRUPT_MESSAGE:
+                    session.interrupts.append(env)
+                else:
+                    await self._mailbox.send(
+                        env.sender,
+                        "(busy: a response is already in progress for this chat)",
+                        content_type=MessageType.SYSTEM,
+                        chat_id=env.chat_id,
+                    )
+
+        except asyncio.CancelledError:
+            await self.aclose()
+            raise
+
+    async def _run_ask(
+        self,
+        *,
+        chat_id: str,
+        generation: int,
+        reply_recipient: str,
+        reply_chat_id: str | None,
+        content: MessageContent,
+        inbound_env: Envelope,
+    ) -> None:
+        token: contextvars.Token | None = None
+        try:
+            token = CURRENT_MAILBOX.set(self._mailbox)
+            event_sink = _RouteAwareMailboxEventSink(self._mailbox, reply_recipient, reply_chat_id)
+            response = await self._agent.ask(
+                chat_id,
+                content,
+                interrupt=self._make_interrupt(chat_id, generation),
+                ctx_metadata=self._turn_metadata(reply_recipient, inbound_env),
+                event_sink=event_sink,
+            )
+        finally:
+            if token is not None:
+                CURRENT_MAILBOX.reset(token)
+
+        if not self._execution_is_current(chat_id, generation):
+            return
+
+        await self._mailbox.send(
+            reply_recipient,
+            response,
+            chat_id=reply_chat_id,
+            metadata=self._assistant_metadata(reply_recipient),
         )
+
+    def _turn_metadata(self, reply_recipient: str, inbound_env: Envelope) -> dict[str, Any]:
         return {
             "sender": reply_recipient,
             "actor_name": self.actor_name,
@@ -127,9 +222,6 @@ class NamedActor(AgentActor):
             "user_message_metadata": self._user_metadata(inbound_env),
             "assistant_message_metadata": self._assistant_metadata(reply_recipient),
         }
-
-    def _reply_metadata(self, reply_recipient: str, inbound_env: Envelope | None = None) -> dict[str, Any]:
-        return self._assistant_metadata(reply_recipient)
 
     def _user_metadata(self, env: Envelope) -> dict[str, Any]:
         target_actor = env.metadata.get("target_actor") or self.actor_name
