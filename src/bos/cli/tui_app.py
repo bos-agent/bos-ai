@@ -22,6 +22,7 @@ from textual.binding import Binding
 from textual.containers import Horizontal
 from textual.message import Message
 from textual.widgets import Footer, Header, Input, RichLog, Static
+from textual_autocomplete import AutoComplete, DropdownItem
 
 from bos.extensions.channels.http import WS_TAKEOVER_CLOSE_REASON
 from bos.extensions.channels.http_client import HttpChannelClient
@@ -72,6 +73,38 @@ class SystemEvent(Message):
         super().__init__()
         self.content = content
         self.chat_id = chat_id
+
+
+SLASH_COMMANDS = [
+    "/help",
+    "/new",
+    "/resume",
+    "/alias",
+    "/aliases",
+    "/unalias",
+    "/history",
+    "/compact",
+    "/tokens",
+    "/chats",
+    "/memory",
+    "/clear",
+    "/restart",
+]
+
+
+class SlashAutoComplete(AutoComplete):
+    """AutoComplete that activates for slash commands and @mentions."""
+
+    def should_show_dropdown(self, search_string: str) -> bool:
+        if not (search_string.startswith("/") or search_string.startswith("@")):
+            return False
+        return super().should_show_dropdown(search_string)
+
+    def apply_completion(self, value: str, state: Any) -> None:
+        """Apply the completion, appending a space after @mentions for routing."""
+        if value.startswith("@"):
+            value = value + " "
+        super().apply_completion(value, state)
 
 
 # ── ChatApp ────────────────────────────────────────────────────
@@ -141,6 +174,7 @@ class ChatApp(App):
 
     BINDINGS = [
         Binding("escape", "interrupt_turn", "Interrupt", show=True, priority=True),
+        Binding("ctrl+enter", "interrupt_message", "Interject", show=True, priority=True),
         Binding("ctrl+c", "quit", "Quit", show=True, priority=True),
         Binding("ctrl+l", "clear_log", "Clear", show=True),
         Binding("ctrl+n", "reset_chat", "New Chat", show=True),
@@ -161,6 +195,7 @@ class ChatApp(App):
         self._busy = False
         self._buffer: list[str] = []
         self._conn_status: str = "connected"
+        self._known_actors: list[str] = []
 
     # ── compose ────────────────────────────────────────────────
 
@@ -184,6 +219,7 @@ class ChatApp(App):
             )
         yield Static(self._status_text(), id="status-bar")
         yield Input(placeholder="Send a message…", id="prompt")
+        yield SlashAutoComplete("#prompt", candidates=self._get_candidates)
         yield Footer()
 
     # ── lifecycle ──────────────────────────────────────────────
@@ -198,7 +234,14 @@ class ChatApp(App):
         # Welcome
         log = self.query_one("#chat", RichLog)
         log.write("[bold $primary]Agent CLI ready.[/]")
-        log.write("[dim]Type /help for commands · Escape to interrupt · Ctrl+C to quit[/]\n")
+        log.write("[dim]Type /help for commands · Escape to abort · Ctrl+Enter to interject · Ctrl+C to quit[/]\n")
+
+        # Fetch actor list for @mention autocomplete
+        try:
+            actors = await self._client.list_actors()
+            self._known_actors = list(actors.keys())
+        except Exception:
+            logger.debug("Failed to fetch actor list", exc_info=True)
 
         self.query_one("#prompt", Input).focus()
 
@@ -408,11 +451,12 @@ class ChatApp(App):
                 "  /restart  — restart the agent process\n"
                 "\n"
                 "[bold]Hot keys:[/]\n"
-                "  Escape    — interrupt the current turn\n"
-                "  Ctrl+C    — quit\n"
-                "  Ctrl+L    — clear the log\n"
-                "  Ctrl+N    — start a new chat\n"
-                "  Ctrl+R    — restart the agent process"
+                "  Escape      — abort the current turn\n"
+                "  Ctrl+Enter  — inject a message into the current turn\n"
+                "  Ctrl+C      — quit\n"
+                "  Ctrl+L      — clear the log\n"
+                "  Ctrl+N      — start a new chat\n"
+                "  Ctrl+R      — restart the agent process"
             )
 
         elif normalized_cmd == "/new":
@@ -502,6 +546,53 @@ class ChatApp(App):
         self._update_status()
         self._write_system("[yellow]⏹ Turn interrupt requested.[/]")
         self.query_one("#prompt", Input).focus()
+
+    async def action_interrupt_message(self) -> None:
+        """Send the current input as an interrupt message (inject into the ongoing turn)."""
+        prompt = self.query_one("#prompt", Input)
+        text = prompt.value.strip()
+        if not text:
+            return
+        prompt.clear()
+
+        log = self.query_one("#chat", RichLog)
+
+        if self._busy:
+            try:
+                await self._client.send(
+                    text,
+                    content_type=MessageType.INTERRUPT_MESSAGE,
+                    chat_id=self._chat_id,
+                )
+            except Exception as exc:
+                self._write_system(f"[yellow]⚠ Interrupt message failed — reconnecting: {exc}[/]")
+                return
+
+            log.write("\n[bold yellow]❯ You (interrupt)[/]")
+            log.write(f"  {text}")
+            self._write_system("[yellow]⏎ Interrupt message sent.[/]")
+        else:
+            log.write("\n[bold cyan]❯ You[/]")
+            log.write(f"  {text}")
+            self._busy = True
+            self._update_status()
+            try:
+                await self._client.send(text, chat_id=self._chat_id)
+            except Exception as exc:
+                self._busy = False
+                self._update_status()
+                self._write_system(f"[yellow]⚠ Send failed — reconnecting: {exc}[/]")
+
+    # ── autocomplete ───────────────────────────────────────────
+
+    def _get_candidates(self, state: Any) -> list[str]:
+        """Return candidate completions based on the current input prefix."""
+        text = state.text[: state.cursor_position]
+        if text.startswith("/"):
+            return [DropdownItem(cmd) for cmd in SLASH_COMMANDS]
+        if text.startswith("@"):
+            return [DropdownItem(f"@{a}") for a in self._known_actors]
+        return []
 
     # ── helpers ────────────────────────────────────────────────
 
