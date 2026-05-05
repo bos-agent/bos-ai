@@ -104,11 +104,13 @@ model = "gemini/gemini-3.1-pro-preview"
 # configure the harness-level consolidator service. this is separate from
 # platform.agent_defaults.model. model resolution is:
 # harness.consolidator.model -> BOS_CONSOLIDATOR_MODEL -> BOS_MODEL.
-#[harness.consolidator]
-#model = "gemini/gemini-2.5-flash"
+[harness.consolidator]
+model = "gemini/gemini-2.5-flash"
 #instruction = """
-#Summarize the conversation history for future turns.
+#Provide a dense, concise summary of the conversation history for future turns.
 #Preserve user intent, decisions, unresolved tasks, tool results, and important constraints.
+#Keep it highly concise but retain all factual information without omitting details.
+#Avoid transcript style and verbose language. Keep the summary less than 2048 characters.
 #"""
 
 # cofigure the mail route extension

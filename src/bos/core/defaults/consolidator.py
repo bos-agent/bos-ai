@@ -7,9 +7,10 @@ from ..history import project_message_history
 from ..llm import LLMClient
 
 DEFAULT_COMPACTION_INSTRUCTION = """\
-Summarize the conversation history for future turns.
+Provide a dense, concise summary of the conversation history for future turns.
 Preserve user intent, decisions, unresolved tasks, tool results, and important constraints.
-Avoid transcript style.
+Keep it highly concise but retain all factual information without omitting details.
+Avoid transcript style and verbose language. Keep the summary less than 2048 characters.
 """
 
 SUMMARY_PREFIX = "Chat summary:"
@@ -56,6 +57,12 @@ class LLMConsolidator:
                 }
             )
         prompt.extend(project_message_history(conversation))
+        prompt.append(
+            {
+                "role": "user",
+                "content": "Please provide the summary of the conversation above.",
+            }
+        )
         return prompt
 
     @staticmethod
