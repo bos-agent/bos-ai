@@ -57,7 +57,7 @@ commit_author = "github-actions[bot] <github-actions[bot]@users.noreply.github.c
 commit_message = "chore(release): {version} [skip ci]"
 build_command = "python -m ensurepip --upgrade && python -m pip install build && python -m build"
 commit_parser = "conventional"
-commit_parser_options = { parse_squash_commits = true, ignore_merge_commits = true }
+commit_parser_options = { parse_squash_commits = false, ignore_merge_commits = true }
 
 [tool.semantic_release.changelog]
 mode = "update"
