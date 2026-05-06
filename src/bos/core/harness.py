@@ -148,7 +148,6 @@ class AgentHarness:
         if not any([role, agent_cfg]):
             agent_cfg = {
                 "system_prompt": "You are a helpful assistant.",
-                "model": os.getenv("BOS_MODEL"),
                 "tools": [],
                 "skills": [],
                 "maxims": {},
