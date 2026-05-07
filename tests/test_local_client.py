@@ -5,7 +5,6 @@ import pytest
 from bos.cli.local_client import LocalClient
 from bos.core.chat_state import ChatState
 from bos.extensions.mailboxes.in_memory import InMemMailRoute
-from bos.named_actors.registry import ActorRegistry
 from bos.protocol import MessageType
 
 
@@ -33,23 +32,15 @@ def main_actor_mbox(mail_route):
 
 
 @pytest.fixture
-def registry(main_actor_mbox):
-    reg = ActorRegistry()
-    reg.register("main", main_actor_mbox, is_default=True)
-    return reg
-
-
-@pytest.fixture
 def chat_state(tmp_path):
     return ChatState(bos_dir=tmp_path)
 
 
 @pytest.fixture
-def local_client(client_mbox, registry, chat_state):
+def local_client(client_mbox, chat_state):
     return LocalClient(
         client_id="local:test",
         client_mbox=client_mbox,
-        registry=registry,
         chat_state=chat_state,
     )
 
@@ -99,7 +90,7 @@ async def test_local_client_connect_sends_session_ack(local_client):
 
 @pytest.mark.asyncio
 async def test_local_client_send_and_receive(local_client, main_actor_mbox):
-    """send() routes to the default actor mailbox; actor reply arrives via client mailbox."""
+    """send() routes to agent@main; actor reply arrives via client mailbox."""
     await local_client.connect()
     chat_id = local_client.chat_id
 
@@ -131,50 +122,31 @@ async def test_local_client_send_and_receive(local_client, main_actor_mbox):
 
 
 @pytest.mark.asyncio
-async def test_local_client_at_mention_routing(local_client, main_actor_mbox, mail_route):
-    """@mention routes to the named actor, not the default."""
-    # Register a second actor
-    coder_mbox = mail_route.bind("agent@coder")
-    local_client._registry.register("coder", coder_mbox)
-
-    await local_client.connect()
-    chat_id = local_client.chat_id
-
-    # Drain the SESSION_ACK
-    await local_client.receive()
-
-    async def coder_reply():
-        env = await coder_mbox.receive()
-        assert env.content == "write code"
-        await coder_mbox.send(
-            env.sender,
-            "code written",
-            content_type=MessageType.MESSAGE,
-            chat_id=env.chat_id,
-        )
-
-    reply_task = asyncio.create_task(coder_reply())
-
-    await local_client.send("@coder write code", chat_id=chat_id)
-
-    env = await local_client.receive()
-    assert env.content == "code written"
-
-    await reply_task
+async def test_local_client_list_actors(local_client):
+    """list_actors() returns the hardcoded main actor."""
+    actors = await local_client.list_actors()
+    assert actors == {
+        "main": {
+            "display_name": None,
+            "agent_kind": None,
+            "is_default": True,
+        }
+    }
 
 
 @pytest.mark.asyncio
-async def test_local_client_list_actors(local_client, mail_route):
-    """list_actors() returns registered actors from the registry."""
-    coder_mbox = mail_route.bind("agent@coder")
-    local_client._registry.register("coder", coder_mbox, agent_kind="coder")
+async def test_local_client_send_targets_main(local_client, main_actor_mbox):
+    """send() always targets agent@main."""
+    await local_client.connect()
+    await local_client.receive()  # drain SESSION_ACK
 
-    actors = await local_client.list_actors()
-    assert "main" in actors
-    assert actors["main"]["agent_kind"] is None
-    assert actors["main"]["is_default"] is True
-    assert "coder" in actors
-    assert actors["coder"]["agent_kind"] == "coder"
+    async def check_recipient():
+        env = await main_actor_mbox.receive()
+        assert env.recipient == "agent@main"
+
+    task = asyncio.create_task(check_recipient())
+    await local_client.send("hi")
+    await task
 
 
 @pytest.mark.asyncio

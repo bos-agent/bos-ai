@@ -10,7 +10,6 @@ import asyncio
 import logging
 from typing import Any
 
-from bos.named_actors.registry import ActorRegistry
 from bos.protocol import Envelope, MessageContent, MessageType
 
 logger = logging.getLogger(__name__)
@@ -29,12 +28,10 @@ class LocalClient:
         *,
         client_id: str,
         client_mbox: Any,
-        registry: ActorRegistry,
         chat_state: Any,
     ) -> None:
         self._client_id = client_id
         self._client_mbox = client_mbox
-        self._registry = registry
         self._chat_state = chat_state
         self._chat_id: str | None = None
         self._recv_queue: asyncio.Queue[Envelope] = asyncio.Queue()
@@ -95,31 +92,24 @@ class LocalClient:
         routing["chat_id"] = effective_chat_id
         merged_metadata["routing"] = routing
 
-        route_result = self._registry.route(
-            str(content) if isinstance(content, str) else content,
-            metadata=merged_metadata,
-        )
-
         await self._client_mbox.send(
-            route_result.target_address,
-            route_result.content,
+            "agent@main",
+            content,
             content_type=content_type,
             chat_id=effective_chat_id,
-            metadata=route_result.metadata,
+            metadata=merged_metadata,
         )
 
     async def receive(self) -> Envelope:
         return await self._recv_queue.get()
 
     async def list_actors(self) -> dict[str, dict[str, Any]]:
-        actors = self._registry.list_actors()
         return {
-            name: {
-                "display_name": rec.display_name,
-                "agent_kind": rec.agent_kind,
-                "is_default": rec.is_default,
+            "main": {
+                "display_name": None,
+                "agent_kind": None,
+                "is_default": True,
             }
-            for name, rec in actors.items()
         }
 
     async def aclose(self) -> None:

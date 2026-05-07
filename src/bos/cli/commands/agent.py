@@ -202,15 +202,11 @@ async def _run_interactive(
     from bos.cli.local_client import LocalClient
     from bos.core.actor import AgentActor
     from bos.core.chat_state import ChatState
-    from bos.named_actors.registry import ActorRegistry
 
     async with ws.harness() as harness:
         agent = harness.create_agent(agent_name, agent_cfg=agent_cfg)
         actor_mbox = harness.mail_route.bind("agent@main")
         client_mbox = harness.mail_route.bind("client@local")
-
-        registry = ActorRegistry()
-        registry.register("main", actor_mbox, is_default=True)
 
         try:
             username = getpass.getuser()
@@ -224,7 +220,6 @@ async def _run_interactive(
         client = LocalClient(
             client_id=client_id,
             client_mbox=client_mbox,
-            registry=registry,
             chat_state=chat_state,
         )
 

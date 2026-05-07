@@ -29,7 +29,6 @@ async def test_interactive_wiring_harness_to_client(tmp_path):
     """Verify harness + ActorActor + LocalClient wiring without Textual."""
     from bos.core.actor import AgentActor
     from bos.core.chat_state import ChatState
-    from bos.named_actors.registry import ActorRegistry
 
     # Write a minimal config
     bos_dir = tmp_path / ".bos"
@@ -63,15 +62,11 @@ model = "test/consolidator"
         actor_mbox = harness.mail_route.bind("agent@main")
         client_mbox = harness.mail_route.bind("client@local")
 
-        registry = ActorRegistry()
-        registry.register("main", actor_mbox, is_default=True)
-
         chat_state = ChatState(ws.bos_dir)
         actor = AgentActor(agent, actor_mbox, chat_state=chat_state)
         client = LocalClient(
             client_id="local:test",
             client_mbox=client_mbox,
-            registry=registry,
             chat_state=chat_state,
         )
 
