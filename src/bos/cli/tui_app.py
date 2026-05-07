@@ -186,6 +186,8 @@ class ChatApp(App):
     def __init__(
         self,
         client: HttpChannelClient,
+        *,
+        local_mode: bool = False,
     ) -> None:
         super().__init__()
         self._client = client
@@ -196,6 +198,7 @@ class ChatApp(App):
         self._buffer: list[str] = []
         self._conn_status: str = "connected"
         self._known_actors: list[str] = []
+        self._local_mode = local_mode
 
     # ── compose ────────────────────────────────────────────────
 
@@ -219,7 +222,8 @@ class ChatApp(App):
             )
         yield Static(self._status_text(), id="status-bar")
         yield Input(placeholder="Send a message…", id="prompt")
-        yield SlashAutoComplete("#prompt", candidates=self._get_candidates)
+        if not self._local_mode:
+            yield SlashAutoComplete("#prompt", candidates=self._get_candidates)
         yield Footer()
 
     # ── lifecycle ──────────────────────────────────────────────
@@ -234,14 +238,18 @@ class ChatApp(App):
         # Welcome
         log = self.query_one("#chat", RichLog)
         log.write("[bold $primary]Agent CLI ready.[/]")
-        log.write("[dim]Type /help for commands · Escape to abort · Ctrl+Enter to interject · Ctrl+C to quit[/]\n")
+        if self._local_mode:
+            log.write("[dim]Escape to abort · Ctrl+Enter to interject · Ctrl+C to quit[/]\n")
+        else:
+            log.write("[dim]Type /help for commands · Escape to abort · Ctrl+Enter to interject · Ctrl+C to quit[/]\n")
 
         # Fetch actor list for @mention autocomplete
-        try:
-            actors = await self._client.list_actors()
-            self._known_actors = list(actors.keys())
-        except Exception:
-            logger.debug("Failed to fetch actor list", exc_info=True)
+        if not self._local_mode:
+            try:
+                actors = await self._client.list_actors()
+                self._known_actors = list(actors.keys())
+            except Exception:
+                logger.debug("Failed to fetch actor list", exc_info=True)
 
         self.query_one("#prompt", Input).focus()
 
@@ -302,9 +310,15 @@ class ChatApp(App):
             return
         event.input.clear()
 
-        # Handle slash commands
+        # Handle slash commands (daemon mode only)
         if text.startswith("/"):
-            await self._handle_slash_command(text)
+            if self._local_mode:
+                if text.strip().lower() == "/clear":
+                    self.action_clear_log()
+                else:
+                    self._write_system("[yellow]Slash commands are not available in local mode.[/]")
+            else:
+                await self._handle_slash_command(text)
             return
 
         if self._busy:
@@ -587,6 +601,8 @@ class ChatApp(App):
 
     def _get_candidates(self, state: Any) -> list[str]:
         """Return candidate completions based on the current input prefix."""
+        if self._local_mode:
+            return []
         text = state.text[: state.cursor_position]
         if text.startswith("/"):
             return [DropdownItem(cmd) for cmd in SLASH_COMMANDS]
@@ -646,11 +662,16 @@ class ChatApp(App):
 
 async def run_chat_tui(
     client: HttpChannelClient,
+    *,
+    local_mode: bool = False,
 ) -> None:
     """Launch the TUI connected to a running agent via channel.
 
     ``client`` must be an ``HttpChannelClient`` that has already called
     ``connect()``.
+
+    When ``local_mode`` is True, slash commands and @mention autocomplete
+    are disabled since there is no server-side or named-actor support.
     """
-    app = ChatApp(client=client)
+    app = ChatApp(client=client, local_mode=local_mode)
     await app.run_async()

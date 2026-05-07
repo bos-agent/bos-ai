@@ -43,13 +43,13 @@ def _resolve_whom(whom: str) -> Path:
     """
     from pathlib import Path
 
-    presets_dir = Path(__file__).resolve().parent.parent.parent / "config" / "presets"
+    import bos.config
+
+    presets_dir = Path(bos.config.__file__).parent / "presets"
     preset = presets_dir / f"{whom}.toml"
     if not preset.exists():
         available = sorted(p.stem for p in presets_dir.glob("*.toml")) if presets_dir.exists() else []
-        raise click.UsageError(
-            f"Unknown config {whom!r}. Available presets: {', '.join(available) or 'none'}"
-        )
+        raise click.UsageError(f"Unknown config {whom!r}. Available presets: {', '.join(available) or 'none'}")
     return preset
 
 
@@ -234,7 +234,7 @@ async def _run_interactive(
             await client.send(initial_message, chat_id=client.chat_id)
 
         try:
-            await run_chat_tui(client)
+            await run_chat_tui(client, local_mode=True)
         finally:
             actor_task.cancel()
             try:
