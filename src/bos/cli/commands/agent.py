@@ -37,18 +37,11 @@ def _get_ws_and_rd(ctx):
 
 
 def _resolve_whom(whom: str) -> Path:
-    """Resolve --whom value to a config file path.
+    """Resolve --whom value to a built-in preset config file.
 
-    If it looks like a file path (contains / or ends with .toml), treat as
-    a direct file path. Otherwise look up <name>.toml in the built-in presets.
+    Looks up <name>.toml in the built-in presets directory.
     """
     from pathlib import Path
-
-    if "/" in whom or "\\" in whom or whom.endswith(".toml"):
-        p = Path(whom).expanduser()
-        if not p.exists():
-            raise click.UsageError(f"Config file not found: {p}")
-        return p.resolve()
 
     presets_dir = Path(__file__).resolve().parent.parent.parent / "config" / "presets"
     preset = presets_dir / f"{whom}.toml"
@@ -329,13 +322,7 @@ def prompt(ctx, agent_name: str | None):
 @click.option(
     "--whom",
     default=None,
-    help="Path to a bos.toml config file, or name of a built-in preset.",
-)
-@click.option(
-    "--inmem",
-    is_flag=True,
-    default=False,
-    help="Replace mail route, message store, and memory with in-memory variants.",
+    help="Name of a built-in preset config (e.g. default).",
 )
 @click.pass_context
 def ask(
@@ -347,7 +334,6 @@ def ask(
     max_iterations: int | None,
     interactive: bool,
     whom: str | None,
-    inmem: bool,
 ):
     """Run a oneshot agent task or start an interactive chat session.
 
@@ -368,11 +354,6 @@ def ask(
 
     config_source = _resolve_whom(whom) if whom else None
     ws = Workspace(ctx.obj.get("WORKSPACE", "."), config_source=config_source)
-    if inmem:
-        ws.config.setdefault("harness", {})
-        ws.config["harness"]["mail_route"] = {"name": "InMemMailRoute"}
-        ws.config["harness"]["message_store"] = {"name": "InMemMessageStore"}
-        ws.config["harness"]["memory"] = {"name": "InMemMemoryExtension"}
     ws.bootstrap_platform()
     selected_agent = agent_name or ws.get_main_agent_name()
 
