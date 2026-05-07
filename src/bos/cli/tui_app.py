@@ -310,15 +310,9 @@ class ChatApp(App):
             return
         event.input.clear()
 
-        # Handle slash commands (daemon mode only)
+        # Handle slash commands
         if text.startswith("/"):
-            if self._local_mode:
-                if text.strip().lower() == "/clear":
-                    self.action_clear_log()
-                else:
-                    self._write_system("[yellow]Slash commands are not available in local mode.[/]")
-            else:
-                await self._handle_slash_command(text)
+            await self._handle_slash_command(text)
             return
 
         if self._busy:
@@ -480,7 +474,10 @@ class ChatApp(App):
             self.query_one("#chat", RichLog).clear()
 
         elif normalized_cmd == "/restart":
-            await self.action_restart_bos()
+            if self._local_mode:
+                self._write_system("[yellow]/restart is not available in local mode — use Ctrl+C to quit.[/]")
+            else:
+                await self.action_restart_bos()
 
         elif normalized_cmd in (
             "/resume",
