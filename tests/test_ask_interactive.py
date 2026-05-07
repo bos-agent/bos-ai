@@ -9,6 +9,70 @@ from bos.cli.local_client import LocalClient
 from bos.config.workspace import Workspace
 
 
+def test_inmem_overrides_harness_config(tmp_path):
+    """--inmem replaces mail_route, message_store, and memory with in-memory variants."""
+    bos_dir = tmp_path / ".bos"
+    bos_dir.mkdir()
+    (bos_dir / "config.toml").write_text(
+        """
+[main]
+agent = "_default"
+
+[platform]
+extensions = ["bos.extensions.all"]
+
+[harness.mail_route]
+name = "SomeOtherMailRoute"
+
+[harness.message_store]
+name = "SomeOtherStore"
+
+[harness.memory]
+name = "SomeOtherMemory"
+""".strip(),
+        encoding="utf-8",
+    )
+
+    ws = Workspace(str(tmp_path))
+
+    # Simulate --inmem override
+    ws.config.setdefault("harness", {})
+    ws.config["harness"]["mail_route"] = {"name": "InMemMailRoute"}
+    ws.config["harness"]["message_store"] = {"name": "InMemMessageStore"}
+    ws.config["harness"]["memory"] = {"name": "InMemMemoryExtension"}
+
+    assert ws.config["harness"]["mail_route"] == {"name": "InMemMailRoute"}
+    assert ws.config["harness"]["message_store"] == {"name": "InMemMessageStore"}
+    assert ws.config["harness"]["memory"] == {"name": "InMemMemoryExtension"}
+
+
+def test_inmem_preserves_other_harness_keys(tmp_path):
+    """--inmem only overrides the three keys, leaving other harness config intact."""
+    bos_dir = tmp_path / ".bos"
+    bos_dir.mkdir()
+    (bos_dir / "config.toml").write_text(
+        """
+[main]
+agent = "_default"
+
+[platform]
+extensions = ["bos.extensions.all"]
+
+[harness.consolidator]
+model = "test/consolidator"
+""".strip(),
+        encoding="utf-8",
+    )
+
+    ws = Workspace(str(tmp_path))
+    ws.config.setdefault("harness", {})
+    ws.config["harness"]["mail_route"] = {"name": "InMemMailRoute"}
+    ws.config["harness"]["message_store"] = {"name": "InMemMessageStore"}
+    ws.config["harness"]["memory"] = {"name": "InMemMemoryExtension"}
+
+    assert ws.config["harness"]["consolidator"] == {"model": "test/consolidator"}
+
+
 def test_resolve_whom_file_path(tmp_path):
     """--whom with an explicit file path resolves to that file."""
     config_file = tmp_path / "my-config.toml"

@@ -330,6 +330,12 @@ def prompt(ctx, agent_name: str | None):
     default=None,
     help="Path to a bos.toml config file, or name of a built-in preset.",
 )
+@click.option(
+    "--inmem",
+    is_flag=True,
+    default=False,
+    help="Replace mail route, message store, and memory with in-memory variants.",
+)
 @click.pass_context
 def ask(
     ctx,
@@ -340,6 +346,7 @@ def ask(
     max_iterations: int | None,
     interactive: bool,
     whom: str | None,
+    inmem: bool,
 ):
     """Run a oneshot agent task or start an interactive chat session.
 
@@ -360,6 +367,11 @@ def ask(
 
     config_source = _resolve_whom(whom) if whom else None
     ws = Workspace(ctx.obj.get("WORKSPACE", "."), config_source=config_source)
+    if inmem:
+        ws.config.setdefault("harness", {})
+        ws.config["harness"]["mail_route"] = {"name": "InMemMailRoute"}
+        ws.config["harness"]["message_store"] = {"name": "InMemMessageStore"}
+        ws.config["harness"]["memory"] = {"name": "InMemMemoryExtension"}
     ws.bootstrap_platform()
     selected_agent = agent_name or ws.get_main_agent_name()
 
