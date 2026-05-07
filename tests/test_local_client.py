@@ -6,7 +6,7 @@ from bos.cli.local_client import LocalClient
 from bos.core.chat_state import ChatState
 from bos.extensions.mailboxes.in_memory import InMemMailRoute
 from bos.named_actors.registry import ActorRegistry
-from bos.protocol import Envelope, MessageType
+from bos.protocol import MessageType
 
 
 @pytest.fixture(autouse=True)

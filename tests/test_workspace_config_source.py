@@ -1,5 +1,3 @@
-from pathlib import Path
-
 from bos.config.workspace import Workspace
 
 

@@ -108,7 +108,11 @@ def _config_template_path() -> Path:
     return Path(__file__).resolve().parent / "template.toml"
 
 
-def _load_config(workspace: str | Path = ".", *, config_source: str | Path | None = None) -> tuple[Path, dict[str, Any]]:
+def _load_config(
+    workspace: str | Path = ".",
+    *,
+    config_source: str | Path | None = None,
+) -> tuple[Path, dict[str, Any]]:
     workspace = _resolve_workspace_path(workspace)
     if config_source is not None:
         config_path = Path(config_source).expanduser().resolve()
