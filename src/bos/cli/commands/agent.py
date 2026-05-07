@@ -128,7 +128,7 @@ class _TaskProgressDisplay:
             if idx:
                 body.append("\n")
             body.append(message, style=style)
-        return Panel(body, title="bos task", border_style="cyan", padding=(0, 1))
+        return Panel(body, title="bos ask", border_style="cyan", padding=(0, 1))
 
     def _format_event(self, event: TurnEvent) -> tuple[str, str]:
         label = _turn_event_label(event)
@@ -200,7 +200,7 @@ def prompt(ctx, agent_name: str | None):
     click.echo(rendered_prompt, nl=False)
 
 
-# ── bos task ──────────────────────────────────────────────────
+# ── bos ask ──────────────────────────────────────────────────
 
 
 @click.command()
@@ -231,7 +231,7 @@ def prompt(ctx, agent_name: str | None):
     help="Override the maximum number of ReAct iterations.",
 )
 @click.pass_context
-def task(
+def ask(
     ctx,
     message: str | None,
     agent_name: str | None,
@@ -247,10 +247,10 @@ def task(
 
     \b
     Examples:
-        bos task "refactor the auth module"
-        bos task --agent coder "write tests for utils.py"
-        cat spec.md | bos task --stdin
-        echo "explain this" | bos task --stdin --model gpt-4o
+        bos ask "refactor the auth module"
+        bos ask --agent coder "write tests for utils.py"
+        cat spec.md | bos ask --stdin
+        echo "explain this" | bos ask --stdin --model gpt-4o
     """
     if use_stdin and not sys.stdin.isatty():
         stdin_content = sys.stdin.read()

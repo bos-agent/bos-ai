@@ -10,7 +10,7 @@ _LAZY_COMMANDS: dict[str, str] = {
     "stop": "bos.cli.commands.agent:stop",
     "status": "bos.cli.commands.agent:status",
     "restart": "bos.cli.commands.agent:restart",
-    "task": "bos.cli.commands.agent:task",
+    "ask": "bos.cli.commands.agent:ask",
     "tui": "bos.cli.commands.agent:tui",
 }
 
