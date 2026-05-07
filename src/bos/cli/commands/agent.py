@@ -204,6 +204,7 @@ async def _run_interactive(
     import getpass
     import os
     import re
+    import uuid
 
     from bos.cli.local_client import LocalClient
     from bos.core.actor import AgentActor
@@ -223,9 +224,9 @@ async def _run_interactive(
         except Exception:
             username = os.environ.get("USERNAME") or os.environ.get("USER") or ""
         safe = re.sub(r"[^a-z0-9_.-]+", "-", username.strip().lower()).strip("-")
-        client_id = f"local:{safe or 'local'}"
+        client_id = f"local:{safe or 'local'}-{uuid.uuid4().hex[:8]}"
 
-        chat_state = ChatState(ws.bos_dir)
+        chat_state = ChatState()
         actor = AgentActor(agent, actor_mbox, chat_state=chat_state)
         client = LocalClient(
             client_id=client_id,
