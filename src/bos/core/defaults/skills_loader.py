@@ -55,7 +55,14 @@ def _parse_frontmatter_fields(frontmatter: str) -> dict[str, str]:
 @ep_skills_loader(name="_default")
 class FileSystemSkillsLoader:
     def __init__(self, skill_dirs: Iterable[Path | str] | None = None, bos_dir: str | Path | None = None) -> None:
-        skill_dirs = ["skills"] if skill_dirs is None else skill_dirs
+        import bos.skills
+
+        builtin_dirs = list(bos.skills.__path__)
+        if skill_dirs is None:
+            skill_dirs = builtin_dirs + ["skills"]
+        elif "__builtin__" in skill_dirs:
+            skill_dirs = builtin_dirs + list(skill_dirs)
+
         self._skill_dirs = [(Path(bos_dir or ".") / Path(dir).expanduser()).resolve() for dir in skill_dirs]
         self._skill_metas: dict[str, SkillMeta] = {}
         self._skill_metas_refreshed_at = datetime(2000, 1, 1)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -53,7 +54,7 @@ class LLMClient:
         )
 
     async def complete(self, messages: list[dict], **kwargs: Any) -> LLMResponse:
-        if model := kwargs.get("model"):
+        if model := kwargs.get("model") or os.getenv("BOS_MODEL"):
             provider_name, model_name = model.split("/", 1)
             if not ep_provider.has(provider_name):
                 provider_name, model_name = "_default", model
