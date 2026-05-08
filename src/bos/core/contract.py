@@ -102,9 +102,6 @@ class MemoryExtension(Protocol):
     async def get_memory(self, entry_id: str) -> MemoryEntry | None: ...
     async def forget_memory(self, entry_id: str) -> None: ...
 
-    # ── Background optimization ──
-    async def optimize(self) -> None: ...
-
 
 ep_consolidator = ExtensionPoint(
     description="""

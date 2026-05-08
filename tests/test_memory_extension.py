@@ -73,50 +73,7 @@ class TestMemoryExtensionProtocol:
 
 
 class TestRememberTool:
-    """Tests for the Remember tool (maxim write and memory ingest)."""
-
-    @pytest.mark.asyncio
-    async def test_remember_maxim_write(self):
-        agent = ReactAgent(
-            message_store=InMemMessageStore(),
-            memory=InMemMemoryExtension(),
-            consolidator=MessageOnlyConsolidator(),
-            skills_loader=FileSystemSkillsLoader(),
-            maxims={"user": ""},
-            system_prompt="test",
-        )
-        result = await agent._invoke_tool("Remember", content="test content", key="user")
-        assert "updated" in result
-        maxim_content = await agent._memory.get_maxim("user")
-        assert maxim_content == "test content"
-
-    @pytest.mark.asyncio
-    async def test_remember_maxim_rejects_unknown_key(self):
-        agent = ReactAgent(
-            message_store=InMemMessageStore(),
-            memory=InMemMemoryExtension(),
-            consolidator=MessageOnlyConsolidator(),
-            skills_loader=FileSystemSkillsLoader(),
-            maxims={"user": ""},
-            system_prompt="test",
-        )
-        result = await agent._invoke_tool("Remember", content="content", key="soul")
-        assert "not allowed" in result
-
-    @pytest.mark.asyncio
-    async def test_remember_maxim_enforces_length_limit(self):
-        agent = ReactAgent(
-            message_store=InMemMessageStore(),
-            memory=InMemMemoryExtension(),
-            consolidator=MessageOnlyConsolidator(),
-            skills_loader=FileSystemSkillsLoader(),
-            maxims={"user": ""},
-            system_prompt="test",
-        )
-        big_content = "x" * 3000
-        result = await agent._invoke_tool("Remember", content=big_content, key="user")
-        assert "exceeds the limit" in result
-        assert "2048" in result
+    """Tests for the Remember tool (episodic memory only)."""
 
     @pytest.mark.asyncio
     async def test_remember_memory_ingest(self):
@@ -131,8 +88,12 @@ class TestRememberTool:
         result = await agent._invoke_tool("Remember", content="a new fact", tags=["test"])
         assert "entry_id" in result
 
+
+class TestReviseMaximTool:
+    """Tests for the ReviseMaxim tool (append-only maxim revisions)."""
+
     @pytest.mark.asyncio
-    async def test_remember_maxim_at_limit_is_accepted(self):
+    async def test_revise_appends_timestamped_entry(self):
         agent = ReactAgent(
             message_store=InMemMessageStore(),
             memory=InMemMemoryExtension(),
@@ -141,9 +102,52 @@ class TestRememberTool:
             maxims={"user": ""},
             system_prompt="test",
         )
-        content = "x" * 2048
-        result = await agent._invoke_tool("Remember", content=content, key="user")
-        assert "updated" in result
+        result = await agent._invoke_tool("ReviseMaxim", key="user", content="likes Python")
+        assert "appended" in result
+        maxim = await agent._memory.get_maxim("user")
+        assert "likes Python" in maxim
+        assert "]" in maxim  # timestamp bracket present
+
+    @pytest.mark.asyncio
+    async def test_revise_preserves_existing_content(self):
+        agent = ReactAgent(
+            message_store=InMemMessageStore(),
+            memory=InMemMemoryExtension(user="seed content"),
+            consolidator=MessageOnlyConsolidator(),
+            skills_loader=FileSystemSkillsLoader(),
+            maxims={"user": ""},
+            system_prompt="test",
+        )
+        await agent._invoke_tool("ReviseMaxim", key="user", content="new note")
+        maxim = await agent._memory.get_maxim("user")
+        assert "seed content" in maxim
+        assert "new note" in maxim
+
+    @pytest.mark.asyncio
+    async def test_revise_rejects_unknown_key(self):
+        agent = ReactAgent(
+            message_store=InMemMessageStore(),
+            memory=InMemMemoryExtension(),
+            consolidator=MessageOnlyConsolidator(),
+            skills_loader=FileSystemSkillsLoader(),
+            maxims={"user": ""},
+            system_prompt="test",
+        )
+        result = await agent._invoke_tool("ReviseMaxim", key="soul", content="content")
+        assert "not allowed" in result
+
+    @pytest.mark.asyncio
+    async def test_revise_enforces_length_limit(self):
+        agent = ReactAgent(
+            message_store=InMemMessageStore(),
+            memory=InMemMemoryExtension(user="x" * 2000),
+            consolidator=MessageOnlyConsolidator(),
+            skills_loader=FileSystemSkillsLoader(),
+            maxims={"user": ""},
+            system_prompt="test",
+        )
+        result = await agent._invoke_tool("ReviseMaxim", key="user", content="x" * 100)
+        assert "limit" in result.lower()
 
 
 class TestRecallTool:

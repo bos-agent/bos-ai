@@ -197,7 +197,6 @@ async def _run_interactive(
     import getpass
     import os
     import re
-    import uuid
 
     from bos.cli.local_client import LocalClient
     from bos.core.actor import AgentActor

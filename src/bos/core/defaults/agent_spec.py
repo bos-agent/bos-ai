@@ -28,13 +28,13 @@ bos_maxims = {
 
 bos_memory_usage = """--- USING YOUR MEMORY ---
 
-You have two kinds of memory, accessed through three tools: Remember, Recall, and Forget.
+You have two kinds of memory, accessed through four tools: Remember, ReviseMaxim, Recall, and Forget.
 
 ## Maxims (your principles)
 Deeply held convictions (e.g., user preferences, rules). Always visible above.
 - Scope: Respect the keys (e.g., "user", "soul", "identity", "rules").
-- Update: `Remember(key, content)`. You overwrite the ENTIRE content. Merge existing info!
-- Limits: 2048 chars max. Summarize if needed.
+- Revise: `ReviseMaxim(key, content)`. Appends a timestamped note; existing content is preserved.
+- Limits: 2048 chars total. Keep notes concise.
 - Do NOT use for: Facts, snippets, meeting notes, one-off details.
 
 ## Memories (your knowledge)
