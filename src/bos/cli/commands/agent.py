@@ -53,13 +53,6 @@ def _resolve_whom(whom: str) -> Path:
     return preset
 
 
-async def _build_agent_system_prompt(ws: Workspace, agent_name: str | None = None) -> str:
-    ws.bootstrap_platform()
-    selected_agent = agent_name or ws.get_main_agent_name()
-    async with ws.harness() as harness:
-        agent = harness.create_agent(selected_agent)
-        return await agent._build_system_prompt()
-
 
 async def _connect_tui_client(client) -> None:
     try:
@@ -243,38 +236,6 @@ async def _run_interactive(
             await client.aclose()
 
 
-# ── bos prompt ────────────────────────────────────────────────
-
-
-@click.command()
-@click.option(
-    "--agent",
-    "agent_name",
-    default=None,
-    help="Agent name to show the prompt for. Use '0' for the default agent with all tools/skills.",
-)
-@click.pass_context
-def prompt(ctx, agent_name: str | None):
-    """Print the built system prompt for an agent.
-
-    By default, shows the prompt for the configured main agent.
-    Use --agent <name> to show the prompt for a specific agent.
-    Use --agent 0 to show the default agent prompt with all available
-    tools and skills.
-    """
-    ws, _ = _get_ws_and_rd(ctx)
-    try:
-        rendered_prompt = asyncio.run(
-            _build_agent_system_prompt(
-                ws,
-                agent_name == "0" and "_default" or agent_name,
-            )
-        )
-    except ValueError as exc:
-        raise click.UsageError(str(exc)) from exc
-
-    click.echo(rendered_prompt, nl=False)
-
 
 # ── bos ask ──────────────────────────────────────────────────
 
@@ -349,7 +310,18 @@ def ask(
         raise click.UsageError("Provide a task message, use --stdin, or use -i for interactive mode.")
 
     config_source = _resolve_whom(whom) if whom else None
-    ws = Workspace(ctx.obj.get("WORKSPACE", "."), config_source=config_source)
+    try:
+        ws = Workspace(ctx.obj.get("WORKSPACE", "."), config_source=config_source)
+    except WorkspaceResolutionError as exc:
+        hint = str(exc)
+        if not whom:
+            import bos.config as _bos_cfg
+
+            presets_dir = Path(_bos_cfg.__file__).parent / "presets"
+            available = sorted(p.stem for p in presets_dir.glob("*.toml")) if presets_dir.exists() else []
+            presets = ", ".join(available) or "none"
+            hint += f"\nTip: use --whom <preset> to run without a workspace. Available presets: {presets}."
+        raise click.UsageError(hint) from exc
     ws.bootstrap_platform()
     selected_agent = agent_name or ws.get_main_agent_name()
 
