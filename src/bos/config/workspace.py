@@ -108,8 +108,19 @@ def _config_template_path() -> Path:
     return Path(__file__).resolve().parent / "template.toml"
 
 
-def _load_config(workspace: str | Path = ".") -> tuple[Path, dict[str, Any]]:
+def _load_config(
+    workspace: str | Path = ".",
+    *,
+    config_source: str | Path | None = None,
+) -> tuple[Path, dict[str, Any]]:
     workspace = _resolve_workspace_path(workspace)
+    if config_source is not None:
+        config_path = Path(config_source).expanduser().resolve()
+        if not config_path.exists():
+            raise WorkspaceResolutionError(f"Config file not found: {config_path}")
+        if not config_path.is_file():
+            raise WorkspaceResolutionError(f"Config path is not a file: {config_path}")
+        return workspace, tomllib.loads(config_path.read_text(encoding="utf-8"))
     resolved = _resolve_config(workspace)
     if not resolved.config_file.exists():
         return resolved.bos_dir, {}
@@ -362,9 +373,9 @@ class ResolvedChannelConfig:
 
 
 class Workspace:
-    def __init__(self, workspace: str | Path = "."):
+    def __init__(self, workspace: str | Path = ".", *, config_source: str | Path | None = None):
         self.workspace = _resolve_workspace_path(workspace)
-        self.bos_dir, self.config = _load_config(self.workspace)
+        self.bos_dir, self.config = _load_config(self.workspace, config_source=config_source)
         self.agent_source_history: dict[str, list[AgentSourceRecord]] = {}
 
     def bootstrap_platform(self):

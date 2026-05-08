@@ -1,0 +1,14 @@
+[platform]
+extensions = ["bos.extensions.all"]
+
+[harness.mail_route]
+name = "InMemMailRoute"
+
+[harness.message_store]
+name = "InMemMessageStore"
+
+[harness.memory]
+name = "InMemMemoryStore"
+
+[main]
+agent = "_default"

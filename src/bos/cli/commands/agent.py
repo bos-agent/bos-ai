@@ -11,6 +11,7 @@ import sys
 import time
 import uuid
 from collections import deque
+from pathlib import Path
 from typing import Any
 
 import click
@@ -33,6 +34,23 @@ def _get_ws_and_rd(ctx):
 
     rd = RunDir(ws.bos_dir)
     return ws, rd
+
+
+def _resolve_whom(whom: str) -> Path:
+    """Resolve --whom value to a built-in preset config file.
+
+    Looks up <name>.toml in the built-in presets directory.
+    """
+    from pathlib import Path
+
+    import bos.config
+
+    presets_dir = Path(bos.config.__file__).parent / "presets"
+    preset = presets_dir / f"{whom}.toml"
+    if not preset.exists():
+        available = sorted(p.stem for p in presets_dir.glob("*.toml")) if presets_dir.exists() else []
+        raise click.UsageError(f"Unknown config {whom!r}. Available presets: {', '.join(available) or 'none'}")
+    return preset
 
 
 async def _build_agent_system_prompt(ws: Workspace, agent_name: str | None = None) -> str:
@@ -128,7 +146,7 @@ class _TaskProgressDisplay:
             if idx:
                 body.append("\n")
             body.append(message, style=style)
-        return Panel(body, title="bos task", border_style="cyan", padding=(0, 1))
+        return Panel(body, title="bos ask", border_style="cyan", padding=(0, 1))
 
     def _format_event(self, event: TurnEvent) -> tuple[str, str]:
         label = _turn_event_label(event)
@@ -167,6 +185,65 @@ class _TaskProgressDisplay:
         return "", ""
 
 
+async def _run_interactive(
+    ws: "Workspace",
+    agent_name: str,
+    agent_cfg: dict | None,
+    *,
+    initial_message: str | None = None,
+) -> None:
+    """Run the agent in interactive mode with an in-process TUI."""
+    import asyncio
+    import getpass
+    import os
+    import re
+    import uuid
+
+    from bos.cli.local_client import LocalClient
+    from bos.core.actor import AgentActor
+    from bos.core.chat_state import ChatState
+
+    async with ws.harness() as harness:
+        agent = harness.create_agent(agent_name, agent_cfg=agent_cfg)
+        actor_mbox = harness.mail_route.bind("agent@main")
+        client_mbox = harness.mail_route.bind("client@local")
+
+        try:
+            username = getpass.getuser()
+        except Exception:
+            username = os.environ.get("USERNAME") or os.environ.get("USER") or ""
+        safe = re.sub(r"[^a-z0-9_.-]+", "-", username.strip().lower()).strip("-")
+        client_id = f"local:{safe or 'local'}-{uuid.uuid4().hex[:8]}"
+
+        chat_state = ChatState()
+        actor = AgentActor(agent, actor_mbox, chat_state=chat_state)
+        client = LocalClient(
+            client_id=client_id,
+            client_mbox=client_mbox,
+            chat_state=chat_state,
+        )
+
+        await client.connect()
+
+        from bos.cli.tui_app import run_chat_tui
+
+        actor_task = asyncio.create_task(actor.run())
+
+        # If an initial message is provided, send it first
+        if initial_message:
+            await client.send(initial_message, chat_id=client.chat_id)
+
+        try:
+            await run_chat_tui(client, local_mode=True)
+        finally:
+            actor_task.cancel()
+            try:
+                await actor_task
+            except asyncio.CancelledError:
+                pass
+            await client.aclose()
+
+
 # ── bos prompt ────────────────────────────────────────────────
 
 
@@ -200,7 +277,7 @@ def prompt(ctx, agent_name: str | None):
     click.echo(rendered_prompt, nl=False)
 
 
-# ── bos task ──────────────────────────────────────────────────
+# ── bos ask ──────────────────────────────────────────────────
 
 
 @click.command()
@@ -230,35 +307,48 @@ def prompt(ctx, agent_name: str | None):
     default=None,
     help="Override the maximum number of ReAct iterations.",
 )
+@click.option(
+    "-i",
+    "--interactive",
+    is_flag=True,
+    default=False,
+    help="Start an interactive chat session (in-process TUI, no background daemon).",
+)
+@click.option(
+    "--whom",
+    default=None,
+    help="Name of a built-in preset config (e.g. default).",
+)
 @click.pass_context
-def task(
+def ask(
     ctx,
     message: str | None,
     agent_name: str | None,
     model: str | None,
     use_stdin: bool,
     max_iterations: int | None,
+    interactive: bool,
+    whom: str | None,
 ):
-    """Run a oneshot agent task and exit.
-
-    Boots the harness, creates an agent, sends a single message,
-    waits for the full ReAct loop to finish, prints the final
-    response, and exits.  No daemon, no channels.
+    """Run a oneshot agent task or start an interactive chat session.
 
     \b
     Examples:
-        bos task "refactor the auth module"
-        bos task --agent coder "write tests for utils.py"
-        cat spec.md | bos task --stdin
-        echo "explain this" | bos task --stdin --model gpt-4o
+        bos ask "refactor the auth module"
+        bos ask -i
+        bos ask -i "write tests for utils.py"
+        bos ask -i --whom default
+        cat spec.md | bos ask --stdin
     """
     if use_stdin and not sys.stdin.isatty():
         stdin_content = sys.stdin.read()
         message = ((message or "") + "\n" + stdin_content).strip() if message else stdin_content.strip()
-    if not message:
-        raise click.UsageError("Provide a task message as an argument or via --stdin.")
 
-    ws, _ = _get_ws_and_rd(ctx)
+    if not interactive and not message:
+        raise click.UsageError("Provide a task message, use --stdin, or use -i for interactive mode.")
+
+    config_source = _resolve_whom(whom) if whom else None
+    ws = Workspace(ctx.obj.get("WORKSPACE", "."), config_source=config_source)
     ws.bootstrap_platform()
     selected_agent = agent_name or ws.get_main_agent_name()
 
@@ -266,6 +356,15 @@ def task(
     if model:
         llm_args["model"] = model
 
+    if interactive:
+        agent_cfg = {"max_iterations": max_iterations} if max_iterations is not None else None
+        try:
+            asyncio.run(_run_interactive(ws, selected_agent, agent_cfg, initial_message=message))
+        except ValueError as exc:
+            raise click.UsageError(str(exc)) from exc
+        return
+
+    # One-shot mode (unchanged from current logic)
     async def _run(event_sink: _TaskProgressDisplay | None = None) -> str:
         agent_cfg = {"max_iterations": max_iterations} if max_iterations is not None else None
         async with ws.harness() as harness:
