@@ -166,7 +166,9 @@ class ReactAgent:
             if isinstance(maxims, list)
             else (dict(maxims))
         )
-        self._memory_usage = bos_memory_usage if memory_usage in ("*", None) else str(memory_usage)
+        self._memory_usage = (
+            "" if memory_usage is None else bos_memory_usage if memory_usage == "*" else str(memory_usage)
+        )
 
         self._llm = llm or LLMClient()
         self._message_store = message_store

@@ -289,9 +289,10 @@ def prompt(ctx, agent_name: str | None):
     help="Agent name to use (defaults to the configured main agent).",
 )
 @click.option(
-    "--model",
+    "--default-model",
+    "default_model",
     default=None,
-    help="Override the model for this task.",
+    help="Set the default model for all components (agent, consolidator, subagents).",
 )
 @click.option(
     "--stdin",
@@ -324,7 +325,7 @@ def ask(
     ctx,
     message: str | None,
     agent_name: str | None,
-    model: str | None,
+    default_model: str | None,
     use_stdin: bool,
     max_iterations: int | None,
     interactive: bool,
@@ -338,6 +339,7 @@ def ask(
         bos ask -i
         bos ask -i "write tests for utils.py"
         bos ask -i --whom default
+        bos ask --default-model gpt-4o "explain this"
         cat spec.md | bos ask --stdin
     """
     if use_stdin and not sys.stdin.isatty():
@@ -352,9 +354,8 @@ def ask(
     ws.bootstrap_platform()
     selected_agent = agent_name or ws.get_main_agent_name()
 
-    llm_args: dict = {}
-    if model:
-        llm_args["model"] = model
+    if default_model:
+        os.environ["BOS_MODEL"] = default_model
 
     if interactive:
         agent_cfg = {"max_iterations": max_iterations} if max_iterations is not None else None
@@ -372,7 +373,6 @@ def ask(
             return await agent.ask(
                 uuid.uuid4().hex,
                 message,
-                llm_args=llm_args or None,
                 event_sink=event_sink,
             )
 

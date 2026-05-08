@@ -1,0 +1,20 @@
+[platform]
+extensions = ["bos.extensions.all"]
+
+[[platform.agents]]
+name = "xxx"
+system_prompt = "Always start the response wiht 'hihi!'"
+tools = ["Repl"]
+memory_usage = "memorize things before use it"
+
+[harness.mail_route]
+name = "InMemMailRoute"
+
+[harness.message_store]
+name = "InMemMessageStore"
+
+[harness.memory]
+name = "InMemMemoryExtension"
+
+[main]
+agent = "xxx"

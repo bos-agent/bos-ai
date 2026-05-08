@@ -182,13 +182,7 @@ class AgentHarness:
             return self._consolidator_cfg
 
         cfg = (self._consolidator_cfg or {}).copy()
-        model = cfg.get("model") or os.getenv("BOS_CONSOLIDATOR_MODEL") or os.getenv("BOS_MODEL")
-        if not model:
-            raise RuntimeError(
-                "Consolidator model is required. Configure harness.consolidator.model, "
-                "BOS_CONSOLIDATOR_MODEL, or BOS_MODEL."
-            )
-        cfg["model"] = model
+        cfg["model"] = cfg.get("model") or os.getenv("BOS_CONSOLIDATOR_MODEL")
         cfg["llm"] = self.llm
         return self._create_and_own("ep_consolidator", Consolidator, cfg)
 

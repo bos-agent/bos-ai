@@ -84,7 +84,7 @@ ep_memory = ExtensionPoint(
 @dataclass
 class MemoryEntry:
     id: str
-    content: str          # full content from get_memory; truncated snippet from search_memories
+    content: str  # full content from get_memory; truncated snippet from search_memories
     tags: list[str] = field(default_factory=list)
     created_at: str = ""
     metadata: dict | None = None
