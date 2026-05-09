@@ -37,13 +37,18 @@ def _get_ws_and_rd(ctx):
 
 
 def _resolve_whom(whom: str) -> Path:
-    """Resolve --whom value to a built-in preset config file.
+    """Resolve --whom value to a built-in preset config file or a direct file path.
 
-    Looks up <name>.toml in the built-in presets directory.
+    First checks if 'whom' is an existing file path. If not, looks up
+    <name>.toml in the built-in presets directory.
     """
     from pathlib import Path
 
     import bos.config
+
+    whom_path = Path(whom)
+    if whom_path.is_file():
+        return whom_path.resolve()
 
     presets_dir = Path(bos.config.__file__).parent / "presets"
     preset = presets_dir / f"{whom}.toml"
@@ -278,7 +283,7 @@ async def _run_interactive(
 @click.option(
     "--whom",
     default=None,
-    help="Name of a built-in preset config (e.g. default).",
+    help="Name of a built-in preset config (e.g. default) or a path to a config file.",
 )
 @click.pass_context
 def ask(

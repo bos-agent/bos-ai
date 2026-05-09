@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from bos.core import AgentHarness, _apply
+from bos.core._utils import _resolve_path
 
 
 class WorkspaceResolutionError(RuntimeError):
@@ -42,19 +43,7 @@ _FRONTMATTER_ALIAS_KEYS = {
 }
 
 
-@dataclass(frozen=True)
-class _DiscoveredConfig:
-    """Result of workspace filesystem discovery."""
-
-    bos_dir: Path
-    config_file: Path
-
-
-def _resolve_workspace_path(workspace: str | Path = ".") -> Path:
-    return Path(workspace).expanduser().resolve()
-
-
-def _find_discovered_config(workspace: Path) -> _DiscoveredConfig | None:
+def _find_discovered_config(workspace: Path) -> Path | None:
     for parent in [workspace] + list(workspace.parents):
         has_dotbos = (parent / ".bos").exists()
         has_bostoml = (parent / "bos.toml").is_file()
@@ -65,41 +54,32 @@ def _find_discovered_config(workspace: Path) -> _DiscoveredConfig | None:
             )
 
         if has_dotbos:
-            return _DiscoveredConfig(
-                bos_dir=parent / ".bos",
-                config_file=parent / ".bos" / "config.toml",
-            )
+            return parent / ".bos" / "config.toml"
 
         if has_bostoml:
-            return _DiscoveredConfig(
-                bos_dir=parent,
-                config_file=parent / "bos.toml",
-            )
+            return parent / "bos.toml"
 
     return None
 
 
-def _resolve_config(workspace: Path) -> _DiscoveredConfig:
-    discovered = _find_discovered_config(workspace)
+def _resolve_config(workspace: Path) -> Path:
+    discovered_config = _find_discovered_config(workspace)
     configured_bos_dir = os.environ.get("BOS_DIR")
     env_bos_dir = Path(configured_bos_dir).expanduser().resolve() if configured_bos_dir else None
 
-    if discovered and env_bos_dir:
-        resolved_bos_dir = discovered.bos_dir.resolve()
+    if discovered_config and env_bos_dir:
+        resolved_bos_dir = discovered_config.parent.resolve()
         if resolved_bos_dir != env_bos_dir:
             raise WorkspaceResolutionError(
                 f"Ambiguous BOS config: discovered {resolved_bos_dir} and BOS_DIR={env_bos_dir}. "
                 "Unset BOS_DIR or run outside that workspace."
             )
-        return _DiscoveredConfig(bos_dir=resolved_bos_dir, config_file=discovered.config_file.resolve())
+        return discovered_config.resolve()
 
-    if discovered:
-        return _DiscoveredConfig(
-            bos_dir=discovered.bos_dir.resolve(),
-            config_file=discovered.config_file.resolve(),
-        )
+    if discovered_config:
+        return discovered_config.resolve()
     if env_bos_dir:
-        return _DiscoveredConfig(bos_dir=env_bos_dir, config_file=env_bos_dir / "config.toml")
+        return env_bos_dir / "config.toml"
 
     raise WorkspaceResolutionError("No BOS workspace found. Run `bos init`, `cd` into a workspace, or set `BOS_DIR`.")
 
@@ -108,32 +88,21 @@ def _config_template_path() -> Path:
     return Path(__file__).resolve().parent / "template.toml"
 
 
-def _load_config(
-    workspace: str | Path = ".",
-    *,
-    config_source: str | Path | None = None,
-) -> tuple[Path, dict[str, Any]]:
-    workspace = _resolve_workspace_path(workspace)
-    if config_source is not None:
-        config_path = Path(config_source).expanduser().resolve()
-        if not config_path.exists():
-            raise WorkspaceResolutionError(f"Config file not found: {config_path}")
-        if not config_path.is_file():
-            raise WorkspaceResolutionError(f"Config path is not a file: {config_path}")
-        return workspace, tomllib.loads(config_path.read_text(encoding="utf-8"))
-    resolved = _resolve_config(workspace)
-    if not resolved.config_file.exists():
-        return resolved.bos_dir, {}
-    return resolved.bos_dir, tomllib.loads(resolved.config_file.read_text(encoding="utf-8"))
+def _load_config(config_path: Path | str) -> tuple[Path, dict[str, Any]]:
+    if not config_path:
+        raise WorkspaceResolutionError("Config path is not resovled.")
+    if not config_path.is_file():
+        raise WorkspaceResolutionError(f"Config path is not a file: {config_path}")
+    return config_path.parent, tomllib.loads(config_path.read_text(encoding="utf-8"))
 
 
 def initialize_workspace(workspace: str | Path = ".", *, dotbos: bool = False) -> Path:
-    workspace = _resolve_workspace_path(workspace)
+    workspace = _resolve_path(workspace)
 
-    existing = _find_discovered_config(workspace)
-    if existing is not None:
+    existing_config = _find_discovered_config(workspace)
+    if existing_config is not None:
         raise WorkspaceResolutionError(
-            f"Workspace already initialized: found {existing.config_file}. Remove it before re-initializing."
+            f"Workspace already initialized: found {existing_config}. Remove it before re-initializing."
         )
 
     if dotbos:
@@ -374,8 +343,9 @@ class ResolvedChannelConfig:
 
 class Workspace:
     def __init__(self, workspace: str | Path = ".", *, config_source: str | Path | None = None):
-        self.workspace = _resolve_workspace_path(workspace)
-        self.bos_dir, self.config = _load_config(self.workspace, config_source=config_source)
+        self.workspace = _resolve_path(workspace)
+        config_source = _resolve_config(self.workspace) if config_source is None else _resolve_path(config_source)
+        self.bos_dir, self.config = _load_config(config_source)
         self.agent_source_history: dict[str, list[AgentSourceRecord]] = {}
 
     def bootstrap_platform(self):
