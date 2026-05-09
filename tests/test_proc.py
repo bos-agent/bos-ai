@@ -78,7 +78,7 @@ target_address = "agent@main"
 
     assert f"{workspace.resolve()}:/workspace" in argv
     assert f"{bos_dir.resolve()}:/bos" in argv
-    assert "BOS_DIR=/bos" in argv
+    assert "BOS_CONFIG=/bos/config.toml" in argv
 
 
 def test_is_running_checks_docker_container_state(tmp_path, monkeypatch):

@@ -64,24 +64,23 @@ def _find_discovered_config(workspace: Path) -> Path | None:
 
 def _resolve_config(workspace: Path) -> Path:
     discovered_config = _find_discovered_config(workspace)
-    configured_bos_dir = os.environ.get("BOS_DIR")
-    env_bos_dir = Path(configured_bos_dir).expanduser().resolve() if configured_bos_dir else None
+    configured_bos_config = os.environ.get("BOS_CONFIG")
+    env_bos_config = Path(configured_bos_config).expanduser().resolve() if configured_bos_config else None
 
-    if discovered_config and env_bos_dir:
-        resolved_bos_dir = discovered_config.parent.resolve()
-        if resolved_bos_dir != env_bos_dir:
+    if discovered_config and env_bos_config:
+        if discovered_config.resolve() != env_bos_config:
             raise WorkspaceResolutionError(
-                f"Ambiguous BOS config: discovered {resolved_bos_dir} and BOS_DIR={env_bos_dir}. "
-                "Unset BOS_DIR or run outside that workspace."
+                f"Ambiguous BOS config: discovered {discovered_config.resolve()} and BOS_CONFIG={env_bos_config}. "
+                "Unset BOS_CONFIG or run outside that workspace."
             )
         return discovered_config.resolve()
 
     if discovered_config:
         return discovered_config.resolve()
-    if env_bos_dir:
-        return env_bos_dir / "config.toml"
+    if env_bos_config:
+        return env_bos_config
 
-    raise WorkspaceResolutionError("No BOS workspace found. Run `bos init`, `cd` into a workspace, or set `BOS_DIR`.")
+    raise WorkspaceResolutionError("No BOS workspace found. Run `bos init`, `cd` into a workspace, or set `BOS_CONFIG`.")
 
 
 def _config_template_path() -> Path:
@@ -351,6 +350,7 @@ class Workspace:
         self.workspace = _resolve_path(workspace)
         resolved_config = _resolve_config(self.workspace) if config_source is None else _resolve_path(config_source)
         self.bos_dir = resolved_config.parent
+        self.config_file = resolved_config
         self.config = _load_config(resolved_config, explicit=config_source is not None)
         self.agent_source_history: dict[str, list[AgentSourceRecord]] = {}
 

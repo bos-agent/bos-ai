@@ -6,7 +6,7 @@ from bos.cli.entry import cli
 def test_cli_init_creates_bos_toml_by_default(tmp_path, monkeypatch):
     workspace = tmp_path / "project"
     workspace.mkdir()
-    monkeypatch.delenv("BOS_DIR", raising=False)
+    monkeypatch.delenv("BOS_CONFIG", raising=False)
 
     result = CliRunner().invoke(cli, ["--workspace", str(workspace), "init"])
 
@@ -19,7 +19,7 @@ def test_cli_init_creates_bos_toml_by_default(tmp_path, monkeypatch):
 def test_cli_init_dotbos_creates_dot_bos_layout(tmp_path, monkeypatch):
     workspace = tmp_path / "project"
     workspace.mkdir()
-    monkeypatch.delenv("BOS_DIR", raising=False)
+    monkeypatch.delenv("BOS_CONFIG", raising=False)
 
     result = CliRunner().invoke(cli, ["--workspace", str(workspace), "init", "--dotbos"])
 
@@ -33,7 +33,7 @@ def test_cli_init_rejects_already_initialized_workspace(tmp_path, monkeypatch):
     workspace = tmp_path / "project"
     workspace.mkdir()
     (workspace / "bos.toml").write_text("", encoding="utf-8")
-    monkeypatch.delenv("BOS_DIR", raising=False)
+    monkeypatch.delenv("BOS_CONFIG", raising=False)
 
     result = CliRunner().invoke(cli, ["--workspace", str(workspace), "init"])
 
@@ -45,7 +45,7 @@ def test_cli_init_rejects_already_initialized_dotbos(tmp_path, monkeypatch):
     workspace = tmp_path / "project"
     workspace.mkdir()
     (workspace / ".bos").mkdir()
-    monkeypatch.delenv("BOS_DIR", raising=False)
+    monkeypatch.delenv("BOS_CONFIG", raising=False)
 
     result = CliRunner().invoke(cli, ["--workspace", str(workspace), "init"])
 
@@ -56,7 +56,7 @@ def test_cli_init_rejects_already_initialized_dotbos(tmp_path, monkeypatch):
 def test_cli_init_git_creates_repo_and_gitignore(tmp_path, monkeypatch):
     workspace = tmp_path / "project"
     workspace.mkdir()
-    monkeypatch.delenv("BOS_DIR", raising=False)
+    monkeypatch.delenv("BOS_CONFIG", raising=False)
 
     result = CliRunner().invoke(cli, ["--workspace", str(workspace), "init", "--git"])
 
@@ -70,7 +70,7 @@ def test_cli_init_git_creates_repo_and_gitignore(tmp_path, monkeypatch):
 def test_cli_status_fails_cleanly_without_workspace_or_bos_dir(tmp_path, monkeypatch):
     workspace = tmp_path / "project"
     workspace.mkdir()
-    monkeypatch.delenv("BOS_DIR", raising=False)
+    monkeypatch.delenv("BOS_CONFIG", raising=False)
 
     result = CliRunner().invoke(cli, ["--workspace", str(workspace), "status"])
 

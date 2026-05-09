@@ -244,7 +244,7 @@ def build_docker_argv(
             "--env",
             "BOS_RUNTIME=docker",
             "--env",
-            f"BOS_DIR={container_bos_dir}",
+            f"BOS_CONFIG={container_bos_dir}/{workspace.config_file.name}",
         ]
     )
 
