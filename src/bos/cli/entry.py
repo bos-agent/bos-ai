@@ -36,14 +36,14 @@ class _LazyGroup(click.Group):
 
 @click.group(cls=_LazyGroup, lazy_commands=_LAZY_COMMANDS)
 @click.option(
-    "-w",
-    "--workspace",
-    type=click.Path(exists=False, file_okay=False, dir_okay=True),
+    "-c",
+    "--config",
+    "config",
     default=None,
-    help="Path to the workspace directory.",
+    help="Path to a BOS config file or a built-in preset name (e.g. 'coding').",
 )
 @click.pass_context
-def cli(ctx, workspace):
+def cli(ctx, config):
     """BOS AI CLI"""
     import logging
     import os
@@ -56,7 +56,7 @@ def cli(ctx, workspace):
     )
 
     ctx.ensure_object(dict)
-    ctx.obj["WORKSPACE"] = workspace or os.environ.get("BOS_WORKSPACE", ".")
+    ctx.obj["CONFIG"] = config or os.environ.get("BOS_CONFIG")
 
 
 def main():

@@ -7,8 +7,9 @@ def test_cli_init_creates_bos_toml_by_default(tmp_path, monkeypatch):
     workspace = tmp_path / "project"
     workspace.mkdir()
     monkeypatch.delenv("BOS_CONFIG", raising=False)
+    monkeypatch.chdir(workspace)
 
-    result = CliRunner().invoke(cli, ["--workspace", str(workspace), "init"])
+    result = CliRunner().invoke(cli, ["init"])
 
     assert result.exit_code == 0
     assert f"Initialized BOS workspace at {workspace}" in result.output
@@ -20,8 +21,9 @@ def test_cli_init_dotbos_creates_dot_bos_layout(tmp_path, monkeypatch):
     workspace = tmp_path / "project"
     workspace.mkdir()
     monkeypatch.delenv("BOS_CONFIG", raising=False)
+    monkeypatch.chdir(workspace)
 
-    result = CliRunner().invoke(cli, ["--workspace", str(workspace), "init", "--dotbos"])
+    result = CliRunner().invoke(cli, ["init", "--dotbos"])
 
     assert result.exit_code == 0
     assert f"Initialized BOS workspace at {workspace / '.bos'}" in result.output
@@ -34,8 +36,9 @@ def test_cli_init_rejects_already_initialized_workspace(tmp_path, monkeypatch):
     workspace.mkdir()
     (workspace / "bos.toml").write_text("", encoding="utf-8")
     monkeypatch.delenv("BOS_CONFIG", raising=False)
+    monkeypatch.chdir(workspace)
 
-    result = CliRunner().invoke(cli, ["--workspace", str(workspace), "init"])
+    result = CliRunner().invoke(cli, ["init"])
 
     assert result.exit_code != 0
     assert "already initialized" in result.output
@@ -46,8 +49,9 @@ def test_cli_init_rejects_already_initialized_dotbos(tmp_path, monkeypatch):
     workspace.mkdir()
     (workspace / ".bos").mkdir()
     monkeypatch.delenv("BOS_CONFIG", raising=False)
+    monkeypatch.chdir(workspace)
 
-    result = CliRunner().invoke(cli, ["--workspace", str(workspace), "init"])
+    result = CliRunner().invoke(cli, ["init"])
 
     assert result.exit_code != 0
     assert "already initialized" in result.output
@@ -57,8 +61,9 @@ def test_cli_init_git_creates_repo_and_gitignore(tmp_path, monkeypatch):
     workspace = tmp_path / "project"
     workspace.mkdir()
     monkeypatch.delenv("BOS_CONFIG", raising=False)
+    monkeypatch.chdir(workspace)
 
-    result = CliRunner().invoke(cli, ["--workspace", str(workspace), "init", "--git"])
+    result = CliRunner().invoke(cli, ["init", "--git"])
 
     assert result.exit_code == 0
     assert (workspace / ".git").is_dir()
@@ -67,12 +72,13 @@ def test_cli_init_git_creates_repo_and_gitignore(tmp_path, monkeypatch):
     assert gitignore.read_text(encoding="utf-8") == ".env\nrun\n"
 
 
-def test_cli_status_fails_cleanly_without_workspace_or_bos_dir(tmp_path, monkeypatch):
+def test_cli_status_fails_cleanly_without_workspace_or_config(tmp_path, monkeypatch):
     workspace = tmp_path / "project"
     workspace.mkdir()
     monkeypatch.delenv("BOS_CONFIG", raising=False)
+    monkeypatch.chdir(workspace)
 
-    result = CliRunner().invoke(cli, ["--workspace", str(workspace), "status"])
+    result = CliRunner().invoke(cli, ["status"])
 
     assert result.exit_code == 2
     assert "No BOS workspace found" in result.output

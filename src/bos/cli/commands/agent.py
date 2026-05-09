@@ -24,39 +24,80 @@ from bos.config import Workspace, WorkspaceResolutionError
 from bos.protocol import TurnEvent
 
 
-def _get_ws_and_rd(ctx):
-    workspace = ctx.obj.get("WORKSPACE", ".")
+def _resolve_config_option(config: str) -> Path:
+    """Resolve --config value to a built-in preset config file or a direct file path.
+
+    First checks if 'config' is an existing file path. If not, looks up
+    <name>.toml in the built-in presets directory.
+    """
+    import bos.config
+
+    config_path = Path(config)
+    if config_path.is_file():
+        return config_path.resolve()
+
+    presets_dir = Path(bos.config.__file__).parent / "presets"
+    preset = presets_dir / f"{config}.toml"
+    if not preset.exists():
+        available = sorted(p.stem for p in presets_dir.glob("*.toml")) if presets_dir.exists() else []
+        raise click.UsageError(f"Unknown config {config!r}. Available presets: {', '.join(available) or 'none'}")
+    return preset
+
+
+def _workspace_from_config(config_file: Path) -> Path:
+    """Derive workspace directory from a config file location.
+
+    Only standard workspace layouts are supported:
+    - <workspace>/bos.toml → workspace is config parent
+    - <workspace>/.bos/config.toml → workspace is config grandparent
+
+    Raises click.UsageError for non-standard layouts (e.g. presets, arbitrary paths).
+    """
+    if config_file.name == "bos.toml":
+        return config_file.parent
+    if config_file.name == "config.toml" and config_file.parent.name == ".bos":
+        return config_file.parent.parent
+    raise click.UsageError(
+        f"Cannot derive workspace from config at {config_file}. "
+        "Only <workspace>/bos.toml or <workspace>/.bos/config.toml layouts are supported for this command."
+    )
+
+
+def _build_workspace(ctx) -> Workspace:
+    """Build a Workspace from the global --config option (or discovery)."""
+    config = ctx.obj.get("CONFIG")
+    config_source = _resolve_config_option(config) if config else None
     try:
-        ws = Workspace(workspace)
+        ws = Workspace(".", config_source=config_source)
+    except WorkspaceResolutionError as exc:
+        hint = str(exc)
+        if not config:
+            import bos.config as _bos_cfg
+
+            presets_dir = Path(_bos_cfg.__file__).parent / "presets"
+            available = sorted(p.stem for p in presets_dir.glob("*.toml")) if presets_dir.exists() else []
+            presets = ", ".join(available) or "none"
+            hint += f"\nTip: use -c <preset> to run without a workspace. Available presets: {presets}."
+        raise click.UsageError(hint) from exc
+    return ws
+
+
+def _get_ws_and_rd(ctx):
+    """Build Workspace + RunDir for daemon commands (start/stop/status/restart/tui).
+
+    For these commands the config must be a standard workspace layout so that
+    the run/ directory can be located under bos_dir.
+    """
+    config = ctx.obj.get("CONFIG")
+    config_source = _resolve_config_option(config) if config else None
+    try:
+        ws = Workspace(".", config_source=config_source)
     except WorkspaceResolutionError as exc:
         raise click.UsageError(str(exc)) from exc
     from bos.runner.proc import RunDir
 
     rd = RunDir(ws.bos_dir)
     return ws, rd
-
-
-def _resolve_whom(whom: str) -> Path:
-    """Resolve --whom value to a built-in preset config file or a direct file path.
-
-    First checks if 'whom' is an existing file path. If not, looks up
-    <name>.toml in the built-in presets directory.
-    """
-    from pathlib import Path
-
-    import bos.config
-
-    whom_path = Path(whom)
-    if whom_path.is_file():
-        return whom_path.resolve()
-
-    presets_dir = Path(bos.config.__file__).parent / "presets"
-    preset = presets_dir / f"{whom}.toml"
-    if not preset.exists():
-        available = sorted(p.stem for p in presets_dir.glob("*.toml")) if presets_dir.exists() else []
-        raise click.UsageError(f"Unknown config {whom!r}. Available presets: {', '.join(available) or 'none'}")
-    return preset
-
 
 
 async def _connect_tui_client(client) -> None:
@@ -280,11 +321,6 @@ async def _run_interactive(
     default=False,
     help="Start an interactive chat session (in-process TUI, no background daemon).",
 )
-@click.option(
-    "--whom",
-    default=None,
-    help="Name of a built-in preset config (e.g. default) or a path to a config file.",
-)
 @click.pass_context
 def ask(
     ctx,
@@ -294,7 +330,6 @@ def ask(
     use_stdin: bool,
     max_iterations: int | None,
     interactive: bool,
-    whom: str | None,
 ):
     """Run a oneshot agent task or start an interactive chat session.
 
@@ -303,7 +338,7 @@ def ask(
         bos ask "refactor the auth module"
         bos ask -i
         bos ask -i "write tests for utils.py"
-        bos ask -i --whom default
+        bos -c coding ask -i
         bos ask --default-model gpt-4o "explain this"
         cat spec.md | bos ask --stdin
     """
@@ -314,19 +349,7 @@ def ask(
     if not interactive and not message:
         raise click.UsageError("Provide a task message, use --stdin, or use -i for interactive mode.")
 
-    config_source = _resolve_whom(whom) if whom else None
-    try:
-        ws = Workspace(ctx.obj.get("WORKSPACE", "."), config_source=config_source)
-    except WorkspaceResolutionError as exc:
-        hint = str(exc)
-        if not whom:
-            import bos.config as _bos_cfg
-
-            presets_dir = Path(_bos_cfg.__file__).parent / "presets"
-            available = sorted(p.stem for p in presets_dir.glob("*.toml")) if presets_dir.exists() else []
-            presets = ", ".join(available) or "none"
-            hint += f"\nTip: use --whom <preset> to run without a workspace. Available presets: {presets}."
-        raise click.UsageError(hint) from exc
+    ws = _build_workspace(ctx)
     ws.bootstrap_platform()
     selected_agent = agent_name or ws.get_main_agent_name()
 
@@ -371,6 +394,10 @@ def ask(
 def start(ctx, foreground: bool, docker: bool):
     """Start the agent actor and channel server."""
     ws, rd = _get_ws_and_rd(ctx)
+
+    # Reject non-workspace configs (presets, arbitrary paths)
+    _workspace_from_config(ws.config_file)
+
     ws.bootstrap_platform()
 
     from bos.named_actors.runner import start_named_actors
@@ -399,7 +426,7 @@ def start(ctx, foreground: bool, docker: bool):
         asyncio.run(start_named_actors(ws))
         return
     else:
-        argv = [sys.executable, "-m", "bos.runner._main", "--workspace", str(ws.workspace)]
+        argv = [sys.executable, "-m", "bos.runner._main", "--config", str(ws.config_file)]
         pid = start_background(argv, rd)
         click.echo(f"Agent starting (PID {pid})…")
 

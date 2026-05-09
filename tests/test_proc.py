@@ -41,7 +41,7 @@ port = 8080
     argv = build_docker_argv(ws, ws.get_runtime_config(), detach=True)
 
     assert "--detach" in argv
-    assert argv[-3:] == ["bos:test", "--workspace", "/workspace"]
+    assert argv[-3:] == ["bos:test", "--config", "/workspace/.bos/config.toml"]
     assert "--env-file" in argv
     assert str(env_file.resolve()) in argv
     assert f"{workspace.resolve()}:/workspace" in argv

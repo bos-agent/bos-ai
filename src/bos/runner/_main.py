@@ -2,7 +2,7 @@
 
 Usage (internal, via proc.start_background)::
 
-    python -m bos.runner._main --workspace /path/to/workspace
+    python -m bos.runner._main --config /path/to/bos.toml
 """
 
 from __future__ import annotations
@@ -41,7 +41,7 @@ class _TeeStream:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="BOS agent actor process")
-    parser.add_argument("--workspace", default=".", help="Path to workspace directory")
+    parser.add_argument("--config", default=None, help="Path to BOS config file")
     args = parser.parse_args()
 
     # Bootstrap workspace
@@ -49,7 +49,7 @@ def main() -> None:
     from bos.named_actors.runner import start_named_actors
     from bos.runner.proc import RunDir, write_state
 
-    ws = Workspace(args.workspace)
+    ws = Workspace(".", config_source=args.config)
     ws.bootstrap_platform()
 
     rd = RunDir(ws.bos_dir)

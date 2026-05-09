@@ -263,7 +263,8 @@ def build_docker_argv(
             argv.extend(["--publish", f"{port}:{port}"])
             published_ports.add(port)
 
-    argv.extend([runtime.image, "--workspace", runtime.workspace_dir])
+    container_config = f"{container_bos_dir}/{workspace.config_file.name}"
+    argv.extend([runtime.image, "--config", container_config])
     return argv
 
 
