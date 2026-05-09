@@ -96,7 +96,6 @@ class AgentHarness:
 
         self._owned: list[Any] = []
         self._token: contextvars.Token | None = None
-        self._original_cwd: Path | None = None
         self.mail_route = None
         self.message_store = None
         self.memory = None
@@ -112,9 +111,6 @@ class AgentHarness:
                 "the current harness instead of re-entering."
             )
 
-        self._original_cwd = Path.cwd()
-        os.chdir(self._bos_root)
-
         self.mail_route = self._create_and_own("ep_mail_route", MailRoute, self._mail_route_cfg)
         self.message_store = self._create_and_own("ep_message_store", MessageStore, self._message_store_cfg)
         self.memory = self._create_and_own("ep_memory", MemoryExtension, self._memory_cfg)
@@ -123,7 +119,6 @@ class AgentHarness:
         self.skills_loader = self._create_and_own("ep_skills_loader", SkillsLoader, self._skills_loader_cfg)
         self.interceptor = ChainReactInterceptor(self._interceptors_cfg)
 
-        os.chdir(self._workspace)
         self._token = CURRENT_HARNESS.set(self)
         return self
 
@@ -136,10 +131,6 @@ class AgentHarness:
         if self._token is not None:
             CURRENT_HARNESS.reset(self._token)
             self._token = None
-
-        if self._original_cwd is not None:
-            os.chdir(self._original_cwd)
-            self._original_cwd = None
 
     def create_agent(self, role: str | None = None, agent_cfg: dict[str, Any] = None) -> ReactAgent:
         if CURRENT_HARNESS.get(None) is None:

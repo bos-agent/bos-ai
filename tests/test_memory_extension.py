@@ -270,6 +270,7 @@ class TestSystemPromptIntegration:
             consolidator=MessageOnlyConsolidator(),
             skills_loader=FileSystemSkillsLoader(),
             maxims={"user": ""},
+            memory_usage="*",
             system_prompt="base prompt",
         )
         prompt = await agent._build_system_prompt()

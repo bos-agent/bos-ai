@@ -4,24 +4,24 @@ import asyncio
 
 import pytest
 
-from bos.cli.commands.agent import _resolve_whom
+from bos.cli.commands.agent import _resolve_config_option
 from bos.cli.local_client import LocalClient
 from bos.config.workspace import Workspace
 
 
-def test_resolve_whom_builtin_preset():
-    """--whom with a name resolves to the built-in preset."""
-    result = _resolve_whom("default")
+def test_resolve_config_option_builtin_preset():
+    """--config with a name resolves to the built-in preset."""
+    result = _resolve_config_option("default")
     assert result.name == "default.toml"
     assert result.exists()
 
 
-def test_resolve_whom_unknown_name_raises():
-    """--whom with an unknown name raises UsageError."""
+def test_resolve_config_option_unknown_name_raises():
+    """--config with an unknown name raises UsageError."""
     import click
 
     with pytest.raises(click.UsageError, match="Unknown config"):
-        _resolve_whom("nonexistent-config-zzz")
+        _resolve_config_option("nonexistent-config-zzz")
 
 
 @pytest.mark.asyncio

@@ -17,7 +17,7 @@ run
 @click.pass_context
 def init(ctx, dotbos: bool, init_git: bool):
     """Initialize a new BOS workspace."""
-    workspace_path = Path(ctx.obj.get("WORKSPACE", ".")).expanduser().resolve()
+    workspace_path = Path(".").expanduser().resolve()
     try:
         bos_dir = initialize_workspace(workspace_path, dotbos=dotbos)
         click.echo(f"Initialized BOS workspace at {bos_dir}")
