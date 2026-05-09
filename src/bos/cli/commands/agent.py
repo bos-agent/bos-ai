@@ -82,7 +82,7 @@ def _build_workspace(ctx) -> Workspace:
     return ws
 
 
-def _get_ws_and_rd(ctx):
+def _get_ws_and_rd(ctx) -> tuple[Workspace, "RunDir"]:
     """Build Workspace + RunDir for daemon commands (start/stop/status/restart/tui).
 
     For these commands the config must be a standard workspace layout so that
@@ -282,7 +282,6 @@ async def _run_interactive(
             await client.aclose()
 
 
-
 # ── bos ask ──────────────────────────────────────────────────
 
 
@@ -396,7 +395,8 @@ def start(ctx, foreground: bool, docker: bool):
     ws, rd = _get_ws_and_rd(ctx)
 
     # Reject non-workspace configs (presets, arbitrary paths)
-    _workspace_from_config(ws.config_file)
+    # and set workspace to the project root derived from config location.
+    ws.workspace = _workspace_from_config(ws.config_file)
 
     ws.bootstrap_platform()
 

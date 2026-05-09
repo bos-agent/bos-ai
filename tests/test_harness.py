@@ -555,7 +555,7 @@ async def test_harness_consolidator_model_precedence(tmp_path, monkeypatch):
 
     monkeypatch.delenv("BOS_CONSOLIDATOR_MODEL")
     async with AgentHarness(bos_dir=bos_dir, workspace=tmp_path) as harness:
-        assert harness.consolidator._model == "env/base"
+        assert harness.consolidator._model is None
 
 
 @pytest.mark.asyncio
@@ -570,15 +570,14 @@ async def test_harness_uses_bos_consolidator_model_before_bos_model(tmp_path, mo
 
 
 @pytest.mark.asyncio
-async def test_harness_requires_consolidator_model_at_entry(tmp_path, monkeypatch):
+async def test_harness_allows_no_consolidator_model(tmp_path, monkeypatch):
     bos_dir = tmp_path / ".bos"
     bos_dir.mkdir()
     monkeypatch.delenv("BOS_CONSOLIDATOR_MODEL", raising=False)
     monkeypatch.delenv("BOS_MODEL", raising=False)
 
-    with pytest.raises(RuntimeError, match="harness.consolidator.model.*BOS_CONSOLIDATOR_MODEL.*BOS_MODEL"):
-        async with AgentHarness(bos_dir=bos_dir, workspace=tmp_path):
-            pass
+    async with AgentHarness(bos_dir=bos_dir, workspace=tmp_path) as harness:
+        assert harness.consolidator._model is None
 
 
 def test_bootstrap_platform_does_not_require_consolidator_model(tmp_path, monkeypatch):
@@ -604,9 +603,8 @@ model = "agent/default"
     monkeypatch.delenv("BOS_MODEL", raising=False)
 
     workspace = Workspace(tmp_path)
-    with pytest.raises(RuntimeError, match="harness.consolidator.model.*BOS_CONSOLIDATOR_MODEL.*BOS_MODEL"):
-        async with workspace.harness():
-            pass
+    async with workspace.harness() as harness:
+        assert harness.consolidator._model is None
 
 
 @pytest.mark.asyncio
