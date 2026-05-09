@@ -69,18 +69,19 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 # borrow pi-coding-agent examples
 [[platform.agents]]
 name = "main"
-tools = ["AskSubagent", "TodoWrite", "TodoRead"]
+tools = ["AskSubagent", "ReadFile", "WriteFile", "TodoWrite", "TodoRead"]
+subagents = ["scout", "planner", "worker", "reviewer"]
 system_prompt = """
 Use the "AskSubagent" tool with the chain parameter to execute this workflow:
 
 1. First, use the "scout" agent to find all code relevant to: $@
 2. Then, use the "planner" agent to create an implementation plan for "$@" using the context from the previous step (use {previous} placeholder)
 3. Then, use the "worker" agent to implement the plan from the previous step (use {previous} placeholder)
-4. Then, use the "reviewer" agent to review the implementation from the previous step (use {previous} placeholder)
-5. Finally, use the "worker" agent to apply the feedback from the review (use {previous} placeholder)
-... (Repeat 4-5 until the reviewer's comments are addressed or iteration exceeds 3 times)
-6. If the reviewer's issues are not addressed, you can determine whether go back to step 1 along with the lernings, or abort the task.
-   !IMPORTANT! the back to step 1 MUST NOT occur more than once! there is only one chance to start over!
+4. Enter a review→fix loop (max 3 iterations):
+   a. Use the "reviewer" agent to review the latest implementation (use {previous} placeholder).
+   b. If the reviewer finds issues, use the "worker" agent to address the feedback (use {previous} placeholder), then go back to (a).
+   c. If the reviewer approves, or you have completed 3 iterations, exit the loop and finalize the result.
+5. If, after 3 review iterations, critical issues remain unresolved, you may restart from step 1 with the accumulated learnings — but this restart is allowed AT MOST ONCE. If the second attempt also fails review, finalize with a summary of outstanding issues.
 """
 
 [[platform.agents]]
@@ -132,7 +133,7 @@ Which file to look at first and why.
 
 [[platform.agents]]
 name = "planner"
-tools = ["ReadFile", "GlobSearch", "GrepSearch", "TodoWrite", "TodoRead"]
+tools = ["ReadFile", "WriteFile", "GlobSearch", "GrepSearch"]
 system_prompt = """
 You are a planning specialist. You receive context (from a scout) and requirements, then produce a clear implementation plan.
 
@@ -178,8 +179,6 @@ tools = [
     "WebSearch",
     "WebFetch",
     "Bash",
-    "LoadSkill",
-    "SearchSkills",
 ]
 system_prompt = """
 You are a worker agent with full capabilities. You operate in an isolated context window to handle delegated tasks without polluting the main conversation.
