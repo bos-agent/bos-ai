@@ -427,7 +427,7 @@ def start(ctx, foreground: bool, docker: bool):
         return
     else:
         argv = [sys.executable, "-m", "bos.runner._main", "--config", str(ws.config_file)]
-        pid = start_background(argv, rd)
+        pid = start_background(argv, rd, cwd=ws.workspace)
         click.echo(f"Agent starting (PID {pid})…")
 
     state = read_state(rd)

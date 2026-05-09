@@ -162,7 +162,7 @@ def stop_agent(rd: RunDir, sig: int = signal.SIGTERM) -> None:
 # ── background launch ──────────────────────────────────────────
 
 
-def start_background(argv: list[str], rd: RunDir, env: dict | None = None) -> int:
+def start_background(argv: list[str], rd: RunDir, env: dict | None = None, cwd: Path | str | None = None) -> int:
     """Launch *argv* as a detached background process.
 
     Stdout/stderr are redirected to the log file. The PID is written to
@@ -179,6 +179,7 @@ def start_background(argv: list[str], rd: RunDir, env: dict | None = None) -> in
         stdin=subprocess.DEVNULL,
         start_new_session=True,  # detach from terminal
         env=merged_env,
+        cwd=cwd,
     )
     rd.pid_file.write_text(str(proc.pid))
     return proc.pid
