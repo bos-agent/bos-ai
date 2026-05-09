@@ -84,7 +84,7 @@ ep_memory = ExtensionPoint(
 @dataclass
 class MemoryEntry:
     id: str
-    content: str          # full content from get_memory; truncated snippet from search_memories
+    content: str  # full content from get_memory; truncated snippet from search_memories
     tags: list[str] = field(default_factory=list)
     created_at: str = ""
     metadata: dict | None = None
@@ -101,9 +101,6 @@ class MemoryExtension(Protocol):
     async def ingest_memory(self, content: str, *, tags: list[str] | None = None) -> str: ...
     async def get_memory(self, entry_id: str) -> MemoryEntry | None: ...
     async def forget_memory(self, entry_id: str) -> None: ...
-
-    # ── Background optimization ──
-    async def optimize(self) -> None: ...
 
 
 ep_consolidator = ExtensionPoint(

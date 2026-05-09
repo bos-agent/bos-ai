@@ -84,6 +84,10 @@ def _read_text(path: Path) -> str:
         return ""
 
 
+def _resolve_path(path: str | Path = ".") -> Path:
+    return Path(path).expanduser().resolve()
+
+
 def _pick_collection(
     collection: dict[str, Any],
     include: list[str] | None = None,

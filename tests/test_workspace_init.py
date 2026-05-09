@@ -7,7 +7,7 @@ def test_workspace_load_does_not_create_fallback_bos_dir(tmp_path, monkeypatch):
     workspace = tmp_path / "project"
     fallback_bos_dir = tmp_path / "fallback-bos"
     workspace.mkdir()
-    monkeypatch.setenv("BOS_DIR", str(fallback_bos_dir))
+    monkeypatch.setenv("BOS_CONFIG", str(fallback_bos_dir / "config.toml"))
 
     ws = Workspace(workspace)
 
@@ -19,7 +19,7 @@ def test_workspace_load_does_not_create_fallback_bos_dir(tmp_path, monkeypatch):
 def test_workspace_load_requires_discovered_bos_dir_or_bos_dir_env(tmp_path, monkeypatch):
     workspace = tmp_path / "project"
     workspace.mkdir()
-    monkeypatch.delenv("BOS_DIR", raising=False)
+    monkeypatch.delenv("BOS_CONFIG", raising=False)
 
     with pytest.raises(WorkspaceResolutionError, match="No BOS workspace found"):
         Workspace(workspace)
@@ -31,7 +31,7 @@ def test_workspace_load_rejects_conflicting_discovered_bos_dir_and_bos_dir_env(t
     fallback_bos_dir = tmp_path / "fallback-bos"
     workspace.mkdir()
     discovered_bos_dir.mkdir()
-    monkeypatch.setenv("BOS_DIR", str(fallback_bos_dir))
+    monkeypatch.setenv("BOS_CONFIG", str(fallback_bos_dir / "config.toml"))
 
     with pytest.raises(WorkspaceResolutionError, match="Ambiguous BOS config"):
         Workspace(workspace)
@@ -42,7 +42,7 @@ def test_workspace_load_allows_matching_discovered_bos_dir_and_bos_dir_env(tmp_p
     discovered_bos_dir = workspace / ".bos"
     workspace.mkdir()
     discovered_bos_dir.mkdir()
-    monkeypatch.setenv("BOS_DIR", str(discovered_bos_dir))
+    monkeypatch.setenv("BOS_CONFIG", str(discovered_bos_dir / "config.toml"))
 
     ws = Workspace(workspace)
 
@@ -53,7 +53,7 @@ def test_workspace_load_allows_matching_discovered_bos_dir_and_bos_dir_env(tmp_p
 def test_initialize_workspace_creates_bos_toml_by_default(tmp_path, monkeypatch):
     workspace = tmp_path / "project"
     workspace.mkdir()
-    monkeypatch.delenv("BOS_DIR", raising=False)
+    monkeypatch.delenv("BOS_CONFIG", raising=False)
 
     bos_dir = initialize_workspace(workspace)
 
@@ -65,7 +65,7 @@ def test_initialize_workspace_creates_bos_toml_by_default(tmp_path, monkeypatch)
 def test_initialize_workspace_dotbos_creates_dot_bos_layout(tmp_path, monkeypatch):
     workspace = tmp_path / "project"
     workspace.mkdir()
-    monkeypatch.delenv("BOS_DIR", raising=False)
+    monkeypatch.delenv("BOS_CONFIG", raising=False)
 
     bos_dir = initialize_workspace(workspace, dotbos=True)
     ws = Workspace(workspace)
@@ -79,7 +79,7 @@ def test_initialize_workspace_rejects_already_initialized(tmp_path, monkeypatch)
     workspace = tmp_path / "project"
     workspace.mkdir()
     (workspace / "bos.toml").write_text("", encoding="utf-8")
-    monkeypatch.delenv("BOS_DIR", raising=False)
+    monkeypatch.delenv("BOS_CONFIG", raising=False)
 
     with pytest.raises(WorkspaceResolutionError, match="already initialized"):
         initialize_workspace(workspace)
@@ -89,7 +89,7 @@ def test_initialize_workspace_rejects_already_initialized(tmp_path, monkeypatch)
 
 
 def test_workspace_loads_from_bos_toml(tmp_path, monkeypatch):
-    monkeypatch.delenv("BOS_DIR", raising=False)
+    monkeypatch.delenv("BOS_CONFIG", raising=False)
     workspace = tmp_path / "project"
     workspace.mkdir()
     (workspace / "bos.toml").write_text('[platform]\nextensions = ["bos.extensions.all"]\n', encoding="utf-8")
@@ -101,7 +101,7 @@ def test_workspace_loads_from_bos_toml(tmp_path, monkeypatch):
 
 
 def test_workspace_bos_toml_sets_bos_dir_equal_to_workspace(tmp_path, monkeypatch):
-    monkeypatch.delenv("BOS_DIR", raising=False)
+    monkeypatch.delenv("BOS_CONFIG", raising=False)
     workspace = tmp_path / "project"
     subdir = workspace / "sub"
     workspace.mkdir()
@@ -114,7 +114,7 @@ def test_workspace_bos_toml_sets_bos_dir_equal_to_workspace(tmp_path, monkeypatc
 
 
 def test_workspace_rejects_both_dotbos_and_bos_toml(tmp_path, monkeypatch):
-    monkeypatch.delenv("BOS_DIR", raising=False)
+    monkeypatch.delenv("BOS_CONFIG", raising=False)
     workspace = tmp_path / "project"
     workspace.mkdir()
     (workspace / ".bos").mkdir()
@@ -128,7 +128,7 @@ def test_workspace_bos_toml_allows_matching_bos_dir_env(tmp_path, monkeypatch):
     workspace = tmp_path / "project"
     workspace.mkdir()
     (workspace / "bos.toml").write_text("", encoding="utf-8")
-    monkeypatch.setenv("BOS_DIR", str(workspace))
+    monkeypatch.setenv("BOS_CONFIG", str(workspace / "bos.toml"))
 
     ws = Workspace(workspace)
 
@@ -140,7 +140,7 @@ def test_workspace_bos_toml_rejects_conflicting_bos_dir_env(tmp_path, monkeypatc
     other_dir = tmp_path / "other"
     workspace.mkdir()
     (workspace / "bos.toml").write_text("", encoding="utf-8")
-    monkeypatch.setenv("BOS_DIR", str(other_dir))
+    monkeypatch.setenv("BOS_CONFIG", str(other_dir / "bos.toml"))
 
     with pytest.raises(WorkspaceResolutionError, match="Ambiguous BOS config"):
         Workspace(workspace)

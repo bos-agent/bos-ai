@@ -13,7 +13,7 @@ Keep it highly concise but retain all factual information without omitting detai
 Avoid transcript style and verbose language. Keep the summary less than 2048 characters.
 """
 
-SUMMARY_PREFIX = "Chat summary:"
+SUMMARY_PREFIX = "Chat summary:\n"
 
 
 @ep_consolidator(name="_default")
@@ -24,7 +24,7 @@ class LLMConsolidator:
         self,
         *,
         llm: LLMClient,
-        model: str,
+        model: str | None = None,
         instruction: str | None = None,
     ) -> None:
         self._llm = llm

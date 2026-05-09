@@ -37,13 +37,18 @@ def _get_ws_and_rd(ctx):
 
 
 def _resolve_whom(whom: str) -> Path:
-    """Resolve --whom value to a built-in preset config file.
+    """Resolve --whom value to a built-in preset config file or a direct file path.
 
-    Looks up <name>.toml in the built-in presets directory.
+    First checks if 'whom' is an existing file path. If not, looks up
+    <name>.toml in the built-in presets directory.
     """
     from pathlib import Path
 
     import bos.config
+
+    whom_path = Path(whom)
+    if whom_path.is_file():
+        return whom_path.resolve()
 
     presets_dir = Path(bos.config.__file__).parent / "presets"
     preset = presets_dir / f"{whom}.toml"
@@ -52,13 +57,6 @@ def _resolve_whom(whom: str) -> Path:
         raise click.UsageError(f"Unknown config {whom!r}. Available presets: {', '.join(available) or 'none'}")
     return preset
 
-
-async def _build_agent_system_prompt(ws: Workspace, agent_name: str | None = None) -> str:
-    ws.bootstrap_platform()
-    selected_agent = agent_name or ws.get_main_agent_name()
-    async with ws.harness() as harness:
-        agent = harness.create_agent(selected_agent)
-        return await agent._build_system_prompt()
 
 
 async def _connect_tui_client(client) -> None:
@@ -197,7 +195,6 @@ async def _run_interactive(
     import getpass
     import os
     import re
-    import uuid
 
     from bos.cli.local_client import LocalClient
     from bos.core.actor import AgentActor
@@ -244,38 +241,6 @@ async def _run_interactive(
             await client.aclose()
 
 
-# ── bos prompt ────────────────────────────────────────────────
-
-
-@click.command()
-@click.option(
-    "--agent",
-    "agent_name",
-    default=None,
-    help="Agent name to show the prompt for. Use '0' for the default agent with all tools/skills.",
-)
-@click.pass_context
-def prompt(ctx, agent_name: str | None):
-    """Print the built system prompt for an agent.
-
-    By default, shows the prompt for the configured main agent.
-    Use --agent <name> to show the prompt for a specific agent.
-    Use --agent 0 to show the default agent prompt with all available
-    tools and skills.
-    """
-    ws, _ = _get_ws_and_rd(ctx)
-    try:
-        rendered_prompt = asyncio.run(
-            _build_agent_system_prompt(
-                ws,
-                agent_name == "0" and "_default" or agent_name,
-            )
-        )
-    except ValueError as exc:
-        raise click.UsageError(str(exc)) from exc
-
-    click.echo(rendered_prompt, nl=False)
-
 
 # ── bos ask ──────────────────────────────────────────────────
 
@@ -289,9 +254,10 @@ def prompt(ctx, agent_name: str | None):
     help="Agent name to use (defaults to the configured main agent).",
 )
 @click.option(
-    "--model",
+    "--default-model",
+    "default_model",
     default=None,
-    help="Override the model for this task.",
+    help="Set the default model for all components (agent, consolidator, subagents).",
 )
 @click.option(
     "--stdin",
@@ -317,14 +283,14 @@ def prompt(ctx, agent_name: str | None):
 @click.option(
     "--whom",
     default=None,
-    help="Name of a built-in preset config (e.g. default).",
+    help="Name of a built-in preset config (e.g. default) or a path to a config file.",
 )
 @click.pass_context
 def ask(
     ctx,
     message: str | None,
     agent_name: str | None,
-    model: str | None,
+    default_model: str | None,
     use_stdin: bool,
     max_iterations: int | None,
     interactive: bool,
@@ -338,6 +304,7 @@ def ask(
         bos ask -i
         bos ask -i "write tests for utils.py"
         bos ask -i --whom default
+        bos ask --default-model gpt-4o "explain this"
         cat spec.md | bos ask --stdin
     """
     if use_stdin and not sys.stdin.isatty():
@@ -348,13 +315,23 @@ def ask(
         raise click.UsageError("Provide a task message, use --stdin, or use -i for interactive mode.")
 
     config_source = _resolve_whom(whom) if whom else None
-    ws = Workspace(ctx.obj.get("WORKSPACE", "."), config_source=config_source)
+    try:
+        ws = Workspace(ctx.obj.get("WORKSPACE", "."), config_source=config_source)
+    except WorkspaceResolutionError as exc:
+        hint = str(exc)
+        if not whom:
+            import bos.config as _bos_cfg
+
+            presets_dir = Path(_bos_cfg.__file__).parent / "presets"
+            available = sorted(p.stem for p in presets_dir.glob("*.toml")) if presets_dir.exists() else []
+            presets = ", ".join(available) or "none"
+            hint += f"\nTip: use --whom <preset> to run without a workspace. Available presets: {presets}."
+        raise click.UsageError(hint) from exc
     ws.bootstrap_platform()
     selected_agent = agent_name or ws.get_main_agent_name()
 
-    llm_args: dict = {}
-    if model:
-        llm_args["model"] = model
+    if default_model:
+        os.environ["BOS_MODEL"] = default_model
 
     if interactive:
         agent_cfg = {"max_iterations": max_iterations} if max_iterations is not None else None
@@ -372,7 +349,6 @@ def ask(
             return await agent.ask(
                 uuid.uuid4().hex,
                 message,
-                llm_args=llm_args or None,
                 event_sink=event_sink,
             )
 

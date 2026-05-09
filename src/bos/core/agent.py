@@ -166,7 +166,9 @@ class ReactAgent:
             if isinstance(maxims, list)
             else (dict(maxims))
         )
-        self._memory_usage = bos_memory_usage if memory_usage in ("*", None) else str(memory_usage)
+        self._memory_usage = (
+            "" if memory_usage is None else bos_memory_usage if memory_usage == "*" else str(memory_usage)
+        )
 
         self._llm = llm or LLMClient()
         self._message_store = message_store
@@ -452,17 +454,11 @@ class ReactAgent:
     async def _prompt_section_maxims(self) -> str:
         if not self._maxims:
             return ""
-        section = "--- MAXIMS ---\n\n"
+        items: dict[str, str] = {}
         for key, scope in self._maxims.items():
-            content = await self._memory.get_maxim(key)
-            if not content:
-                content = "(empty)"
-            if scope:
-                section += f"* **{key}** ({scope})\n"
-            else:
-                section += f"* **{key}**\n"
-            section += f"```\n{content}\n```\n\n"
-        return section
+            content = await self._memory.get_maxim(key) or "(empty)"
+            items[key] = f"({scope})\n{content}" if scope else content
+        return self._format_prompt_section("ACTIVE MAXIMS", items)
 
     async def _prompt_section_tools(self) -> str:
         all_tools = ep_tool.describe() | self._local_tools.describe()
@@ -531,30 +527,18 @@ class ReactAgent:
     def _register_tools(self) -> None:
         @self._local_tools(
             name="Remember",
-            description=(
-                "Store information in your memory. Use with a 'key' parameter to update a maxim "
-                "(overwrites the entire maxim — include all existing content alongside your changes). "
-                "Use without a 'key' to create a new episodic memory entry. "
-                "Maxim keys are: user, soul, identity, rules."
-            ),
+            description="Store a fact or detail in your episodic memory for later Recall.",
             parameters={
                 "type": "object",
                 "properties": {
-                    "key": {
-                        "type": "string",
-                        "description": (
-                            "Maxim key to update. One of: user, soul, identity, rules. "
-                            "If provided, 'content' overwrites the entire maxim."
-                        ),
-                    },
                     "content": {
                         "type": "string",
-                        "description": "Content to store. For maxisms, this is the complete new content.",
+                        "description": "The information to store.",
                     },
                     "tags": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "Tags for a new memory entry. Only used when 'key' is not provided.",
+                        "description": "Optional tags for categorisation.",
                     },
                 },
                 "required": ["content"],
@@ -562,26 +546,48 @@ class ReactAgent:
         )
         async def tool_remember(
             content: str,
-            key: str | None = None,
             tags: list[str] | None = None,
         ) -> str:
-            if key:
-                # Maxim write
-                if not _allowed(key.lower(), self._maxims):
-                    return f"Error: Maxim '{key}' is not allowed."
-                if len(content) > self.MAXIM_LIMIT:
-                    return (
-                        f"Error: Maxim content is {len(content)} characters, "
-                        f"which exceeds the limit of {self.MAXIM_LIMIT}. "
-                        f"Please summarize and try again."
-                    )
-                await self._memory.set_maxim(key.lower(), content)
-                return f"(Maxim '{key}' updated. Content length: {len(content)}/{self.MAXIM_LIMIT} characters.)"
-            else:
-                # Memory ingest
-                entry_id = await self._memory.ingest_memory(content, tags=tags)
-                tag_note = f" Tags: {tags}." if tags else ""
-                return f"(Memory stored with entry_id: {entry_id}.{tag_note})"
+            entry_id = await self._memory.ingest_memory(content, tags=tags)
+            tag_note = f" Tags: {tags}." if tags else ""
+            return f"(Memory stored with entry_id: {entry_id}.{tag_note})"
+
+        @self._local_tools(
+            name="ReviseMaxim",
+            description=(
+                "Append a revision note to a maxim. Existing content is preserved; "
+                "your text is added as a timestamped entry. You can only update the "
+                "active maxims in your context."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "key": {
+                        "type": "string",
+                        "description": "Maxim key. One of: user, soul, identity, rules.",
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "The revision note to append.",
+                    },
+                },
+                "required": ["key", "content"],
+            },
+        )
+        async def tool_revise_maxim(key: str, content: str) -> str:
+            if not _allowed(key.lower(), self._maxims):
+                return f"Error: Maxim '{key}' is not allowed."
+            current = await self._memory.get_maxim(key.lower())
+            ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+            revised = f"{current}\n[{ts}] {content}" if current else f"[{ts}] {content}"
+            if len(revised) > self.MAXIM_LIMIT:
+                return (
+                    f"Error: Revision would bring maxim '{key}' to "
+                    f"{len(revised)} characters (limit {self.MAXIM_LIMIT}). "
+                    f"Wait for a merge cycle or keep it shorter."
+                )
+            await self._memory.set_maxim(key.lower(), revised)
+            return f"(Revision appended to maxim '{key}'. Total size: {len(revised)}/{self.MAXIM_LIMIT} characters.)"
 
         @self._local_tools(
             name="Recall",
