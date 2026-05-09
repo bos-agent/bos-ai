@@ -48,4 +48,4 @@ model = "test/consolidator"
     ws = Workspace(str(workspace_dir), config_source=str(config_file))
     # Should not raise WorkspaceResolutionError
     assert ws.workspace == workspace_dir.resolve()
-    assert ws.bos_dir == workspace_dir.resolve()
+    assert ws.bos_dir == config_file.resolve().parent
