@@ -22,6 +22,7 @@ from rich.text import Text
 
 from bos.config import Workspace, WorkspaceResolutionError
 from bos.protocol import TurnEvent
+from bos.runner.proc import RunDir
 
 
 def _resolve_config_option(config: str) -> Path:
@@ -82,7 +83,7 @@ def _build_workspace(ctx) -> Workspace:
     return ws
 
 
-def _get_ws_and_rd(ctx) -> tuple[Workspace, "RunDir"]:
+def _get_ws_and_rd(ctx) -> tuple[Workspace, RunDir]:
     """Build Workspace + RunDir for daemon commands (start/stop/status/restart/tui).
 
     For these commands the config must be a standard workspace layout so that
@@ -94,7 +95,6 @@ def _get_ws_and_rd(ctx) -> tuple[Workspace, "RunDir"]:
         ws = Workspace(".", config_source=config_source)
     except WorkspaceResolutionError as exc:
         raise click.UsageError(str(exc)) from exc
-    from bos.runner.proc import RunDir
 
     rd = RunDir(ws.bos_dir)
     return ws, rd
