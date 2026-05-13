@@ -2,6 +2,43 @@
 
 <!-- version list -->
 
+## v1.2.0 (2026-05-13)
+
+### Bug Fixes
+
+- **named-actors**: Preserve metadata through actor hooks
+  ([#17](https://github.com/bos-agent/bos-ai/pull/17),
+  [`3d5565c`](https://github.com/bos-agent/bos-ai/commit/3d5565c263b619e6d882f70d9d80127b2d378c06))
+
+### Chores
+
+- Change log maintainance
+  ([`a259cc7`](https://github.com/bos-agent/bos-ai/commit/a259cc77e7df711b47517e1aa5b20c8643eb3010))
+
+### Features
+
+- **cli**: Add -i/--interactive and --whom options to bos ask
+  ([#20](https://github.com/bos-agent/bos-ai/pull/20),
+  [`dff4a70`](https://github.com/bos-agent/bos-ai/commit/dff4a70cf660a02234d33f498efed17d43e5d78e))
+
+- **tui**: Ctrl+enter interrupt message and slash-command autocomplete
+  ([#18](https://github.com/bos-agent/bos-ai/pull/18),
+  [`70c951d`](https://github.com/bos-agent/bos-ai/commit/70c951d077e7737b4c1d14487a4f8487e932d29c))
+
+### Refactoring
+
+- **cli**: Replace --workspace/--whom with global --config option
+  ([#22](https://github.com/bos-agent/bos-ai/pull/22),
+  [`4b609ef`](https://github.com/bos-agent/bos-ai/commit/4b609eff84316a0240d5002edbb0b01dc83eaa91))
+
+- **defaults**: Tune default agent prompts ([#21](https://github.com/bos-agent/bos-ai/pull/21),
+  [`2432eab`](https://github.com/bos-agent/bos-ai/commit/2432eab6e3a8899d15b32919da14a3f375abf635))
+
+- **extensions**: Move in-memory extensions and add builtin skills support
+  ([#19](https://github.com/bos-agent/bos-ai/pull/19),
+  [`5ad33b1`](https://github.com/bos-agent/bos-ai/commit/5ad33b14a39397494ac46daf2df4e0a83ed23615))
+
+
 ## v1.1.0 (2026-05-05)
 
 ### Features
