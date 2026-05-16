@@ -1,4 +1,4 @@
-"""Standalone actor + channel process — launched by ``bos start``.
+"""Standalone actor + channel process — launched by ``bosa start``.
 
 Usage (internal, via proc.start_background)::
 

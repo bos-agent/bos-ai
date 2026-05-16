@@ -1,4 +1,4 @@
-"""Integration tests for bos ask --interactive wiring (no Textual launch)."""
+"""Integration tests for bosa ask --interactive wiring (no Textual launch)."""
 
 import asyncio
 

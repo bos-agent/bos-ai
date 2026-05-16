@@ -80,7 +80,9 @@ def _resolve_config(workspace: Path) -> Path:
     if env_bos_config:
         return env_bos_config
 
-    raise WorkspaceResolutionError("No BOS workspace found. Run `bos init`, `cd` into a workspace, or set `BOS_CONFIG`.")
+    raise WorkspaceResolutionError(
+        "No BOS workspace found. Run `bosa init`, `cd` into a workspace, or set `BOS_CONFIG`."
+    )
 
 
 def _config_template_path() -> Path:

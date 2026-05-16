@@ -44,7 +44,7 @@ def _envelope_to_dict(env: Envelope) -> dict[str, Any]:
 class HttpChannelClient:
     """aiohttp WebSocket client for connecting to a running HttpChannel.
 
-    Used by ``bos tui`` to send/receive envelopes over WebSocket without
+    Used by ``bosa tui`` to send/receive envelopes over WebSocket without
     direct mailbox access or any server-side imports.
 
     Automatically reconnects when the WebSocket connection drops (e.g. after

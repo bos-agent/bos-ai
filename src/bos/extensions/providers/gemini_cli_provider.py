@@ -155,7 +155,7 @@ async def get_gemini_cli_token(auth_file: str | None = None) -> OAuthCredentials
 
     if not path.exists():
         raise RuntimeError(
-            f"Gemini CLI credentials not found at {path}. Run `bos auth gemini-cli` to authenticate first."
+            f"Gemini CLI credentials not found at {path}. Run `bosa auth gemini-cli` to authenticate first."
         )
 
     data = json.loads(path.read_text())

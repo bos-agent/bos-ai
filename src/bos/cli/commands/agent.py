@@ -1,4 +1,4 @@
-"""``bos start/stop/status/restart/task/tui`` — agent process lifecycle commands."""
+"""``bosa start/stop/status/restart/task/tui`` — agent process lifecycle commands."""
 
 from __future__ import annotations
 
@@ -185,7 +185,7 @@ class _TaskProgressDisplay:
             if idx:
                 body.append("\n")
             body.append(message, style=style)
-        return Panel(body, title="bos ask", border_style="cyan", padding=(0, 1))
+        return Panel(body, title="bosa ask", border_style="cyan", padding=(0, 1))
 
     def _format_event(self, event: TurnEvent) -> tuple[str, str]:
         label = _turn_event_label(event)
@@ -282,7 +282,7 @@ async def _run_interactive(
             await client.aclose()
 
 
-# ── bos ask ──────────────────────────────────────────────────
+# ── bosa ask ──────────────────────────────────────────────────
 
 
 @click.command()
@@ -334,12 +334,12 @@ def ask(
 
     \b
     Examples:
-        bos ask "refactor the auth module"
-        bos ask -i
-        bos ask -i "write tests for utils.py"
-        bos -c coding ask -i
-        bos ask --default-model gpt-4o "explain this"
-        cat spec.md | bos ask --stdin
+        bosa ask "refactor the auth module"
+        bosa ask -i
+        bosa ask -i "write tests for utils.py"
+        bosa -c coding ask -i
+        bosa ask --default-model gpt-4o "explain this"
+        cat spec.md | bosa ask --stdin
     """
     if use_stdin and not sys.stdin.isatty():
         stdin_content = sys.stdin.read()
@@ -383,7 +383,7 @@ def ask(
     click.echo(result)
 
 
-# ── bos start ─────────────────────────────────────────────────
+# ── bosa start ─────────────────────────────────────────────────
 
 
 @click.command()
@@ -455,10 +455,10 @@ def start(ctx, foreground: bool, docker: bool):
             return
 
     ident = container_id[:12] if container_id else pid
-    click.echo(f"Agent started ({runtime.kind} {ident}) — channel info not yet available (check bos status)")
+    click.echo(f"Agent started ({runtime.kind} {ident}) — channel info not yet available (check bosa status)")
 
 
-# ── bos stop ──────────────────────────────────────────────────
+# ── bosa stop ──────────────────────────────────────────────────
 
 
 @click.command()
@@ -498,7 +498,7 @@ def stop(ctx):
     click.echo("Agent stopped.")
 
 
-# ── bos status ────────────────────────────────────────────────
+# ── bosa status ────────────────────────────────────────────────
 
 
 @click.command()
@@ -555,7 +555,7 @@ def status(ctx):
         click.echo(f"Channel:     {name} @ {addr} → ws://{host}:{port}/ws")
 
 
-# ── bos restart ───────────────────────────────────────────────
+# ── bosa restart ───────────────────────────────────────────────
 
 
 @click.command()
@@ -576,7 +576,7 @@ def restart(ctx):
     ctx.invoke(start)
 
 
-# ── bos tui ───────────────────────────────────────────────────
+# ── bosa tui ───────────────────────────────────────────────────
 
 
 @click.command()

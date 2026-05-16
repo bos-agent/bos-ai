@@ -1,7 +1,7 @@
 """LocalClient — in-process mailbox-backed client for ChatApp.
 
 Implements the same interface as HttpChannelClient so ChatApp can be
-reused unchanged when running in interactive mode (``bos ask -i``).
+reused unchanged when running in interactive mode (``bosa ask -i``).
 """
 
 from __future__ import annotations
