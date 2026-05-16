@@ -9,14 +9,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Run a single test file: `uv run pytest -q tests/test_harness.py`
 - Run a single test: `uv run pytest -q tests/test_harness.py -k test_name`
 - Lint: `uv run ruff check src tests`
-- CLI help: `uv run bosa --help`
-- Prefer `uv run bosa ...` for local CLI invocation (not system `bosa`).
+- CLI help: `uv run boscli --help`
+- Prefer `uv run boscli ...` for local CLI invocation (not system `boscli`).
 
 ## Repo Layout
 
 ```
 src/bos/
-  cli/          - Click CLI entrypoints (bosa init, start, stop, tui, auth)
+  cli/          - Click CLI entrypoints (boscli init, start, stop, tui, auth)
   config/       - Workspace discovery, TOML config loading, agent resolution
   core/         - Runtime primitives: ReactAgent, AgentActor, AgentHarness,
                   ExtensionPoint, ToolRegistry, contracts, LLM client

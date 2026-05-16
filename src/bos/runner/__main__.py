@@ -1,8 +1,8 @@
-"""Standalone actor + channel process — launched by ``bosa start``.
+"""Standalone actor + channel process — launched by ``boscli start``.
 
 Usage (internal, via proc.start_background)::
 
-    python -m bos.runner._main --config /path/to/bos.toml
+    python -m bos.runner --config /path/to/bos.toml
 """
 
 from __future__ import annotations

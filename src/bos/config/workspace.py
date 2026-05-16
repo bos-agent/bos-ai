@@ -92,7 +92,7 @@ def _resolve_config(workspace: Path) -> Path:
         return env_bos_config
 
     raise ConfigNotFoundError(
-        "No BOS workspace found. Run `bosa init`, `cd` into a workspace, or set `BOS_CONFIG`."
+        "No BOS workspace found. Run `boscli init`, `cd` into a workspace, or set `BOS_CONFIG`."
     )
 
 
@@ -121,7 +121,7 @@ def resolve_config_source(config_arg: str) -> tuple[Path, Path, dict[str, Any]]:
 
     * If *config_arg* is an existing file path → ``bos_dir`` is the file's parent.
     * If *config_arg* matches a built-in preset name → ``bos_dir`` is
-      ``~/.bosa/agents/<preset>`` (created if necessary).
+      ``~/.bos/agents/<preset>`` (created if necessary).
 
     Raises :class:`WorkspaceResolutionError` if neither matches.
     """
@@ -133,7 +133,7 @@ def resolve_config_source(config_arg: str) -> tuple[Path, Path, dict[str, Any]]:
     presets = presets_dir()
     preset = presets / f"{config_arg}.toml"
     if preset.exists():
-        bos_dir = Path("~/.bosa/agents").expanduser() / config_arg
+        bos_dir = Path("~/.bos/agents").expanduser() / config_arg
         bos_dir.mkdir(parents=True, exist_ok=True)
         return preset, bos_dir, _load_config(preset)
 

@@ -1,4 +1,4 @@
-"""Process lifecycle helpers for bosa start/stop/status.
+"""Process lifecycle helpers for boscli start/stop/status.
 
 Manages the `.bos/run/` directory:
   agent.pid   — PID of the running actor process

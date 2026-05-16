@@ -1,4 +1,4 @@
-"""Integration tests for bosa ask --interactive wiring (no Textual launch)."""
+"""Integration tests for boscli ask --interactive wiring (no Textual launch)."""
 
 import asyncio
 from pathlib import Path
@@ -99,7 +99,7 @@ def test_build_workspace_for_ask_falls_back_to_default_preset(tmp_path, monkeypa
     ctx = type("Ctx", (), {"obj": {}})
 
     ws = _build_workspace_for_ask(ctx)
-    assert ws.bos_dir == Path("~/.bosa/agents/default").expanduser()
+    assert ws.bos_dir == Path("~/.bos/agents/default").expanduser()
     assert isinstance(ws.config, dict)
     assert ws.config_file.name == "default.toml"
 

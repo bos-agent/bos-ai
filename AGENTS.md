@@ -7,14 +7,14 @@ This `AGENTS.md` applies to the entire repository.
 - Use `uv run ...` for Python entrypoints, tests, and linting.
 - The project targets Python `>=3.13` via [pyproject.toml](/Users/jerry/Repo/workbench/bos-ai/pyproject.toml).
 - Do not assume the system `python3` is suitable. On this machine it is older and can fail on `tomllib`.
-- When you need the CLI locally, prefer `uv run bosa ...`.
+- When you need the CLI locally, prefer `uv run boscli ...`.
 
 ## Common Commands
 
 - Run the full test suite: `uv run pytest -q`
 - Run a focused test file: `uv run pytest -q tests/test_workspace_runtime.py`
 - Run lint: `uv run ruff check src tests`
-- Run the CLI help: `uv run bosa --help`
+- Run the CLI help: `uv run boscli --help`
 
 ## Repo Layout
 

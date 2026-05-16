@@ -1,4 +1,4 @@
-"""``bosa start/stop/status/restart/task/tui`` — agent process lifecycle commands."""
+"""``boscli start/stop/status/restart/task/tui`` — agent process lifecycle commands."""
 
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ from bos.runner.proc import RunDir
 
 
 def _build_workspace_for_ask(ctx, workspace_override: str | None = None) -> Workspace:
-    """Build a Workspace for ``bosa ask``.
+    """Build a Workspace for ``boscli ask``.
 
     * workspace defaults to ``"."`` unless overridden by ``--workspace``.
     * ``-c <preset|file>`` → resolve via :func:`resolve_config_source`.
@@ -59,7 +59,7 @@ def _build_workspace_for_ask(ctx, workspace_override: str | None = None) -> Work
 
 
 def _build_workspace_for_daemon(ctx, workspace_override: str | None = None) -> Workspace:
-    """Build a Workspace for daemon commands (``bosa start``).
+    """Build a Workspace for daemon commands (``boscli start``).
 
     * ``-c <preset|file>`` → workspace defaults to ``"."`` unless overridden.
     * No ``-c`` → ancestor discovery (error if not found).
@@ -180,7 +180,7 @@ class _TaskProgressDisplay:
             if idx:
                 body.append("\n")
             body.append(message, style=style)
-        return Panel(body, title="bosa ask", border_style="cyan", padding=(0, 1))
+        return Panel(body, title="boscli ask", border_style="cyan", padding=(0, 1))
 
     def _format_event(self, event: TurnEvent) -> tuple[str, str]:
         label = _turn_event_label(event)
@@ -277,7 +277,7 @@ async def _run_interactive(
             await client.aclose()
 
 
-# ── bosa ask ──────────────────────────────────────────────────
+# ── boscli ask ──────────────────────────────────────────────────
 
 
 @click.command()
@@ -337,12 +337,12 @@ def ask(
 
     \b
     Examples:
-        bosa ask "refactor the auth module"
-        bosa ask -i
-        bosa ask -w /path/to/project -i
-        bosa -c coding ask -i
-        bosa ask --default-model gpt-4o "explain this"
-        cat spec.md | bosa ask --stdin
+        boscli ask "refactor the auth module"
+        boscli ask -i
+        boscli ask -w /path/to/project -i
+        boscli -c coding ask -i
+        boscli ask --default-model gpt-4o "explain this"
+        cat spec.md | boscli ask --stdin
     """
     if use_stdin and not sys.stdin.isatty():
         stdin_content = sys.stdin.read()
@@ -386,7 +386,7 @@ def ask(
     click.echo(result)
 
 
-# ── bosa start ─────────────────────────────────────────────────
+# ── boscli start ─────────────────────────────────────────────────
 
 
 @click.command()
@@ -432,7 +432,7 @@ def start(ctx, foreground: bool, docker: bool, workspace_dir: str | None):
         asyncio.run(start_named_actors(ws))
         return
     else:
-        argv = [sys.executable, "-m", "bos.runner._main", "--config", str(ws.config_file)]
+        argv = [sys.executable, "-m", "bos.runner", "--config", str(ws.config_file)]
         pid = start_background(argv, rd, cwd=ws.workspace)
         click.echo(f"Agent starting (PID {pid})…")
 
@@ -461,10 +461,10 @@ def start(ctx, foreground: bool, docker: bool, workspace_dir: str | None):
             return
 
     ident = container_id[:12] if container_id else pid
-    click.echo(f"Agent started ({runtime.kind} {ident}) — channel info not yet available (check bosa status)")
+    click.echo(f"Agent started ({runtime.kind} {ident}) — channel info not yet available (check boscli status)")
 
 
-# ── bosa stop ──────────────────────────────────────────────────
+# ── boscli stop ──────────────────────────────────────────────────
 
 
 @click.command()
@@ -504,7 +504,7 @@ def stop(ctx):
     click.echo("Agent stopped.")
 
 
-# ── bosa status ────────────────────────────────────────────────
+# ── boscli status ────────────────────────────────────────────────
 
 
 @click.command()
@@ -561,7 +561,7 @@ def status(ctx):
         click.echo(f"Channel:     {name} @ {addr} → ws://{host}:{port}/ws")
 
 
-# ── bosa restart ───────────────────────────────────────────────
+# ── boscli restart ───────────────────────────────────────────────
 
 
 @click.command()
@@ -582,7 +582,7 @@ def restart(ctx):
     ctx.invoke(start)
 
 
-# ── bosa tui ───────────────────────────────────────────────────
+# ── boscli tui ───────────────────────────────────────────────────
 
 
 @click.command()
