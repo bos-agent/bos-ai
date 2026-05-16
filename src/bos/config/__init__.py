@@ -1,3 +1,17 @@
-from bos.config.workspace import Workspace, WorkspaceResolutionError, initialize_workspace
+from bos.config.workspace import (
+    ConfigNotFoundError,
+    Workspace,
+    WorkspaceResolutionError,
+    initialize_workspace,
+    presets_dir,
+    resolve_config_source,
+)
 
-__all__ = ["Workspace", "WorkspaceResolutionError", "initialize_workspace"]
+__all__ = [
+    "ConfigNotFoundError",
+    "Workspace",
+    "WorkspaceResolutionError",
+    "initialize_workspace",
+    "presets_dir",
+    "resolve_config_source",
+]

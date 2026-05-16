@@ -54,7 +54,7 @@ SUPPORTED_MODELS = [
     "gemini-3.1-pro-preview",
 ]
 
-_DEFAULT_AUTH_PATH = Path.home() / ".config" / "bos" / "gemini_cli_auth.default.json"
+_DEFAULT_AUTH_PATH = Path.home() / ".bosa" / "auth" / "gemini_cli_auth.default.json"
 
 
 def _get_gemini_cli_headers() -> dict[str, str]:

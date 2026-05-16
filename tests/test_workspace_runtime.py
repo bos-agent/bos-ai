@@ -8,7 +8,7 @@ def test_runtime_config_defaults_to_process(tmp_path):
     bos_dir.mkdir()
     (bos_dir / "config.toml").write_text("", encoding="utf-8")
 
-    ws = Workspace(tmp_path)
+    ws = Workspace.from_discovery(tmp_path)
     runtime = ws.get_runtime_config()
 
     assert runtime.kind == "process"
@@ -24,7 +24,8 @@ def test_runtime_config_mounts_external_bos_dir_outside_workspace(tmp_path):
     bos_dir.mkdir()
     (bos_dir / "config.toml").write_text("", encoding="utf-8")
 
-    ws = Workspace(workspace)
+    # Explicitly set workspace != bos_dir parent to test external mount
+    ws = Workspace(workspace, bos_dir, {})
     runtime = ws.get_runtime_config()
 
     assert runtime.kind == "process"
@@ -36,7 +37,7 @@ def test_main_agent_address_is_stable_even_when_selecting_different_agent(tmp_pa
     bos_dir.mkdir()
     (bos_dir / "config.toml").write_text("[main]\nagent = \"research\"\n", encoding="utf-8")
 
-    ws = Workspace(tmp_path)
+    ws = Workspace.from_discovery(tmp_path)
 
     assert ws.get_main_agent_name() == "research"
     assert ws.get_main_agent_address() == "agent@main"
@@ -51,7 +52,7 @@ def test_resolve_platform_envfile_from_bos_dir(tmp_path):
     env_file.write_text("BOT_TOKEN=test\n", encoding="utf-8")
     (bos_dir / "config.toml").write_text('[platform]\nenvfile = "../env/agent.env"\n', encoding="utf-8")
 
-    ws = Workspace(tmp_path)
+    ws = Workspace.from_discovery(tmp_path)
 
     assert ws.resolve_platform_envfile() == env_file.resolve()
 
@@ -74,7 +75,7 @@ port = 8080
         encoding="utf-8",
     )
 
-    channels = Workspace(tmp_path).resolve_channels()
+    channels = Workspace.from_discovery(tmp_path).resolve_channels()
 
     assert [(channel.name, channel.bind_address, channel.target_address) for channel in channels] == [
         ("HttpChannel", "channel@http", "agent@main"),
@@ -103,7 +104,7 @@ token = "x"
         encoding="utf-8",
     )
 
-    channels = Workspace(tmp_path).resolve_channels()
+    channels = Workspace.from_discovery(tmp_path).resolve_channels()
 
     assert channels[0].options["bos_dir"] == str(bos_dir)
     assert channels[0].options["workspace_dir"] == str(tmp_path.resolve())
@@ -128,7 +129,7 @@ target_address = "agent@main"
     )
 
     with pytest.raises(ValueError, match="BroadcastChannel is no longer supported"):
-        Workspace(tmp_path).resolve_channels()
+        Workspace.from_discovery(tmp_path).resolve_channels()
 
 
 def test_resolve_channels_rejects_channel_to_channel_topology(tmp_path):
@@ -155,7 +156,7 @@ token = "x"
     )
 
     with pytest.raises(ValueError, match="channel-to-channel routing is no longer supported"):
-        Workspace(tmp_path).resolve_channels()
+        Workspace.from_discovery(tmp_path).resolve_channels()
 
 
 
@@ -176,6 +177,6 @@ target_address = "agent@main"
         encoding="utf-8",
     )
 
-    channels = Workspace(tmp_path).resolve_channels()
+    channels = Workspace.from_discovery(tmp_path).resolve_channels()
 
     assert channels[0].target_address == "agent@main"

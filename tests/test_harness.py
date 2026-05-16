@@ -602,7 +602,7 @@ model = "agent/default"
     monkeypatch.delenv("BOS_CONSOLIDATOR_MODEL", raising=False)
     monkeypatch.delenv("BOS_MODEL", raising=False)
 
-    workspace = Workspace(tmp_path)
+    workspace = Workspace.from_discovery(tmp_path)
     async with workspace.harness() as harness:
         assert harness.consolidator._model is None
 

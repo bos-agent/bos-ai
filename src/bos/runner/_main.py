@@ -45,11 +45,15 @@ def main() -> None:
     args = parser.parse_args()
 
     # Bootstrap workspace
-    from bos.config import Workspace
+    from bos.config import Workspace, resolve_config_source
     from bos.named_actors.runner import start_named_actors
     from bos.runner.proc import RunDir, write_state
 
-    ws = Workspace(".", config_source=args.config)
+    if args.config:
+        config_path, bos_dir, config = resolve_config_source(args.config)
+        ws = Workspace(".", bos_dir, config, config_file=config_path)
+    else:
+        ws = Workspace.from_discovery(".")
     ws.bootstrap_platform()
 
     rd = RunDir(ws.bos_dir)

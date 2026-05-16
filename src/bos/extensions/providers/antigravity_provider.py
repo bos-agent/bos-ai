@@ -222,7 +222,7 @@ async def get_antigravity_token(auth_file: str | None = None) -> OAuthCredential
         if env_path:
             token_path = Path(env_path).expanduser()
         else:
-            token_path = Path.home() / ".config" / "bos" / "antigravity_auth.default.json"
+            token_path = Path.home() / ".bosa" / "auth" / "antigravity_auth.default.json"
 
     if not token_path.exists():
         raise RuntimeError(

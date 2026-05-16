@@ -1,27 +1,26 @@
 """Integration tests for bosa ask --interactive wiring (no Textual launch)."""
 
 import asyncio
+from pathlib import Path
 
 import pytest
 
-from bos.cli.commands.agent import _resolve_config_option
 from bos.cli.local_client import LocalClient
-from bos.config.workspace import Workspace
+from bos.config.workspace import Workspace, WorkspaceResolutionError, resolve_config_source
 
 
-def test_resolve_config_option_builtin_preset():
-    """--config with a name resolves to the built-in preset."""
-    result = _resolve_config_option("default")
-    assert result.name == "default.toml"
-    assert result.exists()
+def test_resolve_config_source_builtin_preset():
+    """resolve_config_source with a preset name resolves to the built-in preset."""
+    config_path, bos_dir, config = resolve_config_source("default")
+    assert config_path.name == "default.toml"
+    assert config_path.exists()
+    assert isinstance(config, dict)
 
 
-def test_resolve_config_option_unknown_name_raises():
-    """--config with an unknown name raises UsageError."""
-    import click
-
-    with pytest.raises(click.UsageError, match="Unknown config"):
-        _resolve_config_option("nonexistent-config-zzz")
+def test_resolve_config_source_unknown_name_raises():
+    """resolve_config_source with an unknown name raises WorkspaceResolutionError."""
+    with pytest.raises(WorkspaceResolutionError, match="Unknown config source"):
+        resolve_config_source("nonexistent-config-zzz")
 
 
 @pytest.mark.asyncio
@@ -54,7 +53,7 @@ model = "test/consolidator"
         encoding="utf-8",
     )
 
-    ws = Workspace(str(tmp_path))
+    ws = Workspace.from_discovery(str(tmp_path))
     ws.bootstrap_platform()
 
     async with ws.harness() as harness:
@@ -87,3 +86,54 @@ model = "test/consolidator"
             await actor_task
 
         await client.aclose()
+
+
+def test_build_workspace_for_ask_falls_back_to_default_preset(tmp_path, monkeypatch):
+    """When no workspace is found and no -c given, ask falls back to the 'default' preset."""
+    from bos.cli.commands.agent import _build_workspace_for_ask
+
+    # Ensure no workspace discovery succeeds
+    monkeypatch.delenv("BOS_CONFIG", raising=False)
+    monkeypatch.chdir(tmp_path)
+
+    ctx = type("Ctx", (), {"obj": {}})
+
+    ws = _build_workspace_for_ask(ctx)
+    assert ws.bos_dir == Path("~/.bosa/agents/default").expanduser()
+    assert isinstance(ws.config, dict)
+    assert ws.config_file.name == "default.toml"
+
+
+def test_build_workspace_for_ask_uses_discovery_when_workspace_exists(tmp_path, monkeypatch):
+    """When a workspace config is discoverable, ask uses it (no fallback)."""
+    from bos.cli.commands.agent import _build_workspace_for_ask
+
+    bos_dir = tmp_path / ".bos"
+    bos_dir.mkdir()
+    (bos_dir / "config.toml").write_text(
+        '[main]\nagent = "discovered-agent"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("BOS_CONFIG", raising=False)
+    monkeypatch.chdir(tmp_path)
+
+    ctx = type("Ctx", (), {"obj": {}})
+    ws = _build_workspace_for_ask(ctx)
+
+    assert ws.get_main_agent_name() == "discovered-agent"
+    assert ws.bos_dir == bos_dir.resolve()
+
+
+def test_build_workspace_for_ask_workspace_override(tmp_path, monkeypatch):
+    """-w/--workspace overrides the workspace directory."""
+    from bos.cli.commands.agent import _build_workspace_for_ask
+
+    override_dir = tmp_path / "override"
+    override_dir.mkdir()
+    monkeypatch.delenv("BOS_CONFIG", raising=False)
+    monkeypatch.chdir(tmp_path)
+
+    ctx = type("Ctx", (), {"obj": {}})
+    ws = _build_workspace_for_ask(ctx, workspace_override=str(override_dir))
+
+    assert ws.workspace == override_dir.resolve()

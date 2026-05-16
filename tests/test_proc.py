@@ -37,7 +37,7 @@ port = 8080
         encoding="utf-8",
     )
 
-    ws = Workspace(workspace)
+    ws = Workspace.from_discovery(workspace)
     argv = build_docker_argv(ws, ws.get_runtime_config(), detach=True)
 
     assert "--detach" in argv
@@ -73,7 +73,11 @@ target_address = "agent@main"
         encoding="utf-8",
     )
 
-    ws = Workspace(workspace)
+    config_file = bos_dir / "config.toml"
+    from bos.config.workspace import _load_config
+    config = _load_config(config_file)
+    # Explicitly set workspace != bos_dir parent to test external bos_dir mount
+    ws = Workspace(workspace, bos_dir, config, config_file=config_file)
     argv = build_docker_argv(ws, ws.get_runtime_config(), detach=True)
 
     assert f"{workspace.resolve()}:/workspace" in argv

@@ -20,7 +20,7 @@ def codex(name: str):
     except ImportError:
         raise click.ClickException("oauth_cli_kit not installed. Run: uv pip install oauth-cli-kit")
 
-    creds_dir = Path.home() / ".config" / "bos"
+    creds_dir = Path.home() / ".bosa" / "auth"
     creds_dir.mkdir(parents=True, exist_ok=True)
 
     token_path = creds_dir / f"codex_auth.{name}.json"
@@ -60,7 +60,7 @@ def antigravity(name: str):
 
     from bos.extensions.providers.antigravity_provider import login_antigravity
 
-    creds_dir = Path.home() / ".config" / "bos"
+    creds_dir = Path.home() / ".bosa" / "auth"
     creds_dir.mkdir(parents=True, exist_ok=True)
     token_path = creds_dir / f"antigravity_auth.{name}.json"
 
@@ -104,7 +104,7 @@ def gemini_cli(name: str) -> None:
     click.echo(" Gemini CLI Authentication")
     click.echo("=" * 50)
 
-    creds_dir = Path.home() / ".config" / "bos"
+    creds_dir = Path.home() / ".bosa" / "auth"
     creds_dir.mkdir(parents=True, exist_ok=True)
     token_path = creds_dir / f"gemini_cli_auth.{name}.json"
 

@@ -41,7 +41,7 @@ async def codex_complete(
         from pathlib import Path
 
         auth_file = os.environ.get("BOS_CODEX_AUTH_FILE") or str(
-            Path.home() / ".config" / "bos" / "codex_auth.default.json"
+            Path.home() / ".bosa" / "auth" / "codex_auth.default.json"
         )
 
     from oauth_cli_kit import get_token as get_codex_token
