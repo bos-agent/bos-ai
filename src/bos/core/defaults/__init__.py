@@ -11,5 +11,6 @@ from . import (
 from .agent_spec import (
     bos_maxims,  # noqa: F401
     bos_memory_usage,  # noqa: F401
+    bos_tools_usage,  # noqa: F401
     default_agent_spec,  # noqa: F401
 )

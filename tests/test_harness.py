@@ -259,6 +259,95 @@ async def test_prompt_sections_render_first_50_items_and_warn(caplog):
 
 
 @pytest.mark.asyncio
+async def test_tools_usage_overrides_tool_description_in_prompt():
+    local_tools = ToolRegistry("test tools")
+
+    @local_tools(
+        name="FetchURL",
+        description="Fetch content from a URL.",
+        parameters={"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]},
+    )
+    async def fetch_url(url: str) -> str:
+        return "ok"
+
+    @local_tools(
+        name="RunBash",
+        description="Run a bash command.",
+        parameters={"type": "object", "properties": {"cmd": {"type": "string"}}, "required": ["cmd"]},
+    )
+    async def run_bash(cmd: str) -> str:
+        return "ok"
+
+    agent = create_test_agent(
+        local_tools=local_tools,
+        tools=["FetchURL", "RunBash"],
+        tools_usage={"FetchURL": "Custom fetch usage for this agent."},
+    )
+
+    prompt = await agent._prompt_section_tools()
+
+    assert "Custom fetch usage for this agent." in prompt
+    assert "Fetch content from a URL." not in prompt
+    assert "Run a bash command." in prompt
+
+
+@pytest.mark.asyncio
+async def test_tools_usage_default_none_keeps_original_descriptions():
+    local_tools = ToolRegistry("test tools")
+
+    @local_tools(
+        name="FetchURL",
+        description="Fetch content from a URL.",
+        parameters={"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]},
+    )
+    async def fetch_url(url: str) -> str:
+        return "ok"
+
+    agent = create_test_agent(local_tools=local_tools, tools=["FetchURL"])
+
+    prompt = await agent._prompt_section_tools()
+
+    assert "Fetch content from a URL." in prompt
+
+
+@pytest.mark.asyncio
+async def test_tools_usage_empty_dict_keeps_all_original_descriptions():
+    local_tools = ToolRegistry("test tools")
+
+    @local_tools(
+        name="FetchURL",
+        description="Fetch content from a URL.",
+        parameters={"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]},
+    )
+    async def fetch_url(url: str) -> str:
+        return "ok"
+
+    agent = create_test_agent(local_tools=local_tools, tools=["FetchURL"], tools_usage={})
+    prompt = await agent._prompt_section_tools()
+
+    assert "Fetch content from a URL." in prompt
+
+
+@pytest.mark.asyncio
+async def test_tools_usage_flows_through_create_agent(tmp_path):
+    bos_dir = tmp_path / ".bos"
+    bos_dir.mkdir()
+
+    async with AgentHarness(bos_dir=bos_dir, workspace=tmp_path, consolidator=MessageOnlyConsolidator()) as harness:
+        agent = harness.create_agent(
+            agent_cfg={
+                "system_prompt": "You are a helpful assistant.",
+                "tools": ["LoadSkill"],
+                "tools_usage": {"LoadSkill": "Custom usage for LoadSkill."},
+            }
+        )
+        prompt = await agent._prompt_section_tools()
+
+    assert "Custom usage for LoadSkill." in prompt
+    assert "Load a skill" not in prompt
+
+
+@pytest.mark.asyncio
 async def test_react_agent_first_turn_passes_only_user_text():
     suffix = uuid.uuid4().hex
     provider_name = f"test_plain_input_provider_{suffix}"

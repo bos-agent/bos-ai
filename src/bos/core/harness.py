@@ -49,9 +49,16 @@ def bootstrap_platform(
             _load_ext_paths(paths=paths)
 
     defaults = agent_defaults or {}
-    for agent_spec in [default_agent_spec] + (agents or []):
-        ReactAgent.register(**(defaults | agent_spec))
 
+    # the agent defaults in configuration takes precedence over the spec in the fallback _default agent
+    _default_spec = default_agent_spec | defaults
+    # the specifice agent definition takes precedence over the agent_defaults
+    agent_specs = [defaults | spec for spec in (agents or [])]
+    # register all the agents
+    for agent_spec in [_default_spec] + agent_specs:
+        ReactAgent.register(**(agent_spec))
+
+    # prevent the litellm to call load_dotenv automatically, and supress logs.
     os.environ["LITELLM_MODE"] = "extension"
     logging.getLogger("LiteLLM").setLevel(logging.ERROR)
 

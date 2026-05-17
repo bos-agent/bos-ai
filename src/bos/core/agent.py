@@ -31,7 +31,7 @@ from .contract import (
     ep_tool,
     ep_turn_interceptor,
 )
-from .defaults import bos_maxims, bos_memory_usage
+from .defaults import bos_maxims, bos_memory_usage, bos_tools_usage
 from .events import derive_event_sink
 from .history import estimate_message_history_tokens
 from .llm import LLMClient, ToolCallRequest
@@ -129,6 +129,7 @@ class ReactAgent:
         skills_loader: SkillsLoader,
         system_prompt: str | None = None,
         tools: list[str] | None = None,
+        tools_usage: dict[str, str] | None = None,
         exclude_tools: list[str] | None = None,
         skills: list[str] | None = None,
         exclude_skills: list[str] | None = None,
@@ -150,6 +151,7 @@ class ReactAgent:
             raise TypeError("system_prompt must be a string or None")
         self._system_prompt = system_prompt or ""
         self._tools = tools
+        self._tools_usage = bos_tools_usage | (tools_usage or {})
         self._exclude_tools = exclude_tools
         self._skills = skills
         self._exclude_skills = exclude_skills
@@ -466,6 +468,9 @@ class ReactAgent:
             _pick_collection(all_tools, self._tools, self._exclude_tools),
             "tools",
         )
+        print(self._tools)
+        available_tools = {k: self._tools_usage.get(k, v).strip() for k, v in available_tools.items()}
+
         return self._format_prompt_section("AVAILABLE TOOLS", available_tools)
 
     async def _prompt_section_skills(self) -> str:
@@ -494,7 +499,7 @@ class ReactAgent:
         tag = title.lower().replace(" ", "_")
         section = f"<{tag}>\n"
         for key, content in items.items():
-            section += f"<item key=\"{key}\">\n{content}\n</item>\n"
+            section += f'<item key="{key}">\n{content}\n</item>\n'
         section += f"</{tag}>"
         return section
 

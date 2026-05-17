@@ -61,3 +61,5 @@ default_agent_spec: dict[str, Any] = {
     "memory_usage": bos_memory_usage,
     "subagents": "*",
 }
+
+bos_tools_usage: dict[str, str] = {}
