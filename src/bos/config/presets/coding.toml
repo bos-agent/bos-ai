@@ -5,7 +5,14 @@ agent_dirs = []
 # borrow pi-coding-agent examples
 [[platform.agents]]
 name = "main"
-tools = ["AskSubagent", "ReadFile", "WriteFile", "TodoWrite", "TodoRead", "LoadSkill"]
+tools = [
+    "AskSubagent",
+    "ReadFile",
+    "WriteFile",
+    "TodoWrite",
+    "TodoRead",
+    "LoadSkill",
+]
 subagents = ["scout", "planner", "worker", "reviewer"]
 skills = ["coding-discipline"]
 system_prompt = """
@@ -112,7 +119,6 @@ tools = [
     "EditFile",
     "GlobSearch",
     "GrepSearch",
-    "NotebookEdit",
     "WebSearch",
     "WebFetch",
     "Bash",

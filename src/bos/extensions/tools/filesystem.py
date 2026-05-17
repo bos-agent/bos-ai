@@ -1,5 +1,4 @@
 import asyncio
-import json
 import os
 import re
 from pathlib import Path
@@ -251,56 +250,3 @@ async def tool_grep_search(query: str, cwd: str = ".") -> str:
             return "\n".join(matches) or "No matches found."
 
         return await asyncio.to_thread(_fallback_search)
-
-
-@ep_tool(
-    name="NotebookEdit",
-    description="Replace, insert, or delete cells in a .ipynb file natively.",
-    parameters={
-        "type": "object",
-        "properties": {
-            "path": {"type": "string", "description": "Path to .ipynb file."},
-            "action": {"type": "string", "enum": ["replace", "insert", "delete"]},
-            "cell_index": {"type": "integer", "description": "0-indexed position."},
-            "source": {"type": "string", "description": "Source code text (ignored for delete).", "default": ""},
-        },
-        "required": ["path", "action", "cell_index"],
-    },
-)
-async def tool_notebook_edit(path: str, action: str, cell_index: int, source: str = "") -> str:
-    return await asyncio.to_thread(_sync_tool_notebook_edit, path, action, cell_index, source)
-
-
-def _sync_tool_notebook_edit(path: str, action: str, cell_index: int, source: str = "") -> str:
-    p = Path(path)
-    if not p.exists():
-        return f"Error: Notebook {path} does not exist."
-    try:
-        nb = json.loads(p.read_text(encoding="utf-8"))
-        cells = nb.get("cells", [])
-        if action == "replace":
-            if cell_index < 0 or cell_index >= len(cells):
-                return f"Error: index {cell_index} out of bounds (0-{len(cells) - 1})."
-            cells[cell_index]["source"] = [s + "\n" for s in source.split("\n")]
-            if cells[cell_index]["source"]:
-                cells[cell_index]["source"][-1] = cells[cell_index]["source"][-1].rstrip("\n")
-        elif action == "insert":
-            new_cell = {
-                "cell_type": "code",
-                "execution_count": None,
-                "metadata": {},
-                "outputs": [],
-                "source": [s + "\n" for s in source.split("\n")],
-            }
-            if new_cell["source"]:
-                new_cell["source"][-1] = new_cell["source"][-1].rstrip("\n")
-            cells.insert(cell_index, new_cell)
-        elif action == "delete":
-            if cell_index < 0 or cell_index >= len(cells):
-                return f"Error: index {cell_index} out of bounds (0-{len(cells) - 1})."
-            cells.pop(cell_index)
-
-        p.write_text(json.dumps(nb, indent=1), encoding="utf-8")
-        return f"Successfully performed {action} at index {cell_index} in {path}."
-    except Exception as e:
-        return f"Error modifying notebook: {e}"
