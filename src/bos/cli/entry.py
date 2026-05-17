@@ -1,4 +1,5 @@
 import importlib
+import os
 
 import click
 
@@ -9,6 +10,9 @@ _LAZY_COMMANDS: dict[str, str] = {
     "ask": "bos.cli.commands.agent:ask",
     "tui": "bos.cli.commands.agent:tui",
 }
+
+if os.environ.get("BOS_DEV"):
+    _LAZY_COMMANDS["debug"] = "bos.cli.commands.debug:debug"
 
 
 class _LazyGroup(click.Group):

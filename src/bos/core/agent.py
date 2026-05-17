@@ -449,7 +449,7 @@ class ReactAgent:
         return "\n\n".join(s for s in sections if s)
 
     def _prompt_section_base(self) -> str:
-        return "--- SYSTEM PROMPT ---\n\n" + self._system_prompt
+        return f"<system_prompt>\n{self._system_prompt}\n</system_prompt>"
 
     async def _prompt_section_maxims(self) -> str:
         if not self._maxims:
@@ -457,7 +457,7 @@ class ReactAgent:
         items: dict[str, str] = {}
         for key, scope in self._maxims.items():
             content = await self._memory.get_maxim(key) or "(empty)"
-            items[key] = f"({scope})\n{content}" if scope else content
+            items[key] = f"<scope>{scope}</scope>\n{content}" if scope else content
         return self._format_prompt_section("ACTIVE MAXIMS", items)
 
     async def _prompt_section_tools(self) -> str:
@@ -491,17 +491,19 @@ class ReactAgent:
         if not items:
             return ""
 
-        section = f"--- {title} ---\n\n"
+        tag = title.lower().replace(" ", "_")
+        section = f"<{tag}>\n"
         for key, content in items.items():
-            section += f"* **{key}**\n"
-            section += f"```\n{content}\n```\n\n"
+            section += f"<item key=\"{key}\">\n{content}\n</item>\n"
+        section += f"</{tag}>"
         return section
 
     def _prompt_section_system_info(self) -> str:
         return (
-            "--- SYSTEM INFORMATION ---\n\n"
-            f"- Platform: {platform.system()}\n"
-            f"- Date: {datetime.now().strftime('%A, %B %d, %Y')}\n"
+            "<system_info>\n"
+            f"<platform>{platform.system()}</platform>\n"
+            f"<date>{datetime.now().strftime('%A, %B %d, %Y')}</date>\n"
+            "</system_info>"
         )
 
     @staticmethod

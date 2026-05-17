@@ -243,7 +243,7 @@ class TestSystemPromptIntegration:
             system_prompt="base prompt",
         )
         prompt = await agent._build_system_prompt()
-        assert "MAXIMS" in prompt
+        assert "<active_maxims>" in prompt
         assert "test user content" in prompt
         assert "your knowledge about the user" in prompt  # scope description
 
@@ -274,7 +274,7 @@ class TestSystemPromptIntegration:
             system_prompt="base prompt",
         )
         prompt = await agent._build_system_prompt()
-        assert "USING YOUR MEMORY" in prompt
+        assert "<memory_usage>" in prompt
 
     @pytest.mark.asyncio
     async def test_maxim_header_has_scope_description(self):

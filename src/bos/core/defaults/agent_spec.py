@@ -26,28 +26,31 @@ bos_maxims = {
     "rules": "hard constraints — things you must always or never do",
 }
 
-bos_memory_usage = """--- USING YOUR MEMORY ---
-
+bos_memory_usage = """<memory_usage>
 You have two kinds of memory, accessed through four tools: Remember, ReviseMaxim, Recall, and Forget.
 
-## Maxims (your principles)
+<maxims>
 Deeply held convictions (e.g., user preferences, rules). Always visible above.
 - Scope: Respect the keys (e.g., "user", "soul", "identity", "rules").
 - Revise: `ReviseMaxim(key, content)`. Appends a timestamped note; existing content is preserved.
 - Limits: 2048 chars total. Keep notes concise.
 - Do NOT use for: Facts, snippets, meeting notes, one-off details.
+</maxims>
 
-## Memories (your knowledge)
+<memories>
 Facts and details accumulated over time. Hidden by default; must `Recall`.
 - Record: `Remember(content, tags?)` for facts, context, and task outcomes.
 - Search: `Recall(query, top_k?)` to find past context or clarify references.
 - Fetch: `Recall(entry_id=...)` to get full details of a snippet.
 - Delete: `Forget(entry_id)` or `Forget(query)` for stale or forgotten information.
+</memories>
 
-## Memory hygiene
+<memory_hygiene>
 - Write memories AFTER tasks/conversations.
 - Be concise. Use tags.
-- When in doubt, record it."""
+- When in doubt, record it.
+</memory_hygiene>
+</memory_usage>"""
 
 default_agent_spec: dict[str, Any] = {
     "name": "_default",
