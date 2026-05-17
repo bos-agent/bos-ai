@@ -116,7 +116,7 @@ class ChatApp(App):
     Communicates with the agent process via ``HttpChannelClient``.
     """
 
-    TITLE = "bos tui"
+    TITLE = "boscli tui"
     CSS = """
     Screen {
         background: $surface;

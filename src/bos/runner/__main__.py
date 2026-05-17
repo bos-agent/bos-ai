@@ -1,8 +1,8 @@
-"""Standalone actor + channel process — launched by ``bos start``.
+"""Standalone actor + channel process — launched by ``boscli gateway start``.
 
 Usage (internal, via proc.start_background)::
 
-    python -m bos.runner._main --config /path/to/bos.toml
+    python -m bos.runner --config /path/to/bos.toml
 """
 
 from __future__ import annotations
@@ -45,11 +45,15 @@ def main() -> None:
     args = parser.parse_args()
 
     # Bootstrap workspace
-    from bos.config import Workspace
+    from bos.config import Workspace, resolve_config_source
     from bos.named_actors.runner import start_named_actors
     from bos.runner.proc import RunDir, write_state
 
-    ws = Workspace(".", config_source=args.config)
+    if args.config:
+        config_path, bos_dir, config = resolve_config_source(args.config)
+        ws = Workspace(".", bos_dir, config, config_file=config_path)
+    else:
+        ws = Workspace.from_discovery(".")
     ws.bootstrap_platform()
 
     rd = RunDir(ws.bos_dir)

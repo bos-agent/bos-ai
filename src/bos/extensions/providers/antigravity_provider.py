@@ -222,11 +222,11 @@ async def get_antigravity_token(auth_file: str | None = None) -> OAuthCredential
         if env_path:
             token_path = Path(env_path).expanduser()
         else:
-            token_path = Path.home() / ".config" / "bos" / "antigravity_auth.default.json"
+            token_path = Path.home() / ".bos" / "auth" / "antigravity_auth.default.json"
 
     if not token_path.exists():
         raise RuntimeError(
-            f"Antigravity credentials not found at {token_path}. Run `bos auth antigravity` to authenticate first."
+            f"Antigravity credentials not found at {token_path}. Run `boscli auth antigravity` to authenticate first."
         )
 
     try:
@@ -264,7 +264,7 @@ async def get_antigravity_token(auth_file: str | None = None) -> OAuthCredential
         logger.debug(f"Failed to load/refresh token from {token_path}: {e}")
         raise RuntimeError(
             f"Failed to load or refresh Antigravity credentials from {token_path}. "
-            f"Run `bos auth antigravity` to re-authenticate. Error: {e}"
+            f"Run `boscli auth antigravity` to re-authenticate. Error: {e}"
         )
 
 

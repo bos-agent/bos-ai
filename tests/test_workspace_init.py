@@ -9,7 +9,7 @@ def test_workspace_load_does_not_create_fallback_bos_dir(tmp_path, monkeypatch):
     workspace.mkdir()
     monkeypatch.setenv("BOS_CONFIG", str(fallback_bos_dir / "config.toml"))
 
-    ws = Workspace(workspace)
+    ws = Workspace.from_discovery(workspace)
 
     assert ws.bos_dir == fallback_bos_dir.resolve()
     assert ws.config == {}
@@ -22,7 +22,7 @@ def test_workspace_load_requires_discovered_bos_dir_or_bos_dir_env(tmp_path, mon
     monkeypatch.delenv("BOS_CONFIG", raising=False)
 
     with pytest.raises(WorkspaceResolutionError, match="No BOS workspace found"):
-        Workspace(workspace)
+        Workspace.from_discovery(workspace)
 
 
 def test_workspace_load_rejects_conflicting_discovered_bos_dir_and_bos_dir_env(tmp_path, monkeypatch):
@@ -31,10 +31,11 @@ def test_workspace_load_rejects_conflicting_discovered_bos_dir_and_bos_dir_env(t
     fallback_bos_dir = tmp_path / "fallback-bos"
     workspace.mkdir()
     discovered_bos_dir.mkdir()
+    (discovered_bos_dir / "config.toml").write_text("", encoding="utf-8")
     monkeypatch.setenv("BOS_CONFIG", str(fallback_bos_dir / "config.toml"))
 
     with pytest.raises(WorkspaceResolutionError, match="Ambiguous BOS config"):
-        Workspace(workspace)
+        Workspace.from_discovery(workspace)
 
 
 def test_workspace_load_allows_matching_discovered_bos_dir_and_bos_dir_env(tmp_path, monkeypatch):
@@ -44,7 +45,7 @@ def test_workspace_load_allows_matching_discovered_bos_dir_and_bos_dir_env(tmp_p
     discovered_bos_dir.mkdir()
     monkeypatch.setenv("BOS_CONFIG", str(discovered_bos_dir / "config.toml"))
 
-    ws = Workspace(workspace)
+    ws = Workspace.from_discovery(workspace)
 
     assert ws.bos_dir == discovered_bos_dir.resolve()
     assert ws.config == {}
@@ -68,7 +69,7 @@ def test_initialize_workspace_dotbos_creates_dot_bos_layout(tmp_path, monkeypatc
     monkeypatch.delenv("BOS_CONFIG", raising=False)
 
     bos_dir = initialize_workspace(workspace, dotbos=True)
-    ws = Workspace(workspace)
+    ws = Workspace.from_discovery(workspace)
 
     assert bos_dir == (workspace / ".bos").resolve()
     assert (bos_dir / "config.toml").exists()
@@ -94,7 +95,7 @@ def test_workspace_loads_from_bos_toml(tmp_path, monkeypatch):
     workspace.mkdir()
     (workspace / "bos.toml").write_text('[platform]\nextensions = ["bos.extensions.all"]\n', encoding="utf-8")
 
-    ws = Workspace(workspace)
+    ws = Workspace.from_discovery(workspace)
 
     assert ws.bos_dir == workspace.resolve()
     assert ws.config == {"platform": {"extensions": ["bos.extensions.all"]}}
@@ -108,7 +109,7 @@ def test_workspace_bos_toml_sets_bos_dir_equal_to_workspace(tmp_path, monkeypatc
     subdir.mkdir()
     (workspace / "bos.toml").write_text("", encoding="utf-8")
 
-    ws = Workspace(subdir)
+    ws = Workspace.from_discovery(subdir)
 
     assert ws.bos_dir == workspace.resolve()
 
@@ -121,7 +122,7 @@ def test_workspace_rejects_both_dotbos_and_bos_toml(tmp_path, monkeypatch):
     (workspace / "bos.toml").write_text("", encoding="utf-8")
 
     with pytest.raises(WorkspaceResolutionError, match="found both .bos/ and bos.toml"):
-        Workspace(workspace)
+        Workspace.from_discovery(workspace)
 
 
 def test_workspace_bos_toml_allows_matching_bos_dir_env(tmp_path, monkeypatch):
@@ -130,7 +131,7 @@ def test_workspace_bos_toml_allows_matching_bos_dir_env(tmp_path, monkeypatch):
     (workspace / "bos.toml").write_text("", encoding="utf-8")
     monkeypatch.setenv("BOS_CONFIG", str(workspace / "bos.toml"))
 
-    ws = Workspace(workspace)
+    ws = Workspace.from_discovery(workspace)
 
     assert ws.bos_dir == workspace.resolve()
 
@@ -143,4 +144,4 @@ def test_workspace_bos_toml_rejects_conflicting_bos_dir_env(tmp_path, monkeypatc
     monkeypatch.setenv("BOS_CONFIG", str(other_dir / "bos.toml"))
 
     with pytest.raises(WorkspaceResolutionError, match="Ambiguous BOS config"):
-        Workspace(workspace)
+        Workspace.from_discovery(workspace)

@@ -20,7 +20,7 @@ port = 8080
         encoding="utf-8",
     )
 
-    channel = Workspace(tmp_path).resolve_channels(runtime_kind="docker")[0]
+    channel = Workspace.from_discovery(tmp_path).resolve_channels(runtime_kind="docker")[0]
 
     assert channel.options["host"] == "0.0.0.0"
 
@@ -43,7 +43,7 @@ token = "x"
         encoding="utf-8",
     )
 
-    channel = Workspace(tmp_path).resolve_channels(runtime_kind="docker")[0]
+    channel = Workspace.from_discovery(tmp_path).resolve_channels(runtime_kind="docker")[0]
 
     assert channel.options == {
         "token": "x",

@@ -18,6 +18,10 @@ class WorkspaceResolutionError(RuntimeError):
     """Raised when the active BOS config source cannot be resolved unambiguously."""
 
 
+class ConfigNotFoundError(WorkspaceResolutionError):
+    """Raised when no BOS config file is found in the workspace tree."""
+
+
 @dataclass(frozen=True)
 class AgentSourceRecord:
     name: str
@@ -54,7 +58,10 @@ def _find_discovered_config(workspace: Path) -> Path | None:
             )
 
         if has_dotbos:
-            return parent / ".bos" / "config.toml"
+            dotbos_config = parent / ".bos" / "config.toml"
+            if dotbos_config.is_file():
+                return dotbos_config
+            # .bos/ exists but config.toml is missing — keep walking up
 
         if has_bostoml:
             return parent / "bos.toml"
@@ -63,6 +70,10 @@ def _find_discovered_config(workspace: Path) -> Path | None:
 
 
 def _resolve_config(workspace: Path) -> Path:
+    """Walk ancestor directories to find the BOS config file.
+
+    Checks ``BOS_CONFIG`` env var and raises on ambiguity.
+    """
     discovered_config = _find_discovered_config(workspace)
     configured_bos_config = os.environ.get("BOS_CONFIG")
     env_bos_config = Path(configured_bos_config).expanduser().resolve() if configured_bos_config else None
@@ -80,24 +91,55 @@ def _resolve_config(workspace: Path) -> Path:
     if env_bos_config:
         return env_bos_config
 
-    raise WorkspaceResolutionError("No BOS workspace found. Run `bos init`, `cd` into a workspace, or set `BOS_CONFIG`.")
+    raise ConfigNotFoundError(
+        "No BOS workspace found. Run `boscli init`, `cd` into a workspace, or set `BOS_CONFIG`."
+    )
 
 
 def _config_template_path() -> Path:
     return Path(__file__).resolve().parent / "template.toml"
 
 
-def _load_config(config_path: Path | str, *, explicit: bool = False) -> dict[str, Any]:
+def _load_config(config_path: Path | str) -> dict[str, Any]:
+    """Read and parse a TOML config file. Returns ``{}`` if the file does not exist."""
     if not config_path:
         raise WorkspaceResolutionError("Config path is not resolved.")
-    
+
     config_path = Path(config_path)
-    
+
     if not config_path.is_file():
-        if explicit:
-            raise WorkspaceResolutionError(f"Config path is not a file: {config_path}")
         return {}
     return tomllib.loads(config_path.read_text(encoding="utf-8"))
+
+
+def presets_dir() -> Path:
+    return Path(__file__).resolve().parent / "presets"
+
+
+def resolve_config_source(config_arg: str) -> tuple[Path, Path, dict[str, Any]]:
+    """Resolve a ``-c`` / ``--config`` argument to ``(config_path, bos_dir, config)``.
+
+    * If *config_arg* is an existing file path → ``bos_dir`` is the file's parent.
+    * If *config_arg* matches a built-in preset name → ``bos_dir`` is
+      ``~/.bos/agents/<preset>`` (created if necessary).
+
+    Raises :class:`WorkspaceResolutionError` if neither matches.
+    """
+    config_path = Path(config_arg)
+    if config_path.is_file():
+        resolved = config_path.resolve()
+        return resolved, resolved.parent, _load_config(resolved)
+
+    presets = presets_dir()
+    preset = presets / f"{config_arg}.toml"
+    if preset.exists():
+        bos_dir = Path("~/.bos/agents").expanduser() / config_arg
+        bos_dir.mkdir(parents=True, exist_ok=True)
+        return preset, bos_dir, _load_config(preset)
+
+    available = sorted(p.stem for p in presets.glob("*.toml")) if presets.exists() else []
+    presets_msg = f"Available presets: {', '.join(available)}" if available else "No presets available"
+    raise WorkspaceResolutionError(f"Unknown config source {config_arg!r}. {presets_msg}")
 
 
 def initialize_workspace(workspace: str | Path = ".", *, dotbos: bool = False) -> Path:
@@ -346,13 +388,43 @@ class ResolvedChannelConfig:
 
 
 class Workspace:
-    def __init__(self, workspace: str | Path = ".", *, config_source: str | Path | None = None):
+    def __init__(
+        self,
+        workspace: str | Path,
+        bos_dir: str | Path,
+        config: dict[str, Any],
+        *,
+        config_file: str | Path | None = None,
+    ):
+        if not isinstance(config, dict):
+            raise TypeError(f"config must be a dict, got {type(config).__name__}")
         self.workspace = _resolve_path(workspace)
-        resolved_config = _resolve_config(self.workspace) if config_source is None else _resolve_path(config_source)
-        self.bos_dir = resolved_config.parent
-        self.config_file = resolved_config
-        self.config = _load_config(resolved_config, explicit=config_source is not None)
+        self.bos_dir = _resolve_path(bos_dir)
+        self.config: dict[str, Any] = config
+        self.config_file: Path | None = _resolve_path(config_file) if config_file else None
         self.agent_source_history: dict[str, list[AgentSourceRecord]] = {}
+
+    @classmethod
+    def from_discovery(cls, cwd: str | Path = ".") -> "Workspace":
+        """Discover workspace layout by walking ancestor directories.
+
+        This is the legacy convenience constructor. Prefer explicit construction
+        in new code.
+        """
+        resolved_cwd = _resolve_path(cwd)
+        config_path = _resolve_config(resolved_cwd)
+        bos_dir = config_path.parent
+        config = _load_config(config_path)
+
+        # Derive workspace root from config location
+        if config_path.name == "bos.toml":
+            workspace = config_path.parent
+        elif config_path.name == "config.toml" and config_path.parent.name == ".bos":
+            workspace = config_path.parent.parent
+        else:
+            workspace = resolved_cwd
+
+        return cls(workspace, bos_dir, config, config_file=config_path)
 
     def bootstrap_platform(self):
         from bos.core import _apply, bootstrap_platform

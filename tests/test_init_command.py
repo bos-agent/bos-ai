@@ -47,7 +47,9 @@ def test_cli_init_rejects_already_initialized_workspace(tmp_path, monkeypatch):
 def test_cli_init_rejects_already_initialized_dotbos(tmp_path, monkeypatch):
     workspace = tmp_path / "project"
     workspace.mkdir()
-    (workspace / ".bos").mkdir()
+    bos_dir = workspace / ".bos"
+    bos_dir.mkdir()
+    (bos_dir / "config.toml").write_text("", encoding="utf-8")
     monkeypatch.delenv("BOS_CONFIG", raising=False)
     monkeypatch.chdir(workspace)
 
@@ -78,7 +80,7 @@ def test_cli_status_fails_cleanly_without_workspace_or_config(tmp_path, monkeypa
     monkeypatch.delenv("BOS_CONFIG", raising=False)
     monkeypatch.chdir(workspace)
 
-    result = CliRunner().invoke(cli, ["status"])
+    result = CliRunner().invoke(cli, ["gateway", "status"])
 
     assert result.exit_code == 2
     assert "No BOS workspace found" in result.output

@@ -54,7 +54,7 @@ SUPPORTED_MODELS = [
     "gemini-3.1-pro-preview",
 ]
 
-_DEFAULT_AUTH_PATH = Path.home() / ".config" / "bos" / "gemini_cli_auth.default.json"
+_DEFAULT_AUTH_PATH = Path.home() / ".bos" / "auth" / "gemini_cli_auth.default.json"
 
 
 def _get_gemini_cli_headers() -> dict[str, str]:
@@ -155,7 +155,7 @@ async def get_gemini_cli_token(auth_file: str | None = None) -> OAuthCredentials
 
     if not path.exists():
         raise RuntimeError(
-            f"Gemini CLI credentials not found at {path}. Run `bos auth gemini-cli` to authenticate first."
+            f"Gemini CLI credentials not found at {path}. Run `boscli auth gemini-cli` to authenticate first."
         )
 
     data = json.loads(path.read_text())

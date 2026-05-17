@@ -1,4 +1,4 @@
-"""``bos start/stop/status/restart/task/tui`` — agent process lifecycle commands."""
+"""``boscli gateway start/stop/status/restart, ask, tui`` — agent process lifecycle commands."""
 
 from __future__ import annotations
 
@@ -11,7 +11,6 @@ import sys
 import time
 import uuid
 from collections import deque
-from pathlib import Path
 from typing import Any
 
 import click
@@ -20,82 +19,78 @@ from rich.live import Live
 from rich.panel import Panel
 from rich.text import Text
 
-from bos.config import Workspace, WorkspaceResolutionError
+from bos.config import ConfigNotFoundError, Workspace, WorkspaceResolutionError, resolve_config_source
+from bos.config.workspace import _resolve_path, presets_dir
 from bos.protocol import TurnEvent
 from bos.runner.proc import RunDir
 
 
-def _resolve_config_option(config: str) -> Path:
-    """Resolve --config value to a built-in preset config file or a direct file path.
+def _build_workspace_for_ask(ctx, workspace_override: str | None = None) -> Workspace:
+    """Build a Workspace for ``boscli ask``.
 
-    First checks if 'config' is an existing file path. If not, looks up
-    <name>.toml in the built-in presets directory.
+    * workspace defaults to ``"."`` unless overridden by ``--workspace``.
+    * ``-c <preset|file>`` → resolve via :func:`resolve_config_source`.
+    * No ``-c`` → discover project config; fall back to ``default`` preset.
     """
-    import bos.config
+    config_arg = ctx.obj.get("CONFIG")
+    ws_dir = workspace_override or "."
 
-    config_path = Path(config)
-    if config_path.is_file():
-        return config_path.resolve()
+    if config_arg:
+        try:
+            config_path, bos_dir, config = resolve_config_source(config_arg)
+        except WorkspaceResolutionError as exc:
+            raise click.UsageError(str(exc)) from exc
+        return Workspace(ws_dir, bos_dir, config, config_file=config_path)
 
-    presets_dir = Path(bos.config.__file__).parent / "presets"
-    preset = presets_dir / f"{config}.toml"
-    if not preset.exists():
-        available = sorted(p.stem for p in presets_dir.glob("*.toml")) if presets_dir.exists() else []
-        raise click.UsageError(f"Unknown config {config!r}. Available presets: {', '.join(available) or 'none'}")
-    return preset
-
-
-def _workspace_from_config(config_file: Path) -> Path:
-    """Derive workspace directory from a config file location.
-
-    Only standard workspace layouts are supported:
-    - <workspace>/bos.toml → workspace is config parent
-    - <workspace>/.bos/config.toml → workspace is config grandparent
-
-    Raises click.UsageError for non-standard layouts (e.g. presets, arbitrary paths).
-    """
-    if config_file.name == "bos.toml":
-        return config_file.parent
-    if config_file.name == "config.toml" and config_file.parent.name == ".bos":
-        return config_file.parent.parent
-    raise click.UsageError(
-        f"Cannot derive workspace from config at {config_file}. "
-        "Only <workspace>/bos.toml or <workspace>/.bos/config.toml layouts are supported for this command."
-    )
-
-
-def _build_workspace(ctx) -> Workspace:
-    """Build a Workspace from the global --config option (or discovery)."""
-    config = ctx.obj.get("CONFIG")
-    config_source = _resolve_config_option(config) if config else None
+    # No -c: try project discovery, fall back to default preset
     try:
-        ws = Workspace(".", config_source=config_source)
-    except WorkspaceResolutionError as exc:
-        hint = str(exc)
-        if not config:
-            import bos.config as _bos_cfg
+        ws = Workspace.from_discovery(".")
+        if workspace_override:
+            ws.workspace = _resolve_path(workspace_override)
+        return ws
+    except ConfigNotFoundError:
+        pass
 
-            presets_dir = Path(_bos_cfg.__file__).parent / "presets"
-            available = sorted(p.stem for p in presets_dir.glob("*.toml")) if presets_dir.exists() else []
-            presets = ", ".join(available) or "none"
-            hint += f"\nTip: use -c <preset> to run without a workspace. Available presets: {presets}."
-        raise click.UsageError(hint) from exc
-    return ws
-
-
-def _get_ws_and_rd(ctx) -> tuple[Workspace, RunDir]:
-    """Build Workspace + RunDir for daemon commands (start/stop/status/restart/tui).
-
-    For these commands the config must be a standard workspace layout so that
-    the run/ directory can be located under bos_dir.
-    """
-    config = ctx.obj.get("CONFIG")
-    config_source = _resolve_config_option(config) if config else None
     try:
-        ws = Workspace(".", config_source=config_source)
+        config_path, bos_dir, config = resolve_config_source("default")
     except WorkspaceResolutionError as exc:
         raise click.UsageError(str(exc)) from exc
+    return Workspace(ws_dir, bos_dir, config, config_file=config_path)
 
+
+def _build_workspace_for_daemon(ctx, workspace_override: str | None = None) -> Workspace:
+    """Build a Workspace for daemon commands (``boscli gateway start``).
+
+    * ``-c <preset|file>`` → workspace defaults to ``"."`` unless overridden.
+    * No ``-c`` → ancestor discovery (error if not found).
+    """
+    config_arg = ctx.obj.get("CONFIG")
+    ws_dir = workspace_override or "."
+
+    if config_arg:
+        try:
+            config_path, bos_dir, config = resolve_config_source(config_arg)
+        except WorkspaceResolutionError as exc:
+            raise click.UsageError(str(exc)) from exc
+        return Workspace(ws_dir, bos_dir, config, config_file=config_path)
+
+    try:
+        ws = Workspace.from_discovery(".")
+        if workspace_override:
+            ws.workspace = _resolve_path(workspace_override)
+        return ws
+    except WorkspaceResolutionError as exc:
+        hint = str(exc)
+        presets = presets_dir()
+        available = sorted(p.stem for p in presets.glob("*.toml")) if presets.exists() else []
+        names = ", ".join(available) or "none"
+        hint += f"\nTip: use -c <preset> to run without a workspace. Available presets: {names}."
+        raise click.UsageError(hint) from exc
+
+
+def _get_ws_and_rd(ctx, workspace_override: str | None = None) -> tuple[Workspace, RunDir]:
+    """Build Workspace + RunDir for daemon commands."""
+    ws = _build_workspace_for_daemon(ctx, workspace_override)
     rd = RunDir(ws.bos_dir)
     return ws, rd
 
@@ -185,7 +180,7 @@ class _TaskProgressDisplay:
             if idx:
                 body.append("\n")
             body.append(message, style=style)
-        return Panel(body, title="bos ask", border_style="cyan", padding=(0, 1))
+        return Panel(body, title="boscli ask", border_style="cyan", padding=(0, 1))
 
     def _format_event(self, event: TurnEvent) -> tuple[str, str]:
         label = _turn_event_label(event)
@@ -282,7 +277,7 @@ async def _run_interactive(
             await client.aclose()
 
 
-# ── bos ask ──────────────────────────────────────────────────
+# ── boscli ask ──────────────────────────────────────────────────
 
 
 @click.command()
@@ -320,6 +315,13 @@ async def _run_interactive(
     default=False,
     help="Start an interactive chat session (in-process TUI, no background daemon).",
 )
+@click.option(
+    "-w",
+    "--workspace",
+    "workspace_dir",
+    default=None,
+    help="Override the workspace directory (defaults to '.' or project root).",
+)
 @click.pass_context
 def ask(
     ctx,
@@ -329,17 +331,18 @@ def ask(
     use_stdin: bool,
     max_iterations: int | None,
     interactive: bool,
+    workspace_dir: str | None,
 ):
     """Run a oneshot agent task or start an interactive chat session.
 
     \b
     Examples:
-        bos ask "refactor the auth module"
-        bos ask -i
-        bos ask -i "write tests for utils.py"
-        bos -c coding ask -i
-        bos ask --default-model gpt-4o "explain this"
-        cat spec.md | bos ask --stdin
+        boscli ask "refactor the auth module"
+        boscli ask -i
+        boscli ask -w /path/to/project -i
+        boscli -c coding ask -i
+        boscli ask --default-model gpt-4o "explain this"
+        cat spec.md | boscli ask --stdin
     """
     if use_stdin and not sys.stdin.isatty():
         stdin_content = sys.stdin.read()
@@ -348,7 +351,7 @@ def ask(
     if not interactive and not message:
         raise click.UsageError("Provide a task message, use --stdin, or use -i for interactive mode.")
 
-    ws = _build_workspace(ctx)
+    ws = _build_workspace_for_ask(ctx, workspace_dir)
     ws.bootstrap_platform()
     selected_agent = agent_name or ws.get_main_agent_name()
 
@@ -383,20 +386,31 @@ def ask(
     click.echo(result)
 
 
-# ── bos start ─────────────────────────────────────────────────
+# ── boscli gateway ──────────────────────────────────────────────
 
 
-@click.command()
+@click.group(name="gateway")
+def gateway():
+    """Manage the agent gateway process."""
+
+
+# ── boscli gateway start ────────────────────────────────────────
+
+
+@gateway.command()
 @click.option("--foreground", "-f", is_flag=True, default=False, help="Run in the foreground (don't daemonize).")
 @click.option("--docker", is_flag=True, default=False, help="Run the agent inside a Docker container.")
+@click.option(
+    "-w",
+    "--workspace",
+    "workspace_dir",
+    default=None,
+    help="Override the workspace directory (defaults to '.' or project root).",
+)
 @click.pass_context
-def start(ctx, foreground: bool, docker: bool):
+def start(ctx, foreground: bool, docker: bool, workspace_dir: str | None):
     """Start the agent actor and channel server."""
-    ws, rd = _get_ws_and_rd(ctx)
-
-    # Reject non-workspace configs (presets, arbitrary paths)
-    # and set workspace to the project root derived from config location.
-    ws.workspace = _workspace_from_config(ws.config_file)
+    ws, rd = _get_ws_and_rd(ctx, workspace_dir)
 
     ws.bootstrap_platform()
 
@@ -426,7 +440,7 @@ def start(ctx, foreground: bool, docker: bool):
         asyncio.run(start_named_actors(ws))
         return
     else:
-        argv = [sys.executable, "-m", "bos.runner._main", "--config", str(ws.config_file)]
+        argv = [sys.executable, "-m", "bos.runner", "--config", str(ws.config_file)]
         pid = start_background(argv, rd, cwd=ws.workspace)
         click.echo(f"Agent starting (PID {pid})…")
 
@@ -455,13 +469,13 @@ def start(ctx, foreground: bool, docker: bool):
             return
 
     ident = container_id[:12] if container_id else pid
-    click.echo(f"Agent started ({runtime.kind} {ident}) — channel info not yet available (check bos status)")
+    click.echo(f"Agent started ({runtime.kind} {ident}) — channel info not yet available (check boscli gateway status)")
 
 
-# ── bos stop ──────────────────────────────────────────────────
+# ── boscli gateway stop ─────────────────────────────────────────
 
 
-@click.command()
+@gateway.command()
 @click.pass_context
 def stop(ctx):
     """Stop the running agent."""
@@ -498,10 +512,10 @@ def stop(ctx):
     click.echo("Agent stopped.")
 
 
-# ── bos status ────────────────────────────────────────────────
+# ── boscli gateway status ───────────────────────────────────────
 
 
-@click.command()
+@gateway.command()
 @click.pass_context
 def status(ctx):
     """Show agent running status."""
@@ -555,10 +569,10 @@ def status(ctx):
         click.echo(f"Channel:     {name} @ {addr} → ws://{host}:{port}/ws")
 
 
-# ── bos restart ───────────────────────────────────────────────
+# ── boscli gateway restart ──────────────────────────────────────
 
 
-@click.command()
+@gateway.command()
 @click.pass_context
 def restart(ctx):
     """Restart the agent (stop then start)."""
@@ -576,7 +590,7 @@ def restart(ctx):
     ctx.invoke(start)
 
 
-# ── bos tui ───────────────────────────────────────────────────
+# ── boscli tui ───────────────────────────────────────────────────
 
 
 @click.command()

@@ -42,27 +42,27 @@ Initialize a workspace:
 ```bash
 mkdir my-agent
 cd my-agent
-bos init
+boscli init
 ```
 
 Start the agent runtime:
 
 ```bash
-bos start
+boscli gateway start
 ```
 
 Connect the built-in TUI:
 
 ```bash
-bos tui
+boscli tui
 ```
 
 Useful lifecycle commands:
 
 ```bash
-bos status
-bos restart
-bos stop
+boscli gateway status
+boscli gateway restart
+boscli gateway stop
 ```
 
 ## Workspace Model
@@ -173,8 +173,8 @@ Build and run:
 
 ```bash
 docker build -t bos-ai:local .
-bos start
-bos tui
+boscli gateway start
+boscli tui
 ```
 
 When Docker is enabled, `HttpChannel` host binding is normalized for container
@@ -332,18 +332,18 @@ Load extensions by adding their modules to `platform.extensions` in
 
 The built-in CLI currently exposes:
 
-- `bos init`
-- `bos auth`
-- `bos start`
-- `bos stop`
-- `bos status`
-- `bos restart`
-- `bos tui`
+- `boscli init`
+- `boscli auth`
+- `boscli gateway start`
+- `boscli gateway stop`
+- `boscli gateway status`
+- `boscli gateway restart`
+- `boscli tui`
 
 Global workspace selection:
 
 ```bash
-bos -w /path/to/workspace start
+boscli -w /path/to/workspace start
 ```
 
 ## What BOS AI Is Good For

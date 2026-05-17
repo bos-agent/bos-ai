@@ -15,7 +15,7 @@ def test_workspace_bootstrap_loads_extensions_bundle(tmp_path):
     previous_extensions = sys.modules.pop("bos.extensions.all", None)
 
     try:
-        Workspace(tmp_path).bootstrap_platform()
+        Workspace.from_discovery(tmp_path).bootstrap_platform()
         assert "bos.extensions.all" in sys.modules
     finally:
         sys.modules.pop("bos.extensions.all", None)
@@ -49,7 +49,7 @@ system_prompt = "Resolved prompt"
     registered: list[dict] = []
     monkeypatch.setattr("bos.core.harness.ReactAgent.register", lambda **kwargs: registered.append(kwargs))
 
-    Workspace(tmp_path).bootstrap_platform()
+    Workspace.from_discovery(tmp_path).bootstrap_platform()
 
     non_default = [r for r in registered if r.get("name") != "_default"]
     assert non_default == [
@@ -80,7 +80,7 @@ skills = ["writer"]
     )
 
     try:
-        Workspace(tmp_path).bootstrap_platform()
+        Workspace.from_discovery(tmp_path).bootstrap_platform()
         defaults = ep_agent.get(agent_name).defaults
 
         assert defaults["tools"] is None

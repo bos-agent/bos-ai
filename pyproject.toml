@@ -23,7 +23,7 @@ Homepage = "https://github.com/bos-agent/bos-ai"
 
 
 [project.scripts]
-bos = "bos.cli.entry:main"
+boscli = "bos.cli.entry:main"
 
 [project.optional-dependencies]
 providers = ["oauth-cli-kit>=0.1.3"]
