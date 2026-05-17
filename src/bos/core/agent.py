@@ -461,7 +461,7 @@ class ReactAgent:
         return self._format_prompt_section("ACTIVE MAXIMS", items)
 
     async def _prompt_section_tools(self) -> str:
-        all_tools = ep_tool.describe() | self._local_tools.describe()
+        all_tools = ep_tool.describe_usage() | self._local_tools.describe_usage()
         available_tools = self._limit_prompt_collection(
             _pick_collection(all_tools, self._tools, self._exclude_tools),
             "tools",

@@ -135,3 +135,6 @@ class ToolRegistry(ExtensionPoint):
         if not ext.description:
             logger.warning(f"Tool {ext.name} is missing description")
         return True
+
+    def describe_usage(self) -> dict[str, str]:
+        return {k: v.metadata.get("usage", v.description) for k, v in self._extensions.items()}
