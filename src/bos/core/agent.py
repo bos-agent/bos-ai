@@ -441,11 +441,11 @@ class ReactAgent:
     async def _build_system_prompt(self) -> str:
         sections = [
             self._prompt_section_base(),
+            self._prompt_section_memory_usage(),
             await self._prompt_section_maxims(),
             await self._prompt_section_tools(),
             await self._prompt_section_skills(),
             await self._prompt_section_subagents(),
-            self._memory_usage,
             self._prompt_section_system_info(),
         ]
         return "\n\n".join(s for s in sections if s)
@@ -453,13 +453,16 @@ class ReactAgent:
     def _prompt_section_base(self) -> str:
         return f"<system_prompt>\n{self._system_prompt}\n</system_prompt>"
 
+    def _prompt_section_memory_usage(self) -> str:
+        return f"<memory_usage>\n{self._memory_usage}\n</memory_usage>"
+
     async def _prompt_section_maxims(self) -> str:
         if not self._maxims:
             return ""
         items: dict[str, str] = {}
         for key, scope in self._maxims.items():
             content = await self._memory.get_maxim(key) or "(empty)"
-            items[key] = f"<scope>{scope}</scope>\n{content}" if scope else content
+            items[f"{key}: {scope or ''}"] = content
         return self._format_prompt_section("ACTIVE MAXIMS", items)
 
     async def _prompt_section_tools(self) -> str:
@@ -499,7 +502,7 @@ class ReactAgent:
         tag = title.lower().replace(" ", "_")
         section = f"<{tag}>\n"
         for key, content in items.items():
-            section += f'<item key="{key}">\n{content}\n</item>\n'
+            section += f"## {key}\n{content}\n\n"
         section += f"</{tag}>"
         return section
 

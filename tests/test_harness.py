@@ -179,8 +179,8 @@ Use this skill to search YouTube.
         skill_metas = await harness.skills_loader.search_skills("YouTube")
         load_result = await agent._local_tools.invoke_async("LoadSkill", {"name": "youtube-searcher"})
 
-    assert '<item key="youtube-searcher">' in skills_prompt
-    assert '<item key="youtube-searcher-display-name">' not in skills_prompt
+    assert "## youtube-searcher" in skills_prompt
+    assert "youtube-searcher-display-name" not in skills_prompt
     assert "Search YouTube." in skills_prompt
     assert str(skill_file) not in skills_prompt
     assert skill_metas["youtube-searcher"].name == "youtube-searcher"
@@ -244,12 +244,12 @@ async def test_prompt_sections_render_first_50_items_and_warn(caplog):
             skills_prompt = await agent._prompt_section_skills()
             subagents_prompt = await agent._prompt_section_subagents()
 
-        assert '<item key="Tool049">' in tools_prompt
-        assert '<item key="Tool050">' not in tools_prompt
-        assert '<item key="skill_049">' in skills_prompt
-        assert '<item key="skill_050">' not in skills_prompt
-        assert f'<item key="{subagent_names[49]}">' in subagents_prompt
-        assert f'<item key="{subagent_names[50]}">' not in subagents_prompt
+        assert "## Tool049" in tools_prompt
+        assert "Tool050" not in tools_prompt
+        assert "## skill_049" in skills_prompt
+        assert "skill_050" not in skills_prompt
+        assert f"## {subagent_names[49]}" in subagents_prompt
+        assert subagent_names[50] not in subagents_prompt
         assert "first 50 tools" in caplog.text
         assert "first 50 skills" in caplog.text
         assert "first 50 subagents" in caplog.text
