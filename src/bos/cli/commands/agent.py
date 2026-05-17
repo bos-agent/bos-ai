@@ -1,4 +1,4 @@
-"""``boscli start/stop/status/restart/task/tui`` — agent process lifecycle commands."""
+"""``boscli gateway start/stop/status/restart, ask, tui`` — agent process lifecycle commands."""
 
 from __future__ import annotations
 
@@ -59,7 +59,7 @@ def _build_workspace_for_ask(ctx, workspace_override: str | None = None) -> Work
 
 
 def _build_workspace_for_daemon(ctx, workspace_override: str | None = None) -> Workspace:
-    """Build a Workspace for daemon commands (``boscli start``).
+    """Build a Workspace for daemon commands (``boscli gateway start``).
 
     * ``-c <preset|file>`` → workspace defaults to ``"."`` unless overridden.
     * No ``-c`` → ancestor discovery (error if not found).
@@ -386,10 +386,18 @@ def ask(
     click.echo(result)
 
 
-# ── boscli start ─────────────────────────────────────────────────
+# ── boscli gateway ──────────────────────────────────────────────
 
 
-@click.command()
+@click.group(name="gateway")
+def gateway():
+    """Manage the agent gateway process."""
+
+
+# ── boscli gateway start ────────────────────────────────────────
+
+
+@gateway.command()
 @click.option("--foreground", "-f", is_flag=True, default=False, help="Run in the foreground (don't daemonize).")
 @click.option("--docker", is_flag=True, default=False, help="Run the agent inside a Docker container.")
 @click.option(
@@ -461,13 +469,13 @@ def start(ctx, foreground: bool, docker: bool, workspace_dir: str | None):
             return
 
     ident = container_id[:12] if container_id else pid
-    click.echo(f"Agent started ({runtime.kind} {ident}) — channel info not yet available (check boscli status)")
+    click.echo(f"Agent started ({runtime.kind} {ident}) — channel info not yet available (check boscli gateway status)")
 
 
-# ── boscli stop ──────────────────────────────────────────────────
+# ── boscli gateway stop ─────────────────────────────────────────
 
 
-@click.command()
+@gateway.command()
 @click.pass_context
 def stop(ctx):
     """Stop the running agent."""
@@ -504,10 +512,10 @@ def stop(ctx):
     click.echo("Agent stopped.")
 
 
-# ── boscli status ────────────────────────────────────────────────
+# ── boscli gateway status ───────────────────────────────────────
 
 
-@click.command()
+@gateway.command()
 @click.pass_context
 def status(ctx):
     """Show agent running status."""
@@ -561,10 +569,10 @@ def status(ctx):
         click.echo(f"Channel:     {name} @ {addr} → ws://{host}:{port}/ws")
 
 
-# ── boscli restart ───────────────────────────────────────────────
+# ── boscli gateway restart ──────────────────────────────────────
 
 
-@click.command()
+@gateway.command()
 @click.pass_context
 def restart(ctx):
     """Restart the agent (stop then start)."""

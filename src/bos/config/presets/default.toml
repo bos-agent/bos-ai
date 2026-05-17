@@ -1,10 +1,10 @@
 [platform]
 extensions = ["bos.extensions.all"]
-agent_dirs = []
 
 [platform.agent_defaults]
 tools = "*"
 skills = "*"
+subagents = "*"
 
 [harness.mail_route]
 name = "InMemMailRoute"

@@ -1,4 +1,4 @@
-"""Standalone actor + channel process — launched by ``boscli start``.
+"""Standalone actor + channel process — launched by ``boscli gateway start``.
 
 Usage (internal, via proc.start_background)::
 

@@ -48,7 +48,7 @@ boscli init
 Start the agent runtime:
 
 ```bash
-boscli start
+boscli gateway start
 ```
 
 Connect the built-in TUI:
@@ -60,9 +60,9 @@ boscli tui
 Useful lifecycle commands:
 
 ```bash
-boscli status
-boscli restart
-boscli stop
+boscli gateway status
+boscli gateway restart
+boscli gateway stop
 ```
 
 ## Workspace Model
@@ -173,7 +173,7 @@ Build and run:
 
 ```bash
 docker build -t bos-ai:local .
-boscli start
+boscli gateway start
 boscli tui
 ```
 
@@ -334,10 +334,10 @@ The built-in CLI currently exposes:
 
 - `boscli init`
 - `boscli auth`
-- `boscli start`
-- `boscli stop`
-- `boscli status`
-- `boscli restart`
+- `boscli gateway start`
+- `boscli gateway stop`
+- `boscli gateway status`
+- `boscli gateway restart`
 - `boscli tui`
 
 Global workspace selection:

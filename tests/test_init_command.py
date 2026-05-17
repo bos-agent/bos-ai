@@ -80,7 +80,7 @@ def test_cli_status_fails_cleanly_without_workspace_or_config(tmp_path, monkeypa
     monkeypatch.delenv("BOS_CONFIG", raising=False)
     monkeypatch.chdir(workspace)
 
-    result = CliRunner().invoke(cli, ["status"])
+    result = CliRunner().invoke(cli, ["gateway", "status"])
 
     assert result.exit_code == 2
     assert "No BOS workspace found" in result.output

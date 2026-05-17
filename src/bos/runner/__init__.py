@@ -1,4 +1,4 @@
-"""Runner module — process lifecycle and orchestration for boscli start/stop/status."""
+"""Runner module — process lifecycle and orchestration for boscli gateway start/stop/status."""
 
 from bos.named_actors.runner import start_named_actors as start
 from bos.runner.proc import RunDir, is_running, kill_process, read_state, start_background, write_state
