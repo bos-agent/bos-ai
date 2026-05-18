@@ -1,24 +1,2 @@
-[platform]
-extensions = ["bos.extensions.all"]
-
-[platform.agent_defaults]
-tools = "*"
-skills = "*"
-subagents = "*"
-[platform.agent_defaults.tools_usage]
-Bash = """
-The usage of Bash command that will overwrite the usage defined on registration.
-"""
-
-
-[harness.mail_route]
-name = "InMemMailRoute"
-
-[harness.message_store]
-name = "InMemMessageStore"
-
-[harness.memory]
-name = "InMemMemoryExtension"
-
-[main]
-agent = "_default"
+# use the default configuration from bos.core.defalts.agent_spec
+# the agent persist storage location is at ~/.bos/agents/default

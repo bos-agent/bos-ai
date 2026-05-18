@@ -12,7 +12,7 @@ from urllib.parse import urlencode
 
 import httpx
 
-from bos.core import LLMResponse, ToolCallRequest, ep_provider
+from bos.core import LLMResponse, ToolCallRequest, _get_bos_home, ep_provider
 from bos.extensions.providers.google_oauth import (
     OAuthCredentials,
     exchange_code_for_tokens,
@@ -222,7 +222,7 @@ async def get_antigravity_token(auth_file: str | None = None) -> OAuthCredential
         if env_path:
             token_path = Path(env_path).expanduser()
         else:
-            token_path = Path.home() / ".bos" / "auth" / "antigravity_auth.default.json"
+            token_path = _get_bos_home() / "auth" / "antigravity_auth.default.json"
 
     if not token_path.exists():
         raise RuntimeError(

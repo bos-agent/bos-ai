@@ -19,6 +19,18 @@ if TYPE_CHECKING:
 logger = logging.getLogger("bos")
 
 
+def _get_bos_home() -> Path:
+    """Return the BOS home directory.
+
+    Uses ``BOS_HOME`` env var if set, otherwise defaults to ``~/.bos``.
+    """
+    import os
+
+    if bos_home := os.environ.get("BOS_HOME"):
+        return Path(bos_home).expanduser()
+    return Path.home() / ".bos"
+
+
 def _create_extension_instance(ext_point: Any, ext_protocol: type, config: Any) -> Any:
     if isinstance(config, ext_protocol):
         return config

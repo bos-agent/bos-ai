@@ -16,7 +16,7 @@ from urllib.parse import urlencode
 
 import httpx
 
-from bos.core import LLMResponse, ToolCallRequest, ep_provider
+from bos.core import LLMResponse, ToolCallRequest, _get_bos_home, ep_provider
 from bos.extensions.providers.antigravity_provider import (
     _AUTH_URL,
     _CLIENT_KEY,
@@ -54,7 +54,7 @@ SUPPORTED_MODELS = [
     "gemini-3.1-pro-preview",
 ]
 
-_DEFAULT_AUTH_PATH = Path.home() / ".bos" / "auth" / "gemini_cli_auth.default.json"
+_DEFAULT_AUTH_PATH = _get_bos_home() / "auth" / "gemini_cli_auth.default.json"
 
 
 def _get_gemini_cli_headers() -> dict[str, str]:

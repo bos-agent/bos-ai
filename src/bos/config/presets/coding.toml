@@ -9,13 +9,17 @@ tools = [
     "AskSubagent",
     "ReadFile",
     "WriteFile",
-    "TodoWrite",
-    "TodoRead",
+    "TaskCreate",
+    "TaskUpdate",
+    "TaskList",
+    "TaskGet",
     "LoadSkill",
 ]
 subagents = ["scout", "planner", "worker", "reviewer"]
 skills = ["coding-discipline"]
 system_prompt = """
+## Workflow
+
 Use the "AskSubagent" tool with the chain parameter to execute this workflow:
 
 1. First, use the "scout" agent to find all code relevant to: $@

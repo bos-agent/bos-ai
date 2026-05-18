@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import platform
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -31,7 +32,7 @@ from .contract import (
     ep_tool,
     ep_turn_interceptor,
 )
-from .defaults import bos_maxims, bos_memory_usage, bos_tools_usage
+from .defaults import bos_maxims, bos_tools_usage
 from .events import derive_event_sink
 from .history import estimate_message_history_tokens
 from .llm import LLMClient, ToolCallRequest
@@ -42,6 +43,17 @@ if TYPE_CHECKING:
     from .llm import LLMResponse
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class _Task:
+    id: str
+    subject: str
+    description: str
+    status: str = "pending"
+    created_at: float = field(default_factory=time.time)
+    blocked_by: list[str] = field(default_factory=list)
+    blocks: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -134,7 +146,6 @@ class ReactAgent:
         skills: list[str] | None = None,
         exclude_skills: list[str] | None = None,
         maxims: dict[str, str] | None = None,
-        memory_usage: str | None = None,
         subagents: list[str] | None = None,
         exclude_subagents: list[str] | None = None,
         name: str | None = None,
@@ -168,10 +179,6 @@ class ReactAgent:
             if isinstance(maxims, list)
             else (dict(maxims))
         )
-        self._memory_usage = (
-            "" if memory_usage is None else bos_memory_usage if memory_usage == "*" else str(memory_usage)
-        )
-
         self._llm = llm or LLMClient()
         self._message_store = message_store
         self._memory = memory
@@ -181,6 +188,7 @@ class ReactAgent:
         self._local_tools = local_tools or ToolRegistry("Agent-scoped local tools.")
         self._tool_configs = tool_configs or {}
         self._name = name or "__unknown__"
+        self._task_store: dict[str, dict[str, _Task]] = {}
 
         self._register_tools()
 
@@ -441,7 +449,6 @@ class ReactAgent:
     async def _build_system_prompt(self) -> str:
         sections = [
             self._prompt_section_base(),
-            self._prompt_section_memory_usage(),
             await self._prompt_section_maxims(),
             await self._prompt_section_tools(),
             await self._prompt_section_skills(),
@@ -452,9 +459,6 @@ class ReactAgent:
 
     def _prompt_section_base(self) -> str:
         return f"<system_prompt>\n{self._system_prompt}\n</system_prompt>"
-
-    def _prompt_section_memory_usage(self) -> str:
-        return f"<memory_usage>\n{self._memory_usage}\n</memory_usage>"
 
     async def _prompt_section_maxims(self) -> str:
         if not self._maxims:
@@ -471,7 +475,6 @@ class ReactAgent:
             _pick_collection(all_tools, self._tools, self._exclude_tools),
             "tools",
         )
-        print(self._tools)
         available_tools = {k: self._tools_usage.get(k, v).strip() for k, v in available_tools.items()}
 
         return self._format_prompt_section("AVAILABLE TOOLS", available_tools)
@@ -498,12 +501,10 @@ class ReactAgent:
     def _format_prompt_section(title: str, items: dict[str, Any]) -> str:
         if not items:
             return ""
-
         tag = title.lower().replace(" ", "_")
         section = f"<{tag}>\n"
-        for key, content in items.items():
-            section += f"## {key}\n{content}\n\n"
-        section += f"</{tag}>"
+        section += "\n\n".join([f"## {key}\n{content}" for key, content in items.items()])
+        section += f"\n</{tag}>"
         return section
 
     def _prompt_section_system_info(self) -> str:
@@ -535,6 +536,163 @@ class ReactAgent:
     MAXIM_LIMIT = 2048
 
     def _register_tools(self) -> None:
+        @self._local_tools(
+            name="TaskCreate",
+            description="Create a new task to track progress on complex, multi-step work.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "subject": {
+                        "type": "string",
+                        "description": "Brief, actionable title in imperative form (e.g., 'Fix auth bug').",
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "What needs to be done. 1-2 sentences.",
+                    },
+                },
+                "required": ["subject", "description"],
+            },
+        )
+        async def tool_task_create(
+            subject: str,
+            description: str,
+            chat_id: str = "",
+        ) -> str:
+            store = self._task_store.setdefault(chat_id, {})
+            task_id = uuid.uuid4().hex[:8]
+            task = _Task(id=task_id, subject=subject, description=description)
+            store[task_id] = task
+            return f"Task created: [{task_id}] {subject} (status: pending)"
+
+        @self._local_tools(
+            name="TaskUpdate",
+            description=(
+                "Update a task's status or metadata."
+                " Status flows: pending -> in_progress -> completed."
+                " Only mark completed when FULLY done."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "taskId": {"type": "string", "description": "Task ID to update."},
+                    "status": {
+                        "type": "string",
+                        "enum": ["pending", "in_progress", "completed", "deleted"],
+                        "description": "New status.",
+                    },
+                    "subject": {"type": "string", "description": "New title."},
+                    "description": {"type": "string", "description": "New description."},
+                    "addBlocks": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Task IDs that this task blocks.",
+                    },
+                    "addBlockedBy": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Task IDs that block this task.",
+                    },
+                },
+                "required": ["taskId"],
+            },
+        )
+        async def tool_task_update(
+            taskId: str,
+            status: str | None = None,
+            subject: str | None = None,
+            description: str | None = None,
+            addBlocks: list[str] | None = None,
+            addBlockedBy: list[str] | None = None,
+            chat_id: str = "",
+        ) -> str:
+            store = self._task_store.get(chat_id, {})
+            if taskId not in store:
+                return f"Error: Task '{taskId}' not found. Use TaskList to see available tasks."
+            task = store[taskId]
+            if status is not None:
+                if status == "deleted":
+                    for other in store.values():
+                        other.blocked_by = [x for x in other.blocked_by if x != taskId]
+                        other.blocks = [x for x in other.blocks if x != taskId]
+                    del store[taskId]
+                    return f"Task '{taskId}' deleted."
+                task.status = status
+                if status == "completed":
+                    for other in store.values():
+                        other.blocked_by = [x for x in other.blocked_by if x != taskId]
+                        other.blocks = [x for x in other.blocks if x != taskId]
+                    task.blocked_by.clear()
+                    task.blocks.clear()
+            if subject is not None:
+                task.subject = subject
+            if description is not None:
+                task.description = description
+            if addBlocks:
+                for blocked_id in addBlocks:
+                    if blocked_id not in store:
+                        return f"Error: Blocked task '{blocked_id}' not found."
+                task.blocks.extend(addBlocks)
+                for blocked_id in addBlocks:
+                    store[blocked_id].blocked_by.append(taskId)
+            if addBlockedBy:
+                for blocker_id in addBlockedBy:
+                    if blocker_id not in store:
+                        return f"Error: Blocker task '{blocker_id}' not found."
+                task.blocked_by.extend(addBlockedBy)
+                for blocker_id in addBlockedBy:
+                    store[blocker_id].blocks.append(taskId)
+            return f"Task '{taskId}' updated. Status: {task.status}."
+
+        @self._local_tools(
+            name="TaskList",
+            description="List all tasks with status and blockers. Shows which tasks are available to work on.",
+            parameters={
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        )
+        async def tool_task_list(chat_id: str = "") -> str:
+            store = self._task_store.get(chat_id, {})
+            if not store:
+                return "(No tasks created yet.)"
+            lines = []
+            for tid in sorted(store.keys(), key=lambda k: store[k].created_at):
+                t = store[tid]
+                blocked = f" (blocked by: {', '.join(t.blocked_by)})" if t.blocked_by else ""
+                blocks = f" [blocks: {', '.join(t.blocks)}]" if t.blocks else ""
+                lines.append(f"[{t.id}] {t.status:<12} {t.subject}{blocked}{blocks}")
+            return "Tasks:\n" + "\n".join(lines)
+
+        @self._local_tools(
+            name="TaskGet",
+            description="Fetch full details of a specific task, including description and dependency state.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "taskId": {"type": "string", "description": "Task ID to fetch."},
+                },
+                "required": ["taskId"],
+            },
+        )
+        async def tool_task_get(taskId: str, chat_id: str = "") -> str:
+            store = self._task_store.get(chat_id, {})
+            if taskId not in store:
+                return f"Error: Task '{taskId}' not found. Use TaskList to see available tasks."
+            t = store[taskId]
+            parts = [
+                f"Task: {t.subject}",
+                f"ID: {t.id}",
+                f"Status: {t.status}",
+                f"Description: {t.description}",
+            ]
+            if t.blocked_by:
+                parts.append(f"Blocked by: {', '.join(t.blocked_by)}")
+            if t.blocks:
+                parts.append(f"Blocks: {', '.join(t.blocks)}")
+            return "\n".join(parts)
+
         @self._local_tools(
             name="Remember",
             description="Store a fact or detail in your episodic memory for later Recall.",

@@ -263,18 +263,19 @@ class TestSystemPromptIntegration:
         assert "soul content" not in prompt
 
     @pytest.mark.asyncio
-    async def test_memory_usage_prompt_injected(self):
+    async def test_memory_tools_usage_injected_via_tools_list(self):
         agent = ReactAgent(
             message_store=InMemMessageStore(),
             memory=InMemMemoryExtension(),
             consolidator=MessageOnlyConsolidator(),
             skills_loader=FileSystemSkillsLoader(),
             maxims={"user": ""},
-            memory_usage="*",
             system_prompt="base prompt",
+            tools=["Remember", "ReviseMaxim", "Recall", "Forget"],
         )
         prompt = await agent._build_system_prompt()
-        assert "<memory_usage>" in prompt
+        assert "Facts and details accumulated over time" in prompt
+        assert "Deeply held convictions" in prompt
 
     @pytest.mark.asyncio
     async def test_maxim_header_has_scope_description(self):

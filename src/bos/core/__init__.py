@@ -16,6 +16,7 @@ from ._utils import (
     _compact,
     _create_extension_instance,
     _flock,
+    _get_bos_home,
     _litellm_response_to_llm_response,
     _litellm_tool_calls_to_requests,
     _load_ext_modules,
@@ -123,4 +124,5 @@ __all__ = [
     "_read_text",
     "_safe_format",
     "_strip_think",
+    "_get_bos_home",
 ]

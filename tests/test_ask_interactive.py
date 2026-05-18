@@ -1,12 +1,12 @@
 """Integration tests for boscli ask --interactive wiring (no Textual launch)."""
 
 import asyncio
-from pathlib import Path
 
 import pytest
 
 from bos.cli.local_client import LocalClient
 from bos.config.workspace import Workspace, WorkspaceResolutionError, resolve_config_source
+from bos.core import _get_bos_home
 
 
 def test_resolve_config_source_builtin_preset():
@@ -99,7 +99,7 @@ def test_build_workspace_for_ask_falls_back_to_default_preset(tmp_path, monkeypa
     ctx = type("Ctx", (), {"obj": {}})
 
     ws = _build_workspace_for_ask(ctx)
-    assert ws.bos_dir == Path("~/.bos/agents/default").expanduser()
+    assert ws.bos_dir == _get_bos_home() / "agents" / "default"
     assert isinstance(ws.config, dict)
     assert ws.config_file.name == "default.toml"
 

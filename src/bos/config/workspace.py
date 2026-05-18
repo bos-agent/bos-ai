@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from bos.core import AgentHarness, _apply
-from bos.core._utils import _resolve_path
+from bos.core._utils import _get_bos_home, _resolve_path
 
 
 class WorkspaceResolutionError(RuntimeError):
@@ -133,7 +133,7 @@ def resolve_config_source(config_arg: str) -> tuple[Path, Path, dict[str, Any]]:
     presets = presets_dir()
     preset = presets / f"{config_arg}.toml"
     if preset.exists():
-        bos_dir = Path("~/.bos/agents").expanduser() / config_arg
+        bos_dir = _get_bos_home() / "agents" / config_arg
         bos_dir.mkdir(parents=True, exist_ok=True)
         return preset, bos_dir, _load_config(preset)
 
