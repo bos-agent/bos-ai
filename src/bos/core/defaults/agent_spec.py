@@ -170,21 +170,41 @@ Guidelines:
 - Treat skill instructions as task-specific operating guidance alongside repository instructions.
 """
 
-bos_tools_usage["Remember"] = """Store a fact or detail in your episodic memory for later recall.
+bos_tools_usage["Remember"] = """Store durable context in episodic memory for later recall.
 
 ### Memories (Episodic)
 
-Facts and details accumulated over time. Hidden by default; must Retrieve with Recall.
-- Record: Remember(content, tags?) for facts, context, and task outcomes.
-- Search: Recall(query, top_k?) to find past context or clarify references.
-- Fetch: Recall(entry_id=...) to get full details of a snippet.
-- Delete: Forget(entry_id) or Forget(query) for stale or forgotten information.
+Use for stable user preferences, recurring feedback, non-obvious project context, and useful
+task outcomes that may matter in future conversations.
 
 ### Memory hygiene
 
-- Write memories AFTER tasks/conversations.
-- Be concise. Use tags.
-- When in doubt, record it.
+- Write memories after tasks or conversations, not as a substitute for current task tracking.
+- Be concise and tag entries when tags help later retrieval.
+- Do not save code structure, file paths, generated plans, or facts that should be rederived from the current repository.
+- Verify memory-derived repository claims against current files before acting on them.
+"""
+
+bos_tools_usage["Recall"] = """Retrieve information from episodic memory.
+
+Use query to search for relevant memories, or entry_id to fetch a specific memory in full after
+a search result identifies it. Use memory as context, not as proof of current repository state.
+
+Guidelines:
+- Recall when the user references prior conversations, preferences, or remembered context.
+- Prefer current files, tests, and git history for facts about the repository.
+- Verify any memory-derived file, symbol, or behavior claim before acting on it.
+"""
+
+bos_tools_usage["Forget"] = """Remove information from episodic memory.
+
+Use entry_id to remove one specific memory, or query to remove all matching memories. Prefer
+entry_id when possible so unrelated memories are not removed accidentally.
+
+Guidelines:
+- Use when the user asks you to forget remembered information or when a memory is clearly stale.
+- Search with Recall first if you need to identify the exact memory.
+- Do not use Forget for current task state; update tasks instead.
 """
 
 bos_tools_usage["ReviseMaxim"] = """Append a revision note to a maxim. Existing content is preserved.
@@ -201,14 +221,14 @@ bos_tools_usage["TaskCreate"] = """Create a new task in the task list.
 
 Use the task tools (TaskCreate, TaskUpdate, TaskList, TaskGet) to plan and track your work.
 
-For complex tasks: create a task list BEFORE starting work. Break the work into concrete,
-verifiable steps. Mark each task in_progress when you begin it, and completed as soon as it's
-done — don't batch completions.
+For complex or multi-part tasks: create a task list BEFORE starting work. Break the work into
+concrete, verifiable steps. After receiving new multi-part instructions, capture them as tasks
+before starting implementation.
 
 For simple single-step tasks: skip task creation and just do the work.
 
-After completing a task, always check TaskList to find what to work on next. Prefer working in
-creation order.
+Mark each task in_progress when you begin it. After completing and verifying a task, mark it
+completed and check TaskList to find what to work on next. Prefer working in creation order.
 
 ### When to Use
 
@@ -236,8 +256,9 @@ bos_tools_usage["TaskUpdate"] = """Update task status, metadata, or dependencies
 
 pending -> in_progress -> completed
 
-IMPORTANT: Only mark completed when FULLY done.
-If tests fail, errors remain, or implementation is partial, keep in_progress.
+IMPORTANT: Only mark completed when implementation and relevant verification are both done.
+If tests fail, errors remain, verification was skipped, or implementation is partial, keep
+in_progress and record the blocker or next action.
 
 Also supports: setting task dependencies (blocks/blockedBy), updating subject/description,
 deleting tasks.
