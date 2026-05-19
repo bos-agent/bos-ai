@@ -51,7 +51,8 @@ def _sync_tool_read_file(path: str, line_offset: int = 0, limit: int = 500) -> s
                 line = f.readline()
                 if not line:
                     break
-                lines.append(line)
+                line_number = line_offset + len(lines) + 1
+                lines.append(f"{line_number}\t{line}")
         return "".join(lines) or "(Reached end of file or file is empty)"
     except Exception as e:
         return f"Error reading file {path}: {e}"

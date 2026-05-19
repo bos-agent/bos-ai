@@ -77,6 +77,7 @@ search first with GlobSearch or GrepSearch.
 
 Guidelines:
 - Use line_offset and limit for large files or focused inspection.
+- Results include 1-based line numbers; use them when referencing code.
 - Read enough surrounding context to understand the existing pattern.
 - Do not reread immediately after a successful EditFile/WriteFile unless semantic verification requires it.
 """
