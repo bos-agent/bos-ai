@@ -9,6 +9,7 @@ from bos.core import AgentHarness, LLMResponse, Message, ToolCallRequest, bootst
 from bos.core.agent import ChainReactInterceptor, ReActAgent
 from bos.core.contract import SkillMeta
 from bos.core.defaults.agent_spec import bos_maxims as default_maxims
+from bos.core.defaults.agent_spec import bos_tools_usage, default_agent_spec
 from bos.core.defaults.skills_loader import FileSystemSkillsLoader
 from bos.core.history import HistoryProjection
 from bos.core.registry import ToolRegistry
@@ -141,6 +142,60 @@ async def test_react_agent_returns_placeholder_for_empty_model_response():
 def test_react_agent_rejects_dict_system_prompt():
     with pytest.raises(TypeError, match="system_prompt must be a string or None"):
         create_test_agent(system_prompt={"_default": "nope"})  # type: ignore[arg-type]
+
+
+def test_default_system_prompt_uses_compact_xml_contract():
+    prompt = default_agent_spec["system_prompt"]
+
+    for tag in ("role", "behavior", "workflow", "communication", "tool_discipline"):
+        assert f"<{tag}>" in prompt
+        assert f"</{tag}>" in prompt
+
+    assert "Always explain your reasoning before calling a tool" not in prompt
+    assert "Do not narrate hidden reasoning" in prompt
+    assert "Verify meaningful code changes" in prompt
+
+
+def test_default_tools_usage_covers_core_agent_tools():
+    expected_tools = {
+        "Bash",
+        "ReadFile",
+        "WriteFile",
+        "EditFile",
+        "GlobSearch",
+        "GrepSearch",
+        "WebSearch",
+        "WebFetch",
+        "AskSubagent",
+        "LoadSkill",
+        "Remember",
+        "Recall",
+        "Forget",
+        "ReviseMaxim",
+        "TaskCreate",
+        "TaskUpdate",
+        "TaskList",
+        "TaskGet",
+    }
+
+    assert expected_tools <= bos_tools_usage.keys()
+    assert all(bos_tools_usage[name].strip() for name in expected_tools)
+
+
+def test_default_tools_usage_references_actual_bos_names_only():
+    rendered = "\n".join(bos_tools_usage.values())
+
+    assert "TodoWrite" not in rendered
+    assert "TodoRead" not in rendered
+    assert "NotebookEdit" not in rendered
+    assert "TaskCreate" in rendered
+    assert "TaskUpdate" in rendered
+    assert "ReadFile" in rendered
+    assert "EditFile" in rendered
+
+
+def test_default_tools_usage_stays_compact():
+    assert sum(len(text.split()) for text in bos_tools_usage.values()) < 1800
 
 
 @pytest.mark.asyncio
