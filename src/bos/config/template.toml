@@ -21,7 +21,7 @@
 # by default, the platform will scan the agents from <bos_dir>/agents
 #agent_dirs = ["./agents"]
 
-# define he defualt setup for all agents
+# define he default setup for all agents
 [platform.agent_defaults]
 
 # a model for agent is almost mandatory unless you are using a llm provider that has built in
@@ -72,6 +72,12 @@ model = "gemini/gemini-3.1-pro-preview"
 #system_prompt = """
 #You are an personal assistant.
 #"""
+
+# define he defualt setup for all agents
+[platform.agent_defaults.tools_usage]
+# Bash = """
+# The usage of Bash command that will overwrite the usage defined on registration.
+# """
 
 
 [harness]

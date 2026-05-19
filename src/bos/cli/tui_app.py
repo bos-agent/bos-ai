@@ -150,6 +150,15 @@ class ChatApp(App):
         padding: 0 2;
     }
 
+    #task-panel {
+        height: auto;
+        max-height: 10;
+        dock: top;
+        border-bottom: solid $primary-background;
+        padding: 0 1;
+        display: none;
+    }
+
     #status-bar {
         height: 1;
         dock: bottom;
@@ -205,6 +214,7 @@ class ChatApp(App):
     def compose(self) -> ComposeResult:
         yield Header()
         yield Static(self._chat_status_text(), id="chat-status")
+        yield Static(id="task-panel")
         with Horizontal(id="main-container"):
             yield RichLog(
                 id="chat",
@@ -363,6 +373,20 @@ class ChatApp(App):
             preview = str(event.content or "")[:120].replace("\n", " ")
             log.write(f"[dim]  ↳ {label}: {name} → {preview}[/]")
 
+        elif event.event_type == "task" and event.detail == "task_state":
+            tasks = (event.metadata or {}).get("tasks", [])
+            panel = self.query_one("#task-panel", Static)
+            if tasks:
+                lines = ["[bold]■ Tasks[/]"]
+                for t in tasks:
+                    marker = {"pending": "⬜", "in_progress": "🔄", "completed": "✅"}.get(t.get("status"), "  ")
+                    blocked = f" [dim](blocked: {', '.join(t.get('blocked_by', []))})[/]" if t.get("blocked_by") else ""
+                    lines.append(f"  {marker} [{t.get('id')}] {t.get('subject')}{blocked}")
+                panel.update("\n".join(lines))
+                panel.display = True
+            else:
+                panel.display = False
+
         elif event.detail == "max_iteration":
             log.write(f"[yellow]  ⚠ {label} max iterations reached[/]")
 
@@ -514,6 +538,11 @@ class ChatApp(App):
 
     def action_clear_log(self) -> None:
         self.query_one("#chat", RichLog).clear()
+        try:
+            panel = self.query_one("#task-panel", Static)
+            panel.display = False
+        except Exception:
+            pass
 
     def action_reset_chat(self) -> None:
         asyncio.create_task(self._send_command("/new"))
@@ -616,6 +645,11 @@ class ChatApp(App):
         self._chat_id = chat_id
         self._client.update_chat_id(chat_id)
         self._update_status()
+        try:
+            panel = self.query_one("#task-panel", Static)
+            panel.display = False
+        except Exception:
+            pass  # DOM not mounted yet (tests, early lifecycle)
 
     def _connection_indicator(self) -> str:
         if self._conn_status == "connected":

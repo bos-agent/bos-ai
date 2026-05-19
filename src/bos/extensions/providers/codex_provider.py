@@ -10,7 +10,7 @@ from typing import Any, AsyncGenerator
 
 import httpx
 
-from bos.core import LLMResponse, ToolCallRequest, ep_provider
+from bos.core import LLMResponse, ToolCallRequest, _get_bos_home, ep_provider
 from bos.protocol.content import image_source_to_model_url
 
 logger = logging.getLogger(__name__)
@@ -38,10 +38,9 @@ async def codex_complete(
 
     if not auth_file:
         import os
-        from pathlib import Path
 
         auth_file = os.environ.get("BOS_CODEX_AUTH_FILE") or str(
-            Path.home() / ".bos" / "auth" / "codex_auth.default.json"
+            _get_bos_home() / "auth" / "codex_auth.default.json"
         )
 
     from oauth_cli_kit import get_token as get_codex_token

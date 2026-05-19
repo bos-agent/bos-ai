@@ -72,6 +72,70 @@ def test_tool_registry_can_force_result_serialization_mode():
     assert registry.invoke("ForceString", {}) == "{'value': 1}"
 
 
+def test_describe_usage_returns_usage_when_provided():
+    registry = ToolRegistry("test tools")
+
+    @registry(
+        name="MyTool",
+        description="Does something.",
+        usage="Does something with extra guidance for the prompt.",
+        parameters={"type": "object", "properties": {}, "required": []},
+    )
+    def tool_my() -> str:
+        return "ok"
+
+    assert registry.describe_usage() == {"MyTool": "Does something with extra guidance for the prompt."}
+
+
+def test_describe_usage_falls_back_to_description():
+    registry = ToolRegistry("test tools")
+
+    @registry(
+        name="MyTool",
+        description="Does something.",
+        parameters={"type": "object", "properties": {}, "required": []},
+    )
+    def tool_my() -> str:
+        return "ok"
+
+    assert registry.describe_usage() == {"MyTool": "Does something."}
+
+
+def test_build_openai_schema_uses_description_not_usage():
+    registry = ToolRegistry("test tools")
+
+    @registry(
+        name="MyTool",
+        description="API description.",
+        usage="Prompt-facing usage guidance.",
+        parameters={
+            "type": "object",
+            "properties": {"x": {"type": "integer"}},
+            "required": ["x"],
+        },
+    )
+    def tool_my(x: int) -> str:
+        return str(x)
+
+    schema = registry.to_openai_schema()
+    assert schema["MyTool"]["function"]["description"] == "API description."
+
+
+def test_describe_still_returns_description():
+    registry = ToolRegistry("test tools")
+
+    @registry(
+        name="MyTool",
+        description="API description.",
+        usage="Prompt-facing usage guidance.",
+        parameters={"type": "object", "properties": {}, "required": []},
+    )
+    def tool_my() -> str:
+        return "ok"
+
+    assert registry.describe() == {"MyTool": "API description."}
+
+
 def test_tool_registry_rejects_unsupported_result_serializer():
     registry = ToolRegistry("test tools")
 

@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import platform
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -31,7 +32,7 @@ from .contract import (
     ep_tool,
     ep_turn_interceptor,
 )
-from .defaults import bos_maxims, bos_memory_usage
+from .defaults import bos_maxims, bos_tools_usage
 from .events import derive_event_sink
 from .history import estimate_message_history_tokens
 from .llm import LLMClient, ToolCallRequest
@@ -42,6 +43,54 @@ if TYPE_CHECKING:
     from .llm import LLMResponse
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class _Task:
+    id: str
+    subject: str
+    description: str
+    status: str = "pending"
+    created_at: float = field(default_factory=time.time)
+    blocked_by: list[str] = field(default_factory=list)
+    blocks: list[str] = field(default_factory=list)
+
+
+@dataclass
+class _TaskList:
+    """Per-chat task list with version tracking for event emission."""
+
+    tasks: dict[str, _Task] = field(default_factory=dict)
+    id: str = field(default_factory=lambda: uuid.uuid4().hex[:8])
+    version: int = 0
+    emitted_version: int = -1
+    _next_id: int = field(default=1, init=False)
+
+    def bump(self) -> None:
+        self.version += 1
+
+    def mark_emitted(self) -> None:
+        self.emitted_version = self.version
+
+    def needs_emit(self) -> bool:
+        return self.version != self.emitted_version
+
+    def next_id(self) -> str:
+        nid = str(self._next_id)
+        self._next_id += 1
+        return nid
+
+    def to_payload(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "id": t.id,
+                "subject": t.subject,
+                "status": t.status,
+                "blocked_by": t.blocked_by,
+                "blocks": t.blocks,
+            }
+            for t in sorted(self.tasks.values(), key=lambda t: t.created_at)
+        ]
 
 
 @dataclass
@@ -119,7 +168,7 @@ class ChainReactInterceptor:
                 await self._instances[i].intercept(stage, context)
 
 
-class ReactAgent:
+class ReActAgent:
     def __init__(
         self,
         *,
@@ -129,11 +178,11 @@ class ReactAgent:
         skills_loader: SkillsLoader,
         system_prompt: str | None = None,
         tools: list[str] | None = None,
+        tools_usage: dict[str, str] | None = None,
         exclude_tools: list[str] | None = None,
         skills: list[str] | None = None,
         exclude_skills: list[str] | None = None,
         maxims: dict[str, str] | None = None,
-        memory_usage: str | None = None,
         subagents: list[str] | None = None,
         exclude_subagents: list[str] | None = None,
         name: str | None = None,
@@ -145,11 +194,13 @@ class ReactAgent:
         interceptor: TurnInterceptor | None = None,
         max_tokens: int = 128 * 1024,
         max_iterations: int = 25,
+        iterations_per_task: int = 8,
     ):
         if system_prompt is not None and not isinstance(system_prompt, str):
             raise TypeError("system_prompt must be a string or None")
         self._system_prompt = system_prompt or ""
         self._tools = tools
+        self._tools_usage = bos_tools_usage | (tools_usage or {})
         self._exclude_tools = exclude_tools
         self._skills = skills
         self._exclude_skills = exclude_skills
@@ -159,6 +210,7 @@ class ReactAgent:
         self._reasoning_effort = reasoning_effort
         self._max_tokens = max_tokens
         self._max_iterations = max_iterations
+        self._iterations_per_task = iterations_per_task
         self._maxims = (
             bos_maxims
             if maxims is None
@@ -166,10 +218,6 @@ class ReactAgent:
             if isinstance(maxims, list)
             else (dict(maxims))
         )
-        self._memory_usage = (
-            "" if memory_usage is None else bos_memory_usage if memory_usage == "*" else str(memory_usage)
-        )
-
         self._llm = llm or LLMClient()
         self._message_store = message_store
         self._memory = memory
@@ -179,6 +227,7 @@ class ReactAgent:
         self._local_tools = local_tools or ToolRegistry("Agent-scoped local tools.")
         self._tool_configs = tool_configs or {}
         self._name = name or "__unknown__"
+        self._task_lists: dict[str, _TaskList] = {}
 
         self._register_tools()
 
@@ -276,7 +325,20 @@ class ReactAgent:
         try:
             await _run_interceptor("prepare")
             await _emit_event("turn", "start", stage="prepare", detail="start")
-            for _ in range(self._max_iterations):
+            iteration = 0
+            peak_task_count = 0
+            while True:
+                task_list = self._task_lists.get(ctx.chat_id)
+                if task_list is not None:
+                    peak_task_count = max(peak_task_count, len(task_list.tasks))
+                max_allowed = self._max_iterations + peak_task_count * self._iterations_per_task
+                if iteration >= max_allowed:
+                    # max iterations reached
+                    ctx.add_message({"role": "assistant", "content": "(max iterations reached)"})
+                    await _run_interceptor("max_iteration")
+                    await _emit_event("turn", "fail", stage="max_iteration", detail="max_iteration")
+                    break
+                iteration += 1
                 await _interrupt()
                 ctx.set_system_prompt(await self._build_system_prompt())
                 await _run_interceptor("before_llm")
@@ -375,11 +437,15 @@ class ReactAgent:
                         tool_name=tc.name,
                         content=tool_result,
                     )
-            else:
-                # max iterations reached
-                ctx.add_message({"role": "assistant", "content": "(max iterations reached)"})
-                await _run_interceptor("max_iteration")
-                await _emit_event("turn", "fail", stage="max_iteration", detail="max_iteration")
+                    task_list = self._task_lists.get(ctx.chat_id)
+                    if task_list is not None and task_list.needs_emit() and event_sink is not None:
+                        await _emit_event(
+                            "task",
+                            "update",
+                            detail="task_state",
+                            metadata={"tasks": task_list.to_payload()},
+                        )
+                        task_list.mark_emitted()
         except AbortTurn:
             pass
         except Exception as e:
@@ -443,13 +509,12 @@ class ReactAgent:
             await self._prompt_section_tools(),
             await self._prompt_section_skills(),
             await self._prompt_section_subagents(),
-            self._memory_usage,
             self._prompt_section_system_info(),
         ]
         return "\n\n".join(s for s in sections if s)
 
     def _prompt_section_base(self) -> str:
-        return "--- SYSTEM PROMPT ---\n\n" + self._system_prompt
+        return f"<system_prompt>\n{self._system_prompt}\n</system_prompt>"
 
     async def _prompt_section_maxims(self) -> str:
         if not self._maxims:
@@ -457,15 +522,17 @@ class ReactAgent:
         items: dict[str, str] = {}
         for key, scope in self._maxims.items():
             content = await self._memory.get_maxim(key) or "(empty)"
-            items[key] = f"({scope})\n{content}" if scope else content
+            items[f"{key}: {scope or ''}"] = content
         return self._format_prompt_section("ACTIVE MAXIMS", items)
 
     async def _prompt_section_tools(self) -> str:
-        all_tools = ep_tool.describe() | self._local_tools.describe()
+        all_tools = ep_tool.describe_usage() | self._local_tools.describe_usage()
         available_tools = self._limit_prompt_collection(
             _pick_collection(all_tools, self._tools, self._exclude_tools),
             "tools",
         )
+        available_tools = {k: self._tools_usage.get(k, v).strip() for k, v in available_tools.items()}
+
         return self._format_prompt_section("AVAILABLE TOOLS", available_tools)
 
     async def _prompt_section_skills(self) -> str:
@@ -490,18 +557,18 @@ class ReactAgent:
     def _format_prompt_section(title: str, items: dict[str, Any]) -> str:
         if not items:
             return ""
-
-        section = f"--- {title} ---\n\n"
-        for key, content in items.items():
-            section += f"* **{key}**\n"
-            section += f"```\n{content}\n```\n\n"
+        tag = title.lower().replace(" ", "_")
+        section = f"<{tag}>\n"
+        section += "\n\n".join([f"## {key}\n{content}" for key, content in items.items()])
+        section += f"\n</{tag}>"
         return section
 
     def _prompt_section_system_info(self) -> str:
         return (
-            "--- SYSTEM INFORMATION ---\n\n"
-            f"- Platform: {platform.system()}\n"
-            f"- Date: {datetime.now().strftime('%A, %B %d, %Y')}\n"
+            "<system_info>\n"
+            f"<platform>{platform.system()}</platform>\n"
+            f"<date>{datetime.now().strftime('%A, %B %d, %Y')}</date>\n"
+            "</system_info>"
         )
 
     @staticmethod
@@ -525,6 +592,167 @@ class ReactAgent:
     MAXIM_LIMIT = 2048
 
     def _register_tools(self) -> None:
+        @self._local_tools(
+            name="TaskCreate",
+            description="Create a new task to track progress on complex, multi-step work.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "subject": {
+                        "type": "string",
+                        "description": "Brief, actionable title in imperative form (e.g., 'Fix auth bug').",
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "What needs to be done. 1-2 sentences.",
+                    },
+                },
+                "required": ["subject", "description"],
+            },
+        )
+        async def tool_task_create(
+            subject: str,
+            description: str,
+            chat_id: str = "",
+        ) -> str:
+            task_list = self._task_lists.setdefault(chat_id, _TaskList())
+            task_id = task_list.next_id()
+            task = _Task(id=task_id, subject=subject, description=description)
+            task_list.tasks[task_id] = task
+            task_list.bump()
+            return f"Task created: [{task_id}] {subject} (status: pending)"
+
+        @self._local_tools(
+            name="TaskUpdate",
+            description=(
+                "Update a task's status or metadata."
+                " Status flows: pending -> in_progress -> completed."
+                " Only mark completed when FULLY done."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "taskId": {"type": "string", "description": "Task ID to update."},
+                    "status": {
+                        "type": "string",
+                        "enum": ["pending", "in_progress", "completed", "deleted"],
+                        "description": "New status.",
+                    },
+                    "subject": {"type": "string", "description": "New title."},
+                    "description": {"type": "string", "description": "New description."},
+                    "addBlocks": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Task IDs that this task blocks.",
+                    },
+                    "addBlockedBy": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Task IDs that block this task.",
+                    },
+                },
+                "required": ["taskId"],
+            },
+        )
+        async def tool_task_update(
+            taskId: str,
+            status: str | None = None,
+            subject: str | None = None,
+            description: str | None = None,
+            addBlocks: list[str] | None = None,
+            addBlockedBy: list[str] | None = None,
+            chat_id: str = "",
+        ) -> str:
+            task_list = self._task_lists.get(chat_id)
+            if task_list is None or taskId not in task_list.tasks:
+                return f"Error: Task '{taskId}' not found. Use TaskList to see available tasks."
+            store = task_list.tasks
+            task = store[taskId]
+            if status is not None:
+                if status == "deleted":
+                    for other in store.values():
+                        other.blocked_by = [x for x in other.blocked_by if x != taskId]
+                        other.blocks = [x for x in other.blocks if x != taskId]
+                    del store[taskId]
+                    task_list.bump()
+                    return f"Task '{taskId}' deleted."
+                task.status = status
+                if status == "completed":
+                    for other in store.values():
+                        other.blocked_by = [x for x in other.blocked_by if x != taskId]
+                        other.blocks = [x for x in other.blocks if x != taskId]
+                    task.blocked_by.clear()
+                    task.blocks.clear()
+            if subject is not None:
+                task.subject = subject
+            if description is not None:
+                task.description = description
+            if addBlocks:
+                for blocked_id in addBlocks:
+                    if blocked_id not in store:
+                        return f"Error: Blocked task '{blocked_id}' not found."
+                task.blocks.extend(addBlocks)
+                for blocked_id in addBlocks:
+                    store[blocked_id].blocked_by.append(taskId)
+            if addBlockedBy:
+                for blocker_id in addBlockedBy:
+                    if blocker_id not in store:
+                        return f"Error: Blocker task '{blocker_id}' not found."
+                task.blocked_by.extend(addBlockedBy)
+                for blocker_id in addBlockedBy:
+                    store[blocker_id].blocks.append(taskId)
+            task_list.bump()
+            return f"Task '{taskId}' updated. Status: {task.status}."
+
+        @self._local_tools(
+            name="TaskList",
+            description="List all tasks with status and blockers. Shows which tasks are available to work on.",
+            parameters={
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        )
+        async def tool_task_list(chat_id: str = "") -> str:
+            task_list = self._task_lists.get(chat_id)
+            if task_list is None or not task_list.tasks:
+                return "(No tasks created yet.)"
+            lines = []
+            for tid in sorted(task_list.tasks, key=lambda k: task_list.tasks[k].created_at):
+                t = task_list.tasks[tid]
+                blocked = f" (blocked by: {', '.join(t.blocked_by)})" if t.blocked_by else ""
+                blocks = f" [blocks: {', '.join(t.blocks)}]" if t.blocks else ""
+                lines.append(f"[{t.id}] {t.status:<12} {t.subject}{blocked}{blocks}")
+            return "Tasks:\n" + "\n".join(lines)
+
+        @self._local_tools(
+            name="TaskGet",
+            description="Fetch full details of a specific task, including description and dependency state.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "taskId": {"type": "string", "description": "Task ID to fetch."},
+                },
+                "required": ["taskId"],
+            },
+        )
+        async def tool_task_get(taskId: str, chat_id: str = "") -> str:
+            task_list = self._task_lists.get(chat_id)
+            if task_list is None or taskId not in task_list.tasks:
+                return f"Error: Task '{taskId}' not found. Use TaskList to see available tasks."
+            t = task_list.tasks[taskId]
+            parts = [
+                f"Task: {t.subject}",
+                f"ID: {t.id}",
+                f"Status: {t.status}",
+                f"Description: {t.description}",
+            ]
+            if t.blocked_by:
+                parts.append(f"Blocked by: {', '.join(t.blocked_by)}")
+            if t.blocks:
+                parts.append(f"Blocks: {', '.join(t.blocks)}")
+            return "\n".join(parts)
+
         @self._local_tools(
             name="Remember",
             description="Store a fact or detail in your episodic memory for later Recall.",
@@ -783,6 +1011,6 @@ class ReactAgent:
             kwargs[key] = map_value(key, kwargs.get(key))
 
         @ep_agent(name=name, description=description, defaults=kwargs)
-        @wraps(ReactAgent)
+        @wraps(ReActAgent)
         def create_react_agent(*args, **kwargs):
-            return ReactAgent(*args, **kwargs)
+            return ReActAgent(*args, **kwargs)

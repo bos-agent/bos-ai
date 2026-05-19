@@ -135,13 +135,18 @@ def _preview(value: Any, limit: int = 120) -> str:
 
 
 class _TaskProgressDisplay:
-    """Compact live renderer for oneshot task turn events."""
+    """Live renderer for oneshot task turn events.
 
-    def __init__(self, *, max_rows: int = 5) -> None:
+    Task state is rendered as a fixed board at the top; other events
+    scroll in the area below.
+    """
+
+    def __init__(self, *, max_rows: int = 10) -> None:
         self._console = Console(stderr=True)
         self._enabled = self._console.is_terminal
         self._live: Live | None = None
         self._rows: deque[tuple[str, str]] = deque(maxlen=max_rows)
+        self._task_board: str = ""
 
     def __enter__(self) -> "_TaskProgressDisplay":
         if self._enabled:
@@ -164,10 +169,12 @@ class _TaskProgressDisplay:
     async def emit(self, event: TurnEvent) -> None:
         if not self._enabled:
             return
-        style, message = self._format_event(event)
-        if not message:
-            return
-        self._append(style, message)
+        if event.event_type == "task" and event.detail == "task_state":
+            self._task_board = self._format_task_board(event)
+        else:
+            style, message = self._format_event(event)
+            if message:
+                self._append(style, message)
         if self._live is not None:
             self._live.update(self._render())
 
@@ -176,11 +183,27 @@ class _TaskProgressDisplay:
 
     def _render(self) -> Panel:
         body = Text()
+        if self._task_board:
+            body.append(self._task_board, style="bold")
+            body.append("\n")
+            body.append("─" * 40, style="dim")
         for idx, (style, message) in enumerate(self._rows):
-            if idx:
+            if idx or self._task_board:
                 body.append("\n")
             body.append(message, style=style)
         return Panel(body, title="boscli ask", border_style="cyan", padding=(0, 1))
+
+    @staticmethod
+    def _format_task_board(event: TurnEvent) -> str:
+        tasks = (event.metadata or {}).get("tasks", [])
+        if not tasks:
+            return ""
+        lines = ["■ Tasks"]
+        for t in tasks:
+            marker = {"pending": "⬜", "in_progress": "🔄", "completed": "✅"}.get(t.get("status"), "  ")
+            blocked = f" (blocked: {', '.join(t.get('blocked_by', []))})" if t.get("blocked_by") else ""
+            lines.append(f"  {marker} [{t.get('id')}] {t.get('subject')}{blocked}")
+        return "\n".join(lines)
 
     def _format_event(self, event: TurnEvent) -> tuple[str, str]:
         label = _turn_event_label(event)

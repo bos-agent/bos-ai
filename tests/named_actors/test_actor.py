@@ -145,7 +145,7 @@ async def test_named_actor_accepts_message_after_turn_completes():
 
 @pytest.mark.asyncio
 async def test_react_agent_persists_named_actor_message_metadata():
-    from bos.core import ReactAgent
+    from bos.core import ReActAgent
 
     class Store:
         def __init__(self):
@@ -177,7 +177,7 @@ async def test_react_agent_persists_named_actor_message_metadata():
             return ""
 
     store = Store()
-    agent = ReactAgent(
+    agent = ReActAgent(
         message_store=store,
         memory=None,
         consolidator=None,

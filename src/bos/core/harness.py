@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from ._utils import _aclose, _create_extension_instance, _load_ext_modules, _load_ext_paths
-from .agent import ChainReactInterceptor, ReactAgent
+from .agent import ChainReactInterceptor, ReActAgent
 from .contract import Consolidator, MailBox, MailRoute, MemoryExtension, MessageStore, SkillsLoader, ep_agent
 from .defaults import default_agent_spec
 from .llm import LLMClient
@@ -49,9 +49,16 @@ def bootstrap_platform(
             _load_ext_paths(paths=paths)
 
     defaults = agent_defaults or {}
-    for agent_spec in [default_agent_spec] + (agents or []):
-        ReactAgent.register(**(defaults | agent_spec))
 
+    # the agent defaults in configuration takes precedence over the spec in the fallback _default agent
+    _default_spec = default_agent_spec | defaults
+    # the specifice agent definition takes precedence over the agent_defaults
+    agent_specs = [defaults | spec for spec in (agents or [])]
+    # register all the agents
+    for agent_spec in [_default_spec] + agent_specs:
+        ReActAgent.register(**(agent_spec))
+
+    # prevent the litellm to call load_dotenv automatically, and supress logs.
     os.environ["LITELLM_MODE"] = "extension"
     logging.getLogger("LiteLLM").setLevel(logging.ERROR)
 
@@ -132,7 +139,7 @@ class AgentHarness:
             CURRENT_HARNESS.reset(self._token)
             self._token = None
 
-    def create_agent(self, role: str | None = None, agent_cfg: dict[str, Any] = None) -> ReactAgent:
+    def create_agent(self, role: str | None = None, agent_cfg: dict[str, Any] = None) -> ReActAgent:
         if CURRENT_HARNESS.get(None) is None:
             raise RuntimeError("create_agent must be called within an active AgentHarness context.")
 
@@ -156,7 +163,7 @@ class AgentHarness:
             "tool_configs": self._tools_cfg,
         }
 
-        return ep_agent.invoke(role, kwargs) if role else ReactAgent(**kwargs)
+        return ep_agent.invoke(role, kwargs) if role else ReActAgent(**kwargs)
 
     def _create_and_own(self, ep_name: str, protocol: type, cfg: Any) -> Any:
         from . import __dict__ as core_exports

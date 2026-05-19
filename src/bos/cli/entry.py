@@ -1,4 +1,5 @@
 import importlib
+import os
 
 import click
 
@@ -9,6 +10,9 @@ _LAZY_COMMANDS: dict[str, str] = {
     "ask": "bos.cli.commands.agent:ask",
     "tui": "bos.cli.commands.agent:tui",
 }
+
+if os.environ.get("BOS_DEV"):
+    _LAZY_COMMANDS["debug"] = "bos.cli.commands.debug:debug"
 
 
 class _LazyGroup(click.Group):
@@ -31,6 +35,9 @@ class _LazyGroup(click.Group):
         return None
 
 
+LOG_LEVELS = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
+
+
 @click.group(cls=_LazyGroup, lazy_commands=_LAZY_COMMANDS)
 @click.option(
     "-c",
@@ -39,15 +46,25 @@ class _LazyGroup(click.Group):
     default=None,
     help="Path to a BOS config file or a built-in preset name (e.g. 'coding').",
 )
+@click.option(
+    "-l",
+    "--log-level",
+    "log_level",
+    type=click.Choice(LOG_LEVELS, case_sensitive=False),
+    default=None,
+    help="Set the logging level (default: ERROR).",
+)
 @click.pass_context
-def cli(ctx, config):
+def cli(ctx, config, log_level):
     """BOS AI CLI"""
     import logging
     import os
     import sys
 
+    if log_level is None:
+        log_level = os.environ.get("BOS_LOG_LEVEL", "ERROR")
     logging.basicConfig(
-        level=os.environ.get("BOS_LOG_LEVEL", "INFO").upper(),
+        level=log_level.upper(),
         format="%(asctime)s %(levelname)-8s %(name)s %(message)s",
         stream=sys.stderr,
     )

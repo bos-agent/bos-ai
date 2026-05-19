@@ -235,9 +235,9 @@ It should not describe:
 2. Replace the default `NaiveConsolidator` with an LLM-backed harness-level consolidator.
 3. Construct `LLMClient` before the consolidator, or otherwise pass the shared `LLMClient` into consolidator construction.
 4. Resolve consolidator model from `harness.consolidator.model`, `BOS_CONSOLIDATOR_MODEL`, then `BOS_MODEL`; abort if none exists.
-5. Keep `max_tokens` on `ReactAgent`; use it only to decide when history should be compacted.
+5. Keep `max_tokens` on `ReActAgent`; use it only to decide when history should be compacted.
 6. Add the shared history projection/token estimation helper.
-7. Update `ReactAgent._get_chat_history()`, `/compact`, and `/tokens` to use the helper and `Message` contract.
+7. Update `ReActAgent._get_chat_history()`, `/compact`, and `/tokens` to use the helper and `Message` contract.
 8. Make repeated compaction summary-aware using `Message.is_summary`.
 9. Update `src/bos/config/template.toml` and any relevant help text.
 10. Remove old dict-based consolidator call sites instead of adapting them.
@@ -250,7 +250,7 @@ It should not describe:
 - Default LLM compaction calls `LLMClient.complete()` with the resolved consolidator model.
 - `Consolidator.consolidate()` receives `list[Message]`, not prompt-projected dicts.
 - No compatibility shim accepts both `list[dict]` and `list[Message]`.
-- `ReactAgent.max_tokens` remains the trigger threshold and is not moved into the consolidator.
+- `ReActAgent.max_tokens` remains the trigger threshold and is not moved into the consolidator.
 - Automatic compaction no longer uses raw `content_length()` sum as the primary threshold.
 - The built system prompt is excluded from compaction-budget accounting.
 - `/compact` and `/tokens` use the same shared history projection/token accounting helper as automatic compaction.
