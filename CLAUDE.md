@@ -18,7 +18,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 src/bos/
   cli/          - Click CLI entrypoints (boscli init, start, stop, tui, auth)
   config/       - Workspace discovery, TOML config loading, agent resolution
-  core/         - Runtime primitives: ReactAgent, AgentActor, AgentHarness,
+  core/         - Runtime primitives: ReActAgent, AgentActor, AgentHarness,
                   ExtensionPoint, ToolRegistry, contracts, LLM client
   extensions/   - Channel, provider, tool, store, interceptor implementations
   protocol/     - Message envelope, content types, turn events
@@ -61,9 +61,9 @@ Extensions register via decorator (e.g., `@ep_tool(name="...", description="..."
 
 ### AgentActor (`src/bos/core/actor.py`)
 
-The actor is the concurrency spine. It polls its bound `MailBox` for messages, maintains per-`chat_id` session state (pending/interrupt buffers, generation counters), and drives the `ReactAgent.ask()` loop in a per-chat task. It handles interrupt/abort semantics and merges multiple pending messages from the same chat.
+The actor is the concurrency spine. It polls its bound `MailBox` for messages, maintains per-`chat_id` session state (pending/interrupt buffers, generation counters), and drives the `ReActAgent.ask()` loop in a per-chat task. It handles interrupt/abort semantics and merges multiple pending messages from the same chat.
 
-### ReactAgent (`src/bos/core/agent.py`)
+### ReActAgent (`src/bos/core/agent.py`)
 
 The turn loop implementation. Each `ask()` call:
 1. Loads chat history, builds system prompt (base + memories + tools + skills + subagents + system info)

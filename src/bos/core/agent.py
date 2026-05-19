@@ -57,6 +57,43 @@ class _Task:
 
 
 @dataclass
+class _TaskList:
+    """Per-chat task list with version tracking for event emission."""
+
+    tasks: dict[str, _Task] = field(default_factory=dict)
+    id: str = field(default_factory=lambda: uuid.uuid4().hex[:8])
+    version: int = 0
+    emitted_version: int = -1
+    _next_id: int = field(default=1, init=False)
+
+    def bump(self) -> None:
+        self.version += 1
+
+    def mark_emitted(self) -> None:
+        self.emitted_version = self.version
+
+    def needs_emit(self) -> bool:
+        return self.version != self.emitted_version
+
+    def next_id(self) -> str:
+        nid = str(self._next_id)
+        self._next_id += 1
+        return nid
+
+    def to_payload(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "id": t.id,
+                "subject": t.subject,
+                "status": t.status,
+                "blocked_by": t.blocked_by,
+                "blocks": t.blocks,
+            }
+            for t in sorted(self.tasks.values(), key=lambda t: t.created_at)
+        ]
+
+
+@dataclass
 class TurnContext:
     chat_id: str
     turn_id: str
@@ -131,7 +168,7 @@ class ChainReactInterceptor:
                 await self._instances[i].intercept(stage, context)
 
 
-class ReactAgent:
+class ReActAgent:
     def __init__(
         self,
         *,
@@ -157,6 +194,7 @@ class ReactAgent:
         interceptor: TurnInterceptor | None = None,
         max_tokens: int = 128 * 1024,
         max_iterations: int = 25,
+        iterations_per_task: int = 8,
     ):
         if system_prompt is not None and not isinstance(system_prompt, str):
             raise TypeError("system_prompt must be a string or None")
@@ -172,6 +210,7 @@ class ReactAgent:
         self._reasoning_effort = reasoning_effort
         self._max_tokens = max_tokens
         self._max_iterations = max_iterations
+        self._iterations_per_task = iterations_per_task
         self._maxims = (
             bos_maxims
             if maxims is None
@@ -188,7 +227,7 @@ class ReactAgent:
         self._local_tools = local_tools or ToolRegistry("Agent-scoped local tools.")
         self._tool_configs = tool_configs or {}
         self._name = name or "__unknown__"
-        self._task_store: dict[str, dict[str, _Task]] = {}
+        self._task_lists: dict[str, _TaskList] = {}
 
         self._register_tools()
 
@@ -286,7 +325,20 @@ class ReactAgent:
         try:
             await _run_interceptor("prepare")
             await _emit_event("turn", "start", stage="prepare", detail="start")
-            for _ in range(self._max_iterations):
+            iteration = 0
+            peak_task_count = 0
+            while True:
+                task_list = self._task_lists.get(ctx.chat_id)
+                if task_list is not None:
+                    peak_task_count = max(peak_task_count, len(task_list.tasks))
+                max_allowed = self._max_iterations + peak_task_count * self._iterations_per_task
+                if iteration >= max_allowed:
+                    # max iterations reached
+                    ctx.add_message({"role": "assistant", "content": "(max iterations reached)"})
+                    await _run_interceptor("max_iteration")
+                    await _emit_event("turn", "fail", stage="max_iteration", detail="max_iteration")
+                    break
+                iteration += 1
                 await _interrupt()
                 ctx.set_system_prompt(await self._build_system_prompt())
                 await _run_interceptor("before_llm")
@@ -385,11 +437,15 @@ class ReactAgent:
                         tool_name=tc.name,
                         content=tool_result,
                     )
-            else:
-                # max iterations reached
-                ctx.add_message({"role": "assistant", "content": "(max iterations reached)"})
-                await _run_interceptor("max_iteration")
-                await _emit_event("turn", "fail", stage="max_iteration", detail="max_iteration")
+                    task_list = self._task_lists.get(ctx.chat_id)
+                    if task_list is not None and task_list.needs_emit() and event_sink is not None:
+                        await _emit_event(
+                            "task",
+                            "update",
+                            detail="task_state",
+                            metadata={"tasks": task_list.to_payload()},
+                        )
+                        task_list.mark_emitted()
         except AbortTurn:
             pass
         except Exception as e:
@@ -559,10 +615,11 @@ class ReactAgent:
             description: str,
             chat_id: str = "",
         ) -> str:
-            store = self._task_store.setdefault(chat_id, {})
-            task_id = uuid.uuid4().hex[:8]
+            task_list = self._task_lists.setdefault(chat_id, _TaskList())
+            task_id = task_list.next_id()
             task = _Task(id=task_id, subject=subject, description=description)
-            store[task_id] = task
+            task_list.tasks[task_id] = task
+            task_list.bump()
             return f"Task created: [{task_id}] {subject} (status: pending)"
 
         @self._local_tools(
@@ -606,9 +663,10 @@ class ReactAgent:
             addBlockedBy: list[str] | None = None,
             chat_id: str = "",
         ) -> str:
-            store = self._task_store.get(chat_id, {})
-            if taskId not in store:
+            task_list = self._task_lists.get(chat_id)
+            if task_list is None or taskId not in task_list.tasks:
                 return f"Error: Task '{taskId}' not found. Use TaskList to see available tasks."
+            store = task_list.tasks
             task = store[taskId]
             if status is not None:
                 if status == "deleted":
@@ -616,6 +674,7 @@ class ReactAgent:
                         other.blocked_by = [x for x in other.blocked_by if x != taskId]
                         other.blocks = [x for x in other.blocks if x != taskId]
                     del store[taskId]
+                    task_list.bump()
                     return f"Task '{taskId}' deleted."
                 task.status = status
                 if status == "completed":
@@ -642,6 +701,7 @@ class ReactAgent:
                 task.blocked_by.extend(addBlockedBy)
                 for blocker_id in addBlockedBy:
                     store[blocker_id].blocks.append(taskId)
+            task_list.bump()
             return f"Task '{taskId}' updated. Status: {task.status}."
 
         @self._local_tools(
@@ -654,12 +714,12 @@ class ReactAgent:
             },
         )
         async def tool_task_list(chat_id: str = "") -> str:
-            store = self._task_store.get(chat_id, {})
-            if not store:
+            task_list = self._task_lists.get(chat_id)
+            if task_list is None or not task_list.tasks:
                 return "(No tasks created yet.)"
             lines = []
-            for tid in sorted(store.keys(), key=lambda k: store[k].created_at):
-                t = store[tid]
+            for tid in sorted(task_list.tasks, key=lambda k: task_list.tasks[k].created_at):
+                t = task_list.tasks[tid]
                 blocked = f" (blocked by: {', '.join(t.blocked_by)})" if t.blocked_by else ""
                 blocks = f" [blocks: {', '.join(t.blocks)}]" if t.blocks else ""
                 lines.append(f"[{t.id}] {t.status:<12} {t.subject}{blocked}{blocks}")
@@ -677,10 +737,10 @@ class ReactAgent:
             },
         )
         async def tool_task_get(taskId: str, chat_id: str = "") -> str:
-            store = self._task_store.get(chat_id, {})
-            if taskId not in store:
+            task_list = self._task_lists.get(chat_id)
+            if task_list is None or taskId not in task_list.tasks:
                 return f"Error: Task '{taskId}' not found. Use TaskList to see available tasks."
-            t = store[taskId]
+            t = task_list.tasks[taskId]
             parts = [
                 f"Task: {t.subject}",
                 f"ID: {t.id}",
@@ -951,6 +1011,6 @@ class ReactAgent:
             kwargs[key] = map_value(key, kwargs.get(key))
 
         @ep_agent(name=name, description=description, defaults=kwargs)
-        @wraps(ReactAgent)
+        @wraps(ReActAgent)
         def create_react_agent(*args, **kwargs):
-            return ReactAgent(*args, **kwargs)
+            return ReActAgent(*args, **kwargs)

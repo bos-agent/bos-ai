@@ -47,7 +47,7 @@ system_prompt = "Resolved prompt"
     )
 
     registered: list[dict] = []
-    monkeypatch.setattr("bos.core.harness.ReactAgent.register", lambda **kwargs: registered.append(kwargs))
+    monkeypatch.setattr("bos.core.harness.ReActAgent.register", lambda **kwargs: registered.append(kwargs))
 
     Workspace.from_discovery(tmp_path).bootstrap_platform()
 

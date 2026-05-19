@@ -13,7 +13,7 @@ from bos.core import (
     ep_agent,
     ep_provider,
 )
-from bos.core.agent import ChainReactInterceptor, ReactAgent
+from bos.core.agent import ChainReactInterceptor, ReActAgent
 from bos.core.defaults.skills_loader import FileSystemSkillsLoader
 from bos.protocol import MessageType
 
@@ -24,7 +24,7 @@ def create_test_agent(**kwargs):
     kwargs.setdefault("consolidator", MessageOnlyConsolidator())
     kwargs.setdefault("skills_loader", FileSystemSkillsLoader())
     kwargs.setdefault("interceptor", ChainReactInterceptor())
-    return ReactAgent(**kwargs)
+    return ReActAgent(**kwargs)
 
 
 class CaptureSink:
@@ -136,14 +136,14 @@ async def test_ask_subagent_emits_child_lineage_events(tmp_path):
         return LLMResponse(content="Researcher summary")
 
     try:
-        ReactAgent.register(
+        ReActAgent.register(
             name=manager_name,
             description="Manager",
             model=f"{provider_name}/manager",
             tools=["AskSubagent"],
             subagents=[researcher_name],
         )
-        ReactAgent.register(
+        ReActAgent.register(
             name=researcher_name,
             description="Researcher",
             model=f"{provider_name}/researcher",

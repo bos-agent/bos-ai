@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Any
 
-from bos.core import AgentActor, Message, ReactAgent
+from bos.core import AgentActor, Message, ReActAgent
 from bos.core._utils import _compact
 from bos.protocol import Envelope, MessageContent, MessageContentPart
 from bos.protocol.content import content_length
@@ -39,8 +39,8 @@ def _display_label(display_name: str | None, actor_name: str, agent_kind: str | 
     return f"{label} ({agent_kind})" if agent_kind else label
 
 
-class NamedAgent(ReactAgent):
-    """ReactAgent that renders shared history with actor attribution."""
+class NamedAgent(ReActAgent):
+    """ReActAgent that renders shared history with actor attribution."""
 
     async def _get_chat_history(self, chat_id: str, *, budget_model: str | None = None) -> list[dict[str, Any]]:
         history_messages = await self._get_history_messages(chat_id)

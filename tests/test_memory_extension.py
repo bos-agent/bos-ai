@@ -5,7 +5,7 @@ from conftest import InMemMemoryExtension, InMemMessageStore, MessageOnlyConsoli
 
 from bos.core import (
     MemoryExtension,
-    ReactAgent,
+    ReActAgent,
 )
 from bos.core.defaults.agent_spec import bos_maxims as default_maxims
 from bos.core.defaults.skills_loader import FileSystemSkillsLoader
@@ -77,7 +77,7 @@ class TestRememberTool:
 
     @pytest.mark.asyncio
     async def test_remember_memory_ingest(self):
-        agent = ReactAgent(
+        agent = ReActAgent(
             message_store=InMemMessageStore(),
             memory=InMemMemoryExtension(),
             consolidator=MessageOnlyConsolidator(),
@@ -94,7 +94,7 @@ class TestReviseMaximTool:
 
     @pytest.mark.asyncio
     async def test_revise_appends_timestamped_entry(self):
-        agent = ReactAgent(
+        agent = ReActAgent(
             message_store=InMemMessageStore(),
             memory=InMemMemoryExtension(),
             consolidator=MessageOnlyConsolidator(),
@@ -110,7 +110,7 @@ class TestReviseMaximTool:
 
     @pytest.mark.asyncio
     async def test_revise_preserves_existing_content(self):
-        agent = ReactAgent(
+        agent = ReActAgent(
             message_store=InMemMessageStore(),
             memory=InMemMemoryExtension(user="seed content"),
             consolidator=MessageOnlyConsolidator(),
@@ -125,7 +125,7 @@ class TestReviseMaximTool:
 
     @pytest.mark.asyncio
     async def test_revise_rejects_unknown_key(self):
-        agent = ReactAgent(
+        agent = ReActAgent(
             message_store=InMemMessageStore(),
             memory=InMemMemoryExtension(),
             consolidator=MessageOnlyConsolidator(),
@@ -138,7 +138,7 @@ class TestReviseMaximTool:
 
     @pytest.mark.asyncio
     async def test_revise_enforces_length_limit(self):
-        agent = ReactAgent(
+        agent = ReActAgent(
             message_store=InMemMessageStore(),
             memory=InMemMemoryExtension(user="x" * 2000),
             consolidator=MessageOnlyConsolidator(),
@@ -155,7 +155,7 @@ class TestRecallTool:
 
     @pytest.mark.asyncio
     async def test_recall_search(self):
-        agent = ReactAgent(
+        agent = ReActAgent(
             message_store=InMemMessageStore(),
             memory=InMemMemoryExtension(),
             consolidator=MessageOnlyConsolidator(),
@@ -169,7 +169,7 @@ class TestRecallTool:
 
     @pytest.mark.asyncio
     async def test_recall_entry_id(self):
-        agent = ReactAgent(
+        agent = ReActAgent(
             message_store=InMemMessageStore(),
             memory=InMemMemoryExtension(),
             consolidator=MessageOnlyConsolidator(),
@@ -183,7 +183,7 @@ class TestRecallTool:
 
     @pytest.mark.asyncio
     async def test_recall_no_results(self):
-        agent = ReactAgent(
+        agent = ReActAgent(
             message_store=InMemMessageStore(),
             memory=InMemMemoryExtension(),
             consolidator=MessageOnlyConsolidator(),
@@ -200,7 +200,7 @@ class TestForgetTool:
 
     @pytest.mark.asyncio
     async def test_forget_by_entry_id(self):
-        agent = ReactAgent(
+        agent = ReActAgent(
             message_store=InMemMessageStore(),
             memory=InMemMemoryExtension(),
             consolidator=MessageOnlyConsolidator(),
@@ -215,7 +215,7 @@ class TestForgetTool:
 
     @pytest.mark.asyncio
     async def test_forget_by_query(self):
-        agent = ReactAgent(
+        agent = ReActAgent(
             message_store=InMemMessageStore(),
             memory=InMemMemoryExtension(),
             consolidator=MessageOnlyConsolidator(),
@@ -234,7 +234,7 @@ class TestSystemPromptIntegration:
 
     @pytest.mark.asyncio
     async def test_maxims_injected_into_prompt(self):
-        agent = ReactAgent(
+        agent = ReActAgent(
             message_store=InMemMessageStore(),
             memory=InMemMemoryExtension(user="test user content"),
             consolidator=MessageOnlyConsolidator(),
@@ -249,7 +249,7 @@ class TestSystemPromptIntegration:
 
     @pytest.mark.asyncio
     async def test_only_dict_keys_appear_in_prompt(self):
-        agent = ReactAgent(
+        agent = ReActAgent(
             message_store=InMemMessageStore(),
             memory=InMemMemoryExtension(),
             consolidator=MessageOnlyConsolidator(),
@@ -264,7 +264,7 @@ class TestSystemPromptIntegration:
 
     @pytest.mark.asyncio
     async def test_memory_tools_usage_injected_via_tools_list(self):
-        agent = ReactAgent(
+        agent = ReActAgent(
             message_store=InMemMessageStore(),
             memory=InMemMemoryExtension(),
             consolidator=MessageOnlyConsolidator(),
@@ -279,7 +279,7 @@ class TestSystemPromptIntegration:
 
     @pytest.mark.asyncio
     async def test_maxim_header_has_scope_description(self):
-        agent = ReactAgent(
+        agent = ReActAgent(
             message_store=InMemMessageStore(),
             memory=InMemMemoryExtension(rules="rule content", soul="soul content"),
             consolidator=MessageOnlyConsolidator(),

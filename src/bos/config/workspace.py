@@ -42,7 +42,7 @@ class _LoadedAgentCandidate:
 _EXTERNAL_AGENT_SUFFIXES = {".toml", ".md"}
 _FRONTMATTER_ALIAS_KEYS = {
     # Keep this compatibility typo narrow: misspelling it otherwise creates an
-    # unusable ReactAgent default that fails only at agent construction time.
+    # unusable ReActAgent default that fails only at agent construction time.
     "exlude_tools": "exclude_tools",
 }
 

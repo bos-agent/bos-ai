@@ -5,7 +5,7 @@ import asyncio
 import pytest
 from conftest import InMemMemoryExtension, InMemMessageStore, MessageOnlyConsolidator
 
-from bos.core import ReactAgent
+from bos.core import ReActAgent
 from bos.core.defaults.agent_spec import bos_maxims
 from bos.core.defaults.skills_loader import FileSystemSkillsLoader
 
@@ -17,7 +17,7 @@ def _create_agent(**kwargs):
     kwargs.setdefault("skills_loader", FileSystemSkillsLoader())
     kwargs.setdefault("maxims", bos_maxims)
     kwargs.setdefault("system_prompt", "test")
-    return ReactAgent(**kwargs)
+    return ReActAgent(**kwargs)
 
 
 class TestTaskCreate:

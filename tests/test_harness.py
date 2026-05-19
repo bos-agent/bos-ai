@@ -6,7 +6,7 @@ from conftest import CloseTrackingConsolidator, InMemMemoryExtension, InMemMessa
 
 from bos.config.workspace import Workspace
 from bos.core import AgentHarness, LLMResponse, Message, ToolCallRequest, bootstrap_platform, ep_agent, ep_provider
-from bos.core.agent import ChainReactInterceptor, ReactAgent
+from bos.core.agent import ChainReactInterceptor, ReActAgent
 from bos.core.contract import SkillMeta
 from bos.core.defaults.agent_spec import bos_maxims as default_maxims
 from bos.core.defaults.skills_loader import FileSystemSkillsLoader
@@ -20,7 +20,7 @@ def create_test_agent(**kwargs):
     kwargs.setdefault("consolidator", MessageOnlyConsolidator())
     kwargs.setdefault("skills_loader", FileSystemSkillsLoader())
     kwargs.setdefault("interceptor", ChainReactInterceptor())
-    return ReactAgent(**kwargs)
+    return ReActAgent(**kwargs)
 
 
 def test_react_agent_local_tools_describe_ask_subagent(caplog):
@@ -66,7 +66,7 @@ async def test_registered_agent_defaults_to_no_capabilities(tmp_path):
     agent_name = f"locked_{uuid.uuid4().hex}"
 
     try:
-        ReactAgent.register(name=agent_name, description="Locked", system_prompt="Stay locked down.")
+        ReActAgent.register(name=agent_name, description="Locked", system_prompt="Stay locked down.")
 
         async with AgentHarness(bos_dir=bos_dir, workspace=tmp_path, consolidator=MessageOnlyConsolidator()) as harness:
             agent = harness.create_agent(agent_name)
@@ -87,7 +87,7 @@ async def test_registered_agent_star_capabilities_enable_all(tmp_path):
     agent_name = f"open_{uuid.uuid4().hex}"
 
     try:
-        ReactAgent.register(
+        ReActAgent.register(
             name=agent_name,
             description="Open",
             system_prompt="Use everything.",
@@ -117,7 +117,7 @@ def test_registered_agent_rejects_unknown_capability_string():
     agent_name = f"bad_caps_{uuid.uuid4().hex}"
 
     with pytest.raises(TypeError, match="tools must be a list, '\\*', or None"):
-        ReactAgent.register(name=agent_name, tools="all")
+        ReActAgent.register(name=agent_name, tools="all")
 
 
 @pytest.mark.asyncio
@@ -230,7 +230,7 @@ async def test_prompt_sections_render_first_50_items_and_warn(caplog):
     subagent_names = [f"prompt_cap_agent_{uuid.uuid4().hex}_{i:03}" for i in range(51)]
     try:
         for i, name in enumerate(subagent_names):
-            ReactAgent.register(name=name, description=f"Subagent description {i:03}", tools=[])
+            ReActAgent.register(name=name, description=f"Subagent description {i:03}", tools=[])
 
         agent = create_test_agent(
             local_tools=local_tools,
@@ -516,7 +516,7 @@ async def test_harness_ask_subagent_delegates_to_named_specialist(tmp_path):
         return LLMResponse(content="Researcher says BOS delegates to named specialists via AskSubagent.")
 
     try:
-        ReactAgent.register(
+        ReActAgent.register(
             name=manager_name,
             description="Manager",
             model=f"{provider_name}/manager",
@@ -524,7 +524,7 @@ async def test_harness_ask_subagent_delegates_to_named_specialist(tmp_path):
             subagents=[researcher_name],
             system_prompt="Delegate focused work to the researcher when useful.",
         )
-        ReactAgent.register(
+        ReActAgent.register(
             name=researcher_name,
             description="Researcher",
             model=f"{provider_name}/researcher",
@@ -588,20 +588,20 @@ async def test_ask_subagent_rejects_disallowed_registered_agent(tmp_path):
         return LLMResponse(content="blocked response")
 
     try:
-        ReactAgent.register(
+        ReActAgent.register(
             name=manager_name,
             description="Manager",
             model=f"{provider_name}/manager",
             tools=["AskSubagent"],
             subagents=[allowed_name],
         )
-        ReactAgent.register(
+        ReActAgent.register(
             name=allowed_name,
             description="Allowed",
             model=f"{provider_name}/allowed",
             tools=[],
         )
-        ReactAgent.register(
+        ReActAgent.register(
             name=blocked_name,
             description="Blocked",
             model=f"{provider_name}/blocked",
@@ -755,3 +755,84 @@ async def test_agent_auto_compaction_passes_message_objects(monkeypatch):
     assert all(isinstance(message, Message) for message in consolidator.calls[0][0])
     assert any(message.is_summary for message in store._messages["compact-chat"])
     assert history[-1]["content"].startswith("Chat summary:")
+
+
+@pytest.mark.asyncio
+async def test_agent_emits_task_state_events(monkeypatch):
+    """After TaskCreate/TaskUpdate calls, the event sink receives task_state events."""
+    suffix = uuid.uuid4().hex
+    provider_name = f"test_task_events_{suffix}"
+
+    call_count = [0]
+    captured_task_id: list[str] = []
+
+    @ep_provider(name=provider_name)
+    async def provider(messages, model=None, tools=None, **kwargs):
+        call_count[0] += 1
+        if call_count[0] == 1:
+            return LLMResponse(
+                content="",
+                tool_calls=[
+                    ToolCallRequest(
+                        id="tc1", name="TaskCreate",
+                        arguments={"subject": "Task 1", "description": "First task"},
+                    ),
+                    ToolCallRequest(
+                        id="tc2", name="TaskCreate",
+                        arguments={"subject": "Task 2", "description": "Second task"},
+                    ),
+                ],
+                finish_reason="tool_calls",
+            )
+        elif call_count[0] == 2:
+            return LLMResponse(
+                content="",
+                tool_calls=[
+                    ToolCallRequest(
+                        id="tc3", name="TaskUpdate",
+                        arguments={"taskId": captured_task_id[0], "status": "in_progress"},
+                    ),
+                ],
+                finish_reason="tool_calls",
+            )
+        else:
+            return LLMResponse(content="All done.", finish_reason="stop")
+
+    events: list = []
+
+    class CaptureSink:
+        async def emit(self, event):
+            events.append(event)
+            if event.event_type == "task" and event.detail == "task_state":
+                tasks = event.metadata.get("tasks", [])
+                if tasks and not captured_task_id:
+                    captured_task_id.append(tasks[0]["id"])
+
+    try:
+        agent = create_test_agent(model=f"{provider_name}/model")
+        await agent.ask(
+            chat_id="task-events-chat",
+            content="Create two tasks then update one.",
+            event_sink=CaptureSink(),
+        )
+    finally:
+        ep_provider._extensions.pop(provider_name, None)
+
+    task_events = [e for e in events if e.event_type == "task" and e.detail == "task_state"]
+    assert len(task_events) >= 3, f"Expected >= 3 task_state events (2 creates + 1 update), got {len(task_events)}"
+
+    # After 1st TaskCreate: one task pending
+    tasks1 = task_events[0].metadata.get("tasks", [])
+    assert len(tasks1) == 1
+    assert tasks1[0]["status"] == "pending"
+    assert tasks1[0]["subject"] == "Task 1"
+
+    # After 2nd TaskCreate: both tasks present
+    tasks2 = task_events[1].metadata.get("tasks", [])
+    assert len(tasks2) == 2
+    assert tasks2[0]["subject"] == "Task 1"
+    assert tasks2[1]["subject"] == "Task 2"
+
+    # After TaskUpdate: first task now in_progress
+    tasks3 = task_events[2].metadata.get("tasks", [])
+    assert tasks3[0]["status"] == "in_progress"

@@ -28,7 +28,7 @@ from ._utils import (
     _strip_think,
 )
 from .actor import AgentActor
-from .agent import AbortTurn, ChainReactInterceptor, ReactAgent, TurnContext
+from .agent import AbortTurn, ChainReactInterceptor, ReActAgent, TurnContext
 from .contract import (
     Agent,
     Channel,
@@ -87,7 +87,7 @@ __all__ = [
     "MemoryExtension",
     "Message",
     "MessageStore",
-    "ReactAgent",
+    "ReActAgent",
     "SkillsLoader",
     "ToolCallRequest",
     "ToolRegistry",

@@ -289,7 +289,7 @@ Mention routing is channel-specific. `HttpChannel` supports registry-backed `@ac
    metadata = {"target_actor": "bob", ...}
 5. HttpChannel sends content to "agent@bob" with route_result.metadata.
 6. Named actor at agent@bob receives the message.
-7. NamedAgent asks the underlying ReactAgent with:
+7. NamedAgent asks the underlying ReActAgent with:
    - shared chat history rendered with actor attribution
    - scoped memory wrapper for maxims and memory tools
    - actor address/name in turn metadata
