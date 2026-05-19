@@ -8,11 +8,11 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
-from bos.protocol import Envelope, MessageContent, MessageType
+from bos.protocol import Envelope, MessageContent, MessageType, TurnEvent
 
 from .agent import AbortTurn
 from .chat_state import ChatState
-from .contract import ep_actor_command
+from .contract import Agent, MailBox, ep_actor_command
 from .events import MailboxEventSink
 from .harness import CURRENT_HARNESS, CURRENT_MAILBOX
 
@@ -35,11 +35,11 @@ class SessionState:
 
 
 class _RouteAwareMailboxEventSink(MailboxEventSink):
-    def __init__(self, mailbox: Any, recipient: str, chat_id: str | None) -> None:
+    def __init__(self, mailbox: MailBox, recipient: str, chat_id: str | None) -> None:
         super().__init__(mailbox, recipient)
         self._chat_id = chat_id
 
-    async def emit(self, event: Any) -> None:
+    async def emit(self, event: TurnEvent) -> None:
         await self._mailbox.send(
             self._recipient,
             json.dumps(event.to_payload(), default=str),
@@ -57,7 +57,7 @@ class AgentActor:
     Messages arriving during an active turn are rejected immediately.
     """
 
-    def __init__(self, agent: Any, mailbox: Any, chat_state: ChatState | None = None):
+    def __init__(self, agent: Agent, mailbox: MailBox, chat_state: ChatState | None = None):
         self._address = mailbox.address
         self._agent = agent
         self._mailbox = mailbox
