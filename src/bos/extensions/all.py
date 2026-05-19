@@ -11,6 +11,5 @@ from bos.extensions.providers import (
 from bos.extensions.tools import (
     filesystem,  # noqa: F401
     knowledge,  # noqa: F401
-    orchestration,  # noqa: F401
     system,  # noqa: F401
 )
