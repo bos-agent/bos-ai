@@ -6,6 +6,7 @@ from pathlib import Path
 from bos.core import ep_tool
 
 _IGNORE_DIRS = {".git", ".pycache", "__pycache__", "node_modules", "venv", ".venv", ".uv", "dist", "build"}
+_READ_FILES: set[Path] = set()
 
 
 @ep_tool(
@@ -51,7 +52,9 @@ def _sync_tool_read_file(path: str, line_offset: int = 0, limit: int = 500) -> s
                 line = f.readline()
                 if not line:
                     break
-                lines.append(line)
+                line_number = line_offset + len(lines) + 1
+                lines.append(f"{line_number}\t{line}")
+        _READ_FILES.add(p.resolve())
         return "".join(lines) or "(Reached end of file or file is empty)"
     except Exception as e:
         return f"Error reading file {path}: {e}"
@@ -59,7 +62,7 @@ def _sync_tool_read_file(path: str, line_offset: int = 0, limit: int = 500) -> s
 
 @ep_tool(
     name="WriteFile",
-    description="Write content to a text file in the workspace.",
+    description="Write content to a text file in the workspace. Existing files must be read first.",
     parameters={
         "type": "object",
         "properties": {
@@ -76,8 +79,12 @@ async def tool_write_file(path: str, content: str) -> str:
 def _sync_tool_write_file(path: str, content: str) -> str:
     p = Path(path)
     try:
+        resolved = p.resolve(strict=False)
+        if p.exists() and p.is_file() and resolved not in _READ_FILES:
+            return f"Error: Refusing to overwrite existing file '{path}' before it has been read with ReadFile."
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content, encoding="utf-8")
+        _READ_FILES.add(resolved)
         return f"Successfully wrote to {path}."
     except Exception as e:
         return f"Error writing to file {path}: {e}"
@@ -119,10 +126,9 @@ def _sync_tool_edit_file(
         return f"Error: File '{path}' does not exist."
     try:
         content = p.read_text(encoding="utf-8")
-        if old_string not in content:
-            return "Error: old_string not found in file."
-
         if replace_all:
+            if old_string not in content:
+                return "Error: old_string not found in file."
             count = content.count(old_string)
             content = content.replace(old_string, new_string)
             p.write_text(content, encoding="utf-8")
@@ -139,15 +145,17 @@ def _sync_tool_edit_file(
         else:
             char_offset = 0
 
-        # Find the first occurrence at or after the char_offset
-        match_idx = content.find(old_string, char_offset)
-
-        if match_idx == -1:
+        search_space = content[char_offset:]
+        count = search_space.count(old_string)
+        if count == 0:
             return f"Error: old_string not found at or after line {line_offset}."
+        if count > 1:
+            return (
+                f"Error: old_string found {count} times at or after line {line_offset}. "
+                "Provide a more specific old_string or set replace_all=true."
+            )
 
-        # Verify there are no multiple occurrences remaining in the search space *unless*
-        # user is strictly relying on line_offset. Actually, user wants it to just
-        # replace the FIRST occurrence after the offset.
+        match_idx = content.find(old_string, char_offset)
         before = content[:match_idx]
         after = content[match_idx + len(old_string) :]
         content = before + new_string + after

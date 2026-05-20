@@ -274,7 +274,9 @@ class TestSystemPromptIntegration:
             tools=["Remember", "ReviseMaxim", "Recall", "Forget"],
         )
         prompt = await agent._build_system_prompt()
-        assert "Facts and details accumulated over time" in prompt
+        assert "Store durable context in episodic memory" in prompt
+        assert "Retrieve information from episodic memory" in prompt
+        assert "Remove information from episodic memory" in prompt
         assert "Deeply held convictions" in prompt
 
     @pytest.mark.asyncio
