@@ -31,3 +31,49 @@ async def test_read_file_empty_file_message_unchanged(tmp_path):
     result = await filesystem.tool_read_file(str(path))
 
     assert result == "(Reached end of file or file is empty)"
+
+
+@pytest.mark.asyncio
+async def test_edit_file_rejects_ambiguous_old_string(tmp_path):
+    path = tmp_path / "example.txt"
+    path.write_text("target\nmiddle\ntarget\n", encoding="utf-8")
+
+    result = await filesystem.tool_edit_file(str(path), old_string="target", new_string="changed")
+
+    assert result == (
+        "Error: old_string found 2 times at or after line 0. "
+        "Provide a more specific old_string or set replace_all=true."
+    )
+    assert path.read_text(encoding="utf-8") == "target\nmiddle\ntarget\n"
+
+
+@pytest.mark.asyncio
+async def test_edit_file_allows_unique_old_string_after_line_offset(tmp_path):
+    path = tmp_path / "example.txt"
+    path.write_text("target\nmiddle\ntarget\n", encoding="utf-8")
+
+    result = await filesystem.tool_edit_file(
+        str(path),
+        old_string="target",
+        new_string="changed",
+        line_offset=2,
+    )
+
+    assert result == f"Successfully edited {path}."
+    assert path.read_text(encoding="utf-8") == "target\nmiddle\nchanged\n"
+
+
+@pytest.mark.asyncio
+async def test_edit_file_replace_all_allows_multiple_matches(tmp_path):
+    path = tmp_path / "example.txt"
+    path.write_text("target\nmiddle\ntarget\n", encoding="utf-8")
+
+    result = await filesystem.tool_edit_file(
+        str(path),
+        old_string="target",
+        new_string="changed",
+        replace_all=True,
+    )
+
+    assert result == f"Successfully replaced all 2 occurrences in {path}."
+    assert path.read_text(encoding="utf-8") == "changed\nmiddle\nchanged\n"

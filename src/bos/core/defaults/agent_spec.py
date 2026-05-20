@@ -101,6 +101,7 @@ the intended location. Use replace_all only when every occurrence should change.
 Guidelines:
 - Read the relevant file content before editing.
 - Preserve indentation and nearby style.
+- EditFile fails when old_string is ambiguous; include more context or use replace_all deliberately.
 - If the edit fails, search or reread the file and adjust the replacement; do not guess.
 """
 

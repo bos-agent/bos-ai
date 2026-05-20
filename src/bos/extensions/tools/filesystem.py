@@ -120,10 +120,9 @@ def _sync_tool_edit_file(
         return f"Error: File '{path}' does not exist."
     try:
         content = p.read_text(encoding="utf-8")
-        if old_string not in content:
-            return "Error: old_string not found in file."
-
         if replace_all:
+            if old_string not in content:
+                return "Error: old_string not found in file."
             count = content.count(old_string)
             content = content.replace(old_string, new_string)
             p.write_text(content, encoding="utf-8")
@@ -140,15 +139,17 @@ def _sync_tool_edit_file(
         else:
             char_offset = 0
 
-        # Find the first occurrence at or after the char_offset
-        match_idx = content.find(old_string, char_offset)
-
-        if match_idx == -1:
+        search_space = content[char_offset:]
+        count = search_space.count(old_string)
+        if count == 0:
             return f"Error: old_string not found at or after line {line_offset}."
+        if count > 1:
+            return (
+                f"Error: old_string found {count} times at or after line {line_offset}. "
+                "Provide a more specific old_string or set replace_all=true."
+            )
 
-        # Verify there are no multiple occurrences remaining in the search space *unless*
-        # user is strictly relying on line_offset. Actually, user wants it to just
-        # replace the FIRST occurrence after the offset.
+        match_idx = content.find(old_string, char_offset)
         before = content[:match_idx]
         after = content[match_idx + len(old_string) :]
         content = before + new_string + after
