@@ -204,9 +204,79 @@ async def _build_system_prompt(self, ctx: TurnContext) -> str:
 
 ---
 
+## Case Study: The Task Plugin
+
+The `TaskPlugin` provides a complete demonstration of the micro-kernel plugin boundaries, implementing state isolation, dynamic loop budget updates, post-tool event emission, and caching-friendly prompt injection.
+
+### 1. Isolated State Storage
+Task lists are completely removed from the agent class and stored on the `BoundTaskPlugin` instance:
+```python
+class BoundTaskPlugin:
+    def __init__(self, config: dict[str, Any]):
+        self._iterations_per_task = config.get("iterations_per_task", 5)
+        self.task_lists: dict[str, TaskList] = {}  # Per-chat task list storage
+```
+
+### 2. Dynamic Loop Budget Scaling
+To modify loop parameters dynamically, `BoundPlugin` exposes an optional budget calculation hook:
+```python
+class BoundTaskPlugin:
+    def get_iteration_budget_adjust(self, chat_id: str) -> int:
+        task_list = self.task_lists.get(chat_id)
+        if not task_list:
+            return 0
+        return len(task_list.tasks) * self._iterations_per_task
+```
+The agent core calls this method every turn to dynamically scale its iteration limits.
+
+### 3. Caching-Friendly Prompt Injection
+To avoid breaking the prefix cache of the static system prompt, the `TaskPlugin` injects active task lists into the **latest user message** inside a `before_llm` interceptor:
+```python
+class TaskTurnInterceptor:
+    async def intercept(self, stage: str, context: TurnContext) -> None:
+        if stage != "before_llm":
+            return
+        
+        task_list = self.plugin.task_lists.get(context.chat_id)
+        if not task_list or not task_list.tasks:
+            return
+            
+        latest_msg = context.current[-1]
+        tasks_text = self.plugin.format_active_tasks(task_list)
+        
+        # Prepend task list context to user query, leaving system prompt 100% static
+        latest_msg.llm_message["content"] = (
+            f"### Active Task Status\n{tasks_text}\n\n"
+            f"{latest_msg.llm_message['content']}"
+        )
+```
+
+### 4. Post-Tool Event Emission
+To broadcast UI task list updates to external subscribers without cluttering the agent loop, the task interceptor handles events in `after_tool`:
+```python
+class TaskTurnInterceptor:
+    async def intercept(self, stage: str, context: TurnContext) -> None:
+        if stage == "after_tool":
+            task_list = self.plugin.task_lists.get(context.chat_id)
+            if task_list and task_list.needs_emit() and context.event_sink:
+                await context.event_sink.emit(
+                    TurnEvent(
+                        type="task",
+                        action="update",
+                        detail="task_state",
+                        metadata={"tasks": task_list.to_payload()}
+                    )
+                )
+                task_list.mark_emitted()
+```
+
+---
+
 ## Revision History
 
 | Date | Change | Intention |
 |---|---|---|
 | 2026-05-20 | Initial draft (BEP 4) | Formulate the design for decoupling agent-scoped tools from ReActAgent to make tools modular, customizable, and testable. |
 | 2026-05-20 | Plugin Micro-kernel Evolution | Revise the design to treat memory and tasks as cohesive plugins, separating harness/agent boundaries via factory binding and pass-through configuration. |
+| 2026-05-20 | Append Task Case Study | Detail how the Task capability operates as a plugin, including caching-friendly prompt injection. |
+
