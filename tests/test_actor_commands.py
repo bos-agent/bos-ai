@@ -68,6 +68,23 @@ class SlowAgent(StubAgent):
         return f"reply for {chat_id}"
 
 
+class CleanupSlowAgent(StubAgent):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = asyncio.Event()
+        self.cleanup_started = asyncio.Event()
+        self.cleanup_done = asyncio.Event()
+
+    async def ask(self, chat_id, content, **kwargs):
+        self.started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.cleanup_started.set()
+            await self.cleanup_done.wait()
+            raise
+
+
 @pytest.mark.asyncio
 async def test_new_command_returns_structured_payload():
     mailbox = FakeMailbox("agent@main")
@@ -422,6 +439,48 @@ async def test_interrupt_abort_cancels_in_flight_turn_without_reply():
         with pytest.raises(asyncio.TimeoutError):
             await asyncio.wait_for(sender_mailbox.receive(), timeout=0.2)
     finally:
+        actor_task.cancel()
+        await asyncio.gather(actor_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_interrupt_abort_keeps_session_busy_until_cancel_cleanup_finishes():
+    route = InMemMailRoute()
+    actor_address = f"agent@{uuid.uuid4().hex}"
+    sender_address = f"channel@{uuid.uuid4().hex}"
+    actor_mailbox = route.bind(actor_address)
+    sender_mailbox = route.bind(sender_address)
+    agent = CleanupSlowAgent()
+    actor = AgentActor(agent, actor_mailbox)
+
+    actor_task = asyncio.create_task(actor.run())
+    try:
+        await sender_mailbox.send(actor_address, "hello", chat_id="cleanup-chat")
+        await asyncio.wait_for(agent.started.wait(), timeout=1)
+
+        await sender_mailbox.send(
+            actor_address,
+            "",
+            content_type=MessageType.INTERRUPT_ABORT,
+            chat_id="cleanup-chat",
+        )
+        await asyncio.wait_for(agent.cleanup_started.wait(), timeout=1)
+
+        await sender_mailbox.send(actor_address, "continue", chat_id="cleanup-chat")
+        rejection = await asyncio.wait_for(sender_mailbox.receive(), timeout=1)
+        assert rejection.content == "(busy: a response is already in progress for this chat)"
+        assert rejection.content_type == MessageType.SYSTEM
+
+        agent.cleanup_done.set()
+        for _ in range(20):
+            session = actor._sessions.get("cleanup-chat")
+            if session is not None and session.execution.task is None:
+                break
+            await asyncio.sleep(0.05)
+        else:
+            raise AssertionError("in-flight turn cleanup did not finish")
+    finally:
+        agent.cleanup_done.set()
         actor_task.cancel()
         await asyncio.gather(actor_task, return_exceptions=True)
 

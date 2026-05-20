@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import uuid
 
@@ -473,6 +474,110 @@ async def test_react_agent_injects_runtime_tool_context():
         assert '"turn_id": "' in result
     finally:
         ep_provider._extensions.pop(provider_name, None)
+
+
+@pytest.mark.asyncio
+async def test_react_agent_persists_sanitized_abort_on_cancellation():
+    store = InMemMessageStore()
+
+    class SlowLLM:
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+
+        async def complete(self, messages, **kwargs):
+            self.started.set()
+            await asyncio.Event().wait()
+
+    llm = SlowLLM()
+    agent = create_test_agent(message_store=store, llm=llm)
+
+    task = asyncio.create_task(agent.ask("cancel-chat", "Please do a long task."))
+    await asyncio.wait_for(llm.started.wait(), timeout=1)
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    messages = store._messages["cancel-chat"]
+    assert [message.llm_message["role"] for message in messages] == ["user", "assistant"]
+    assert messages[0].llm_message["content"] == "Please do a long task."
+    assert "turn aborted before completion" in messages[1].llm_message["content"]
+    assert messages[1].metadata["turn_status"] == "aborted"
+    assert messages[1].metadata["abort_reason"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_react_agent_abort_persistence_drops_incomplete_tool_call_state():
+    store = InMemMessageStore()
+    tools = ToolRegistry("test tools")
+    tool_started = asyncio.Event()
+
+    @tools(
+        name="SlowTool",
+        description="Wait until cancelled.",
+        parameters={"type": "object", "properties": {}, "required": []},
+    )
+    async def slow_tool() -> str:
+        tool_started.set()
+        await asyncio.Event().wait()
+        return "unreachable"
+
+    class ToolCallingLLM:
+        async def complete(self, messages, **kwargs):
+            return LLMResponse(
+                content="",
+                tool_calls=[ToolCallRequest(id="call_slow", name="SlowTool", arguments={})],
+                finish_reason="tool_calls",
+            )
+
+    agent = create_test_agent(
+        message_store=store,
+        llm=ToolCallingLLM(),
+        local_tools=tools,
+        tools=["SlowTool"],
+    )
+
+    task = asyncio.create_task(agent.ask("cancel-tool-chat", "Use the slow tool."))
+    await asyncio.wait_for(tool_started.wait(), timeout=1)
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    messages = store._messages["cancel-tool-chat"]
+    assert [message.llm_message["role"] for message in messages] == ["user", "assistant"]
+    assert messages[0].llm_message["content"] == "Use the slow tool."
+    assert "turn aborted before completion" in messages[1].llm_message["content"]
+    assert all("tool_calls" not in message.llm_message for message in messages)
+
+
+@pytest.mark.asyncio
+async def test_react_agent_cancellation_after_final_response_persists_answer():
+    store = InMemMessageStore()
+
+    class CancelOnFinalResponse:
+        async def intercept(self, stage, context):
+            if stage == "final_response":
+                asyncio.current_task().cancel()
+                await asyncio.sleep(0)
+
+    class FinalLLM:
+        async def complete(self, messages, **kwargs):
+            return LLMResponse(content="done", finish_reason="stop")
+
+    agent = create_test_agent(
+        message_store=store,
+        llm=FinalLLM(),
+        interceptor=CancelOnFinalResponse(),
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await agent.ask("cancel-after-final-chat", "Finish then cancel.")
+
+    messages = store._messages["cancel-after-final-chat"]
+    assert [message.llm_message["role"] for message in messages] == ["user", "assistant"]
+    assert messages[1].llm_message["content"] == "done"
+    assert "turn aborted before completion" not in messages[1].llm_message["content"]
 
 
 @pytest.mark.asyncio

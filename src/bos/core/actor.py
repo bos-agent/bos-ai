@@ -178,19 +178,23 @@ class AgentActor:
         task.add_done_callback(self._command_tasks.discard)
 
     def _abort_current_turn(self, session: SessionState) -> None:
-        """Cancel the current execution immediately and fence stale replies."""
+        """Cancel the current execution and fence stale replies.
+
+        Keep the task attached to the session until the actor loop observes its
+        completion so the agent can run cancellation cleanup, including any
+        abort-safe history persistence, before a new turn starts for this chat.
+        """
         task = session.execution.task
         session.execution.generation += 1
         session.interrupts.clear()
-        session.execution.task = None
         session.execution.reply_recipient = None
         session.execution.reply_chat_id = None
         if task is not None:
             if task.done():
                 self._log_aborted_task_result(task)
+                session.execution.task = None
             else:
                 task.cancel()
-                task.add_done_callback(self._log_aborted_task_result)
 
     @staticmethod
     def _log_aborted_task_result(task: asyncio.Task) -> None:

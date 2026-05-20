@@ -1,11 +1,46 @@
 import asyncio
 import contextlib
 import io
+import os
+import signal
 import traceback
+from typing import Any
 
 from bos.core import ep_tool
 
 _REPL_GLOBALS = {}
+
+
+def _subprocess_kwargs() -> dict[str, Any]:
+    if os.name == "posix":
+        return {"start_new_session": True}
+    return {}
+
+
+async def _terminate_process(proc: asyncio.subprocess.Process) -> None:
+    if proc.returncode is not None:
+        return
+    try:
+        if os.name == "posix":
+            os.killpg(proc.pid, signal.SIGTERM)
+        else:
+            proc.terminate()
+    except ProcessLookupError:
+        return
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=2)
+        return
+    except asyncio.TimeoutError:
+        pass
+
+    try:
+        if os.name == "posix":
+            os.killpg(proc.pid, signal.SIGKILL)
+        else:
+            proc.kill()
+    except ProcessLookupError:
+        return
+    await proc.wait()
 
 
 @ep_tool(
@@ -22,12 +57,14 @@ _REPL_GLOBALS = {}
     },
 )
 async def tool_bash(command: str, cwd: str = ".", timeout: int = 60) -> str:
+    proc: asyncio.subprocess.Process | None = None
     try:
         proc = await asyncio.create_subprocess_shell(
             command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=cwd,
+            **_subprocess_kwargs(),
         )
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         output = ""
@@ -39,7 +76,13 @@ async def tool_bash(command: str, cwd: str = ".", timeout: int = 60) -> str:
             output += stderr.decode("utf-8", errors="replace")
         return output.strip() or "(Execution succeeded with no output)"
     except asyncio.TimeoutError:
+        if proc is not None:
+            await _terminate_process(proc)
         return f"Error: Command timed out after {timeout} seconds."
+    except asyncio.CancelledError:
+        if proc is not None:
+            await _terminate_process(proc)
+        raise
     except Exception as e:
         return f"Error executing bash: {e}"
 
@@ -58,6 +101,7 @@ async def tool_bash(command: str, cwd: str = ".", timeout: int = 60) -> str:
     },
 )
 async def tool_powershell(command: str, cwd: str = ".", timeout: int = 60) -> str:
+    proc: asyncio.subprocess.Process | None = None
     try:
         proc = await asyncio.create_subprocess_exec(
             "pwsh",
@@ -67,6 +111,7 @@ async def tool_powershell(command: str, cwd: str = ".", timeout: int = 60) -> st
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=cwd,
+            **_subprocess_kwargs(),
         )
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         output = ""
@@ -78,7 +123,13 @@ async def tool_powershell(command: str, cwd: str = ".", timeout: int = 60) -> st
             output += stderr.decode("utf-8", errors="replace")
         return output.strip() or "(Execution succeeded with no output)"
     except asyncio.TimeoutError:
+        if proc is not None:
+            await _terminate_process(proc)
         return f"Error: Command timed out after {timeout} seconds."
+    except asyncio.CancelledError:
+        if proc is not None:
+            await _terminate_process(proc)
+        raise
     except FileNotFoundError:
         return "Error: pwsh (PowerShell) not found on system."
     except Exception as e:

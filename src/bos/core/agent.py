@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -43,6 +44,15 @@ if TYPE_CHECKING:
     from .llm import LLMResponse
 
 logger = logging.getLogger(__name__)
+
+
+ABORTED_TURN_CONTENT = """(turn aborted before completion)
+
+The previous user request was interrupted before a final answer was produced.
+Intermediate assistant/tool state from the aborted turn was intentionally not
+committed as conversation context. If the user asks to continue, start a fresh
+attempt from the preceding user request and redo any necessary checks or tool
+work."""
 
 
 @dataclass
@@ -261,6 +271,8 @@ class ReActAgent:
             {"role": "user", "content": content or ""},
             **(user_message_metadata if isinstance(user_message_metadata, dict) else {}),
         )
+        turn_status: Literal["running", "completed", "aborted", "error"] = "running"
+        abort_reason: str | None = None
 
         cache_index = 0
 
@@ -268,6 +280,41 @@ class ReActAgent:
             nonlocal cache_index
             ctx.add_message(_compact(message), **(metadata or {}))
             cache_index -= 1
+
+        def _aborted_turn_messages(reason: str | None) -> list[Message]:
+            user_messages = [message for message in ctx.current if message.llm_message.get("role") == "user"]
+            if not user_messages:
+                return []
+            return [
+                *user_messages,
+                Message(
+                    llm_message={"role": "assistant", "content": ABORTED_TURN_CONTENT},
+                    turn_id=ctx.turn_id,
+                    metadata={
+                        "turn_status": "aborted",
+                        "aborted": True,
+                        "abort_reason": reason or "unknown",
+                    },
+                ),
+            ]
+
+        def _has_final_assistant_response() -> bool:
+            if ctx.final_content is None or not ctx.current:
+                return False
+            last_message = ctx.current[-1].llm_message
+            return (
+                last_message.get("role") == "assistant"
+                and not last_message.get("tool_calls")
+                and last_message.get("content") == ctx.final_content
+            )
+
+        async def _persist_turn() -> None:
+            if turn_status == "aborted" and not _has_final_assistant_response():
+                messages = _aborted_turn_messages(abort_reason)
+            else:
+                messages = ctx.current
+            if messages:
+                await self._message_store.save_messages(chat_id, messages)
 
         async def _run_interceptor(stage: str):
             try:
@@ -446,15 +493,23 @@ class ReActAgent:
                             metadata={"tasks": task_list.to_payload()},
                         )
                         task_list.mark_emitted()
+            turn_status = "completed"
         except AbortTurn:
-            pass
+            turn_status = "aborted"
+            abort_reason = "abort_turn"
+            ctx.final_content = ABORTED_TURN_CONTENT
+        except asyncio.CancelledError:
+            turn_status = "aborted"
+            abort_reason = "cancelled"
+            raise
         except Exception as e:
+            turn_status = "error"
             logger.error("Error in agent: %s", e, exc_info=True)
             ctx.add_message({"role": "assistant", "content": f"(error: {e})"})
             await _run_interceptor("error")
             await _emit_event("turn", "fail", detail="error", content=str(e))
-
-        await self._message_store.save_messages(chat_id, ctx.current)
+        finally:
+            await _persist_turn()
         return ctx.final_response
 
     def _get_tool_defs(self) -> list[dict[str, Any]]:
