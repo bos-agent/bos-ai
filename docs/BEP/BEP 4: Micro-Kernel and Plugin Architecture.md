@@ -324,6 +324,37 @@ class TaskTurnInterceptor:
 
 ---
 
+## Impact on Named Actors
+
+The `named_actors` package (under [src/bos/named_actors](file:///home/jzhang/bos-ai/src/bos/named_actors)) is a multi-agent orchestration layer. The transition to a Micro-Kernel and Plugin Architecture impacts it in the following ways:
+
+### 1. `NamedAgent` Constructor Signature
+Because `NamedAgent` (in [src/bos/named_actors/actor.py](file:///home/jzhang/bos-ai/src/bos/named_actors/actor.py#L42)) inherits from `ReActAgent` without overriding `__init__`, its constructor signature changes dynamically with `ReActAgent`. 
+
+When instantiating `NamedAgent` in [runner.py: _build_named_agent](file:///home/jzhang/bos-ai/src/bos/named_actors/runner.py#L164), we must update the `kwargs` to pass the bound plugin list rather than the deprecated direct services (`memory`, `skills_loader`):
+
+```python
+# Updated in src/bos/named_actors/runner.py
+def _build_named_agent(harness, agent_kind: str, scope: str, actor_overrides: dict[str, Any]):
+    ...
+    # Resolve the selective plugins for the agent
+    bound_plugins = harness.bind_plugins_for_agent(agent_spec)
+    
+    kwargs = agent_spec | {
+        "name": agent_kind,
+        "llm": harness.llm,
+        "message_store": harness.message_store,
+        "consolidator": harness.consolidator,
+        "plugins": bound_plugins,  # Passed to ReActAgent.__init__
+    }
+    return _apply(NamedAgent, kwargs)
+```
+
+### 2. `ScopedMemory` Integration
+The `ScopedMemory` wrapper (in [src/bos/named_actors/memory.py](file:///home/jzhang/bos-ai/src/bos/named_actors/memory.py)) was previously injected directly as a `MemoryExtension` service. Under the plugin model, memory isolation per-actor will be configured and initialized as a parameter within the `MemoryPlugin`'s binding process (e.g. `MemoryPlugin.bind({"scope": scope})`), keeping `ScopedMemory` as an implementation detail encapsulated inside the memory plugin.
+
+---
+
 ## Revision History
 
 | Date | Change | Intention |
@@ -331,4 +362,6 @@ class TaskTurnInterceptor:
 | 2026-05-20 | Initial draft (BEP 4) | Formulate the design for decoupling agent-scoped tools from ReActAgent to make tools modular, customizable, and testable. |
 | 2026-05-20 | Plugin Micro-kernel Evolution | Revise the design to treat memory and tasks as cohesive plugins, separating harness/agent boundaries via factory binding and pass-through configuration. |
 | 2026-05-20 | Append Task Case Study | Detail how the Task capability operates as a plugin, including caching-friendly prompt injection. |
+| 2026-05-20 | Add Named Actors Impact | Outline constructor signature changes for NamedAgent and scoped memory integration. |
+
 
