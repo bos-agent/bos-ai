@@ -125,13 +125,31 @@ class AgentHarness:
         ...
 
     def create_agent(self, name: str, agent_spec: dict[str, Any]) -> Agent:
-        plugins_config = agent_spec.get("plugins", {})
+        # 1. Resolve agent-specific plugins by merging defaults and overrides
+        defaults = self.agent_defaults.get("plugins", {})
+        overrides = agent_spec.get("plugins", {})
         
-        # 2. Bind agent-specific instances
-        bound_plugins = [
-            plugin.bind(plugins_config.get(plugin.name, {}))
-            for plugin in self.plugins.values()
-        ]
+        merged_config = {}
+        # Apply defaults
+        for p_name, p_cfg in defaults.items():
+            if p_cfg is not False:
+                merged_config[p_name] = p_cfg
+                
+        # Apply agent-level overrides (can overwrite config or disable via False)
+        for p_name, p_cfg in overrides.items():
+            if p_cfg is False:
+                merged_config.pop(p_name, None)
+            else:
+                merged_config[p_name] = {**merged_config.get(p_name, {}), **p_cfg}
+        
+        # 2. Bind only the enabled plugins
+        bound_plugins = []
+        for p_name, p_cfg in merged_config.items():
+            if p_name in self.plugins:
+                plugin = self.plugins[p_name]
+                bound_plugins.append(plugin.bind(p_cfg))
+            else:
+                logger.warning(f"Plugin {p_name} requested by agent {name} is not loaded by the harness.")
         
         # Inject bound plugins into the agent creation
         return ep_agent.invoke(name, agent_spec | {"plugins": bound_plugins})
