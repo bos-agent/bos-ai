@@ -2,6 +2,28 @@
 
 <!-- version list -->
 
+## v1.3.0 (2026-05-20)
+
+### Features
+
+- **agent**: Abort-safe history persistence, hardened actor cleanup, and process-group termination
+  ([`057bea5`](https://github.com/bos-agent/bos-ai/commit/057bea506e3003fda1615d3fb25b78da193e96be))
+
+- **agent**: Task state emission, fixed task panel, dynamic iteration budget, ReActAgent rename
+  ([#24](https://github.com/bos-agent/bos-ai/pull/24),
+  [`03f8286`](https://github.com/bos-agent/bos-ai/commit/03f8286fd1eb9192cacd032747fcaa43834171cb))
+
+- **defaults**: Tighten agent prompt and harden filesystem tools
+  ([#26](https://github.com/bos-agent/bos-ai/pull/26),
+  [`d01a1ef`](https://github.com/bos-agent/bos-ai/commit/d01a1ef6be7460438f9e88a5a8c2a59b0ec938b4))
+
+### Refactoring
+
+- **cli**: Rename to boscli, group gateway commands, harden workspace config
+  ([#23](https://github.com/bos-agent/bos-ai/pull/23),
+  [`eb1bcbb`](https://github.com/bos-agent/bos-ai/commit/eb1bcbb75fadcd6ea3e737d2fd65c81e311dd7ce))
+
+
 ## v1.2.0 (2026-05-13)
 
 ### Bug Fixes
