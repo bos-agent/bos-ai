@@ -34,6 +34,43 @@ async def test_read_file_empty_file_message_unchanged(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_write_file_creates_new_file_without_prior_read(tmp_path):
+    filesystem._READ_FILES.clear()
+    path = tmp_path / "new.txt"
+
+    result = await filesystem.tool_write_file(str(path), "created\n")
+
+    assert result == f"Successfully wrote to {path}."
+    assert path.read_text(encoding="utf-8") == "created\n"
+
+
+@pytest.mark.asyncio
+async def test_write_file_refuses_to_overwrite_existing_file_before_read(tmp_path):
+    filesystem._READ_FILES.clear()
+    path = tmp_path / "existing.txt"
+    path.write_text("original\n", encoding="utf-8")
+
+    result = await filesystem.tool_write_file(str(path), "changed\n")
+
+    assert result == f"Error: Refusing to overwrite existing file '{path}' before it has been read with ReadFile."
+    assert path.read_text(encoding="utf-8") == "original\n"
+
+
+@pytest.mark.asyncio
+async def test_write_file_overwrites_existing_file_after_read(tmp_path):
+    filesystem._READ_FILES.clear()
+    path = tmp_path / "existing.txt"
+    path.write_text("original\n", encoding="utf-8")
+
+    read_result = await filesystem.tool_read_file(str(path))
+    write_result = await filesystem.tool_write_file(str(path), "changed\n")
+
+    assert read_result == "1\toriginal\n"
+    assert write_result == f"Successfully wrote to {path}."
+    assert path.read_text(encoding="utf-8") == "changed\n"
+
+
+@pytest.mark.asyncio
 async def test_edit_file_rejects_ambiguous_old_string(tmp_path):
     path = tmp_path / "example.txt"
     path.write_text("target\nmiddle\ntarget\n", encoding="utf-8")

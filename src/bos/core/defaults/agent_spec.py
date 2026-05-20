@@ -88,6 +88,7 @@ Use mainly for new files or deliberate complete rewrites. Prefer EditFile for lo
 to existing files. Before overwriting an existing file, inspect its current content with ReadFile.
 
 Guidelines:
+- WriteFile refuses to overwrite an existing file until that file has been read with ReadFile.
 - Avoid creating documentation, plans, or broad new files unless the task requires them.
 - Preserve existing style and formatting when rewriting.
 - After writing meaningful code, verify with an appropriate test, import, or focused inspection.

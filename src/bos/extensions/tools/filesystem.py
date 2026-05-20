@@ -6,6 +6,7 @@ from pathlib import Path
 from bos.core import ep_tool
 
 _IGNORE_DIRS = {".git", ".pycache", "__pycache__", "node_modules", "venv", ".venv", ".uv", "dist", "build"}
+_READ_FILES: set[Path] = set()
 
 
 @ep_tool(
@@ -53,6 +54,7 @@ def _sync_tool_read_file(path: str, line_offset: int = 0, limit: int = 500) -> s
                     break
                 line_number = line_offset + len(lines) + 1
                 lines.append(f"{line_number}\t{line}")
+        _READ_FILES.add(p.resolve())
         return "".join(lines) or "(Reached end of file or file is empty)"
     except Exception as e:
         return f"Error reading file {path}: {e}"
@@ -60,7 +62,7 @@ def _sync_tool_read_file(path: str, line_offset: int = 0, limit: int = 500) -> s
 
 @ep_tool(
     name="WriteFile",
-    description="Write content to a text file in the workspace.",
+    description="Write content to a text file in the workspace. Existing files must be read first.",
     parameters={
         "type": "object",
         "properties": {
@@ -77,8 +79,12 @@ async def tool_write_file(path: str, content: str) -> str:
 def _sync_tool_write_file(path: str, content: str) -> str:
     p = Path(path)
     try:
+        resolved = p.resolve(strict=False)
+        if p.exists() and p.is_file() and resolved not in _READ_FILES:
+            return f"Error: Refusing to overwrite existing file '{path}' before it has been read with ReadFile."
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content, encoding="utf-8")
+        _READ_FILES.add(resolved)
         return f"Successfully wrote to {path}."
     except Exception as e:
         return f"Error writing to file {path}: {e}"
