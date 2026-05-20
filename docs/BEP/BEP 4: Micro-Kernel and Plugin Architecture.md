@@ -1,4 +1,4 @@
-# BEP 4: Decouple Agent-Scoped Tools via AgentContext
+# BEP 4: Micro-Kernel and Plugin Architecture
 
 Status: **design** — contract and tool surface finalized, ready for implementation planning.
 
