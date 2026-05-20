@@ -324,6 +324,72 @@ class TaskTurnInterceptor:
 
 ---
 
+## Component Taxonomy
+
+Every current agent capability is classified as either a **Core Service**, a **Core Primitive**, or a **Plugin**:
+
+| Component | Classification | Rationale |
+|---|---|---|
+| `MessageStore` | **Core Service** | Mandatory runtime primitive for turn persistence. No LLM tools. |
+| `Consolidator` | **Core Service** | Backend utility for context compression. No LLM tools. |
+| `LLMClient` | **Core Service** | Mandatory provider abstraction. No LLM tools. |
+| `MailRoute` | **Core Service** | Message routing infrastructure. No LLM tools. |
+| `AskSubagent` | **Core Primitive** | Deeply coupled to harness lifecycle (`create_agent`, `_make_subagent_chat_id`, subagent config resolution). Remains a built-in agent tool. |
+| Memory (`Remember`, `Recall`, `ReviseMaxim`, `Forget`) | **Plugin** | Bundles 4 tools + maxim prompt injection + scoped state. Fully optional. |
+| Tasks (`TaskCreate`, `TaskUpdate`, `TaskList`, `TaskGet`) | **Plugin** | Bundles 4 tools + interceptors + dynamic budget hook. Fully optional. |
+| Skills (`LoadSkill`) | **Plugin** | Currently a thin loader, but the plugin boundary enables richer implementations (skill creation, improvement, semantic search). Fully optional. |
+
+### Why `AskSubagent` Stays Core
+
+`AskSubagent` requires deep access to harness internals that are not appropriate to expose through the plugin protocol:
+- `harness.create_agent(role, cfg)` — instantiates a child agent with full service wiring
+- `harness._get_subagent_config(role)` — resolves subagent-specific configuration and task templates
+- `harness._make_subagent_chat_id(chat_id, role)` — generates namespaced child chat IDs
+- `derive_event_sink(...)` — creates scoped event sinks for parent/child tracing
+
+Exposing these as a public `AgentContext` API would leak harness internals. Instead, `AskSubagent` remains the **only built-in tool** in the agent core, keeping the "zero built-in tools" aspiration at "one built-in tool" for pragmatic reasons.
+
+### Why Skills Become a Plugin
+
+The current `LoadSkill` tool is a thin wrapper around `self._skills_loader.load_skill(name)`. By packaging it as a `SkillsPlugin`:
+- The plugin owns the `_prompt_section_skills()` prompt injection (listing available skills in the system prompt)
+- The plugin can evolve to include richer tools: `CreateSkill`, `ImproveSkill`, `SearchSkills`
+- The `ep_skills_loader` extension point moves from a core contract into a plugin-internal concern
+- Users who don't need skills can disable the plugin entirely, removing both the tool and the prompt section
+
+---
+
+## Impact on Named Actors
+
+The `named_actors` package (under [src/bos/named_actors](file:///home/jzhang/bos-ai/src/bos/named_actors)) is a multi-agent orchestration layer. The transition to a Micro-Kernel and Plugin Architecture impacts it in the following ways:
+
+### 1. `NamedAgent` Constructor Signature
+Because `NamedAgent` (in [src/bos/named_actors/actor.py](file:///home/jzhang/bos-ai/src/bos/named_actors/actor.py#L42)) inherits from `ReActAgent` without overriding `__init__`, its constructor signature changes dynamically with `ReActAgent`. 
+
+When instantiating `NamedAgent` in [runner.py: _build_named_agent](file:///home/jzhang/bos-ai/src/bos/named_actors/runner.py#L164), we must update the `kwargs` to pass the bound plugin list rather than the deprecated direct services (`memory`, `skills_loader`):
+
+```python
+# Updated in src/bos/named_actors/runner.py
+def _build_named_agent(harness, agent_kind: str, scope: str, actor_overrides: dict[str, Any]):
+    ...
+    # Resolve the selective plugins for the agent
+    bound_plugins = harness.bind_plugins_for_agent(agent_spec)
+    
+    kwargs = agent_spec | {
+        "name": agent_kind,
+        "llm": harness.llm,
+        "message_store": harness.message_store,
+        "consolidator": harness.consolidator,
+        "plugins": bound_plugins,  # Passed to ReActAgent.__init__
+    }
+    return _apply(NamedAgent, kwargs)
+```
+
+### 2. `ScopedMemory` Integration
+The `ScopedMemory` wrapper (in [src/bos/named_actors/memory.py](file:///home/jzhang/bos-ai/src/bos/named_actors/memory.py)) was previously injected directly as a `MemoryExtension` service. Under the plugin model, memory isolation per-actor will be configured and initialized as a parameter within the `MemoryPlugin`'s binding process (e.g. `MemoryPlugin.bind({"scope": scope})`), keeping `ScopedMemory` as an implementation detail encapsulated inside the memory plugin.
+
+---
+
 ## Revision History
 
 | Date | Change | Intention |
@@ -331,4 +397,7 @@ class TaskTurnInterceptor:
 | 2026-05-20 | Initial draft (BEP 4) | Formulate the design for decoupling agent-scoped tools from ReActAgent to make tools modular, customizable, and testable. |
 | 2026-05-20 | Plugin Micro-kernel Evolution | Revise the design to treat memory and tasks as cohesive plugins, separating harness/agent boundaries via factory binding and pass-through configuration. |
 | 2026-05-20 | Append Task Case Study | Detail how the Task capability operates as a plugin, including caching-friendly prompt injection. |
+| 2026-05-20 | Add Named Actors Impact | Outline constructor signature changes for NamedAgent and scoped memory integration. |
+| 2026-05-20 | Component Taxonomy | Classify all agent capabilities into Core Services, Core Primitives, and Plugins. AskSubagent stays core; Skills becomes a plugin. |
+
 
