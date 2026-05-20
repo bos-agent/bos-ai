@@ -86,17 +86,51 @@ class BoundPlugin(Protocol):
         ...
 ```
 
-### 2. Harness Assembly
-When compiling an agent, the harness binds registered plugins using the resolved agent configuration:
+### 2. Plugin Discovery and Registration (`ep_plugin`)
+
+Plugins are discovered using the core platform's registry system. We define a new global `ExtensionPoint` inside [src/bos/core/contract.py](file:///home/jzhang/bos-ai/src/bos/core/contract.py):
+
+```python
+# In src/bos/core/contract.py
+ep_plugin = ExtensionPoint(
+    description="Harness plugin. A class or factory implementing the HarnessPlugin protocol."
+)
+```
+
+Developers register their custom plugins globally by decorating their classes:
+```python
+@ep_plugin(name="MarkdownMemoryPlugin")
+class MarkdownMemoryPlugin:
+    ...
+```
+
+### 3. Harness Startup Loading and Assembly
+
+During [AgentHarness](file:///home/jzhang/bos-ai/src/bos/core/harness.py) startup (`__aenter__`), configured plugins are instantiated via `ep_plugin`, tracked as owned resources, and initialized by calling `setup(self)`:
 
 ```python
 class AgentHarness:
+    async def __aenter__(self):
+        ...
+        # 1. Resolve which plugins to load (from config or auto-detected from agent specs)
+        self.plugins: dict[str, HarnessPlugin] = {}
+        for name in self._configured_plugins:
+            # Instantiate via the global ep_plugin registry
+            plugin = ep_plugin.invoke(name, self._plugin_configs.get(name, {}))
+            self.plugins[name] = plugin
+            self._owned.append(plugin)
+            
+            # Run startup registrations and resources
+            await plugin.setup(self)
+        ...
+
     def create_agent(self, name: str, agent_spec: dict[str, Any]) -> Agent:
         plugins_config = agent_spec.get("plugins", {})
         
+        # 2. Bind agent-specific instances
         bound_plugins = [
             plugin.bind(plugins_config.get(plugin.name, {}))
-            for plugin in self.registered_plugins
+            for plugin in self.plugins.values()
         ]
         
         # Inject bound plugins into the agent creation
