@@ -93,12 +93,12 @@ def test_workspace_loads_from_bos_toml(tmp_path, monkeypatch):
     monkeypatch.delenv("BOS_CONFIG", raising=False)
     workspace = tmp_path / "project"
     workspace.mkdir()
-    (workspace / "bos.toml").write_text('[platform]\nextensions = ["bos.extensions.all"]\n', encoding="utf-8")
+    (workspace / "bos.toml").write_text('[platform]\nextensions = ["bos.exts"]\n', encoding="utf-8")
 
     ws = Workspace.from_discovery(workspace)
 
     assert ws.bos_dir == workspace.resolve()
-    assert ws.config == {"platform": {"extensions": ["bos.extensions.all"]}}
+    assert ws.config == {"platform": {"extensions": ["bos.exts"]}}
 
 
 def test_workspace_bos_toml_sets_bos_dir_equal_to_workspace(tmp_path, monkeypatch):

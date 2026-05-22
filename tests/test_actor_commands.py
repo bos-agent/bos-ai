@@ -370,6 +370,23 @@ async def test_prompt_command_returns_current_agent_system_prompt():
 
 
 @pytest.mark.asyncio
+async def test_memory_command_is_not_registered():
+    mailbox = FakeMailbox("agent@main")
+    actor = AgentActor(StubAgent(), mailbox)
+    env = Envelope(
+        sender="channel@telegram",
+        recipient="agent@main",
+        content="/memory",
+        content_type=MessageType.COMMAND,
+        chat_id="telegram:42",
+    )
+
+    await actor._handle_command(env)
+
+    assert mailbox.sent[-1].content == "Invalid command `memory`"
+
+
+@pytest.mark.asyncio
 async def test_new_cancels_or_fences_in_flight_reply_and_drops_stale_result():
     route = InMemMailRoute()
     actor_mailbox = route.bind("agent@main")

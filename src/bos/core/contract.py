@@ -207,6 +207,8 @@ class ToolContext:
     chat_id: str
     turn_id: str
     event_sink: EventSink | None = None
+    # Escape hatch for plugin/runtime-specific context that is intentionally
+    # not modeled as a core ToolContext field.
     extra_data: Mapping[str, Any] = field(default_factory=dict)
 
 

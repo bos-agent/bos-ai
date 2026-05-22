@@ -28,7 +28,7 @@ from ._utils import (
     _strip_think,
 )
 from .actor import AgentActor
-from .agent import AbortTurn, ChainReactInterceptor, ReActAgent, TurnContext
+from .agent import AbortTurn, ChainInterceptor, ReActAgent, TurnContext
 from .contract import (
     Agent,
     AgentBindContext,
@@ -76,7 +76,7 @@ __all__ = [
     "CURRENT_HARNESS",
     "CURRENT_MAILBOX",
     "Channel",
-    "ChainReactInterceptor",
+    "ChainInterceptor",
     "Closeable",
     "Consolidator",
     "Envelope",

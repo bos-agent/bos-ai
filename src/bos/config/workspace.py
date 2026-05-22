@@ -440,7 +440,7 @@ class Workspace:
         resolved_platform_cfg = copy.deepcopy({k: v for k, v in raw_platform_cfg.items() if k != "agent_dirs"})
 
         if resolved_platform_cfg.get("extensions") is None:
-            resolved_platform_cfg["extensions"] = ["bos.extensions.all", "./extensions"]
+            resolved_platform_cfg["extensions"] = ["bos.exts", "./extensions"]
 
         try:
             resolved_agents, source_history = self._resolve_platform_agents(raw_platform_cfg)

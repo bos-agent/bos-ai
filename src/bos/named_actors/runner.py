@@ -168,7 +168,7 @@ async def _build_named_agent(harness, agent_kind: str, scope: str, actor_overrid
     if ep_agent.has(agent_kind):
         agent_spec.update(ep_agent.get(agent_kind).defaults)
     agent_spec.update(actor_overrides)
-    agent_spec["name"] = agent_kind
+    agent_spec["name"] = agent_kind  # TODO why the name always be agent kind?
 
     bind_context = AgentBindContext(
         agent_name=agent_kind,

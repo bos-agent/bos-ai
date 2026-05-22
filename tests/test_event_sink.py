@@ -13,14 +13,14 @@ from bos.core import (
     ep_agent,
     ep_provider,
 )
-from bos.core.agent import ChainReactInterceptor, ReActAgent
+from bos.core.agent import ChainInterceptor, ReActAgent
 from bos.protocol import MessageType
 
 
 def create_test_agent(**kwargs):
     kwargs.setdefault("message_store", InMemMessageStore())
     kwargs.setdefault("consolidator", MessageOnlyConsolidator())
-    kwargs.setdefault("interceptor", ChainReactInterceptor())
+    kwargs.setdefault("interceptor", ChainInterceptor())
     return ReActAgent(**kwargs)
 
 

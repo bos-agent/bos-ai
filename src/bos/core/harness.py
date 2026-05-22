@@ -15,7 +15,7 @@ from ._utils import (
     _load_ext_paths,
     _safe_format,
 )
-from .agent import ChainReactInterceptor, ReActAgent
+from .agent import ChainInterceptor, ReActAgent
 from .contract import (
     AgentBindContext,
     AgentPlugin,
@@ -218,7 +218,7 @@ class AgentHarness:
         self.message_store = self._create_and_own("ep_message_store", MessageStore, self._message_store_cfg)
         self.llm = LLMClient(self._providers_cfg)
         self.consolidator = self._create_consolidator()
-        self.interceptor = ChainReactInterceptor(self._interceptors_cfg)
+        self.interceptor = ChainInterceptor(self._interceptors_cfg)
 
         # Build plugin services
         self._plugin_services = PluginServices(

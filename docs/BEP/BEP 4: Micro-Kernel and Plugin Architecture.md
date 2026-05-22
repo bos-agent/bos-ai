@@ -165,17 +165,14 @@ Invalid settings for a known plugin are startup errors. A known plugin config ta
 BEP 4 adds a plugin extension point in `src/bos/core/contract.py`:
 
 ```python
-ep_plugin = ExtensionPoint(
-    description="Harness plugin. A class or factory implementing HarnessPlugin."
-)
+ep_plugin = ExtensionPoint(description="Harness plugin. A class or factory implementing HarnessPlugin.")
 ```
 
 Plugin packages register plugin providers through `ep_plugin`:
 
 ```python
 @ep_plugin(name="MemoryPlugin")
-class MemoryHarnessPlugin:
-    ...
+class MemoryHarnessPlugin: ...
 ```
 
 `ep_plugin` discovers harness-scoped plugin providers. It is not a tool registry.
@@ -201,7 +198,6 @@ class TurnContext:
     final_content: str | None = None
 
     event_sink: EventSink | None = None
-    extra_data: dict[str, Any] = field(default_factory=dict)
 
     def get_llm_messages(self) -> list[dict[str, Any]]:
         return self.system + self.history + [m.llm_message for m in self.current] + self.ephemeral
@@ -250,6 +246,7 @@ class SubagentRuntime(Protocol):
         """Delegate to a configured subagent and return its response."""
         ...
 
+
 @dataclass(frozen=True)
 class PluginServices:
     bos_dir: Path
@@ -272,45 +269,36 @@ Plugins are split by scope:
 ```python
 class HarnessPlugin(Protocol):
     @property
-    def name(self) -> str:
-        ...
+    def name(self) -> str: ...
 
-    def default_config(self) -> Mapping[str, Any]:
-        ...
+    def default_config(self) -> Mapping[str, Any]: ...
 
-    async def setup(self, services: PluginServices) -> None:
-        ...
+    async def setup(self, services: PluginServices) -> None: ...
 
     def validate_config(
         self,
         config: Mapping[str, Any],
         context: AgentBindContext,
-    ) -> None:
-        ...
+    ) -> None: ...
 
     def bind(
         self,
         config: Mapping[str, Any],
         context: AgentBindContext,
-    ) -> "AgentPlugin":
-        ...
+    ) -> "AgentPlugin": ...
 
-    async def teardown(self) -> None:
-        ...
+    async def teardown(self) -> None: ...
+
 
 class AgentPlugin(Protocol):
     @property
-    def name(self) -> str:
-        ...
+    def name(self) -> str: ...
 
-    def register_tools(self, registry: ToolRegistry) -> None:
-        ...
+    def register_tools(self, registry: ToolRegistry) -> None: ...
 
-    async def get_system_prompt_section(self, context: TurnContext) -> str | None:
-        ...
+    async def get_system_prompt_section(self, context: TurnContext) -> str | None: ...
 
-    def get_interceptors(self) -> Sequence[TurnInterceptor]:
-        ...
+    def get_interceptors(self) -> Sequence[TurnInterceptor]: ...
 ```
 
 `AgentPlugin.register_tools(registry)` replaces the earlier `get_tools() -> list[str]` sketch. Plugins contribute complete tool definitions and bound handlers to the owning agent's local `ToolRegistry`.
@@ -345,8 +333,7 @@ class ReActAgent:
         interceptor: TurnInterceptor | None = None,
         max_tokens: int = 128 * 1024,
         max_iterations: int = 25,
-    ):
-        ...
+    ): ...
 ```
 
 Removed from the kernel constructor:
@@ -520,18 +507,12 @@ MemoryPlugin may retain an internal backend protocol equivalent to the current m
 
 ```python
 class MemoryBackend(Protocol):
-    async def get_maxim(self, key: str) -> str:
-        ...
-    async def set_maxim(self, key: str, content: str) -> None:
-        ...
-    async def search_memories(self, query: str, *, top_k: int = 5) -> list[MemoryEntry]:
-        ...
-    async def ingest_memory(self, content: str, *, tags: list[str] | None = None) -> str:
-        ...
-    async def get_memory(self, entry_id: str) -> MemoryEntry | None:
-        ...
-    async def forget_memory(self, entry_id: str) -> None:
-        ...
+    async def get_maxim(self, key: str) -> str: ...
+    async def set_maxim(self, key: str, content: str) -> None: ...
+    async def search_memories(self, query: str, *, top_k: int = 5) -> list[MemoryEntry]: ...
+    async def ingest_memory(self, content: str, *, tags: list[str] | None = None) -> str: ...
+    async def get_memory(self, entry_id: str) -> MemoryEntry | None: ...
+    async def forget_memory(self, entry_id: str) -> None: ...
 ```
 
 That protocol belongs to MemoryPlugin implementation, not the agent kernel.

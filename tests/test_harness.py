@@ -973,3 +973,65 @@ async def test_agent_emits_task_state_events(monkeypatch):
     # After TaskUpdate: first task now in_progress
     tasks3 = task_events[2].metadata.get("tasks", [])
     assert tasks3[0]["status"] == "in_progress"
+
+
+@pytest.mark.asyncio
+async def test_cache_hint_offsets_for_ephemeral_messages():
+    suffix = uuid.uuid4().hex
+    provider_name = f"test_cache_ephemeral_{suffix}"
+    calls: list[dict] = []
+
+    @ep_provider(name=provider_name)
+    async def provider(messages, model=None, tools=None, **kwargs):
+        calls.append(
+            {
+                "messages": messages,
+                "cache_control_injection_points": kwargs.get("cache_control_injection_points"),
+            }
+        )
+        if len(calls) == 1:
+            return LLMResponse(
+                content="",
+                tool_calls=[ToolCallRequest(id="tc1", name="Echo", arguments={})],
+                finish_reason="tool_calls",
+            )
+        return LLMResponse(content="done", finish_reason="stop")
+
+    class EphemeralInterceptor:
+        async def intercept(self, stage, context):
+            if stage == "before_llm":
+                context.ephemeral = [{"role": "user", "content": "ephemeral note"}]
+
+    async def echo() -> str:
+        return "tool result"
+
+    try:
+        agent = create_test_agent(
+            model=f"{provider_name}/model",
+            interceptor=EphemeralInterceptor(),
+            tools=["Echo"],
+        )
+        agent._local_tools(
+            name="Echo",
+            description="Echo test tool.",
+            parameters={"type": "object", "properties": {}, "required": []},
+        )(echo)
+
+        await agent.ask("cache-ephemeral-chat", "run tool")
+
+        assert len(calls) == 2
+        second_messages = calls[1]["messages"]
+        assert [message["role"] for message in second_messages] == [
+            "system",
+            "user",
+            "assistant",
+            "tool",
+            "user",
+        ]
+        assert second_messages[-1]["content"] == "ephemeral note"
+        assert calls[1]["cache_control_injection_points"] == [
+            {"location": "message", "role": "system"},
+            {"location": "message", "index": -4},
+        ]
+    finally:
+        ep_provider._extensions.pop(provider_name, None)

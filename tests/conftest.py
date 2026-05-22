@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from bos.core.agent import ChainReactInterceptor, ReActAgent
+from bos.core.agent import ChainInterceptor, ReActAgent
 from bos.core.contract import Message
 from bos.extensions.mailboxes.in_memory import InMemMailRoute  # noqa: F401
 from bos.extensions.memory_stores.in_memory import InMemMemoryExtension  # noqa: F401
@@ -14,7 +14,7 @@ from bos.extensions.message_stores.in_memory import InMemMessageStore  # noqa: F
 def create_test_agent(*, plugins: list[Any] | None = None, **kwargs: Any) -> ReActAgent:
     kwargs.setdefault("message_store", InMemMessageStore())
     kwargs.setdefault("consolidator", MessageOnlyConsolidator())
-    kwargs.setdefault("interceptor", ChainReactInterceptor())
+    kwargs.setdefault("interceptor", ChainInterceptor())
     return ReActAgent(plugins=plugins or [], **kwargs)
 
 

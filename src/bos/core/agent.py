@@ -67,7 +67,6 @@ class TurnContext:
     current_llm_response: LLMResponse | None = None
     final_content: str | None = None
     event_sink: EventSink | None = None
-    extra_data: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def set_system_prompt(self, content: MessageContent) -> None:
@@ -79,9 +78,6 @@ class TurnContext:
             self.current[-1].llm_message["content"] = parts
         else:
             self.current.append(Message(llm_message=llm_message, turn_id=self.turn_id, metadata=kwargs))
-
-    def get_messages(self) -> list[dict[str, Any]]:
-        return self.system + self.history + [m.llm_message for m in self.current]
 
     def get_llm_messages(self) -> list[dict[str, Any]]:
         return self.system + self.history + [m.llm_message for m in self.current] + self.ephemeral
@@ -95,7 +91,7 @@ class AbortTurn(Exception):
     pass
 
 
-class ChainReactInterceptor:
+class ChainInterceptor:
     """
     An interceptor that takes a list of interceptor names (or configurations)
     and runs them sequentially in the provided order.
@@ -181,7 +177,7 @@ class ReActAgent:
         tools: list[str] | None = None,
         tools_usage: dict[str, str] | None = None,
         exclude_tools: list[str] | None = None,
-        name: str | None = None,
+        name: str | None = None,  # TODO how is this assigned and used?
         model: str | None = None,
         reasoning_effort: Literal["low", "medium", "high"] | None = None,
         llm: LLMClient | None = None,
@@ -211,12 +207,10 @@ class ReActAgent:
         self._current_context: TurnContext | None = None
 
         # Compose interceptors: plugin interceptors first, then configured harness/workspace interceptors
-        plugin_interceptors = [
-            i for plugin in self._plugins for i in plugin.get_interceptors()
-        ]
+        plugin_interceptors = [i for plugin in self._plugins for i in plugin.get_interceptors()]
         self._interceptor = _CompositePluginInterceptor(
             plugin_interceptors=plugin_interceptors,
-            fallback=interceptor or ChainReactInterceptor(),
+            fallback=interceptor or ChainInterceptor(),
         )
 
         # Register plugin tools into the agent-local tool registry
@@ -263,6 +257,16 @@ class ReActAgent:
             nonlocal cache_index
             ctx.add_message(_compact(message), **(metadata or {}))
             cache_index -= 1
+
+        def _cache_control_injection_points() -> list[dict[str, Any]]:
+            hints = [{"location": "message", "role": "system"}]
+            if cache_index == 0:
+                return hints
+            # ctx.ephemeral is appended after persisted/current messages in the
+            # LLM input, so negative indexes that target current/history messages
+            # must be shifted left by the ephemeral tail length.
+            hints.append({"location": "message", "index": cache_index - len(ctx.ephemeral)})
+            return hints
 
         def _aborted_turn_messages(reason: str | None) -> list[Message]:
             user_messages = [message for message in ctx.current if message.llm_message.get("role") == "user"]
@@ -369,13 +373,10 @@ class ReActAgent:
                 await _run_interceptor("before_llm")
                 await _emit_event("llm", "start", stage="before_llm", detail="thinking")
 
-                litellm_cache_hint = [{"location": "message", "role": "system"}] + (
-                    [] if cache_index == 0 else [{"location": "message", "index": cache_index}]
-                )
                 ctx.current_llm_response = response = await self._llm.complete(
                     ctx.get_llm_messages(),
                     tools=ctx.tool_defs,
-                    cache_control_injection_points=litellm_cache_hint,
+                    cache_control_injection_points=_cache_control_injection_points(),
                     **llm_params,
                 )
                 cache_index = -1
@@ -426,15 +427,13 @@ class ReActAgent:
 
                 # call tools and send bake to the llm
                 tool_call_dicts = [tc.to_openai_call() for tc in response.tool_calls]
-                _add_message(
-                    {
-                        "role": "assistant",
-                        "content": response.content or "",
-                        "tool_calls": tool_call_dicts,
-                        "reasoning_content": response.reasoning_content,
-                        "thinking_blocks": response.thinking_blocks,
-                    }
-                )
+                _add_message({
+                    "role": "assistant",
+                    "content": response.content or "",
+                    "tool_calls": tool_call_dicts,
+                    "reasoning_content": response.reasoning_content,
+                    "thinking_blocks": response.thinking_blocks,
+                })
 
                 for tc in response.tool_calls:
                     await _emit_event(
@@ -445,14 +444,12 @@ class ReActAgent:
                         content=json.dumps(tc.arguments, default=str),
                     )
                     tool_result = await self._call_tool(tc, ctx, event_sink=event_sink)
-                    _add_message(
-                        {
-                            "role": "tool",
-                            "tool_call_id": tc.id,
-                            "name": tc.name,
-                            "content": tool_result,
-                        }
-                    )
+                    _add_message({
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "name": tc.name,
+                        "content": tool_result,
+                    })
                     await _run_interceptor("after_tool")
                     await _emit_event(
                         "tool",
@@ -599,8 +596,8 @@ class ReActAgent:
         )
         return dict(list(collection.items())[:limit])
 
-    @classmethod
-    def register(cls, name: str, description: str | None = None, **kwargs):
+    @staticmethod
+    def register(name: str, description: str | None = None, **kwargs):
         _CAPABILITY_KEYS = ("tools",)
 
         def map_value(key, value):

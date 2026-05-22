@@ -38,7 +38,7 @@ async def test_interactive_wiring_harness_to_client(tmp_path):
 agent = "test-agent"
 
 [platform]
-extensions = ["bos.extensions.all"]
+extensions = ["bos.exts"]
 
 [[platform.agents]]
 name = "test-agent"
