@@ -62,7 +62,7 @@ async def start_named_actors(workspace: Workspace) -> None:
         logger.info("No [main.actors] configured; starting single actor agent=%r", agent_name)
         async with workspace.harness() as harness:
             chat_state = ChatState(workspace.bos_dir)
-            agent = harness.create_agent(agent_name)
+            agent = await harness.create_agent(agent_name)
             actor = AgentActor(agent, harness.mail_route.bind(actor_address), chat_state=chat_state)
             channels = _create_channels(channels_cfg, ep_channel, Channel)
             task = asyncio.create_task(_run_actor_and_channels(actor, channels, harness))
@@ -87,7 +87,7 @@ async def start_named_actors(workspace: Workspace) -> None:
             mailbox = harness.mail_route.bind(address)
             is_default = actor_name == "main"
 
-            agent = _build_named_agent(harness, agent_kind, actor_name, _agent_overrides(cfg))
+            agent = await _build_named_agent(harness, agent_kind, actor_name, _agent_overrides(cfg))
             actor = NamedActor(
                 agent,
                 mailbox,
@@ -161,25 +161,17 @@ async def _run_actor_and_channels(actor, channels, harness) -> None:
             tg.create_task(ch.run(harness.mail_route.bind(address)), name=f"channel:{address}")
 
 
-def _build_named_agent(harness, agent_kind: str, scope: str, actor_overrides: dict[str, Any]):
-    from bos.core import ep_agent
-    from bos.core._utils import _apply
-    from bos.named_actors.actor import NamedAgent
-    from bos.named_actors.memory import ScopedMemory
+async def _build_named_agent(harness, agent_kind: str, scope: str, actor_overrides: dict[str, Any]):
+    from bos.core import AgentBindContext, ep_agent
 
     agent_spec: dict[str, Any] = {}
     if ep_agent.has(agent_kind):
         agent_spec.update(ep_agent.get(agent_kind).defaults)
     agent_spec.update(actor_overrides)
+    agent_spec["name"] = agent_kind  # TODO why the name always be agent kind?
 
-    kwargs = agent_spec | {
-        "name": agent_kind,
-        "llm": harness.llm,
-        "message_store": harness.message_store,
-        "memory": ScopedMemory(harness.memory, scope),
-        "consolidator": harness.consolidator,
-        "skills_loader": harness.skills_loader,
-        "interceptor": harness.interceptor,
-        "tool_configs": harness._tools_cfg,
-    }
-    return _apply(NamedAgent, kwargs)
+    bind_context = AgentBindContext(
+        agent_name=agent_kind,
+        actor_scope=scope,
+    )
+    return await harness.create_agent(agent_kind, agent_spec, bind_context=bind_context)

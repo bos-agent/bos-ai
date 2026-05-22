@@ -440,7 +440,7 @@ class Workspace:
         resolved_platform_cfg = copy.deepcopy({k: v for k, v in raw_platform_cfg.items() if k != "agent_dirs"})
 
         if resolved_platform_cfg.get("extensions") is None:
-            resolved_platform_cfg["extensions"] = ["bos.extensions.all", "./extensions"]
+            resolved_platform_cfg["extensions"] = ["bos.exts", "./extensions"]
 
         try:
             resolved_agents, source_history = self._resolve_platform_agents(raw_platform_cfg)
@@ -454,8 +454,60 @@ class Workspace:
 
         return resolved_platform_cfg
 
+    def _resolve_platform_plugins(self) -> dict[str, dict[str, Any]]:
+        """Return {plugin_name: config_dict} from platform.plugins.*."""
+        raw = self.config.get("platform", {}).get("plugins", {})
+        if not isinstance(raw, dict):
+            return {}
+        return {k: dict(v) if isinstance(v, dict) else {} for k, v in raw.items()}
+
+    def resolve_enabled_plugins(
+        self, agent_spec: dict[str, Any]
+    ) -> list[str]:
+        """Determine ordered list of enabled plugins for an agent.
+
+        Order:
+        1. globally enabled plugins in platform.enabled_plugins list order
+        2. agent-only enabled plugins in agent config declaration order
+
+        Agent can disable a globally enabled plugin with enabled = false.
+        Agent can enable a non-global plugin with enabled = true.
+        """
+        raw_platform = self.config.get("platform", {})
+        global_enabled: list[str] = raw_platform.get("enabled_plugins", [])
+        if not isinstance(global_enabled, list):
+            global_enabled = []
+
+        agent_plugins = agent_spec.get("plugins", {})
+        if not isinstance(agent_plugins, dict):
+            agent_plugins = {}
+
+        resolved: list[str] = []
+        for name in global_enabled:
+            agent_cfg = agent_plugins.get(name, {})
+            disabled = isinstance(agent_cfg, dict) and agent_cfg.get("enabled") is False
+            if not disabled:
+                resolved.append(name)
+
+        for name in agent_plugins:
+            if name not in resolved:
+                cfg = agent_plugins[name]
+                if isinstance(cfg, dict) and cfg.get("enabled") is True:
+                    resolved.append(name)
+
+        return resolved
+
     def harness(self) -> AgentHarness:
-        harness_cfg = self.config.get("harness", {}) | {"bos_dir": self.bos_dir, "workspace": self.workspace}
+        platform_cfg = self.config.get("platform", {})
+        harness_cfg = (
+            self.config.get("harness", {})
+            | {
+                "bos_dir": self.bos_dir,
+                "workspace": self.workspace,
+                "enabled_plugins": platform_cfg.get("enabled_plugins", []),
+                "platform_plugins": platform_cfg.get("plugins", {}),
+            }
+        )
         return _apply(AgentHarness, harness_cfg)
 
     def enable_interceptors(self, interceptors: list[str | dict[str, Any]]):

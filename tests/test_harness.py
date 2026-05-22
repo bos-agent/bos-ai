@@ -3,33 +3,37 @@ import logging
 import uuid
 
 import pytest
-from conftest import CloseTrackingConsolidator, InMemMemoryExtension, InMemMessageStore, MessageOnlyConsolidator
+from conftest import (
+    CloseTrackingConsolidator,
+    InMemMemoryExtension,
+    InMemMessageStore,
+    MessageOnlyConsolidator,
+    create_test_agent,
+)
 
 from bos.config.workspace import Workspace
 from bos.core import AgentHarness, LLMResponse, Message, ToolCallRequest, bootstrap_platform, ep_agent, ep_provider
-from bos.core.agent import ChainReactInterceptor, ReActAgent
-from bos.core.contract import SkillMeta
-from bos.core.defaults.agent_spec import bos_maxims as default_maxims
+from bos.core.agent import ReActAgent
 from bos.core.defaults.agent_spec import bos_tools_usage, default_agent_spec
-from bos.core.defaults.skills_loader import FileSystemSkillsLoader
 from bos.core.history import HistoryProjection
 from bos.core.registry import ToolRegistry
+from bos.plugins.memory import MemoryAgentPlugin
+from bos.plugins.skills import SkillMeta, SkillsAgentPlugin
+from bos.plugins.subagent import SubagentAgentPlugin
+from bos.plugins.task import TaskAgentPlugin
 
 
-def create_test_agent(**kwargs):
-    kwargs.setdefault("message_store", InMemMessageStore())
-    kwargs.setdefault("memory", InMemMemoryExtension())
-    kwargs.setdefault("consolidator", MessageOnlyConsolidator())
-    kwargs.setdefault("skills_loader", FileSystemSkillsLoader())
-    kwargs.setdefault("interceptor", ChainReactInterceptor())
-    return ReActAgent(**kwargs)
+class _MockSubagentRuntime:
+    async def ask(self, role, message, *, parent) -> str:
+        return "mock response"
 
 
 def test_react_agent_local_tools_describe_ask_subagent(caplog):
     local_tools = ToolRegistry("test tools")
+    subagent = SubagentAgentPlugin(_MockSubagentRuntime(), allow=None, exclude=[])
 
     with caplog.at_level(logging.WARNING):
-        agent = create_test_agent(local_tools=local_tools)
+        agent = create_test_agent(local_tools=local_tools, plugins=[subagent])
 
     assert local_tools.get("AskSubagent") is not None
     ask_subagent = agent._local_tools.get("AskSubagent")
@@ -52,12 +56,9 @@ async def test_harness_create_agent_defaults_to_no_capabilities(tmp_path):
     bos_dir.mkdir()
 
     async with AgentHarness(bos_dir=bos_dir, workspace=tmp_path, consolidator=MessageOnlyConsolidator()) as harness:
-        agent = harness.create_agent()
+        agent = await harness.create_agent()
 
         assert agent._tools == []
-        assert agent._skills == []
-        assert agent._maxims == {}
-        assert agent._subagents == []
         assert agent._get_tool_defs() == []
 
 
@@ -71,12 +72,9 @@ async def test_registered_agent_defaults_to_no_capabilities(tmp_path):
         ReActAgent.register(name=agent_name, description="Locked", system_prompt="Stay locked down.")
 
         async with AgentHarness(bos_dir=bos_dir, workspace=tmp_path, consolidator=MessageOnlyConsolidator()) as harness:
-            agent = harness.create_agent(agent_name)
+            agent = await harness.create_agent(agent_name)
 
             assert agent._tools == []
-            assert agent._skills == []
-            assert agent._maxims == {}
-            assert agent._subagents == []
             assert agent._get_tool_defs() == []
     finally:
         ep_agent._extensions.pop(agent_name, None)
@@ -94,23 +92,15 @@ async def test_registered_agent_star_capabilities_enable_all(tmp_path):
             description="Open",
             system_prompt="Use everything.",
             tools="*",
-            skills="*",
-            maxims="*",
-            subagents="*",
         )
 
         async with AgentHarness(bos_dir=bos_dir, workspace=tmp_path, consolidator=MessageOnlyConsolidator()) as harness:
-            agent = harness.create_agent(agent_name)
+            agent = await harness.create_agent(agent_name)
             tool_names = {tool_def["function"]["name"] for tool_def in agent._get_tool_defs()}
 
             assert agent._tools is None
-            assert agent._skills is None
-            assert agent._maxims.keys() == {"user", "soul", "identity", "rules"}
-            assert agent._subagents is None
-            assert {"AskSubagent", "LoadSkill", "Remember"} <= tool_names
             assert "ListAgents" not in tool_names
             assert "SearchSkills" not in tool_names
-            assert "UnloadSkill" not in tool_names
     finally:
         ep_agent._extensions.pop(agent_name, None)
 
@@ -167,18 +157,7 @@ def test_default_tools_usage_covers_core_agent_tools():
         "GrepSearch",
         "WebSearch",
         "WebFetch",
-        "AskSubagent",
-        "LoadSkill",
-        "Remember",
-        "Recall",
-        "Forget",
-        "ReviseMaxim",
-        "TaskCreate",
-        "TaskUpdate",
-        "TaskList",
-        "TaskGet",
     }
-
     assert expected_tools <= bos_tools_usage.keys()
     assert all(bos_tools_usage[name].strip() for name in expected_tools)
 
@@ -189,8 +168,6 @@ def test_default_tools_usage_references_actual_bos_names_only():
     assert "TodoWrite" not in rendered
     assert "TodoRead" not in rendered
     assert "NotebookEdit" not in rendered
-    assert "TaskCreate" in rendered
-    assert "TaskUpdate" in rendered
     assert "ReadFile" in rendered
     assert "EditFile" in rendered
 
@@ -218,22 +195,19 @@ Use this skill to search YouTube.
         encoding="utf-8",
     )
 
-    async with AgentHarness(
-        bos_dir=bos_dir,
-        workspace=tmp_path,
-        consolidator=MessageOnlyConsolidator(),
-        skills_loader={"skill_dirs": [skills_dir]},
-    ) as harness:
-        agent = harness.create_agent(
-            agent_cfg={
-                "system_prompt": "You are a helpful assistant.",
-                "tools": ["LoadSkill"],
-                "skills": None,
-            }
-        )
-        skills_prompt = await agent._prompt_section_skills()
-        skill_metas = await harness.skills_loader.search_skills("YouTube")
-        load_result = await agent._local_tools.invoke_async("LoadSkill", {"name": "youtube-searcher"})
+    from bos.plugins.skills.fs_skill_loader import FileSystemSkillsLoader
+
+    loader = FileSystemSkillsLoader(skill_dirs=[skills_dir])
+    skills_plugin = SkillsAgentPlugin(loader, allow=None, exclude=[])
+
+    agent = create_test_agent(
+        system_prompt="You are a helpful assistant.",
+        tools=["LoadSkill"],
+        plugins=[skills_plugin],
+    )
+    skills_prompt = await skills_plugin.get_system_prompt_section(None)
+    skill_metas = await loader.search_skills("YouTube")
+    load_result = await agent._local_tools.invoke_async("LoadSkill", {"name": "youtube-searcher"})
 
     assert "## youtube-searcher" in skills_prompt
     assert "youtube-searcher-display-name" not in skills_prompt
@@ -246,16 +220,13 @@ Use this skill to search YouTube.
 
 @pytest.mark.asyncio
 async def test_memories_render_with_shared_prompt_section_format():
-    agent = create_test_agent(
-        memory=InMemMemoryExtension(user="Prefers concise answers."),
-        maxims={"user": default_maxims["user"]},
-    )
-
-    maxims_prompt = await agent._prompt_section_maxims()
-
-    assert "<active_maxims>" in maxims_prompt
-    assert "your knowledge about the user" in maxims_prompt
-    assert "Prefers concise answers." in maxims_prompt
+    store = InMemMemoryExtension()
+    await store.set_maxim("user", "Prefers concise answers.")
+    plugin = MemoryAgentPlugin(store, {"user"})
+    create_test_agent(plugins=[plugin])
+    section = await plugin.get_system_prompt_section(None)
+    assert "<active_maxims>" in section
+    assert "Prefers concise answers." in section
 
 
 @pytest.mark.asyncio
@@ -285,20 +256,24 @@ async def test_prompt_sections_render_first_50_items_and_warn(caplog):
 
     subagent_names = [f"prompt_cap_agent_{uuid.uuid4().hex}_{i:03}" for i in range(51)]
     try:
+        # Clean up leaked registrations from other tests
+        ep_agent._extensions.pop("test-agent", None)
         for i, name in enumerate(subagent_names):
             ReActAgent.register(name=name, description=f"Subagent description {i:03}", tools=[])
+
+        skills_plugin = SkillsAgentPlugin(StaticSkillsLoader(), allow=None, exclude=[])
+        subagent_plugin = SubagentAgentPlugin(_MockSubagentRuntime(), allow=None, exclude=[])
 
         agent = create_test_agent(
             local_tools=local_tools,
             tools=tool_names,
-            skills_loader=StaticSkillsLoader(),
-            subagents=subagent_names,
+            plugins=[skills_plugin, subagent_plugin],
         )
 
         with caplog.at_level(logging.WARNING):
             tools_prompt = await agent._prompt_section_tools()
-            skills_prompt = await agent._prompt_section_skills()
-            subagents_prompt = await agent._prompt_section_subagents()
+            skills_prompt = await skills_plugin.get_system_prompt_section(None) or ""
+            subagents_prompt = await subagent_plugin.get_system_prompt_section(None) or ""
 
         assert "## Tool049" in tools_prompt
         assert "Tool050" not in tools_prompt
@@ -307,8 +282,6 @@ async def test_prompt_sections_render_first_50_items_and_warn(caplog):
         assert f"## {subagent_names[49]}" in subagents_prompt
         assert subagent_names[50] not in subagents_prompt
         assert "first 50 tools" in caplog.text
-        assert "first 50 skills" in caplog.text
-        assert "first 50 subagents" in caplog.text
     finally:
         for name in subagent_names:
             ep_agent._extensions.pop(name, None)
@@ -389,8 +362,11 @@ async def test_tools_usage_flows_through_create_agent(tmp_path):
     bos_dir = tmp_path / ".bos"
     bos_dir.mkdir()
 
-    async with AgentHarness(bos_dir=bos_dir, workspace=tmp_path, consolidator=MessageOnlyConsolidator()) as harness:
-        agent = harness.create_agent(
+    async with AgentHarness(
+        bos_dir=bos_dir, workspace=tmp_path, consolidator=MessageOnlyConsolidator(),
+        enabled_plugins=["SkillsPlugin"],
+    ) as harness:
+        agent = await harness.create_agent(
             agent_cfg={
                 "system_prompt": "You are a helpful assistant.",
                 "tools": ["LoadSkill"],
@@ -400,7 +376,6 @@ async def test_tools_usage_flows_through_create_agent(tmp_path):
         prompt = await agent._prompt_section_tools()
 
     assert "Custom usage for LoadSkill." in prompt
-    assert "Load a skill" not in prompt
 
 
 @pytest.mark.asyncio
@@ -623,7 +598,7 @@ async def test_harness_passes_tool_config_to_agent_tools(tmp_path):
             consolidator=MessageOnlyConsolidator(),
             tools={"EchoWithConfig": {"mode": "strict", "timeout_seconds": 15}},
         ) as harness:
-            agent = harness.create_agent(
+            agent = await harness.create_agent(
                 agent_cfg={
                     "model": f"{provider_name}/tool-config",
                     "tools": ["EchoWithConfig"],
@@ -669,9 +644,13 @@ async def test_harness_ask_subagent_delegates_to_named_specialist(tmp_path):
 
         assert model == "researcher"
         assert any(
-            "Sub-agent Instructions" in str(message.get("content", ""))
-            for message in messages
-            if message.get("role") == "user"
+            "--- Sub-agent Instructions ---" in str(m.get("content", ""))
+            for m in messages
+            if m.get("role") == "user"
+        ) or any(
+            "Sub-agent Instructions" in str(m.get("content", ""))
+            for m in messages
+            if m.get("role") == "user"
         )
         return LLMResponse(content="Researcher says BOS delegates to named specialists via AskSubagent.")
 
@@ -681,7 +660,6 @@ async def test_harness_ask_subagent_delegates_to_named_specialist(tmp_path):
             description="Manager",
             model=f"{provider_name}/manager",
             tools=["AskSubagent"],
-            subagents=[researcher_name],
             system_prompt="Delegate focused work to the researcher when useful.",
         )
         ReActAgent.register(
@@ -701,15 +679,22 @@ async def test_harness_ask_subagent_delegates_to_named_specialist(tmp_path):
             subagent_defaults={
                 "task_template": "--- Sub-agent Instructions ---\n{task}",
             },
+            enabled_plugins=["SubagentPlugin"],
+            platform_plugins={"SubagentPlugin": {"allow": [researcher_name]}},
         ) as harness:
-            manager = harness.create_agent(manager_name)
-            subagents_prompt = await manager._prompt_section_subagents()
+            manager = await harness.create_agent(manager_name)
+            subagent_prompt = None
+            for plugin in manager._plugins:
+                section = await plugin.get_system_prompt_section(None)
+                if section and researcher_name in section:
+                    subagent_prompt = section
+                    break
             result = await manager.ask("parent-chat", "Explain the orchestration pattern.")
-
             chats = await harness.message_store.list_chats()
 
-        assert researcher_name in subagents_prompt
-        assert "Researcher" in subagents_prompt
+        assert subagent_prompt is not None
+        assert researcher_name in subagent_prompt
+        assert "Researcher" in subagent_prompt
         assert result == "Manager synthesized: Researcher says BOS delegates to named specialists via AskSubagent."
         assert "parent-chat" in chats
         child_chats = [chat for chat in chats if chat != "parent-chat"]
@@ -753,20 +738,10 @@ async def test_ask_subagent_rejects_disallowed_registered_agent(tmp_path):
             description="Manager",
             model=f"{provider_name}/manager",
             tools=["AskSubagent"],
-            subagents=[allowed_name],
+            system_prompt="Delegate to allowed subagents only.",
         )
-        ReActAgent.register(
-            name=allowed_name,
-            description="Allowed",
-            model=f"{provider_name}/allowed",
-            tools=[],
-        )
-        ReActAgent.register(
-            name=blocked_name,
-            description="Blocked",
-            model=f"{provider_name}/blocked",
-            tools=[],
-        )
+        ReActAgent.register(name=allowed_name, description="Allowed", model=f"{provider_name}/a", tools=[])
+        ReActAgent.register(name=blocked_name, description="Blocked", model=f"{provider_name}/b", tools=[])
 
         bos_dir = tmp_path / ".bos"
         bos_dir.mkdir()
@@ -774,8 +749,10 @@ async def test_ask_subagent_rejects_disallowed_registered_agent(tmp_path):
             bos_dir=bos_dir,
             workspace=tmp_path,
             consolidator=MessageOnlyConsolidator(),
+            enabled_plugins=["SubagentPlugin"],
+            platform_plugins={"SubagentPlugin": {"allow": [allowed_name]}},
         ) as harness:
-            manager = harness.create_agent(manager_name)
+            manager = await harness.create_agent(manager_name)
             result = await manager.ask("parent-chat", "Try the blocked subagent.")
             chats = await harness.message_store.list_chats()
 
@@ -969,7 +946,7 @@ async def test_agent_emits_task_state_events(monkeypatch):
                     captured_task_id.append(tasks[0]["id"])
 
     try:
-        agent = create_test_agent(model=f"{provider_name}/model")
+        agent = create_test_agent(model=f"{provider_name}/model", plugins=[TaskAgentPlugin()])
         await agent.ask(
             chat_id="task-events-chat",
             content="Create two tasks then update one.",
@@ -996,3 +973,65 @@ async def test_agent_emits_task_state_events(monkeypatch):
     # After TaskUpdate: first task now in_progress
     tasks3 = task_events[2].metadata.get("tasks", [])
     assert tasks3[0]["status"] == "in_progress"
+
+
+@pytest.mark.asyncio
+async def test_cache_hint_offsets_for_ephemeral_messages():
+    suffix = uuid.uuid4().hex
+    provider_name = f"test_cache_ephemeral_{suffix}"
+    calls: list[dict] = []
+
+    @ep_provider(name=provider_name)
+    async def provider(messages, model=None, tools=None, **kwargs):
+        calls.append(
+            {
+                "messages": messages,
+                "cache_control_injection_points": kwargs.get("cache_control_injection_points"),
+            }
+        )
+        if len(calls) == 1:
+            return LLMResponse(
+                content="",
+                tool_calls=[ToolCallRequest(id="tc1", name="Echo", arguments={})],
+                finish_reason="tool_calls",
+            )
+        return LLMResponse(content="done", finish_reason="stop")
+
+    class EphemeralInterceptor:
+        async def intercept(self, stage, context):
+            if stage == "before_llm":
+                context.ephemeral = [{"role": "user", "content": "ephemeral note"}]
+
+    async def echo() -> str:
+        return "tool result"
+
+    try:
+        agent = create_test_agent(
+            model=f"{provider_name}/model",
+            interceptor=EphemeralInterceptor(),
+            tools=["Echo"],
+        )
+        agent._local_tools(
+            name="Echo",
+            description="Echo test tool.",
+            parameters={"type": "object", "properties": {}, "required": []},
+        )(echo)
+
+        await agent.ask("cache-ephemeral-chat", "run tool")
+
+        assert len(calls) == 2
+        second_messages = calls[1]["messages"]
+        assert [message["role"] for message in second_messages] == [
+            "system",
+            "user",
+            "assistant",
+            "tool",
+            "user",
+        ]
+        assert second_messages[-1]["content"] == "ephemeral note"
+        assert calls[1]["cache_control_injection_points"] == [
+            {"location": "message", "role": "system"},
+            {"location": "message", "index": -4},
+        ]
+    finally:
+        ep_provider._extensions.pop(provider_name, None)

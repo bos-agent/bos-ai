@@ -3,8 +3,9 @@ from collections.abc import Iterable
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from .._utils import _read_text
-from ..contract import SkillMeta, ep_skills_loader
+from bos.core import _read_text
+
+from .plugin import SkillMeta, ep_skills_loader
 
 
 def _parse_frontmatter_fields(frontmatter: str) -> dict[str, str]:

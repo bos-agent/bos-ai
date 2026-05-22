@@ -91,3 +91,29 @@ Channels target `agent@main` directly. Channel-to-channel routing is not support
 - Pull request titles must follow semantic/conventional format (`feat(config): ...`, `fix(runner): ...`).
 - `uv run ruff check src tests` is a useful signal but the repo may contain pre-existing lint findings.
 - `src/bos/core/__init__.py` is the public API surface. Internal helpers with `_` prefix are exported for use by extensions but are not considered stable.
+
+
+## Code Search
+
+Use `uv run semble search` to find code by describing what it does or naming a symbol/identifier, instead of grep:
+
+```bash
+uv run semble search "authentication flow" ./my-project
+uv run semble search "save_pretrained" ./my-project
+uv run semble search "save model to disk" ./my-project --top-k 10
+```
+
+Use `uv run semble find-related` to discover code similar to a known location (pass `file_path` and `line` from a prior search result):
+
+```bash
+uv run semble find-related src/auth.py 42 ./my-project
+```
+
+`path` defaults to the current directory when omitted; git URLs are accepted.
+
+## Workflow
+
+1. Start with `uv run semble search` to find relevant chunks.
+2. Inspect full files only when the returned chunk is not enough context.
+3. Optionally use `uv run semble find-related` with a promising result's `file_path` and `line` to discover related implementations.
+4. Use grep only when you need exhaustive literal matches or quick confirmation of an exact string.

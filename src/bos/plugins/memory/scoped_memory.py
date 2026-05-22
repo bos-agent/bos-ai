@@ -1,12 +1,34 @@
+"""Memory backend types — MemoryEntry, MemoryBackend protocol, ScopedMemory."""
+
 from __future__ import annotations
 
-from bos.core import MemoryEntry, MemoryExtension
+from dataclasses import dataclass, field
+from typing import Protocol
+
+
+@dataclass
+class MemoryEntry:
+    id: str
+    content: str
+    tags: list[str] = field(default_factory=list)
+    created_at: str = ""
+    metadata: dict | None = None
+
+
+class MemoryBackend(Protocol):
+    async def get_maxim(self, key: str) -> str: ...
+    async def set_maxim(self, key: str, content: str) -> None: ...
+    async def search_memories(self, query: str, *, top_k: int = 5) -> list[MemoryEntry]: ...
+    async def ingest_memory(self, content: str, *, tags: list[str] | None = None) -> str: ...
+    async def get_memory(self, entry_id: str) -> MemoryEntry | None: ...
+    async def forget_memory(self, entry_id: str) -> None: ...
+    async def optimize(self) -> None: ...
 
 
 class ScopedMemory:
-    """MemoryExtension wrapper that presents an actor-scoped memory view."""
+    """MemoryBackend wrapper that presents an actor-scoped memory view."""
 
-    def __init__(self, inner: MemoryExtension, scope: str) -> None:
+    def __init__(self, inner: MemoryBackend, scope: str) -> None:
         self._inner = inner
         self._scope = scope
 
@@ -46,7 +68,8 @@ class ScopedMemory:
             await self._inner.forget_memory(entry_id)
 
     async def optimize(self) -> None:
-        await self._inner.optimize()
+        if hasattr(self._inner, "optimize"):
+            await self._inner.optimize()
 
     def _is_visible(self, entry: MemoryEntry) -> bool:
         tags = set(entry.tags)

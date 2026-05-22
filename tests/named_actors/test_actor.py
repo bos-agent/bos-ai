@@ -169,24 +169,12 @@ async def test_react_agent_persists_named_actor_message_metadata():
 
             return LLMResponse(content="answer", finish_reason="stop")
 
-    class Skills:
-        async def search_skills(self, query=None):
-            return {}
-
-        async def load_skill(self, name):
-            return ""
-
     store = Store()
     agent = ReActAgent(
         message_store=store,
-        memory=None,
         consolidator=None,
-        skills_loader=Skills(),
         llm=LLM(),
         tools=[],
-        skills=[],
-        subagents=[],
-        maxims={},
     )
     await agent.ask(
         "chat",

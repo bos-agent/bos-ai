@@ -86,7 +86,6 @@ SLASH_COMMANDS = [
     "/compact",
     "/tokens",
     "/chats",
-    "/memory",
     "/clear",
     "/restart",
 ]
@@ -478,7 +477,6 @@ class ChatApp(App):
                 "  /compact  — compact chat\n"
                 "  /tokens   — rough token estimate\n"
                 "  /chats    — list all chats\n"
-                "  /memory   — list agent memories\n"
                 "  /clear    — clear the log\n"
                 "  /restart  — restart the agent process\n"
                 "\n"
@@ -512,7 +510,6 @@ class ChatApp(App):
             "/compact",
             "/tokens",
             "/chats",
-            "/memory",
         ):
             # Delegate to the server via a command envelope
             await self._send_command(command_text)

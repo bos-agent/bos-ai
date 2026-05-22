@@ -85,14 +85,6 @@ async def chats(actor: AgentActor) -> dict:
     return {"name": "chats", "ok": True, "result": result}
 
 
-@ep_actor_command(name="memory")
-async def memory(actor: AgentActor) -> dict:
-    """List agent memories."""
-    agent = actor._agent
-    result = dict(agent._maxims)
-    return {"name": "memory", "ok": True, "result": result}
-
-
 @ep_actor_command(name="prompt")
 async def prompt(actor: AgentActor) -> dict:
     """Show the current agent system prompt."""

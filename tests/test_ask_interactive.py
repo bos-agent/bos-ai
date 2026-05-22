@@ -38,7 +38,7 @@ async def test_interactive_wiring_harness_to_client(tmp_path):
 agent = "test-agent"
 
 [platform]
-extensions = ["bos.extensions.all"]
+extensions = ["bos.exts"]
 
 [[platform.agents]]
 name = "test-agent"
@@ -57,7 +57,7 @@ model = "test/consolidator"
     ws.bootstrap_platform()
 
     async with ws.harness() as harness:
-        agent = harness.create_agent("test-agent")
+        agent = await harness.create_agent("test-agent")
         actor_mbox = harness.mail_route.bind("agent@main")
         client_mbox = harness.mail_route.bind("client@local")
 

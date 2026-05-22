@@ -93,9 +93,7 @@ async def test_named_agent_renders_metadata_attribution():
     )
     agent = NamedAgent(
         message_store=store,
-        memory=None,
         consolidator=None,
-        skills_loader=None,
         llm=FakeLLM(),
         tools=[],
     )
@@ -122,9 +120,7 @@ async def test_named_agent_filters_tool_noise_from_history():
     )
     agent = NamedAgent(
         message_store=store,
-        memory=None,
         consolidator=None,
-        skills_loader=None,
         llm=FakeLLM(),
         tools=[],
     )
@@ -153,9 +149,7 @@ async def test_named_agent_compaction_passes_message_objects():
     consolidator = RecordingConsolidator()
     agent = NamedAgent(
         message_store=store,
-        memory=None,
         consolidator=consolidator,
-        skills_loader=None,
         llm=FakeLLM(),
         tools=[],
         max_tokens=1,

@@ -12,7 +12,7 @@ def test_workspace_config_source_loads_from_explicit_file(tmp_path):
 agent = "custom-agent"
 
 [platform]
-extensions = ["bos.extensions.all"]
+extensions = ["bos.exts"]
 
 [[platform.agents]]
 name = "custom-agent"
@@ -38,7 +38,7 @@ def test_workspace_config_source_skips_discovery(tmp_path):
     config_file.write_text(
         """
 [platform]
-extensions = ["bos.extensions.all"]
+extensions = ["bos.exts"]
 
 [harness.consolidator]
 model = "test/consolidator"

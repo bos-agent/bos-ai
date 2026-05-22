@@ -67,6 +67,7 @@ def cli(ctx, config, log_level):
         level=log_level.upper(),
         format="%(asctime)s %(levelname)-8s %(name)s %(message)s",
         stream=sys.stderr,
+        force=True,
     )
 
     ctx.ensure_object(dict)

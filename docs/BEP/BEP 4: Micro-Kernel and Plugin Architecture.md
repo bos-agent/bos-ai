@@ -1,392 +1,675 @@
 # BEP 4: Micro-Kernel and Plugin Architecture
 
-Status: **design** — contract and tool surface finalized, ready for implementation planning.
+Status: **design accepted** — architecture-level contract is settled and ready for implementation design.
 
 ---
 
 ## Core Insight
 
-Currently, [ReActAgent](file:///home/jzhang/bos-ai/src/bos/core/agent.py#L181) registers its core capabilities—such as task management, memory operations, subagent interaction, and skill loading—at the agent instance level as nested closures. These tools access agent-scoped state (like memory backends, task lists, and policies) directly from the `self` instance.
+`ReActAgent` currently owns both the agent loop and several concrete capabilities: memory, task tracking, skill loading, and subagent delegation. In `src/bos/core/agent.py`, those capabilities are registered as agent-local tools through nested closures that capture agent state directly.
 
-This design introduces tight coupling between the agent runtime and concrete tool logic, making it difficult for developers to:
-1. **Extend or Override**: Swap out default behaviors (e.g., customize `Remember` or run custom subagent routing).
-2. **Decouple**: Reuse the agent runner independently of specific built-in tool assumptions.
-3. **Test**: Unit test core tools in isolation without constructing a full agent runtime.
+This makes the agent loop harder to reuse, test, and extend because capability logic is coupled to the kernel. BEP 4 moves capability logic into plugins while keeping the kernel responsible for the turn loop, prompt compilation, local tool registry, tool invocation boundary, persistence, and interceptor execution.
 
-By migrating to a **Micro-kernel & Plugin Architecture**, the agent core is simplified to an execution loop with **zero built-in tools**. Features like memory, tasks, and skills are encapsulated inside harness plugins. These plugins dynamically register their tools at startup and provide prompt injection sections and interceptors at turn runtime.
+The target architecture is:
+
+```text
+Agent kernel
+  turn loop
+  prompt compiler
+  local tool registry
+  tool invocation boundary
+  interceptor runner
+  persistence/history/consolidation
+
+Harness plugins
+  harness-scoped lifecycle/resources
+
+Agent plugins
+  agent-scoped config/state/tools/prompt/interceptors
+```
+
+`ReActAgent` has **zero hardcoded LLM tools**. Default capabilities such as memory, tasks, skills, and subagent delegation are normal plugins.
+
+---
+
+## Goals
+
+1. Remove capability-specific tool implementations from `ReActAgent`.
+2. Let different agents bind the same plugin with different settings.
+3. Keep plugin-bound tools agent-scoped by registering them into the agent-local `ToolRegistry`.
+4. Keep process-global `ep_tool` available as public BOS API for standalone global tools.
+5. Expose harness/platform capabilities to plugins through narrow typed services, not through raw `AgentHarness` access.
+6. Preserve deterministic prompt, interceptor, and tool-registration order.
+7. Make lifecycle and error handling explicit enough for implementation.
+
+## Non-Goals
+
+1. This BEP does not define implementation phases. Temporary staging notes live in `docs/debate/BEP 4: Implementation Staging Notes.md`.
+2. This BEP does not preserve a production compatibility layer. There is no production usage to migrate.
+3. This BEP does not settle cache-control mechanics for ephemeral plugin context.
 
 ---
 
 ## Configuration Spec
 
-Plugins are configured globally in the workspace configuration, with settings matching the plugin's registration name. Configuration supports both global defaults and agent-specific overrides.
+Workspace plugin defaults live under `platform.plugins`. These defaults do not enable a plugin by themselves.
 
 ```toml
-# Pass-through configuration defaults for all agents
-[platform.agent_defaults.plugins.MarkdownMemoryPlugin]
+[platform]
+# enabled_plugins = ["MemoryPlugin", "TaskPlugin", "SkillsPlugin", "SubagentPlugin"]
+
+[platform.plugins.MemoryPlugin]
+maxims = ["user", "soul"]
+scope = "workspace"
+```
+
+Plugins are disabled by default. A plugin is enabled for an agent when either:
+
+1. its name appears in `platform.enabled_plugins`, or
+2. that agent sets `enabled = true` in its plugin table.
+
+An agent can disable a globally enabled plugin with `enabled = false`.
+
+```toml
+[platform]
+enabled_plugins = ["MemoryPlugin", "TaskPlugin"]
+
+[platform.plugins.MemoryPlugin]
 maxims = ["user", "soul"]
 
-# Agent definition
 [[platform.agents]]
-name = "coordinator"
-system_prompt = "Coordinate subtasks."
+name = "coding"
+system_prompt = "You write code."
 
-# Agent-specific plugin configuration overrides
-[platform.agents.plugins.MarkdownMemoryPlugin]
-maxims = ["soul", "rules"]
+# Overrides global MemoryPlugin defaults for this agent.
+[platform.agents.plugins.MemoryPlugin]
+maxims = ["coding", "repo", "rules"]
+scope = "agent:coding"
+
+# Enables SkillsPlugin for this agent only.
+[platform.agents.plugins.SkillsPlugin]
+enabled = true
+allow = ["code-review", "repo-navigation"]
+
+[[platform.agents]]
+name = "stateless"
+
+# Disables globally enabled MemoryPlugin for this agent.
+[platform.agents.plugins.MemoryPlugin]
+enabled = false
 ```
+
+External agent files may use a top-level `plugins` table. During workspace loading, it is treated as agent-local plugin config:
+
+```toml
+# agents/coding.toml
+name = "coding"
+system_prompt = "You write code."
+
+[plugins.MemoryPlugin]
+enabled = true
+maxims = ["coding", "repo"]
+```
+
+This normalizes to the same internal shape as:
+
+```toml
+[[platform.agents]]
+name = "coding"
+
+[platform.agents.plugins.MemoryPlugin]
+enabled = true
+maxims = ["coding", "repo"]
+```
+
+### Config Resolution
+
+For each agent and plugin, config is resolved by **shallow merge** in this order:
+
+```text
+plugin code defaults
+< platform.plugins.<PluginName>
+< agent-local plugins.<PluginName>
+```
+
+Scalars, lists, and dictionaries all replace at the top level. There is no recursive merge in BEP 4.
+
+### Enablement and Ordering
+
+Resolved plugin order is deterministic:
+
+1. globally enabled plugins in `platform.enabled_plugins` list order;
+2. agent-only enabled plugins in agent config declaration order.
+
+Agent overrides of globally enabled plugins retain the global order position. Disabled plugins are removed from the resolved order.
+
+This order controls:
+
+- plugin prompt sections;
+- local tool registration attempts;
+- plugin interceptor execution;
+- future ordered plugin hooks.
+
+### Unknown and Invalid Config
+
+Unknown plugin names produce warnings and are skipped. They do not fail startup.
+
+Invalid settings for a known plugin are startup errors. A known plugin config table should be validated even when it appears only as defaults, so config mistakes are not silently ignored.
 
 ---
 
-## The Harness & Plugin Lifecycle
+## Core Contracts
 
-The [AgentHarness](file:///home/jzhang/bos-ai/src/bos/core/harness.py) owns the lifecycle of plugins, instantiating them, configuring global resources on startup, and cleaning up resources on shutdown.
+### Plugin Discovery
 
-### 1. The `HarnessPlugin` & `BoundPlugin` Split
-To support thread-safety and agent isolation, plugins implement a factory pattern via `.bind()`:
-* **`HarnessPlugin` (Harness Scope / Singleton)**: Manages global, heavy resources (e.g. database connections) and executes startup registrations.
-* **`BoundPlugin` (Agent Scope / Instance)**: Created per-agent, holding agent-specific configuration (like active maxim lists).
+BEP 4 adds a plugin extension point in `src/bos/core/contract.py`:
 
 ```python
-from typing import Protocol, Any
-from bos.core.contract import TurnInterceptor, TurnContext
+ep_plugin = ExtensionPoint(description="Harness plugin. A class or factory implementing HarnessPlugin.")
+```
 
+Plugin packages register plugin providers through `ep_plugin`:
+
+```python
+@ep_plugin(name="MemoryPlugin")
+class MemoryHarnessPlugin: ...
+```
+
+`ep_plugin` discovers harness-scoped plugin providers. It is not a tool registry.
+
+### Context Contracts
+
+`TurnContext` is the broad mutable context for the current agent turn. It is used by the agent loop, prompt hooks, and interceptors.
+
+```python
+@dataclass
+class TurnContext:
+    agent_name: str
+    chat_id: str
+    turn_id: str
+
+    system: list[dict[str, Any]] = field(default_factory=list)
+    history: list[dict[str, Any]] = field(default_factory=list)
+    current: list[Message] = field(default_factory=list)
+    ephemeral: list[dict[str, Any]] = field(default_factory=list)
+
+    tool_defs: list[dict[str, Any]] = field(default_factory=list)
+    current_llm_response: LLMResponse | None = None
+    final_content: str | None = None
+
+    event_sink: EventSink | None = None
+
+    def get_llm_messages(self) -> list[dict[str, Any]]:
+        return self.system + self.history + [m.llm_message for m in self.current] + self.ephemeral
+```
+
+`ephemeral` contains request-only messages that are sent to the LLM but not persisted. Cache-control remains an implementation detail of the LLM call path. The current LiteLLM integration may continue to use `cache_control_injection_points`; implementation must ensure cache hints are not placed on dynamic ephemeral context unless intentionally desired. BEP 4 makes no cache optimization claim.
+
+`ToolContext` is the narrow per-tool-call context. It is derived from `TurnContext` and passed to tool handlers that accept a `context` parameter.
+
+```python
+@dataclass(frozen=True)
+class ToolContext:
+    agent_name: str
+    chat_id: str
+    turn_id: str
+    event_sink: EventSink | None = None
+    extra_data: Mapping[str, Any] = field(default_factory=dict)
+```
+
+`extra_data` is an escape hatch for caller/runtime values not formally declared on the context. It is not a service locator and must not carry raw harness or plugin internals.
+
+### Binding Context
+
+Plugins may need binding-time facts that are not normal user config, such as named-actor scope. Those facts are passed through `AgentBindContext`.
+
+```python
+@dataclass(frozen=True)
+class AgentBindContext:
+    agent_name: str
+    actor_scope: str | None = None
+```
+
+### Harness Platform Services
+
+Plugins must not receive the raw `AgentHarness`. Harness-owned capabilities are exposed through narrow service protocols.
+
+```python
+class SubagentRuntime(Protocol):
+    async def ask(
+        self,
+        role: str,
+        message: str,
+        *,
+        parent: ToolContext,
+    ) -> str:
+        """Delegate to a configured subagent and return its response."""
+        ...
+
+
+@dataclass(frozen=True)
+class PluginServices:
+    bos_dir: Path
+    workspace: Path
+    llm: LLMClient
+    message_store: MessageStore
+    consolidator: Consolidator
+    subagents: SubagentRuntime
+```
+
+The harness may add explicit typed services over time, but it should not expose raw private methods such as `_get_subagent_config` or `_make_subagent_chat_id` to plugins.
+
+### HarnessPlugin and AgentPlugin
+
+Plugins are split by scope:
+
+- `HarnessPlugin`: one per harness, owns shared lifecycle/resources/service adapters.
+- `AgentPlugin`: one per agent binding, owns resolved agent config, local state, prompt sections, local tool handlers, and interceptors.
+
+```python
 class HarnessPlugin(Protocol):
-    @property
-    def name(self) -> str:
-        """Unique plugin registration name (e.g. 'MarkdownMemoryPlugin')."""
-        ...
-
-    async def setup(self, harness: "AgentHarness") -> None:
-        """Called on harness startup to register tools and init pools."""
-        ...
-
-    async def teardown(self) -> None:
-        """Called on harness shutdown to clean up resources."""
-        ...
-
-    def bind(self, config: dict[str, Any]) -> "BoundPlugin":
-        """Instantiate an agent-specific bound runner with custom config."""
-        ...
-
-class BoundPlugin(Protocol):
     @property
     def name(self) -> str: ...
 
-    def get_tools(self) -> list[str]:
-        """Return the names of ep_tool registrations activated by this plugin."""
-        ...
+    def default_config(self) -> Mapping[str, Any]: ...
 
-    async def get_system_prompt(self, context: TurnContext) -> str | None:
-        """Return prompt instructions to inject into the system prompt."""
-        ...
+    async def setup(self, services: PluginServices) -> None: ...
 
-    def get_interceptors(self) -> list[TurnInterceptor]:
-        """Return turn interceptors to execute during loop execution."""
-        ...
-```
-
-### 2. Plugin Discovery and Registration (`ep_plugin`)
-
-Plugins are discovered using the core platform's registry system. We define a new global `ExtensionPoint` inside [src/bos/core/contract.py](file:///home/jzhang/bos-ai/src/bos/core/contract.py):
-
-```python
-# In src/bos/core/contract.py
-ep_plugin = ExtensionPoint(
-    description="Harness plugin. A class or factory implementing the HarnessPlugin protocol."
-)
-```
-
-Developers register their custom plugins globally by decorating their classes:
-```python
-@ep_plugin(name="MarkdownMemoryPlugin")
-class MarkdownMemoryPlugin:
-    ...
-```
-
-### 3. Harness Startup Loading and Assembly
-
-During [AgentHarness](file:///home/jzhang/bos-ai/src/bos/core/harness.py) startup (`__aenter__`), configured plugins are instantiated via `ep_plugin`, tracked as owned resources, and initialized by calling `setup(self)`:
-
-```python
-class AgentHarness:
-    async def __aenter__(self):
-        ...
-        # 1. Resolve which plugins to load (from config or auto-detected from agent specs)
-        self.plugins: dict[str, HarnessPlugin] = {}
-        for name in self._configured_plugins:
-            # Instantiate via the global ep_plugin registry
-            plugin = ep_plugin.invoke(name, self._plugin_configs.get(name, {}))
-            self.plugins[name] = plugin
-            self._owned.append(plugin)
-            
-            # Run startup registrations and resources
-            await plugin.setup(self)
-        ...
-
-    def create_agent(self, name: str, agent_spec: dict[str, Any]) -> Agent:
-        # 1. Resolve agent-specific plugins by merging defaults and overrides
-        defaults = self.agent_defaults.get("plugins", {})
-        overrides = agent_spec.get("plugins", {})
-        
-        merged_config = {}
-        # Apply defaults
-        for p_name, p_cfg in defaults.items():
-            if p_cfg is not False:
-                merged_config[p_name] = p_cfg
-                
-        # Apply agent-level overrides (can overwrite config or disable via False)
-        for p_name, p_cfg in overrides.items():
-            if p_cfg is False:
-                merged_config.pop(p_name, None)
-            else:
-                merged_config[p_name] = {**merged_config.get(p_name, {}), **p_cfg}
-        
-        # 2. Bind only the enabled plugins
-        bound_plugins = []
-        for p_name, p_cfg in merged_config.items():
-            if p_name in self.plugins:
-                plugin = self.plugins[p_name]
-                bound_plugins.append(plugin.bind(p_cfg))
-            else:
-                logger.warning(f"Plugin {p_name} requested by agent {name} is not loaded by the harness.")
-        
-        # Inject bound plugins into the agent creation
-        return ep_agent.invoke(name, agent_spec | {"plugins": bound_plugins})
-```
-
----
-
-## Dynamic Tool Registration & Delegation
-
-To prevent polluting the global namespace, tools are registered dynamically to [ep_tool](file:///home/jzhang/bos-ai/src/bos/core/contract.py#L20) during the harness initialization phase.
-
-```python
-from bos.core.contract import Extension, ep_tool
-
-class MarkdownMemoryPlugin:
-    async def setup(self, harness: AgentHarness) -> None:
-        ep_tool.register(Extension(
-            name="Remember",
-            fn=self.tool_remember,
-            description="Store a fact in episodic memory.",
-            metadata={"parameters": {...}}
-        ))
-
-    async def tool_remember(
+    def validate_config(
         self,
-        content: str,
-        agent_context: AgentContext | None = None,
+        config: Mapping[str, Any],
+        context: AgentBindContext,
+    ) -> None: ...
+
+    def bind(
+        self,
+        config: Mapping[str, Any],
+        context: AgentBindContext,
+    ) -> "AgentPlugin": ...
+
+    async def teardown(self) -> None: ...
+
+
+class AgentPlugin(Protocol):
+    @property
+    def name(self) -> str: ...
+
+    def register_tools(self, registry: ToolRegistry) -> None: ...
+
+    async def get_system_prompt_section(self, context: TurnContext) -> str | None: ...
+
+    def get_interceptors(self) -> Sequence[TurnInterceptor]: ...
+```
+
+`AgentPlugin.register_tools(registry)` replaces the earlier `get_tools() -> list[str]` sketch. Plugins contribute complete tool definitions and bound handlers to the owning agent's local `ToolRegistry`.
+
+There is no `AgentContext.get_plugin(name)` API. Tool handlers are already bound to the correct `AgentPlugin` instance when registered.
+
+---
+
+## Agent Kernel Behavior
+
+### Constructor Surface
+
+`ReActAgent` receives core services and bound plugins. Capability-specific constructor arguments are removed.
+
+```python
+class ReActAgent:
+    def __init__(
+        self,
+        *,
+        message_store: MessageStore,
+        consolidator: Consolidator,
+        plugins: Sequence[AgentPlugin] = (),
+        system_prompt: str | None = None,
+        tools: list[str] | None = None,
+        tools_usage: dict[str, str] | None = None,
+        exclude_tools: list[str] | None = None,
+        name: str | None = None,
+        model: str | None = None,
+        reasoning_effort: Literal["low", "medium", "high"] | None = None,
+        llm: LLMClient | None = None,
+        local_tools: ToolRegistry | None = None,
+        interceptor: TurnInterceptor | None = None,
+        max_tokens: int = 128 * 1024,
+        max_iterations: int = 25,
+    ): ...
+```
+
+Removed from the kernel constructor:
+
+```text
+memory
+skills_loader
+skills
+exclude_skills
+maxims
+subagents
+exclude_subagents
+iterations_per_task
+```
+
+These move into plugin config and plugin implementation.
+
+### Local Tool Registration
+
+Each agent owns an agent-local `ToolRegistry`. During construction, enabled `AgentPlugin` instances register tools into that registry:
+
+```python
+self._local_tools = local_tools or ToolRegistry("Agent-scoped local tools.")
+for plugin in self._plugins:
+    plugin.register_tools(self._local_tools)
+```
+
+Same-agent local tool name collisions are errors.
+
+`ep_tool` remains public BOS API for standalone process-global tools. A plugin package may still register global tools with `ep_tool` when appropriate. However, agent-specific plugin behavior should use `AgentPlugin.register_tools()`.
+
+Agent-local tools shadow process-global `ep_tool` tools of the same name for that agent.
+
+### Tool Permissions
+
+Plugin enablement and tool permission are separate concerns.
+
+An enabled plugin always contributes its prompt sections, interceptors, state, and local tool registrations. The agent's `tools` and `exclude_tools` filters determine which registered tools are callable.
+
+If the model calls a registered but disallowed tool, the normal tool permission boundary returns a tool error.
+
+Provider tool schemas and the available-tools prompt section must be generated from the same filtered effective tool set:
+
+```text
+process-global ep_tool tools
++ agent-local tools
+- tools/exclude_tools filter
+```
+
+### Tool Invocation Context
+
+Plugin-owned tool settings are bound into the `AgentPlugin`. They should not rely on per-call `tool_config` injection.
+
+The invocation boundary injects `ToolContext` into tools that declare a `context` parameter. Existing global tools may continue to accept legacy named injections such as `chat_id`, `turn_id`, `event_sink`, or `tool_config`, but plugin-owned tools should prefer `ToolContext`.
+
+### Prompt Compilation
+
+`ReActAgent` remains responsible for compiling the final system prompt.
+
+Prompt order is:
+
+```text
+base system prompt
+plugin system prompt sections
+available tools
+system info
+```
+
+Core prompt sections:
+
+1. base system prompt;
+2. available tools;
+3. system info.
+
+Plugin prompt sections:
+
+- MemoryPlugin maxims;
+- SkillsPlugin available skills;
+- SubagentPlugin available subagents;
+- any plugin-specific instructions.
+
+Plugin sections are rendered in resolved plugin order.
+
+### Interceptor Composition
+
+Plugin interceptors run before configured harness/workspace interceptors.
+
+```text
+plugin interceptors, in resolved plugin order
+configured ChainReactInterceptor
+```
+
+Interceptor exceptions are logged and the turn continues, except `AbortTurn`, which propagates.
+
+---
+
+## Harness Assembly
+
+`AgentHarness` owns core services and harness-scoped plugins:
+
+```text
+MessageStore
+Consolidator
+LLMClient
+MailRoute
+configured interceptors
+HarnessPlugin instances
+```
+
+Harness startup:
+
+1. loads extension modules/paths;
+2. resolves known plugin names from config and enabled plugin lists;
+3. instantiates known `HarnessPlugin` providers needed for validation and for enabled bindings;
+4. validates known plugin config tables and resolved per-agent plugin configs;
+5. builds `PluginServices` with typed platform services;
+6. calls `setup(services)` on each harness plugin that is enabled by at least one agent.
+
+Agent creation:
+
+1. resolves plugin config for that agent;
+2. determines enabled plugin order;
+3. creates `AgentBindContext`;
+4. validates resolved config;
+5. calls `HarnessPlugin.bind(config, context)`;
+6. passes bound `AgentPlugin` instances into `ReActAgent`.
+
+No plugin receives the raw harness object.
+
+---
+
+## Lifecycle and Error Semantics
+
+| Situation | Behavior |
+|---|---|
+| Unknown plugin name | Warn and skip |
+| Invalid config for known plugin | Startup error |
+| `HarnessPlugin.setup()` raises | Startup error |
+| `HarnessPlugin.bind()` raises | Agent creation/startup error |
+| `AgentPlugin.register_tools()` raises | Agent creation/startup error |
+| Same-agent local tool collision | Agent creation/startup error |
+| Runtime tool exception | Caught and returned as tool result, as today |
+| Plugin prompt section exception | Fail the turn |
+| Plugin interceptor exception | Log and continue, except `AbortTurn` |
+| `HarnessPlugin.teardown()` raises | Log and continue cleanup |
+
+Teardown is best-effort and proceeds in reverse plugin setup order.
+
+---
+
+## Default Plugins
+
+Default capabilities are implemented as normal plugins. They are not special-cased in `ReActAgent`.
+
+### MemoryPlugin
+
+Memory is plugin-owned. Core removes `ep_memory` and the core `MemoryExtension` dependency.
+
+MemoryPlugin owns:
+
+- memory backend construction and lifecycle;
+- maxim prompt section;
+- `Remember`;
+- `Recall`;
+- `ReviseMaxim`;
+- `Forget`;
+- actor scope handling via `AgentBindContext.actor_scope`;
+- maxims allowlist/config.
+
+MemoryPlugin may retain an internal backend protocol equivalent to the current memory contract:
+
+```python
+class MemoryBackend(Protocol):
+    async def get_maxim(self, key: str) -> str: ...
+    async def set_maxim(self, key: str, content: str) -> None: ...
+    async def search_memories(self, query: str, *, top_k: int = 5) -> list[MemoryEntry]: ...
+    async def ingest_memory(self, content: str, *, tags: list[str] | None = None) -> str: ...
+    async def get_memory(self, entry_id: str) -> MemoryEntry | None: ...
+    async def forget_memory(self, entry_id: str) -> None: ...
+```
+
+That protocol belongs to MemoryPlugin implementation, not the agent kernel.
+
+### TaskPlugin
+
+TaskPlugin owns task state and task tools:
+
+- `TaskCreate`;
+- `TaskUpdate`;
+- `TaskList`;
+- `TaskGet`.
+
+Task lists are stored on the agent-scoped TaskPlugin, keyed by `chat_id`.
+
+BEP 4 removes dynamic iteration-budget scaling. The agent uses fixed `max_iterations`. A future BEP may define graceful max-iteration abortion by summarizing turn progress and clearly stating the stop reason so the work can continue in a new turn.
+
+Task tools should return updated task state in tool results so the model sees the current state through the normal tool-message path.
+
+TaskPlugin may also inject request-only active-task context through `TurnContext.ephemeral` during `before_llm`, but this must be idempotent and must not be described as a cache optimization. Cache-control for this context follows the general `TurnContext.ephemeral` rule: cache hints should not be placed on dynamic ephemeral context unless intentionally desired.
+
+Task update events are emitted by plugin interceptors through first-class `TurnContext.event_sink`.
+
+### SkillsPlugin
+
+Skills are plugin-owned. Core removes `ep_skills_loader` and the core `SkillsLoader` dependency.
+
+SkillsPlugin implements skill discovery and loading directly. It owns:
+
+- available skills prompt section;
+- `LoadSkill`;
+- skill allow/exclude config;
+- skill source/path config.
+
+### SubagentPlugin
+
+Subagent delegation is a normal plugin. `AskSubagent` is not a core tool.
+
+SubagentPlugin owns:
+
+- available subagents prompt section;
+- `AskSubagent` tool;
+- subagent allow/exclude config.
+
+It delegates through `SubagentRuntime`, not raw harness internals:
+
+```python
+class SubagentAgentPlugin:
+    async def ask_subagent(
+        self,
+        role: str,
+        message: str,
+        *,
+        context: ToolContext,
     ) -> str:
-        if not agent_context:
-            return "Error: Agent context is unavailable."
-            
-        # Delegate tool execution to the agent-bound plugin instance
-        bound_plugin = agent_context.get_plugin(self.name)
-        return await bound_plugin.remember(content)
+        return await self._runtime.ask(role, message, parent=context)
 ```
 
----
-
-## The `AgentContext` Protocol
-
-The `AgentContext` is constructed by the agent loop every turn and injected into tool signatures. It provides the tool with metadata and access to the active agent-bound plugins:
-
-```python
-from typing import Protocol, Any
-
-class AgentContext(Protocol):
-    @property
-    def agent_name(self) -> str: ...
-    @property
-    def chat_id(self) -> str: ...
-    @property
-    def turn_id(self) -> str: ...
-
-    def get_plugin(self, name: str) -> Any | None:
-        """Locate a bound plugin instance by name."""
-        ...
-```
-
----
-
-## Agent Permission & Execution
-
-The [ReActAgent](file:///home/jzhang/bos-ai/src/bos/core/agent.py#L181) has **zero built-in tools**. It relies on active plugins to supply capabilities, while remaining the ultimate filter for tool permissions:
-
-### 1. Active Tools Resolution
-```python
-class ReactAgent:
-    def __init__(self, plugins: list[BoundPlugin], allowed_tools: list[str] = None, exclude_tools: list[str] = None):
-        self._plugins = plugins
-        self._allowed_tools = set(allowed_tools or [])
-        self._exclude_tools = set(exclude_tools or [])
-
-    def _get_active_tools(self) -> set[str]:
-        active_tools = set()
-        
-        # 1. Start with configured allowed tools (or default to all registered tools)
-        if self._allowed_tools:
-            active_tools.update(self._allowed_tools)
-        else:
-            active_tools.update(ep_tool.describe().keys())
-
-        # 2. Add all tools exposed by active plugins
-        for plugin in self._plugins:
-            active_tools.update(plugin.get_tools())
-
-        # 3. Filter out any excluded tools
-        active_tools.difference_update(self._exclude_tools)
-        return active_tools
-```
-
-### 2. Prompt Compilation
-```python
-async def _build_system_prompt(self, ctx: TurnContext) -> str:
-    sections = [self._prompt_section_base()]
-    
-    # Collect custom sections from all active plugins in order
-    for plugin in self._plugins:
-        if prompt := await plugin.get_system_prompt(ctx):
-            sections.append(prompt)
-            
-    sections.append(self._prompt_section_system_info())
-    return "\n\n".join(s for s in sections if s)
-```
-
----
-
-## Case Study: The Task Plugin
-
-The `TaskPlugin` provides a complete demonstration of the micro-kernel plugin boundaries, implementing state isolation, dynamic loop budget updates, post-tool event emission, and caching-friendly prompt injection.
-
-### 1. Isolated State Storage
-Task lists are completely removed from the agent class and stored on the `BoundTaskPlugin` instance:
-```python
-class BoundTaskPlugin:
-    def __init__(self, config: dict[str, Any]):
-        self._iterations_per_task = config.get("iterations_per_task", 5)
-        self.task_lists: dict[str, TaskList] = {}  # Per-chat task list storage
-```
-
-### 2. Dynamic Loop Budget Scaling
-To modify loop parameters dynamically, `BoundPlugin` exposes an optional budget calculation hook:
-```python
-class BoundTaskPlugin:
-    def get_iteration_budget_adjust(self, chat_id: str) -> int:
-        task_list = self.task_lists.get(chat_id)
-        if not task_list:
-            return 0
-        return len(task_list.tasks) * self._iterations_per_task
-```
-The agent core calls this method every turn to dynamically scale its iteration limits.
-
-### 3. Caching-Friendly Prompt Injection
-To avoid breaking the prefix cache of the static system prompt, the `TaskPlugin` injects active task lists into the **latest user message** inside a `before_llm` interceptor:
-```python
-class TaskTurnInterceptor:
-    async def intercept(self, stage: str, context: TurnContext) -> None:
-        if stage != "before_llm":
-            return
-        
-        task_list = self.plugin.task_lists.get(context.chat_id)
-        if not task_list or not task_list.tasks:
-            return
-            
-        latest_msg = context.current[-1]
-        tasks_text = self.plugin.format_active_tasks(task_list)
-        
-        # Prepend task list context to user query, leaving system prompt 100% static
-        latest_msg.llm_message["content"] = (
-            f"### Active Task Status\n{tasks_text}\n\n"
-            f"{latest_msg.llm_message['content']}"
-        )
-```
-
-### 4. Post-Tool Event Emission
-To broadcast UI task list updates to external subscribers without cluttering the agent loop, the task interceptor handles events in `after_tool`:
-```python
-class TaskTurnInterceptor:
-    async def intercept(self, stage: str, context: TurnContext) -> None:
-        if stage == "after_tool":
-            task_list = self.plugin.task_lists.get(context.chat_id)
-            if task_list and task_list.needs_emit() and context.event_sink:
-                await context.event_sink.emit(
-                    TurnEvent(
-                        type="task",
-                        action="update",
-                        detail="task_state",
-                        metadata={"tasks": task_list.to_payload()}
-                    )
-                )
-                task_list.mark_emitted()
-```
+The harness implementation of `SubagentRuntime` may internally resolve subagent config, apply task templates, derive child chat IDs, create child agents, and derive child event sinks. Those details remain private to the harness adapter.
 
 ---
 
 ## Component Taxonomy
 
-Every current agent capability is classified as either a **Core Service**, a **Core Primitive**, or a **Plugin**:
-
 | Component | Classification | Rationale |
 |---|---|---|
-| `MessageStore` | **Core Service** | Mandatory runtime primitive for turn persistence. No LLM tools. |
-| `Consolidator` | **Core Service** | Backend utility for context compression. No LLM tools. |
-| `LLMClient` | **Core Service** | Mandatory provider abstraction. No LLM tools. |
-| `MailRoute` | **Core Service** | Message routing infrastructure. No LLM tools. |
-| `AskSubagent` | **Core Primitive** | Deeply coupled to harness lifecycle (`create_agent`, `_make_subagent_chat_id`, subagent config resolution). Remains a built-in agent tool. |
-| Memory (`Remember`, `Recall`, `ReviseMaxim`, `Forget`) | **Plugin** | Bundles 4 tools + maxim prompt injection + scoped state. Fully optional. |
-| Tasks (`TaskCreate`, `TaskUpdate`, `TaskList`, `TaskGet`) | **Plugin** | Bundles 4 tools + interceptors + dynamic budget hook. Fully optional. |
-| Skills (`LoadSkill`) | **Plugin** | Currently a thin loader, but the plugin boundary enables richer implementations (skill creation, improvement, semantic search). Fully optional. |
+| `MessageStore` | Core Service | Mandatory turn persistence. No LLM tool surface. |
+| `Consolidator` | Core Service | Context compression utility. No LLM tool surface. |
+| `LLMClient` | Core Service | Provider abstraction. No LLM tool surface. |
+| `MailRoute` | Core Service | Message routing infrastructure. No LLM tool surface. |
+| `ReActAgent` loop | Agent Kernel | Executes turns, invokes tools, compiles prompts, persists messages. |
+| Agent-local `ToolRegistry` | Agent Kernel | Per-agent effective tool namespace. |
+| `ep_tool` | Global Extension Point | Public process-global standalone tool API. |
+| `ep_plugin` | Global Extension Point | Public plugin discovery API. |
+| `MemoryPlugin` | Default Plugin | Memory tools, maxims, backend, scoped memory. |
+| `TaskPlugin` | Default Plugin | Task tools, task state, task events, optional ephemeral task context. |
+| `SkillsPlugin` | Default Plugin | Skill discovery, skill prompt section, `LoadSkill`. |
+| `SubagentPlugin` | Default Plugin | Subagent prompt section and `AskSubagent`. |
 
-### Why `AskSubagent` Stays Core
+Core extension points after BEP 4 include:
 
-`AskSubagent` requires deep access to harness internals that are not appropriate to expose through the plugin protocol:
-- `harness.create_agent(role, cfg)` — instantiates a child agent with full service wiring
-- `harness._get_subagent_config(role)` — resolves subagent-specific configuration and task templates
-- `harness._make_subagent_chat_id(chat_id, role)` — generates namespaced child chat IDs
-- `derive_event_sink(...)` — creates scoped event sinks for parent/child tracing
+```text
+ep_tool
+ep_agent
+ep_message_store
+ep_consolidator
+ep_provider
+ep_turn_interceptor
+ep_plugin
+```
 
-Exposing these as a public `AgentContext` API would leak harness internals. Instead, `AskSubagent` remains the **only built-in tool** in the agent core, keeping the "zero built-in tools" aspiration at "one built-in tool" for pragmatic reasons.
+Removed from core:
 
-### Why Skills Become a Plugin
+```text
+ep_memory
+ep_skills_loader
+```
 
-The current `LoadSkill` tool is a thin wrapper around `self._skills_loader.load_skill(name)`. By packaging it as a `SkillsPlugin`:
-- The plugin owns the `_prompt_section_skills()` prompt injection (listing available skills in the system prompt)
-- The plugin can evolve to include richer tools: `CreateSkill`, `ImproveSkill`, `SearchSkills`
-- The `ep_skills_loader` extension point moves from a core contract into a plugin-internal concern
-- Users who don't need skills can disable the plugin entirely, removing both the tool and the prompt section
+A plugin may define its own internal extension points, but those are not part of the agent kernel contract.
 
 ---
 
-## Impact on Named Actors
+## Named Actors Impact
 
-The `named_actors` package (under [src/bos/named_actors](file:///home/jzhang/bos-ai/src/bos/named_actors)) is a multi-agent orchestration layer. The transition to a Micro-Kernel and Plugin Architecture impacts it in the following ways:
+Named actors use the same plugin binding path as normal agents.
 
-### 1. `NamedAgent` Constructor Signature
-Because `NamedAgent` (in [src/bos/named_actors/actor.py](file:///home/jzhang/bos-ai/src/bos/named_actors/actor.py#L42)) inherits from `ReActAgent` without overriding `__init__`, its constructor signature changes dynamically with `ReActAgent`. 
-
-When instantiating `NamedAgent` in [runner.py: _build_named_agent](file:///home/jzhang/bos-ai/src/bos/named_actors/runner.py#L164), we must update the `kwargs` to pass the bound plugin list rather than the deprecated direct services (`memory`, `skills_loader`):
+`NamedAgent` should not receive `ScopedMemory` or a memory service directly. Instead, named actor construction passes actor scope through `AgentBindContext`:
 
 ```python
-# Updated in src/bos/named_actors/runner.py
-def _build_named_agent(harness, agent_kind: str, scope: str, actor_overrides: dict[str, Any]):
-    ...
-    # Resolve the selective plugins for the agent
-    bound_plugins = harness.bind_plugins_for_agent(agent_spec)
-    
-    kwargs = agent_spec | {
-        "name": agent_kind,
-        "llm": harness.llm,
-        "message_store": harness.message_store,
-        "consolidator": harness.consolidator,
-        "plugins": bound_plugins,  # Passed to ReActAgent.__init__
-    }
-    return _apply(NamedAgent, kwargs)
+context = AgentBindContext(
+    agent_name=agent_kind,
+    actor_scope=scope,
+)
+plugins = harness.bind_plugins_for_agent(agent_spec, context)
 ```
 
-### 2. `ScopedMemory` Integration
-The `ScopedMemory` wrapper (in [src/bos/named_actors/memory.py](file:///home/jzhang/bos-ai/src/bos/named_actors/memory.py)) was previously injected directly as a `MemoryExtension` service. Under the plugin model, memory isolation per-actor will be configured and initialized as a parameter within the `MemoryPlugin`'s binding process (e.g. `MemoryPlugin.bind({"scope": scope})`), keeping `ScopedMemory` as an implementation detail encapsulated inside the memory plugin.
+MemoryPlugin uses `actor_scope` during binding to create a scoped memory backend or equivalent scoped behavior. The existing `ScopedMemory` wrapper may remain as an internal MemoryPlugin utility, but it is no longer injected into `ReActAgent`.
+
+---
+
+## Default Configuration Template
+
+`bos init` should not enable plugins globally by default. It may include a commented example:
+
+```toml
+[platform]
+# enabled_plugins = ["MemoryPlugin", "TaskPlugin", "SkillsPlugin", "SubagentPlugin"]
+```
+
+Default agent capabilities may be expressed in `src/bos/core/defaults/agent_spec.py` through agent-level plugin config, not through generated workspace-global enablement.
+
+---
+
+## Resolved Design Decisions
+
+1. `AskSubagent` becomes `SubagentPlugin`; `ReActAgent` has zero hardcoded LLM tools.
+2. Harness/platform capabilities are exposed through typed services such as `SubagentRuntime`, not raw `AgentHarness`.
+3. Use `HarnessPlugin` / `AgentPlugin` naming.
+4. Use `AgentPlugin.register_tools(registry)`, not `get_tools() -> list[str]`.
+5. Remove `AgentContext.get_plugin(name)`.
+6. Use `ToolContext` for per-tool-call metadata.
+7. Use top-level `platform.enabled_plugins` for global enablement.
+8. Use `platform.plugins.<PluginName>` for workspace plugin defaults.
+9. Use shallow config merge.
+10. Unknown plugin names warn; invalid known-plugin config fails startup.
+11. Remove dynamic task iteration budget adjustment.
+12. Use fixed `max_iterations`; graceful max-iteration continuation is future work.
+13. Plugin prompt order is base → plugin sections → tools → system info.
+14. Plugin interceptors run before configured harness/workspace interceptors.
+15. `event_sink` is first-class on `TurnContext`.
+16. Remove `ep_memory` and `ep_skills_loader` from core.
+
+---
+
+## Cache-Control Note
+
+`TurnContext.ephemeral` is useful for dynamic request-only context such as active task status. Cache-control remains an implementation detail of the LLM call path. The current LiteLLM integration may continue to use `cache_control_injection_points`; implementation must ensure cache hints are not placed on dynamic ephemeral context unless intentionally desired. BEP 4 does not claim ephemeral task context improves prefix caching.
 
 ---
 
@@ -394,10 +677,6 @@ The `ScopedMemory` wrapper (in [src/bos/named_actors/memory.py](file:///home/jzh
 
 | Date | Change | Intention |
 |---|---|---|
-| 2026-05-20 | Initial draft (BEP 4) | Formulate the design for decoupling agent-scoped tools from ReActAgent to make tools modular, customizable, and testable. |
-| 2026-05-20 | Plugin Micro-kernel Evolution | Revise the design to treat memory and tasks as cohesive plugins, separating harness/agent boundaries via factory binding and pass-through configuration. |
-| 2026-05-20 | Append Task Case Study | Detail how the Task capability operates as a plugin, including caching-friendly prompt injection. |
-| 2026-05-20 | Add Named Actors Impact | Outline constructor signature changes for NamedAgent and scoped memory integration. |
-| 2026-05-20 | Component Taxonomy | Classify all agent capabilities into Core Services, Core Primitives, and Plugins. AskSubagent stays core; Skills becomes a plugin. |
-
-
+| 2026-05-20 | Initial draft | Formulate plugin architecture for decoupling agent-scoped tools from `ReActAgent`. |
+| 2026-05-20 | Added task case study and named actor impact | Explore plugin boundaries and scoped memory implications. |
+| 2026-05-21 | Consolidated review decisions | Make `AskSubagent` a plugin, switch to `HarnessPlugin`/`AgentPlugin`, local plugin tool registration, explicit config semantics, lifecycle semantics, and remove core memory/skills extension points. |

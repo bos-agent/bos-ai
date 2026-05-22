@@ -8,19 +8,19 @@ def test_workspace_bootstrap_loads_extensions_bundle(tmp_path):
     bos_dir = tmp_path / ".bos"
     bos_dir.mkdir()
     (bos_dir / "config.toml").write_text(
-        '[platform]\nextensions = ["bos.extensions.all"]\n',
+        '[platform]\nextensions = ["bos.exts"]\n',
         encoding="utf-8",
     )
 
-    previous_extensions = sys.modules.pop("bos.extensions.all", None)
+    previous_extensions = sys.modules.pop("bos.exts", None)
 
     try:
         Workspace.from_discovery(tmp_path).bootstrap_platform()
-        assert "bos.extensions.all" in sys.modules
+        assert "bos.exts" in sys.modules
     finally:
-        sys.modules.pop("bos.extensions.all", None)
+        sys.modules.pop("bos.exts", None)
         if previous_extensions is not None:
-            sys.modules["bos.extensions.all"] = previous_extensions
+            sys.modules["bos.exts"] = previous_extensions
 
 
 def test_workspace_bootstrap_registers_external_agents_from_resolved_platform(tmp_path, monkeypatch):
@@ -85,7 +85,5 @@ skills = ["writer"]
 
         assert defaults["tools"] is None
         assert defaults["skills"] == ["writer"]
-        assert defaults["maxims"] == []
-        assert defaults["subagents"] == []
     finally:
         ep_agent._extensions.pop(agent_name, None)

@@ -121,7 +121,7 @@ def test_as_parts_keeps_structured_message_content_unchanged():
 
 
 def test_turn_context_merge_keeps_structured_message_parts_in_order():
-    context = TurnContext(chat_id="thread-1", turn_id="turn-1")
+    context = TurnContext(agent_name="test", chat_id="thread-1", turn_id="turn-1")
 
     context.add_message({"role": "user", "content": [{"type": "text", "text": "first"}]})
     context.add_message(

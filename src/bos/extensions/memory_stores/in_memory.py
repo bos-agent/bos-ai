@@ -8,10 +8,10 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from bos.core.contract import MemoryEntry, ep_memory
+from bos.plugins.memory import MemoryEntry, ep_memory_backend
 
 
-@ep_memory(name="InMemMemoryExtension")
+@ep_memory_backend(name="in_memory")
 class InMemMemoryExtension:
     """In-memory store for maxims and episodic memories."""
 

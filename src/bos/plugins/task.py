@@ -1,0 +1,344 @@
+"""TaskPlugin — task tracking tools and events."""
+
+from __future__ import annotations
+
+import time
+import uuid
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any, Literal
+
+from bos.core.contract import (
+    AgentBindContext,
+    AgentPlugin,
+    PluginServices,
+    TurnInterceptor,
+    ep_plugin,
+)
+from bos.core.registry import ToolRegistry
+
+if TYPE_CHECKING:
+    from bos.core.agent import TurnContext
+
+
+@dataclass
+class _Task:
+    id: str
+    subject: str
+    description: str
+    status: str = "pending"
+    created_at: float = field(default_factory=time.time)
+    blocked_by: list[str] = field(default_factory=list)
+    blocks: list[str] = field(default_factory=list)
+
+
+@dataclass
+class _TaskList:
+    """Per-chat task list with version tracking for event emission."""
+
+    tasks: dict[str, _Task] = field(default_factory=dict)
+    id: str = field(default_factory=lambda: uuid.uuid4().hex[:8])
+    version: int = 0
+    emitted_version: int = -1
+    _next_id: int = field(default=1, init=False)
+
+    def bump(self) -> None:
+        self.version += 1
+
+    def mark_emitted(self) -> None:
+        self.emitted_version = self.version
+
+    def needs_emit(self) -> bool:
+        return self.version != self.emitted_version
+
+    def next_id(self) -> str:
+        nid = str(self._next_id)
+        self._next_id += 1
+        return nid
+
+    def to_payload(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "id": t.id,
+                "subject": t.subject,
+                "status": t.status,
+                "blocked_by": t.blocked_by,
+                "blocks": t.blocks,
+            }
+            for t in sorted(self.tasks.values(), key=lambda t: t.created_at)
+        ]
+
+
+class TaskEventInterceptor:
+    """Emits task state events on after_tool and final_response."""
+
+    def __init__(self, task_lists: dict[str, _TaskList]) -> None:
+        self._task_lists = task_lists
+
+    async def intercept(
+        self,
+        stage: Literal[
+            "prepare", "before_llm", "after_llm", "after_tool",
+            "final_response", "max_iteration",
+        ],
+        context: TurnContext,
+    ) -> None:
+        if stage not in ("after_tool", "final_response"):
+            return
+        event_sink = getattr(context, "event_sink", None)
+        if event_sink is None:
+            return
+        task_list = self._task_lists.get(context.chat_id)
+        if task_list is not None and task_list.needs_emit():
+            from bos.protocol import TurnEvent
+
+            await event_sink.emit(
+                TurnEvent(
+                    event_type="task",
+                    phase="update",
+                    chat_id=context.chat_id,
+                    turn_id=context.turn_id,
+                    agent_name=context.agent_name,
+                    stage=stage,
+                    detail="task_state",
+                    content="",
+                    metadata={"tasks": task_list.to_payload()},
+                )
+            )
+            task_list.mark_emitted()
+
+
+_TASK_TOOL_USAGE = {
+    "TaskCreate": """Create a new task in the task list.
+
+Use the task tools (TaskCreate, TaskUpdate, TaskList, TaskGet) to plan and track your work.
+
+For complex or multi-part tasks: create a task list BEFORE starting work. Break the work into
+concrete, verifiable steps. After receiving new multi-part instructions, capture them as tasks
+before starting implementation.
+
+For simple single-step tasks: skip task creation and just do the work.
+
+Mark each task in_progress when you begin it. After completing and verifying a task, mark it
+completed and check TaskList to find what to work on next. Prefer working in creation order.
+
+### When to Use
+
+Use proactively when:
+- A task requires 3 or more distinct steps or actions
+- The task is non-trivial and needs careful planning
+- The user provides multiple tasks (numbered or comma-separated)""",
+
+    "TaskUpdate": """Update task status, metadata, or dependencies.
+
+### Status Workflow
+
+pending -> in_progress -> completed
+
+IMPORTANT: Only mark completed when implementation and relevant verification are both done.
+If tests fail, errors remain, verification was skipped, or implementation is partial, keep
+in_progress and record the blocker or next action.""",
+
+    "TaskList": """List all tasks with status and blockers. Use to:
+- Check overall progress
+- Find the next available task (pending, not blocked)
+- See which tasks are blocked and why""",
+
+    "TaskGet": """Fetch full details of a task including description and dependency state.
+Use before starting work on a task to verify its blockedBy list is empty.""",
+}
+
+
+@ep_plugin(name="TaskPlugin")
+class TaskHarnessPlugin:
+    @property
+    def name(self) -> str:
+        return "TaskPlugin"
+
+    def default_config(self) -> Mapping[str, Any]:
+        return {}
+
+    async def setup(self, services: PluginServices) -> None:
+        pass
+
+    def validate_config(self, config: Mapping[str, Any], context: AgentBindContext) -> None:
+        pass
+
+    def bind(self, config: Mapping[str, Any], context: AgentBindContext) -> AgentPlugin:
+        return TaskAgentPlugin()
+
+    async def teardown(self) -> None:
+        pass
+
+
+class TaskAgentPlugin:
+    def __init__(self) -> None:
+        self._task_lists: dict[str, _TaskList] = {}
+
+    @property
+    def name(self) -> str:
+        return "TaskPlugin"
+
+    def register_tools(self, registry: ToolRegistry) -> None:
+        task_lists = self._task_lists
+
+        @registry(
+            name="TaskCreate",
+            description="Create a new task to track progress on complex, multi-step work.",
+            usage=_TASK_TOOL_USAGE["TaskCreate"],
+            parameters={
+                "type": "object",
+                "properties": {
+                    "subject": {
+                        "type": "string",
+                        "description": "Brief, actionable title in imperative form (e.g., 'Fix auth bug').",
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "What needs to be done. 1-2 sentences.",
+                    },
+                },
+                "required": ["subject", "description"],
+            },
+        )
+        async def task_create(subject: str, description: str, chat_id: str = "") -> str:
+            tl = task_lists.setdefault(chat_id, _TaskList())
+            task_id = tl.next_id()
+            task = _Task(id=task_id, subject=subject, description=description)
+            tl.tasks[task_id] = task
+            tl.bump()
+            return f"Task created: [{task_id}] {subject} (status: pending)"
+
+        @registry(
+            name="TaskUpdate",
+            description=(
+                "Update a task's status or metadata."
+                " Status flows: pending -> in_progress -> completed."
+                " Only mark completed when FULLY done."
+            ),
+            usage=_TASK_TOOL_USAGE["TaskUpdate"],
+            parameters={
+                "type": "object",
+                "properties": {
+                    "taskId": {"type": "string", "description": "Task ID to update."},
+                    "status": {
+                        "type": "string",
+                        "enum": ["pending", "in_progress", "completed", "deleted"],
+                        "description": "New status.",
+                    },
+                    "subject": {"type": "string", "description": "New title."},
+                    "description": {"type": "string", "description": "New description."},
+                    "addBlocks": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Task IDs that this task blocks.",
+                    },
+                    "addBlockedBy": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Task IDs that block this task.",
+                    },
+                },
+                "required": ["taskId"],
+            },
+        )
+        async def task_update(
+            taskId: str,
+            status: str | None = None,
+            subject: str | None = None,
+            description: str | None = None,
+            addBlocks: list[str] | None = None,
+            addBlockedBy: list[str] | None = None,
+            chat_id: str = "",
+        ) -> str:
+            tl = task_lists.get(chat_id)
+            if tl is None or taskId not in tl.tasks:
+                return f"Error: Task '{taskId}' not found. Use TaskList to see available tasks."
+            store = tl.tasks
+            task = store[taskId]
+            if status is not None:
+                if status == "deleted":
+                    for other in store.values():
+                        other.blocked_by = [x for x in other.blocked_by if x != taskId]
+                        other.blocks = [x for x in other.blocks if x != taskId]
+                    del store[taskId]
+                    tl.bump()
+                    return f"Task '{taskId}' deleted."
+                task.status = status
+                if status == "completed":
+                    for other in store.values():
+                        other.blocked_by = [x for x in other.blocked_by if x != taskId]
+                        other.blocks = [x for x in other.blocks if x != taskId]
+                    task.blocked_by.clear()
+                    task.blocks.clear()
+            if subject is not None:
+                task.subject = subject
+            if description is not None:
+                task.description = description
+            if addBlocks:
+                for blocked_id in addBlocks:
+                    if blocked_id not in store:
+                        return f"Error: Blocked task '{blocked_id}' not found."
+                task.blocks.extend(addBlocks)
+                for blocked_id in addBlocks:
+                    store[blocked_id].blocked_by.append(taskId)
+            if addBlockedBy:
+                for blocker_id in addBlockedBy:
+                    if blocker_id not in store:
+                        return f"Error: Blocker task '{blocker_id}' not found."
+                task.blocked_by.extend(addBlockedBy)
+                for blocker_id in addBlockedBy:
+                    store[blocker_id].blocks.append(taskId)
+            tl.bump()
+            return f"Task '{taskId}' updated. Status: {task.status}."
+
+        @registry(
+            name="TaskList",
+            description="List all tasks with status and blockers. Shows which tasks are available to work on.",
+            usage=_TASK_TOOL_USAGE["TaskList"],
+            parameters={"type": "object", "properties": {}, "required": []},
+        )
+        async def task_list(chat_id: str = "") -> str:
+            tl = task_lists.get(chat_id)
+            if tl is None or not tl.tasks:
+                return "(No tasks created yet.)"
+            lines = []
+            for tid in sorted(tl.tasks, key=lambda k: tl.tasks[k].created_at):
+                t = tl.tasks[tid]
+                blocked = f" (blocked by: {', '.join(t.blocked_by)})" if t.blocked_by else ""
+                blocks = f" [blocks: {', '.join(t.blocks)}]" if t.blocks else ""
+                lines.append(f"[{t.id}] {t.status:<12} {t.subject}{blocked}{blocks}")
+            return "Tasks:\n" + "\n".join(lines)
+
+        @registry(
+            name="TaskGet",
+            description="Fetch full details of a specific task, including description and dependency state.",
+            usage=_TASK_TOOL_USAGE["TaskGet"],
+            parameters={
+                "type": "object",
+                "properties": {"taskId": {"type": "string", "description": "Task ID to fetch."}},
+                "required": ["taskId"],
+            },
+        )
+        async def task_get(taskId: str, chat_id: str = "") -> str:
+            tl = task_lists.get(chat_id)
+            if tl is None or taskId not in tl.tasks:
+                return f"Error: Task '{taskId}' not found. Use TaskList to see available tasks."
+            t = tl.tasks[taskId]
+            parts = [
+                f"Task: {t.subject}",
+                f"ID: {t.id}",
+                f"Status: {t.status}",
+                f"Description: {t.description}",
+            ]
+            if t.blocked_by:
+                parts.append(f"Blocked by: {', '.join(t.blocked_by)}")
+            if t.blocks:
+                parts.append(f"Blocks: {', '.join(t.blocks)}")
+            return "\n".join(parts)
+
+    async def get_system_prompt_section(self, context: TurnContext) -> str | None:
+        return None
+
+    def get_interceptors(self) -> Sequence[TurnInterceptor]:
+        return [TaskEventInterceptor(self._task_lists)]
