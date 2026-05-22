@@ -260,7 +260,7 @@ async def _run_interactive(
     from bos.core.chat_state import ChatState
 
     async with ws.harness() as harness:
-        agent = harness.create_agent(agent_name, agent_cfg=agent_cfg)
+        agent = await harness.create_agent(agent_name, agent_cfg=agent_cfg)
         actor_mbox = harness.mail_route.bind("agent@main")
         client_mbox = harness.mail_route.bind("client@local")
 
@@ -393,7 +393,7 @@ def ask(
     async def _run(event_sink: _TaskProgressDisplay | None = None) -> str:
         agent_cfg = {"max_iterations": max_iterations} if max_iterations is not None else None
         async with ws.harness() as harness:
-            agent = harness.create_agent(selected_agent, agent_cfg=agent_cfg)
+            agent = await harness.create_agent(selected_agent, agent_cfg=agent_cfg)
             return await agent.ask(
                 uuid.uuid4().hex,
                 message,

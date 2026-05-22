@@ -3,7 +3,7 @@ import json
 import uuid
 
 import pytest
-from conftest import InMemMailRoute, InMemMemoryExtension, InMemMessageStore, MessageOnlyConsolidator
+from conftest import InMemMailRoute, InMemMessageStore, MessageOnlyConsolidator
 
 from bos.core import (
     AgentActor,
@@ -14,15 +14,12 @@ from bos.core import (
     ep_provider,
 )
 from bos.core.agent import ChainReactInterceptor, ReActAgent
-from bos.core.defaults.skills_loader import FileSystemSkillsLoader
 from bos.protocol import MessageType
 
 
 def create_test_agent(**kwargs):
     kwargs.setdefault("message_store", InMemMessageStore())
-    kwargs.setdefault("memory", InMemMemoryExtension())
     kwargs.setdefault("consolidator", MessageOnlyConsolidator())
-    kwargs.setdefault("skills_loader", FileSystemSkillsLoader())
     kwargs.setdefault("interceptor", ChainReactInterceptor())
     return ReActAgent(**kwargs)
 
@@ -141,7 +138,6 @@ async def test_ask_subagent_emits_child_lineage_events(tmp_path):
             description="Manager",
             model=f"{provider_name}/manager",
             tools=["AskSubagent"],
-            subagents=[researcher_name],
         )
         ReActAgent.register(
             name=researcher_name,
@@ -158,8 +154,10 @@ async def test_ask_subagent_emits_child_lineage_events(tmp_path):
             workspace=tmp_path,
             consolidator=MessageOnlyConsolidator(),
             subagent_defaults={"task_template": "--- Sub-agent Instructions ---\n{task}"},
+            enabled_plugins=["SubagentPlugin"],
+            platform_plugins={"SubagentPlugin": {"allow": "*"}},
         ) as harness:
-            manager = harness.create_agent(manager_name)
+            manager = await harness.create_agent(manager_name)
             result = await manager.ask("parent-chat", "Explain the event sink refactor.", event_sink=sink)
 
         assert result == "Manager synthesized: Researcher summary"

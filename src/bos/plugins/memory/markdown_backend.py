@@ -11,14 +11,16 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-from .._utils import _flock
-from ..contract import MemoryEntry, ep_memory
+from bos.core import _flock
+
+from .scoped_memory import MemoryEntry
+from .plugin import ep_memory_backend
 
 logger = logging.getLogger(__name__)
 
 
-@ep_memory(name="_default")
-class MarkdownMemoryExtension:
+@ep_memory_backend(name="_default")
+class MarkdownMemoryBackend:
     """File-based memory store. Maxims in ``maxims/``, memories in ``memories/``."""
 
     def __init__(self, store_dir: str | Path | None = None, bos_dir: str | Path | None = None) -> None:

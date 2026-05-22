@@ -2,8 +2,8 @@ from datetime import datetime
 
 import pytest
 
-from bos.core import MemoryEntry
-from bos.named_actors.memory import ScopedMemory
+from bos.plugins.memory import MemoryEntry
+from bos.plugins.memory.scoped_memory import ScopedMemory
 
 
 class FakeMemory:

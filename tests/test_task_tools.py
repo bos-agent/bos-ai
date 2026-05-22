@@ -1,23 +1,16 @@
-"""Tests for TaskCreate, TaskUpdate, TaskList, TaskGet tools."""
+"""Tests for TaskCreate, TaskUpdate, TaskList, TaskGet tools via TaskPlugin."""
 
 import asyncio
 
 import pytest
-from conftest import InMemMemoryExtension, InMemMessageStore, MessageOnlyConsolidator
+from conftest import create_test_agent
 
-from bos.core import ReActAgent
-from bos.core.defaults.agent_spec import bos_maxims
-from bos.core.defaults.skills_loader import FileSystemSkillsLoader
+from bos.plugins.task import TaskAgentPlugin
 
 
 def _create_agent(**kwargs):
-    kwargs.setdefault("message_store", InMemMessageStore())
-    kwargs.setdefault("memory", InMemMemoryExtension())
-    kwargs.setdefault("consolidator", MessageOnlyConsolidator())
-    kwargs.setdefault("skills_loader", FileSystemSkillsLoader())
-    kwargs.setdefault("maxims", bos_maxims)
     kwargs.setdefault("system_prompt", "test")
-    return ReActAgent(**kwargs)
+    return create_test_agent(plugins=[TaskAgentPlugin()], **kwargs)
 
 
 class TestTaskCreate:

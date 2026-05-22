@@ -32,3 +32,29 @@ This `AGENTS.md` applies to the entire repository.
 - If a change touches config/runtime behavior, add or update targeted pytest coverage in `tests/`.
 - `uv run ruff check src tests` is a useful signal, but the repo may already contain unrelated lint findings. Do not assume a lint failure came from your change without checking the reported files.
 - Pull request titles must follow semantic/conventional format, for example `feat(config): ...` or `fix(runner): ...`, because GitHub Actions validate the PR title.
+
+
+## Code Search
+
+Use `uv run semble search` to find code by describing what it does or naming a symbol/identifier, instead of grep:
+
+```bash
+uv run semble search "authentication flow" ./my-project
+uv run semble search "save_pretrained" ./my-project
+uv run semble search "save model to disk" ./my-project --top-k 10
+```
+
+Use `uv run semble find-related` to discover code similar to a known location (pass `file_path` and `line` from a prior search result):
+
+```bash
+uv run semble find-related src/auth.py 42 ./my-project
+```
+
+`path` defaults to the current directory when omitted; git URLs are accepted.
+
+## Workflow
+
+1. Start with `uv run semble search` to find relevant chunks.
+2. Inspect full files only when the returned chunk is not enough context.
+3. Optionally use `uv run semble find-related` with a promising result's `file_path` and `line` to discover related implementations.
+4. Use grep only when you need exhaustive literal matches or quick confirmation of an exact string.

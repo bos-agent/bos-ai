@@ -43,7 +43,7 @@ async def start(workspace: Workspace) -> None:
         from bos.core.chat_state import ChatState
 
         chat_state = ChatState(workspace.bos_dir)
-        agent = harness.create_agent(agent_name)
+        agent = await harness.create_agent(agent_name)
         actor = AgentActor(agent, harness.mail_route.bind(actor_address), chat_state=chat_state)
 
         channels: list[tuple[Channel, str]] = []

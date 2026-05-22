@@ -37,7 +37,7 @@ def prompt(ctx, agent_name: str | None, workspace_dir: str | None):
 
     async def _run() -> str:
         async with ws.harness() as harness:
-            agent = harness.create_agent(selected)
+            agent = await harness.create_agent(selected)
             return await agent._build_system_prompt()
 
     click.echo(asyncio.run(_run()))

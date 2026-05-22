@@ -44,11 +44,15 @@ dev = [
     "pytest-asyncio>=1.1.0",
     "pytest-cov>=6.2.1",
     "ruff>=0.12.4",
+    "semble>=0.2.0",
 ]
 
 [tool.ruff]
 line-length = 120
 lint.select = ["E", "F", "I"]
+
+[tool.ruff.format]
+preview = true
 
 [tool.semantic_release]
 allow_zero_version = true

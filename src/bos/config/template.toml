@@ -12,7 +12,7 @@
 # a list of module names or paths where the platform would scan and load extendisons from.
 # by default, the platform will load all the bos built in extension as well as
 # the extensions under <bos_dir>/extensions
-#extensions = ["bos.extensions.all", "./extentions"]
+#extensions = ["bos.exts", "./extentions"]
 
 # a list of path where the platform would scan and load the agents definition spec, in addition
 # to the agents configured inline in this file. for the agent specs with same name (role), the
@@ -20,6 +20,24 @@
 # individule agent config specs
 # by default, the platform will scan the agents from <bos_dir>/agents
 #agent_dirs = ["./agents"]
+
+# ── Plugin System (BEP 4) ─────────────────────────────────────────────
+# Enable built-in plugins globally. Plugins are disabled by default.
+# enabled_plugins = ["MemoryPlugin", "TaskPlugin", "SkillsPlugin", "SubagentPlugin"]
+
+# Workspace-level plugin defaults (does not enable the plugin by itself).
+# [platform.plugins.MemoryPlugin]
+# maxims = ["user", "soul", "identity", "rules"]
+# scope = "workspace"
+
+# [platform.plugins.SkillsPlugin]
+# skill_dirs = ["skills"]
+# allow = "*"
+
+# [platform.plugins.SubagentPlugin]
+# allow = "*"
+
+# ── Agent Defaults ────────────────────────────────────────────────────
 
 # define he default setup for all agents
 [platform.agent_defaults]
@@ -36,21 +54,12 @@ model = "gemini/gemini-3.1-pro-preview"
 #tools = ["ReadFile", "SearchFiles"]
 #tools = "*"
 
-# the skills that is avaialbie for the agent. the setting rules are same as tools.
-#skills = ["brainstorming"]
-#skills = "*"
-
-# the subagents the agent can use with the AskSubagent tool. the setting rules are same as tools.
-#subagents = ["researcher"]
-#subagents = "*"
-
-# the maxims for this agent. it could be set in multiple forms. if not set, no maxims for the agent.
-# 1. enable all the built in maxims, which are soul, user, identity and rules.
-#maxims = "*"
-# 2. enable subset of the built in maxims
-#maxims = ["user", "soul"]
-# 3. use customize maxims, where you need to provide a table for maxim definition
-#maxims = {"user": "your knowledge about the user — preferences, background, projects, style", "identity": "who you are — your role, purpose, and context"}
+# The skills, subagents, and maxims are now managed through plugins (MemoryPlugin,
+# SkillsPlugin, SubagentPlugin). Use platform.plugins.<PluginName> and per-agent
+# [[platform.agents.plugins.<PluginName>]] to configure them.
+#
+# The legacy keys (skills, subagents, maxims) in agent_defaults or per-agent config
+# are no longer processed by the kernel.
 
 # llm reasonging effort level, which would be sent along the llm model call
 #reasoning_effort = "medium"
@@ -72,6 +81,15 @@ model = "gemini/gemini-3.1-pro-preview"
 #system_prompt = """
 #You are an personal assistant.
 #"""
+
+# Per-agent plugin configuration example:
+# [platform.agents.plugins.MemoryPlugin]
+# maxims = ["user", "soul"]
+# scope = "actor"
+#
+# [platform.agents.plugins.SkillsPlugin]
+# enabled = true
+# allow = ["code-review", "repo-navigation"]
 
 # define he defualt setup for all agents
 [platform.agent_defaults.tools_usage]

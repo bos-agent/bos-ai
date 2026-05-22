@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
 from bos.protocol import Envelope, MessageContent, MessageType, TurnEvent
@@ -73,36 +74,6 @@ class MessageStore(Protocol):
     async def list_chats(self) -> dict[str, dict[str, Any]]: ...
 
 
-ep_memory = ExtensionPoint(
-    description="""
-        Memory extension. A factory that creates memory backends implementing
-        the MemoryExtension protocol. Replaces ep_memory_store.
-    """
-)
-
-
-@dataclass
-class MemoryEntry:
-    id: str
-    content: str  # full content from get_memory; truncated snippet from search_memories
-    tags: list[str] = field(default_factory=list)
-    created_at: str = ""
-    metadata: dict | None = None
-
-
-@runtime_checkable
-class MemoryExtension(Protocol):
-    # ── Maxims: preloaded into system prompt every turn ──
-    async def get_maxim(self, key: str) -> str: ...
-    async def set_maxim(self, key: str, content: str) -> None: ...
-
-    # ── Memories: searched on demand ──
-    async def search_memories(self, query: str, *, top_k: int = 5) -> list[MemoryEntry]: ...
-    async def ingest_memory(self, content: str, *, tags: list[str] | None = None) -> str: ...
-    async def get_memory(self, entry_id: str) -> MemoryEntry | None: ...
-    async def forget_memory(self, entry_id: str) -> None: ...
-
-
 ep_consolidator = ExtensionPoint(
     description="""
         Content consolidator. A factory that creates consolidators implementing the Consolidator protocol.
@@ -113,26 +84,6 @@ ep_consolidator = ExtensionPoint(
 @runtime_checkable
 class Consolidator(Protocol):
     async def consolidate(self, messages: list[Message], instruction: str | None = None) -> str: ...
-
-
-ep_skills_loader = ExtensionPoint(
-    description="""
-        Skills Loader. A factory that creates skills loaders implementing the SkillsLoader protocol.
-    """
-)
-
-
-@dataclass
-class SkillMeta:
-    location: str
-    name: str = ""
-    description: str = ""
-
-
-@runtime_checkable
-class SkillsLoader(Protocol):
-    async def load_skill(self, name: str) -> str: ...
-    async def search_skills(self, query: str | None = None) -> dict[str, SkillMeta]: ...
 
 
 ep_turn_interceptor = ExtensionPoint(
@@ -235,3 +186,83 @@ ep_actor_command = ExtensionPoint(
         return actor._agent._get_tool_defs()
     """
 )
+
+
+# ── BEP 4: Plugin Architecture ─────────────────────────────────────────────
+
+ep_plugin = ExtensionPoint(
+    description="Harness plugin. A class or factory implementing HarnessPlugin."
+)
+
+
+@dataclass(frozen=True)
+class AgentBindContext:
+    agent_name: str
+    actor_scope: str | None = None
+
+
+@dataclass(frozen=True)
+class ToolContext:
+    agent_name: str
+    chat_id: str
+    turn_id: str
+    event_sink: EventSink | None = None
+    extra_data: Mapping[str, Any] = field(default_factory=dict)
+
+
+class SubagentRuntime(Protocol):
+    async def ask(
+        self,
+        role: str,
+        message: str,
+        *,
+        parent: ToolContext,
+    ) -> str:
+        """Delegate to a configured subagent and return its response."""
+        ...
+
+
+@dataclass(frozen=True)
+class PluginServices:
+    bos_dir: Path
+    workspace: Path
+    llm: Any  # LLMClient
+    message_store: MessageStore
+    consolidator: Consolidator
+    subagents: SubagentRuntime
+
+
+@runtime_checkable
+class AgentPlugin(Protocol):
+    @property
+    def name(self) -> str: ...
+
+    def register_tools(self, registry: ToolRegistry) -> None: ...
+
+    async def get_system_prompt_section(self, context: Any) -> str | None: ...
+
+    def get_interceptors(self) -> Sequence[Any]: ...
+
+
+@runtime_checkable
+class HarnessPlugin(Protocol):
+    @property
+    def name(self) -> str: ...
+
+    def default_config(self) -> Mapping[str, Any]: ...
+
+    async def setup(self, services: PluginServices) -> None: ...
+
+    def validate_config(
+        self,
+        config: Mapping[str, Any],
+        context: AgentBindContext,
+    ) -> None: ...
+
+    def bind(
+        self,
+        config: Mapping[str, Any],
+        context: AgentBindContext,
+    ) -> AgentPlugin: ...
+
+    async def teardown(self) -> None: ...
