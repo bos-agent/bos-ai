@@ -6,16 +6,16 @@ readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.13"
 dependencies = [
-    "litellm==1.83.0",
-    "python-dotenv>=1.2.2",
-    "filelock>=3.19.1",
-    "click>=8.1.7",
-    "rich>=13.0.0",
-    "textual>=1.0.0",
-    "tomli>=2.0.0; python_version<'3.11'",
-    "beautifulsoup4>=4.14.3",
-    "aiohttp>=3.13.5",
-    "textual-autocomplete>=4.0.6",
+    "litellm==1.84.0",
+    "python-dotenv==1.2.2",
+    "filelock==3.25.2",
+    "click==8.3.2",
+    "rich==14.3.3",
+    "textual==8.2.3",
+    "tomli==2.0.1; python_version<'3.11'",
+    "beautifulsoup4==4.14.3",
+    "aiohttp==3.13.5",
+    "textual-autocomplete==4.0.6",
 ]
 
 [project.urls]
@@ -26,9 +26,9 @@ Homepage = "https://github.com/bos-agent/bos-ai"
 boscli = "bos.cli.entry:main"
 
 [project.optional-dependencies]
-providers = ["oauth-cli-kit>=0.1.3"]
-search = ["tavily-python>=0.7.23"]
-all = ["oauth-cli-kit>=0.1.3", "tavily-python>=0.7.23"]
+providers = ["oauth-cli-kit==0.1.3"]
+search = ["tavily-python==0.7.23"]
+all = ["oauth-cli-kit==0.1.3", "tavily-python==0.7.23"]
 
 [build-system]
 requires = ["hatchling"]
@@ -39,12 +39,12 @@ packages = ["src/bos"]
 
 [dependency-groups]
 dev = [
-    "ipdb>=0.13.13",
-    "pytest>=8.4.1",
-    "pytest-asyncio>=1.1.0",
-    "pytest-cov>=6.2.1",
-    "ruff>=0.12.4",
-    "semble>=0.2.0",
+    "ipdb==0.13.13",
+    "pytest==9.0.3",
+    "pytest-asyncio==1.3.0",
+    "pytest-cov==7.1.0",
+    "ruff==0.15.10",
+    "semble==0.2.0",
 ]
 
 [tool.ruff]
@@ -69,3 +69,7 @@ insertion_flag = "<!-- version list -->"
 
 [tool.semantic_release.changelog.default_templates]
 mask_initial_release = false
+
+[tool.uv]
+preview = true
+add-bounds = "exact"
