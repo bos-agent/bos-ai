@@ -10,6 +10,12 @@ from bos.protocol import Envelope, MessageContent, MessageType, TurnEvent
 
 from .registry import ExtensionPoint, ToolRegistry
 
+# ── BEP 5: Shared literals ─────────────────────────────────────────────────
+
+ToolNoiseFilter = Literal["keep_signatures", "strip_all", "keep_all"]
+TokenEstimateSource = Literal["litellm", "fallback", "fallback-error"]
+ToolResultStatus = Literal["success", "error", "unknown"]
+
 
 @runtime_checkable
 class Closeable(Protocol):
@@ -50,28 +56,98 @@ ep_provider = ExtensionPoint(
     """
 )
 
-ep_message_store = ExtensionPoint(
-    description="""
-        Message store. A factory that creates message stores implementing the MessageStore protocol.
-    """
-)
-
-
 @dataclass
 class Message:
     llm_message: dict[str, Any]
     created_at: datetime = field(default_factory=datetime.now)
     turn_id: str | None = None
+    # BEP 5: is_summary marks this message as a compaction boundary.
+    # get_context() and get_messages(active_only=True) use the latest
+    # is_summary=True message to determine the active-context window.
     is_summary: bool = False
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class TokenEstimate:
+    count: int
+    tokenizer_model: str | None
+    source: TokenEstimateSource
+
+
+@dataclass(frozen=True)
+class ContextResult:
+    """Provider-ready context assembled by get_context()."""
+
+    messages: list[dict[str, Any]]
+    source_messages: list[Message]
+    estimated_tokens: int
+    tokenizer_model: str | None
+    estimation_source: TokenEstimateSource
+    filter_mode: ToolNoiseFilter
+    summary_applied: bool
+    summary_message_count_excluded: int
+    latest_summary: Message | None = None
+
+
+@dataclass(frozen=True)
+class ChatMeta:
+    chat_id: str
+    message_count: int
+    last_activity: datetime | None
+    has_summary: bool
+    latest_summary_at: datetime | None = None
+    description: str | None = None
+    extra: dict[str, Any] = field(default_factory=dict)
+
+
+ep_chat_store = ExtensionPoint(
+    description="Chat store factory. Creates ChatStore implementations for persistence + context assembly."
+)
+
+
 @runtime_checkable
-class MessageStore(Protocol):
-    async def save_messages(self, chat_id: str, messages: Iterable[Message]) -> None: ...
-    async def get_messages(self, chat_id: str, original: bool = False) -> Iterable[Message]: ...
+class ChatStore(Protocol):
+    # ── Turn persistence ──
+    async def save_turn(
+        self, chat_id: str, messages: Iterable[Message], *, turn_id: str | None = None
+    ) -> None: ...
+
+    # ── Context assembly: pure read, no consolidation ──
+    async def get_context(
+        self,
+        chat_id: str,
+        *,
+        tokenizer_model: str | None = None,
+        filter_mode: ToolNoiseFilter | None = None,
+    ) -> ContextResult: ...
+
+    # ── Compaction input: active + filtered but not provider-projected ──
+    async def get_compaction_messages(
+        self,
+        chat_id: str,
+        *,
+        filter_mode: ToolNoiseFilter | None = None,
+    ) -> list[Message]: ...
+
+    # ── Token estimation for diagnostics and commands ──
+    async def estimate_tokens(
+        self,
+        chat_id: str,
+        *,
+        tokenizer_model: str | None = None,
+        filter_mode: ToolNoiseFilter | None = None,
+    ) -> TokenEstimate: ...
+
+    # ── Compaction boundary persistence and inspection ──
     async def save_summary(self, chat_id: str, summary: str) -> None: ...
-    async def list_chats(self) -> dict[str, dict[str, Any]]: ...
+    async def get_summary(self, chat_id: str) -> Message | None: ...
+
+    # ── Raw access ──
+    async def get_messages(self, chat_id: str, *, active_only: bool = True) -> list[Message]: ...
+
+    # ── Metadata ──
+    async def list_chats(self) -> dict[str, ChatMeta]: ...
 
 
 ep_consolidator = ExtensionPoint(
@@ -229,9 +305,9 @@ class PluginServices:
     bos_dir: Path
     workspace: Path
     llm: Any  # LLMClient
-    message_store: MessageStore
     consolidator: Consolidator
     subagents: SubagentRuntime
+    chat_store: ChatStore | None = None
 
 
 @runtime_checkable

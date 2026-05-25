@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING
 
 from bos.core import ep_actor_command
 from bos.core.chat_state import ChatStateError
-from bos.core.history import estimate_message_history_tokens
 from bos.protocol import Envelope
 
 if TYPE_CHECKING:
@@ -38,7 +37,7 @@ async def history(input: str, env: Envelope, actor: AgentActor) -> dict:
     agent = actor._agent
     if not chat_id:
         return {"name": "history", "ok": False, "error": "(no chat found)", "result": []}
-    messages = await agent._message_store.get_messages(chat_id)
+    messages = await agent._chat_store.get_messages(chat_id, active_only=True)
     result = [m.llm_message for m in messages]
     return {"name": "history", "ok": True, "result": result}
 
@@ -50,9 +49,9 @@ async def compact(input: str, env: Envelope, actor: AgentActor) -> dict:
     agent = actor._agent
     if not chat_id:
         return {"name": "compact", "ok": False, "error": "(no chat found)", "result": "(no chat found)"}
-    messages = list(await agent._message_store.get_messages(chat_id))
+    messages = await agent._chat_store.get_compaction_messages(chat_id)
     summary = await agent._consolidator.consolidate(messages)
-    await agent._message_store.save_summary(chat_id, summary)
+    await agent._chat_store.save_summary(chat_id, summary)
     return {"name": "compact", "ok": True, "result": f"Chat {chat_id} compacted."}
 
 
@@ -63,16 +62,15 @@ async def tokens(input: str, env: Envelope, actor: AgentActor) -> dict:
     agent = actor._agent
     if not chat_id:
         return {"name": "tokens", "ok": False, "error": "(no chat found)", "result": "(no chat found)"}
-    messages = list(await agent._message_store.get_messages(chat_id))
     budget_model = getattr(agent, "_model", None)
-    estimate = estimate_message_history_tokens(messages, budget_model=budget_model)
-    result = f"Estimated tokens: {estimate.estimated_tokens} ({estimate.source}, model={estimate.model or 'unknown'})"
+    estimate = await agent._chat_store.estimate_tokens(chat_id, tokenizer_model=budget_model)
+    result = f"Estimated tokens: {estimate.count} ({estimate.source}, model={estimate.tokenizer_model or 'unknown'})"
     return {
         "name": "tokens",
         "ok": True,
         "result": result,
-        "estimated_tokens": estimate.estimated_tokens,
-        "model": estimate.model,
+        "estimated_tokens": estimate.count,
+        "model": estimate.tokenizer_model,
         "source": estimate.source,
     }
 
@@ -81,7 +79,7 @@ async def tokens(input: str, env: Envelope, actor: AgentActor) -> dict:
 async def chats(actor: AgentActor) -> dict:
     """List all chats."""
     agent = actor._agent
-    result = await agent._message_store.list_chats()
+    result = await agent._chat_store.list_chats()
     return {"name": "chats", "ok": True, "result": result}
 
 

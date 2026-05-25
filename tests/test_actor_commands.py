@@ -3,12 +3,11 @@ import json
 import uuid
 
 import pytest
-from conftest import InMemMailRoute, InMemMemoryExtension, InMemMessageStore, MessageOnlyConsolidator
+from conftest import InMemChatStore, InMemMailRoute, InMemMemoryExtension, MessageOnlyConsolidator
 
 from bos.core.actor import AgentActor
 from bos.core.chat_state import ChatState
 from bos.core.contract import Message
-from bos.core.history import HistoryProjection
 from bos.extensions.actor_commands import system_cmd  # noqa: F401
 from bos.protocol import Envelope, MessageType
 
@@ -44,7 +43,7 @@ class FakeMailbox:
 
 class StubAgent:
     def __init__(self) -> None:
-        self._message_store = InMemMessageStore()
+        self._chat_store = InMemChatStore()
         self._memory = InMemMemoryExtension()
         self._consolidator = MessageOnlyConsolidator()
         self._model = "test/model"
@@ -120,7 +119,7 @@ async def test_new_command_pops_old_session_and_returns_fresh_id():
     actor = AgentActor(agent, mailbox)
     old_chat_id = "old-chat"
     actor._get_or_create_session(old_chat_id)
-    await agent._message_store.save_messages(
+    await agent._chat_store.save_turn(
         old_chat_id,
         [Message(llm_message={"role": "user", "content": "old message"})],
     )
@@ -259,7 +258,7 @@ async def test_history_command_uses_envelope_chat_id():
     actor = AgentActor(agent, mailbox)
     chat_id = "telegram:42"
 
-    await agent._message_store.save_messages(
+    await agent._chat_store.save_turn(
         chat_id,
         [Message(llm_message={"role": "user", "content": "saved under chat"})],
     )
@@ -284,7 +283,7 @@ async def test_compact_command_passes_message_objects_and_saves_summary():
     agent = StubAgent()
     actor = AgentActor(agent, mailbox)
     chat_id = "compact-chat"
-    await agent._message_store.save_messages(
+    await agent._chat_store.save_turn(
         chat_id,
         [Message(llm_message={"role": "user", "content": "history"})],
     )
@@ -300,7 +299,7 @@ async def test_compact_command_passes_message_objects_and_saves_summary():
     )
 
     payload = json.loads(mailbox.sent[-1].content)
-    messages = await agent._message_store.get_messages(chat_id)
+    messages = await agent._chat_store.get_messages(chat_id, active_only=True)
     assert payload["name"] == "compact"
     assert payload["ok"] is True
     assert agent._consolidator.calls
@@ -311,25 +310,21 @@ async def test_compact_command_passes_message_objects_and_saves_summary():
 
 @pytest.mark.asyncio
 async def test_tokens_command_returns_estimate_metadata(monkeypatch):
+    from bos.core.contract import TokenEstimate
+
     mailbox = FakeMailbox("agent@main")
     agent = StubAgent()
     actor = AgentActor(agent, mailbox)
     chat_id = "tokens-chat"
-    await agent._message_store.save_messages(
+    await agent._chat_store.save_turn(
         chat_id,
         [Message(llm_message={"role": "user", "content": "history"})],
     )
 
-    def fake_estimate(messages, *, budget_model):
-        assert all(isinstance(message, Message) for message in messages)
-        return HistoryProjection(
-            messages=[message.llm_message for message in messages],
-            estimated_tokens=123,
-            model=budget_model,
-            source="fallback",
-        )
+    async def fake_estimate(chat_id, *, tokenizer_model=None, filter_mode=None):
+        return TokenEstimate(count=123, tokenizer_model=tokenizer_model, source="fallback")
 
-    monkeypatch.setattr(system_cmd, "estimate_message_history_tokens", fake_estimate)
+    monkeypatch.setattr(agent._chat_store, "estimate_tokens", fake_estimate)
     await actor._handle_command(
         Envelope(
             sender="channel@http",

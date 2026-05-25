@@ -151,14 +151,37 @@ async def test_react_agent_persists_named_actor_message_metadata():
         def __init__(self):
             self.messages = []
 
-        async def get_messages(self, chat_id, original=False):
+        async def save_turn(self, chat_id, messages, *, turn_id=None):
+            self.messages.extend(messages)
+
+        async def get_context(self, chat_id, *, tokenizer_model=None, filter_mode=None):
+            from bos.core.contract import ContextResult
+            return ContextResult(
+                messages=[],
+                source_messages=[],
+                estimated_tokens=0,
+                tokenizer_model=tokenizer_model,
+                estimation_source="fallback",
+                filter_mode="keep_signatures",
+                summary_applied=False,
+                summary_message_count_excluded=0,
+            )
+
+        async def get_compaction_messages(self, chat_id, *, filter_mode=None):
             return []
 
-        async def save_messages(self, chat_id, messages):
-            self.messages.extend(messages)
+        async def estimate_tokens(self, chat_id, *, tokenizer_model=None, filter_mode=None):
+            from bos.core.contract import TokenEstimate
+            return TokenEstimate(count=0, tokenizer_model=tokenizer_model, source="fallback")
 
         async def save_summary(self, chat_id, summary):
             pass
+
+        async def get_summary(self, chat_id):
+            return None
+
+        async def get_messages(self, chat_id, *, active_only=True):
+            return []
 
         async def list_chats(self):
             return {}
@@ -171,7 +194,7 @@ async def test_react_agent_persists_named_actor_message_metadata():
 
     store = Store()
     agent = ReActAgent(
-        message_store=store,
+        chat_store=store,
         consolidator=None,
         llm=LLM(),
         tools=[],

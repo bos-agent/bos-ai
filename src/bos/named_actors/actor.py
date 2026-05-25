@@ -1,29 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import replace
 from typing import Any
 
 from bos.core import AgentActor, Message, ReActAgent
 from bos.core._utils import _compact
+from bos.core.contract import ContextResult
 from bos.protocol import Envelope, MessageContent, MessageContentPart
-from bos.protocol.content import content_length
-
-
-def _filter_tool_noise(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    cleaned: list[dict[str, Any]] = []
-    for msg in messages:
-        role = msg.get("role", "")
-        if role == "tool":
-            continue
-        if role == "assistant" and msg.get("tool_calls"):
-            content = msg.get("content", "")
-            if not content or (isinstance(content, str) and not content.strip()):
-                continue
-            item = {"role": "assistant", "content": content}
-            cleaned.append(item)
-        else:
-            cleaned.append(msg)
-    return cleaned
 
 
 def _prefix_content(label: str, content: MessageContent) -> MessageContent:
@@ -42,36 +24,8 @@ def _display_label(display_name: str | None, actor_name: str, agent_kind: str | 
 class NamedAgent(ReActAgent):
     """ReActAgent that renders shared history with actor attribution."""
 
-    async def _get_chat_history(self, chat_id: str, *, budget_model: str | None = None) -> list[dict[str, Any]]:
-        history_messages = await self._get_history_messages(chat_id)
-        history = [message.llm_message for message in history_messages]
-        if sum(content_length(m.get("content", "")) for m in history) > self._max_tokens:
-            summary = await self._consolidator.consolidate(history_messages)
-            await self._message_store.save_summary(chat_id, summary)
-            history_messages = await self._get_history_messages(chat_id)
-        return [message.llm_message for message in history_messages]
-
-    async def _get_history_messages(self, chat_id: str) -> list[Message]:
-        messages = await self._message_store.get_messages(chat_id)
-        attributed = [replace(message, llm_message=self._history_item(message)) for message in messages]
-        return self._filter_tool_noise_messages(attributed)
-
-    @staticmethod
-    def _filter_tool_noise_messages(messages: list[Message]) -> list[Message]:
-        cleaned: list[Message] = []
-        for message in messages:
-            msg = message.llm_message
-            role = msg.get("role", "")
-            if role == "tool":
-                continue
-            if role == "assistant" and msg.get("tool_calls"):
-                content = msg.get("content", "")
-                if not content or (isinstance(content, str) and not content.strip()):
-                    continue
-                cleaned.append(replace(message, llm_message={"role": "assistant", "content": content}))
-            else:
-                cleaned.append(message)
-        return cleaned
+    def _format_history(self, result: ContextResult) -> list[dict[str, Any]]:
+        return [self._history_item(src) for src in result.source_messages]
 
     def _history_item(self, message: Message) -> dict[str, Any]:
         msg = message.llm_message

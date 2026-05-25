@@ -3,7 +3,7 @@ import json
 import uuid
 
 import pytest
-from conftest import InMemMailRoute, InMemMessageStore, MessageOnlyConsolidator
+from conftest import InMemChatStore, InMemMailRoute, MessageOnlyConsolidator
 
 from bos.core import (
     AgentActor,
@@ -14,11 +14,12 @@ from bos.core import (
     ep_provider,
 )
 from bos.core.agent import ChainInterceptor, ReActAgent
+from bos.plugins.subagent import SubagentAgentPlugin  # noqa: F401  registers SubagentPlugin
 from bos.protocol import MessageType
 
 
 def create_test_agent(**kwargs):
-    kwargs.setdefault("message_store", InMemMessageStore())
+    kwargs.setdefault("chat_store", InMemChatStore())
     kwargs.setdefault("consolidator", MessageOnlyConsolidator())
     kwargs.setdefault("interceptor", ChainInterceptor())
     return ReActAgent(**kwargs)

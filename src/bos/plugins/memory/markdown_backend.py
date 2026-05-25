@@ -13,8 +13,8 @@ from pathlib import Path
 
 from bos.core import _flock
 
-from .scoped_memory import MemoryEntry
 from .plugin import ep_memory_backend
+from .scoped_memory import MemoryEntry
 
 logger = logging.getLogger(__name__)
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import contextvars
 import logging
 import os
@@ -19,11 +20,11 @@ from .agent import ChainInterceptor, ReActAgent
 from .contract import (
     AgentBindContext,
     AgentPlugin,
+    ChatStore,
     Consolidator,
     HarnessPlugin,
     MailBox,
     MailRoute,
-    MessageStore,
     PluginServices,
     ToolContext,
     ep_agent,
@@ -168,7 +169,7 @@ class AgentHarness:
         self,
         *,
         mail_route: dict[str, Any] | None = None,
-        message_store: dict[str, Any] | None = None,
+        chat_store: dict[str, Any] | None = None,
         consolidator: dict[str, Any] | None = None,
         providers: dict[str, dict[str, Any]] | None = None,
         interceptors: list[str | dict[str, Any]] | None = None,
@@ -187,7 +188,7 @@ class AgentHarness:
         self._subagents_cfg = {cfg["name"]: cfg for cfg in subagents} if subagents else {}
 
         self._mail_route_cfg = mail_route
-        self._message_store_cfg = message_store
+        self._chat_store_cfg = chat_store
         self._consolidator_cfg = consolidator
         self._providers_cfg = providers
         self._interceptors_cfg = interceptors
@@ -198,7 +199,7 @@ class AgentHarness:
         self._owned: list[Any] = []
         self._token: contextvars.Token | None = None
         self.mail_route = None
-        self.message_store = None
+        self.chat_store = None
         self.consolidator = None
         self.interceptor = None
         self.llm = None
@@ -206,6 +207,9 @@ class AgentHarness:
         # Plugin state
         self._harness_plugins: dict[str, HarnessPlugin] = {}
         self._plugin_services: PluginServices | None = None
+
+        # Per-chat compaction locks (BEP 5)
+        self._compaction_locks: dict[str, asyncio.Lock] = {}
 
     async def __aenter__(self):
         if self._token is not None:
@@ -215,7 +219,7 @@ class AgentHarness:
             )
 
         self.mail_route = self._create_and_own("ep_mail_route", MailRoute, self._mail_route_cfg)
-        self.message_store = self._create_and_own("ep_message_store", MessageStore, self._message_store_cfg)
+        self.chat_store = self._create_and_own("ep_chat_store", ChatStore, self._chat_store_cfg)
         self.llm = LLMClient(self._providers_cfg)
         self.consolidator = self._create_consolidator()
         self.interceptor = ChainInterceptor(self._interceptors_cfg)
@@ -225,7 +229,7 @@ class AgentHarness:
             bos_dir=self._bos_root,
             workspace=self._workspace,
             llm=self.llm,
-            message_store=self.message_store,
+            chat_store=self.chat_store,
             consolidator=self.consolidator,
             subagents=_HarnessSubagentRuntime(self),
         )
@@ -277,11 +281,12 @@ class AgentHarness:
         kwargs = (agent_cfg or {}) | {
             "name": role or (agent_cfg or {}).get("name"),
             "llm": self.llm,
-            "message_store": self.message_store,
+            "chat_store": self.chat_store,
             "consolidator": self.consolidator,
             "interceptor": self.interceptor,
             "tool_configs": self._tools_cfg,
             "plugins": await self._bind_plugins_for_agent(role, merged_cfg, bind_context),
+            "chat_compaction_lock": self._get_compaction_lock,
         }
 
         return ep_agent.invoke(role, kwargs) if role else ReActAgent(**kwargs)
@@ -361,6 +366,11 @@ class AgentHarness:
 
     def _get_subagent_config(self, role: str) -> dict[str, Any]:
         return self._subagent_defaults | (self._subagents_cfg.get(role) or {})
+
+    def _get_compaction_lock(self, chat_id: str) -> asyncio.Lock:
+        if chat_id not in self._compaction_locks:
+            self._compaction_locks[chat_id] = asyncio.Lock()
+        return self._compaction_locks[chat_id]
 
     @staticmethod
     def _make_subagent_chat_id(parent_chat_id: str, role: str) -> str:
