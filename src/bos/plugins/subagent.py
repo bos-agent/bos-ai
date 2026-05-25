@@ -1,7 +1,11 @@
-"""SubagentPlugin — subagent delegation via AskSubagent."""
+"""SubagentPlugin — subagent delegation via AskSubagent, AskClaudeCode, AskCodex."""
 
 from __future__ import annotations
 
+import asyncio
+import os
+import shutil
+import signal
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
@@ -53,6 +57,79 @@ class SubagentHarnessPlugin:
         pass
 
 
+async def _terminate_proc(proc: asyncio.subprocess.Process) -> None:
+    """Best-effort terminate then kill a subprocess."""
+    if proc.returncode is not None:
+        return
+    try:
+        if os.name == "posix":
+            os.killpg(proc.pid, signal.SIGTERM)
+        else:
+            proc.terminate()
+    except ProcessLookupError:
+        return
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=2)
+        return
+    except asyncio.TimeoutError:
+        pass
+    try:
+        if os.name == "posix":
+            os.killpg(proc.pid, signal.SIGKILL)
+        else:
+            proc.kill()
+    except ProcessLookupError:
+        return
+    await proc.wait()
+
+
+async def _run_cli_agent(
+    binary: str,
+    args: list[str],
+    *,
+    cwd: str = ".",
+    timeout: int = 300,
+) -> str:
+    """Run a CLI coding-agent binary and return its combined output."""
+    path = shutil.which(binary)
+    if path is None:
+        return f"Error: '{binary}' not found on PATH."
+
+    posix_kwargs: dict[str, Any] = {}
+    if os.name == "posix":
+        posix_kwargs["start_new_session"] = True
+
+    proc: asyncio.subprocess.Process | None = None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            path,
+            *args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=cwd,
+            **posix_kwargs,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        output = ""
+        if stdout:
+            output += stdout.decode("utf-8", errors="replace")
+        if stderr:
+            if output:
+                output += "\n"
+            output += stderr.decode("utf-8", errors="replace")
+        return output.strip() or "(Execution succeeded with no output)"
+    except asyncio.TimeoutError:
+        if proc is not None:
+            await _terminate_proc(proc)
+        return f"Error: {binary} timed out after {timeout} seconds."
+    except asyncio.CancelledError:
+        if proc is not None:
+            await _terminate_proc(proc)
+        raise
+    except Exception as e:
+        return f"Error executing {binary}: {e}"
+
+
 _SUBAGENT_TOOL_USAGE = {
     "AskSubagent": """Delegate a task to an allowed named subagent and return its response.
 
@@ -65,6 +142,24 @@ Guidelines:
 - Tell the subagent whether code changes are allowed or whether the task is read-only.
 - Subagents cannot see the full conversation history. Summarize what they need to know.
 - Verify subagent results before treating work as complete.""",
+    "AskClaudeCode": """Run a one-shot task using the Claude Code CLI (`claude -p`).
+
+Use when you need Claude Code to perform an isolated coding task — file edits, code generation,
+explanation, or review — without maintaining an interactive session.
+
+Guidelines:
+- Provide a clear, self-contained prompt describing the task.
+- Set an appropriate timeout for long-running tasks.
+- The tool returns Claude Code's stdout/stderr output.""",
+    "AskCodex": """Run a one-shot task using the OpenAI Codex CLI (`codex exec`).
+
+Use when you need Codex to perform an isolated coding task — file edits, code generation,
+explanation, or review — in non-interactive mode.
+
+Guidelines:
+- Provide a clear, self-contained prompt describing the task.
+- Set an appropriate timeout for long-running tasks.
+- The tool returns Codex's stdout/stderr output.""",
 }
 
 
@@ -119,8 +214,69 @@ class SubagentAgentPlugin:
                 return "Error: AskSubagent requires a ToolContext."
             return await runtime.ask(role, message, parent=context)
 
+        @registry(
+            name="AskClaudeCode",
+            description="Run a one-shot task using the Claude Code CLI.",
+            usage=_SUBAGENT_TOOL_USAGE["AskClaudeCode"],
+            parameters={
+                "type": "object",
+                "properties": {
+                    "prompt": {
+                        "type": "string",
+                        "description": "The task prompt to send to Claude Code.",
+                    },
+                    "cwd": {
+                        "type": "string",
+                        "description": "Working directory for the command.",
+                        "default": ".",
+                    },
+                    "timeout": {
+                        "type": "integer",
+                        "description": "Timeout in seconds.",
+                        "default": 300,
+                    },
+                },
+                "required": ["prompt"],
+            },
+        )
+        async def ask_claude_code(
+            prompt: str, cwd: str = ".", timeout: int = 300, **_: Any
+        ) -> str:
+            return await _run_cli_agent("claude", ["-p", prompt], cwd=cwd, timeout=timeout)
+
+        @registry(
+            name="AskCodex",
+            description="Run a one-shot task using the OpenAI Codex CLI.",
+            usage=_SUBAGENT_TOOL_USAGE["AskCodex"],
+            parameters={
+                "type": "object",
+                "properties": {
+                    "prompt": {
+                        "type": "string",
+                        "description": "The task prompt to send to Codex.",
+                    },
+                    "cwd": {
+                        "type": "string",
+                        "description": "Working directory for the command.",
+                        "default": ".",
+                    },
+                    "timeout": {
+                        "type": "integer",
+                        "description": "Timeout in seconds.",
+                        "default": 300,
+                    },
+                },
+                "required": ["prompt"],
+            },
+        )
+        async def ask_codex(
+            prompt: str, cwd: str = ".", timeout: int = 300, **_: Any
+        ) -> str:
+            return await _run_cli_agent(
+                "codex", ["exec", "--json", prompt], cwd=cwd, timeout=timeout,
+            )
+
     async def get_system_prompt_section(self, context: TurnContext) -> str | None:
-        import os
 
         available = dict(ep_agent.describe())
         available.pop("_default", None)
