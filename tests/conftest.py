@@ -6,13 +6,13 @@ from typing import Any
 
 from bos.core.agent import ChainInterceptor, ReActAgent
 from bos.core.contract import Message
+from bos.extensions.chat_stores.in_memory import InMemChatStore
 from bos.extensions.mailboxes.in_memory import InMemMailRoute  # noqa: F401
 from bos.extensions.memory_stores.in_memory import InMemMemoryExtension  # noqa: F401
-from bos.extensions.message_stores.in_memory import InMemMessageStore  # noqa: F401
 
 
 def create_test_agent(*, plugins: list[Any] | None = None, **kwargs: Any) -> ReActAgent:
-    kwargs.setdefault("message_store", InMemMessageStore())
+    kwargs.setdefault("chat_store", InMemChatStore())
     kwargs.setdefault("consolidator", MessageOnlyConsolidator())
     kwargs.setdefault("interceptor", ChainInterceptor())
     return ReActAgent(plugins=plugins or [], **kwargs)

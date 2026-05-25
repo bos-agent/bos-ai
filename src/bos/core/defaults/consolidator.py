@@ -2,9 +2,13 @@ from __future__ import annotations
 
 from typing import Any
 
+from .._utils import _compact
 from ..contract import Message, ep_consolidator
-from ..history import project_message_history
 from ..llm import LLMClient
+
+
+def _project_history(messages: list[Message]) -> list[dict[str, Any]]:
+    return [_compact({"role": m.llm_message["role"], "content": m.llm_message.get("content", "")}) for m in messages]
 
 DEFAULT_COMPACTION_INSTRUCTION = """\
 Provide a dense, concise summary of the conversation history for future turns.
@@ -56,7 +60,7 @@ class LLMConsolidator:
                     "content": "Existing summary context:\n" + "\n\n".join(existing_summaries),
                 }
             )
-        prompt.extend(project_message_history(conversation))
+        prompt.extend(_project_history(conversation))
         prompt.append(
             {
                 "role": "user",

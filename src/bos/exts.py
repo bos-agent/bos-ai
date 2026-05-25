@@ -13,14 +13,14 @@ import bos.extensions.actor_commands.system_cmd  # noqa: F401
 import bos.extensions.channels.http  # noqa: F401
 import bos.extensions.channels.telegram  # noqa: F401
 
+# Chat stores
+import bos.extensions.chat_stores.in_memory  # noqa: F401
+
 # Mailboxes
 import bos.extensions.mailboxes.in_memory  # noqa: F401
 
 # Memory stores
 import bos.extensions.memory_stores.in_memory  # noqa: F401
-
-# Message stores
-import bos.extensions.message_stores.in_memory  # noqa: F401
 
 # Providers
 import bos.extensions.providers.antigravity_provider  # noqa: F401

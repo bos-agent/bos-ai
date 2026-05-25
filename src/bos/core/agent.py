@@ -25,21 +25,26 @@ from ._utils import (
 )
 from .contract import (
     AgentPlugin,
+    ChatStore,
+    ContextResult,
     EventSink,
     Message,
     ToolContext,
+    ToolNoiseFilter,
     TurnInterceptor,
     ep_agent,
     ep_tool,
     ep_turn_interceptor,
 )
 from .defaults import bos_tools_usage
-from .history import estimate_message_history_tokens
 from .llm import LLMClient, ToolCallRequest
 from .registry import ToolRegistry
 
 if TYPE_CHECKING:
-    from .contract import Consolidator, MessageStore
+    from collections.abc import Callable
+    from contextlib import AbstractAsyncContextManager
+
+    from .contract import Consolidator
     from .llm import LLMResponse
 
 logger = logging.getLogger(__name__)
@@ -170,7 +175,7 @@ class ReActAgent:
     def __init__(
         self,
         *,
-        message_store: MessageStore,
+        chat_store: ChatStore,
         consolidator: Consolidator,
         plugins: Sequence[AgentPlugin] = (),
         system_prompt: str | None = None,
@@ -186,6 +191,8 @@ class ReActAgent:
         interceptor: TurnInterceptor | None = None,
         max_tokens: int = 128 * 1024,
         max_iterations: int = 25,
+        tool_noise_filter: ToolNoiseFilter | None = None,
+        chat_compaction_lock: Callable[[str], AbstractAsyncContextManager] | None = None,
     ):
         if system_prompt is not None and not isinstance(system_prompt, str):
             raise TypeError("system_prompt must be a string or None")
@@ -198,13 +205,15 @@ class ReActAgent:
         self._max_tokens = max_tokens
         self._max_iterations = max_iterations
         self._llm = llm or LLMClient()
-        self._message_store = message_store
+        self._chat_store = chat_store
         self._consolidator = consolidator
         self._local_tools = local_tools or ToolRegistry("Agent-scoped local tools.")
         self._tool_configs = tool_configs or {}
         self._name = name or "__unknown__"
         self._plugins = plugins
         self._current_context: TurnContext | None = None
+        self._tool_noise_filter = tool_noise_filter
+        self._compaction_lock = chat_compaction_lock
 
         # Compose interceptors: plugin interceptors first, then configured harness/workspace interceptors
         plugin_interceptors = [i for plugin in self._plugins for i in plugin.get_interceptors()]
@@ -236,7 +245,7 @@ class ReActAgent:
             agent_name=self._name,
             chat_id=chat_id,
             turn_id=uuid.uuid4().hex,
-            history=await self._get_chat_history(chat_id, budget_model=budget_model),
+            history=await self._load_and_compact_history(chat_id, budget_model=budget_model),
             tool_defs=self._get_tool_defs(),
             event_sink=event_sink,
             metadata=(ctx_metadata or {}).copy(),
@@ -301,7 +310,7 @@ class ReActAgent:
             else:
                 messages = ctx.current
             if messages:
-                await self._message_store.save_messages(chat_id, messages)
+                await self._chat_store.save_turn(chat_id, messages, turn_id=ctx.turn_id)
 
         async def _run_interceptor(stage: str):
             try:
@@ -520,17 +529,30 @@ class ReActAgent:
             return await ep_tool.invoke_async(tool_name, kwargs)
         raise Exception(f"Tool {tool_name} not found")
 
-    async def _get_chat_history(self, chat_id: str, *, budget_model: str | None) -> list[dict]:
-        messages = list(await self._message_store.get_messages(chat_id))
-        projection = estimate_message_history_tokens(messages, budget_model=budget_model)
+    async def _load_and_compact_history(self, chat_id: str, *, budget_model: str | None) -> list[dict[str, Any]]:
+        result = await self._chat_store.get_context(
+            chat_id, tokenizer_model=budget_model, filter_mode=self._tool_noise_filter
+        )
+        if result.estimated_tokens > self._max_tokens and self._compaction_lock is not None:
+            async with self._compaction_lock(chat_id):
+                # Re-check after acquiring lock (race guard)
+                result = await self._chat_store.get_context(
+                    chat_id, tokenizer_model=budget_model, filter_mode=self._tool_noise_filter
+                )
+                if result.estimated_tokens > self._max_tokens:
+                    compaction_msgs = await self._chat_store.get_compaction_messages(
+                        chat_id, filter_mode=self._tool_noise_filter
+                    )
+                    summary = await self._consolidator.consolidate(compaction_msgs)
+                    await self._chat_store.save_summary(chat_id, summary)
+                    result = await self._chat_store.get_context(
+                        chat_id, tokenizer_model=budget_model, filter_mode=self._tool_noise_filter
+                    )
+        return self._format_history(result)
 
-        if projection.estimated_tokens > self._max_tokens:
-            summary = await self._consolidator.consolidate(messages)
-            await self._message_store.save_summary(chat_id, summary)
-            messages = list(await self._message_store.get_messages(chat_id))
-            projection = estimate_message_history_tokens(messages, budget_model=budget_model)
-
-        return projection.messages
+    def _format_history(self, result: ContextResult) -> list[dict[str, Any]]:
+        """Hook for subclasses to customise history projection (e.g. attribution labels)."""
+        return result.messages
 
     async def _build_system_prompt(self) -> str:
         sections = [

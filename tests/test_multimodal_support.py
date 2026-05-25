@@ -5,7 +5,7 @@ import sys
 import types
 
 import pytest
-from conftest import InMemMailRoute, InMemMessageStore
+from conftest import InMemChatStore, InMemMailRoute
 
 from bos.core import (
     Envelope,
@@ -144,10 +144,10 @@ def test_content_helpers_render_structured_message_content_for_previews_and_toke
 
 @pytest.mark.asyncio
 async def test_inmem_message_store_list_chats_uses_structured_content_preview():
-    store = InMemMessageStore()
+    store = InMemChatStore()
     content = _structured_message_content()
 
-    await store.save_messages(
+    await store.save_turn(
         "thread-1",
         [
             Message(llm_message={"role": "user", "content": content}),
@@ -157,8 +157,8 @@ async def test_inmem_message_store_list_chats_uses_structured_content_preview():
 
     chats = await store.list_chats()
 
-    assert chats["thread-1"]["description"] == "Describe this image. [image]"
-    assert chats["thread-1"]["message_count"] == 2
+    assert chats["thread-1"].description == "Describe this image. [image]"
+    assert chats["thread-1"].message_count == 2
 
 
 @pytest.mark.asyncio

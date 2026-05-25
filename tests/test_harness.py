@@ -5,8 +5,8 @@ import uuid
 import pytest
 from conftest import (
     CloseTrackingConsolidator,
+    InMemChatStore,
     InMemMemoryExtension,
-    InMemMessageStore,
     MessageOnlyConsolidator,
     create_test_agent,
 )
@@ -15,7 +15,6 @@ from bos.config.workspace import Workspace
 from bos.core import AgentHarness, LLMResponse, Message, ToolCallRequest, bootstrap_platform, ep_agent, ep_provider
 from bos.core.agent import ReActAgent
 from bos.core.defaults.agent_spec import bos_tools_usage, default_agent_spec
-from bos.core.history import HistoryProjection
 from bos.core.registry import ToolRegistry
 from bos.plugins.memory import MemoryAgentPlugin
 from bos.plugins.skills import SkillMeta, SkillsAgentPlugin
@@ -453,7 +452,7 @@ async def test_react_agent_injects_runtime_tool_context():
 
 @pytest.mark.asyncio
 async def test_react_agent_persists_sanitized_abort_on_cancellation():
-    store = InMemMessageStore()
+    store = InMemChatStore()
 
     class SlowLLM:
         def __init__(self) -> None:
@@ -464,7 +463,7 @@ async def test_react_agent_persists_sanitized_abort_on_cancellation():
             await asyncio.Event().wait()
 
     llm = SlowLLM()
-    agent = create_test_agent(message_store=store, llm=llm)
+    agent = create_test_agent(chat_store=store, llm=llm)
 
     task = asyncio.create_task(agent.ask("cancel-chat", "Please do a long task."))
     await asyncio.wait_for(llm.started.wait(), timeout=1)
@@ -483,7 +482,7 @@ async def test_react_agent_persists_sanitized_abort_on_cancellation():
 
 @pytest.mark.asyncio
 async def test_react_agent_abort_persistence_drops_incomplete_tool_call_state():
-    store = InMemMessageStore()
+    store = InMemChatStore()
     tools = ToolRegistry("test tools")
     tool_started = asyncio.Event()
 
@@ -506,7 +505,7 @@ async def test_react_agent_abort_persistence_drops_incomplete_tool_call_state():
             )
 
     agent = create_test_agent(
-        message_store=store,
+        chat_store=store,
         llm=ToolCallingLLM(),
         local_tools=tools,
         tools=["SlowTool"],
@@ -528,7 +527,7 @@ async def test_react_agent_abort_persistence_drops_incomplete_tool_call_state():
 
 @pytest.mark.asyncio
 async def test_react_agent_cancellation_after_final_response_persists_answer():
-    store = InMemMessageStore()
+    store = InMemChatStore()
 
     class CancelOnFinalResponse:
         async def intercept(self, stage, context):
@@ -541,7 +540,7 @@ async def test_react_agent_cancellation_after_final_response_persists_answer():
             return LLMResponse(content="done", finish_reason="stop")
 
     agent = create_test_agent(
-        message_store=store,
+        chat_store=store,
         llm=FinalLLM(),
         interceptor=CancelOnFinalResponse(),
     )
@@ -690,7 +689,7 @@ async def test_harness_ask_subagent_delegates_to_named_specialist(tmp_path):
                     subagent_prompt = section
                     break
             result = await manager.ask("parent-chat", "Explain the orchestration pattern.")
-            chats = await harness.message_store.list_chats()
+            chats = await harness.chat_store.list_chats()
 
         assert subagent_prompt is not None
         assert researcher_name in subagent_prompt
@@ -754,7 +753,7 @@ async def test_ask_subagent_rejects_disallowed_registered_agent(tmp_path):
         ) as harness:
             manager = await harness.create_agent(manager_name)
             result = await manager.ask("parent-chat", "Try the blocked subagent.")
-            chats = await harness.message_store.list_chats()
+            chats = await harness.chat_store.list_chats()
 
         assert result == f"Error: Agent '{blocked_name}' is not an allowed subagent."
         assert list(chats) == ["parent-chat"]
@@ -851,17 +850,19 @@ async def test_agent_history_budget_uses_resolved_turn_model(monkeypatch):
     provider_name = f"test_budget_model_provider_{suffix}"
     seen_budget_models: list[str | None] = []
 
-    def fake_estimate(messages, *, budget_model):
-        seen_budget_models.append(budget_model)
-        return HistoryProjection(messages=[], estimated_tokens=0, model=budget_model, source="fallback")
-
     @ep_provider(name=provider_name)
     async def provider(messages, model=None, **kwargs):
         return LLMResponse(content="ok")
 
-    monkeypatch.setattr("bos.core.agent.estimate_message_history_tokens", fake_estimate)
     try:
         agent = create_test_agent(model=f"{provider_name}/base")
+        original_get_context = agent._chat_store.get_context
+
+        async def tracking_get_context(chat_id, *, tokenizer_model=None, filter_mode=None):
+            seen_budget_models.append(tokenizer_model)
+            return await original_get_context(chat_id, tokenizer_model=tokenizer_model, filter_mode=filter_mode)
+
+        monkeypatch.setattr(agent._chat_store, "get_context", tracking_get_context)
         result = await agent.ask("budget-model-chat", "Hello.", llm_args={"model": f"{provider_name}/override"})
 
         assert result == "ok"
@@ -872,21 +873,51 @@ async def test_agent_history_budget_uses_resolved_turn_model(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_agent_auto_compaction_passes_message_objects(monkeypatch):
-    store = InMemMessageStore()
+    from bos.core.contract import ContextResult
+
+    store = InMemChatStore()
     consolidator = MessageOnlyConsolidator()
-    await store.save_messages(
+    await store.save_turn(
         "compact-chat",
         [Message(llm_message={"role": "user", "content": "large history"})],
     )
 
-    def fake_estimate(messages, *, budget_model):
-        projected = [message.llm_message for message in messages]
-        return HistoryProjection(messages=projected, estimated_tokens=999, model=budget_model, source="fallback")
+    real_get_context = store.get_context
+    call_count = [0]
 
-    monkeypatch.setattr("bos.core.agent.estimate_message_history_tokens", fake_estimate)
-    agent = create_test_agent(message_store=store, consolidator=consolidator, max_tokens=1)
+    async def fake_get_context(chat_id, *, tokenizer_model=None, filter_mode=None):
+        call_count[0] += 1
+        if call_count[0] <= 2:
+            # First two calls: high token count triggers compaction
+            result = await real_get_context(chat_id, tokenizer_model=tokenizer_model, filter_mode=filter_mode)
+            return ContextResult(
+                messages=result.messages,
+                source_messages=result.source_messages,
+                estimated_tokens=999,
+                tokenizer_model=result.tokenizer_model,
+                estimation_source=result.estimation_source,
+                filter_mode=result.filter_mode,
+                summary_applied=result.summary_applied,
+                summary_message_count_excluded=result.summary_message_count_excluded,
+                latest_summary=result.latest_summary,
+            )
+        return await real_get_context(chat_id, tokenizer_model=tokenizer_model, filter_mode=filter_mode)
 
-    history = await agent._get_chat_history("compact-chat", budget_model="test/model")
+    monkeypatch.setattr(store, "get_context", fake_get_context)
+
+    import asyncio
+    compaction_locks: dict[str, asyncio.Lock] = {}
+    def get_compaction_lock(chat_id: str) -> asyncio.Lock:
+        if chat_id not in compaction_locks:
+            compaction_locks[chat_id] = asyncio.Lock()
+        return compaction_locks[chat_id]
+
+    agent = create_test_agent(
+        chat_store=store, consolidator=consolidator, max_tokens=1,
+        chat_compaction_lock=get_compaction_lock,
+    )
+
+    history = await agent._load_and_compact_history("compact-chat", budget_model="test/model")
 
     assert consolidator.calls
     assert all(isinstance(message, Message) for message in consolidator.calls[0][0])
