@@ -87,7 +87,25 @@ class TurnContext:
             self.current.append(Message(llm_message=llm_message, turn_id=self.turn_id, metadata=kwargs))
 
     def get_llm_messages(self) -> list[dict[str, Any]]:
-        return self.system + self.history + [m.llm_message for m in self.current] + self.ephemeral
+        return (
+            self.system
+            + self.history
+            + [m.llm_message for m in self.current]
+            + [{k: v for k, v in message.items() if not k.startswith("_")} for message in self.ephemeral]
+        )
+
+    def set_ephemeral_message(self, key: str, llm_message: dict[str, Any]) -> None:
+        """Set or replace a keyed ephemeral message for this turn.
+
+        Ephemeral messages are sent to the LLM after persisted/current messages, but are not
+        persisted to chat history. A stable key lets interceptors refresh dynamic context without
+        accumulating stale duplicates across LLM iterations in the same turn.
+        """
+        self.clear_ephemeral_message(key)
+        self.ephemeral.append(llm_message | {"_ephemeral_key": key})
+
+    def clear_ephemeral_message(self, key: str) -> None:
+        self.ephemeral = [message for message in self.ephemeral if message.get("_ephemeral_key") != key]
 
     @property
     def final_response(self) -> str:

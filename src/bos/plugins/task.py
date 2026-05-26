@@ -7,7 +7,9 @@ import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
+from xml.sax.saxutils import escape
 
+from bos.core._utils import _xml_attr
 from bos.core.contract import (
     AgentBindContext,
     AgentPlugin,
@@ -69,8 +71,28 @@ class _TaskList:
         ]
 
 
+def _render_current_tasks(task_list: _TaskList) -> str:
+    lines = ["<current_tasks>"]
+    for task in sorted(task_list.tasks.values(), key=lambda t: t.created_at):
+        blocked_by = ",".join(task.blocked_by)
+        blocks = ",".join(task.blocks)
+        lines.extend(
+            [
+                (
+                    f'<task id="{_xml_attr(task.id)}" status="{_xml_attr(task.status)}" '
+                    f'blocked_by="{_xml_attr(blocked_by)}" blocks="{_xml_attr(blocks)}">'
+                ),
+                f"<subject>{escape(task.subject)}</subject>",
+                f"<description>{escape(task.description)}</description>",
+                "</task>",
+            ]
+        )
+    lines.append("</current_tasks>")
+    return "\n".join(lines)
+
+
 class TaskEventInterceptor:
-    """Emits task state events on after_tool and final_response."""
+    """Injects task state into LLM context and emits task state events."""
 
     def __init__(self, task_lists: dict[str, _TaskList]) -> None:
         self._task_lists = task_lists
@@ -83,6 +105,16 @@ class TaskEventInterceptor:
         ],
         context: TurnContext,
     ) -> None:
+        if stage == "before_llm":
+            task_list = self._task_lists.get(context.chat_id)
+            if task_list is not None and task_list.tasks:
+                context.set_ephemeral_message(
+                    "task.current_tasks",
+                    {"role": "user", "content": _render_current_tasks(task_list)},
+                )
+            else:
+                context.clear_ephemeral_message("task.current_tasks")
+            return
         if stage not in ("after_tool", "final_response"):
             return
         event_sink = getattr(context, "event_sink", None)

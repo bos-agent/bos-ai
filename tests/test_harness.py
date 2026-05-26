@@ -1189,6 +1189,72 @@ async def test_cache_hint_offsets_for_ephemeral_messages():
             "user",
         ]
         assert second_messages[-1]["content"] == "ephemeral note"
+        assert "_ephemeral_key" not in second_messages[-1]
+        assert calls[1]["cache_control_injection_points"] == [
+            {"location": "message", "role": "system"},
+            {"location": "message", "index": -4},
+        ]
+    finally:
+        ep_provider._extensions.pop(provider_name, None)
+
+
+@pytest.mark.asyncio
+async def test_task_plugin_injects_current_tasks_as_ephemeral_user_context():
+    suffix = uuid.uuid4().hex
+    provider_name = f"test_task_ephemeral_{suffix}"
+    calls: list[dict] = []
+
+    @ep_provider(name=provider_name)
+    async def provider(messages, model=None, tools=None, **kwargs):
+        calls.append(
+            {
+                "messages": messages,
+                "cache_control_injection_points": kwargs.get("cache_control_injection_points"),
+            }
+        )
+        if len(calls) == 1:
+            return LLMResponse(
+                content="",
+                tool_calls=[
+                    ToolCallRequest(
+                        id="tc_task_create",
+                        name="TaskCreate",
+                        arguments={
+                            "subject": "Implement <feature>",
+                            "description": "Update the & parser.",
+                        },
+                    )
+                ],
+                finish_reason="tool_calls",
+            )
+        return LLMResponse(content="done", finish_reason="stop")
+
+    try:
+        agent = create_test_agent(
+            model=f"{provider_name}/model",
+            plugins=[TaskAgentPlugin()],
+            tools=["TaskCreate"],
+        )
+
+        await agent.ask("task-ephemeral-chat", "Track the work.")
+
+        assert len(calls) == 2
+        first_messages = calls[0]["messages"]
+        second_messages = calls[1]["messages"]
+        assert "<current_tasks>" not in first_messages[0]["content"]
+        assert [message["role"] for message in second_messages] == [
+            "system",
+            "user",
+            "assistant",
+            "tool",
+            "user",
+        ]
+        task_context = second_messages[-1]["content"]
+        assert task_context.startswith("<current_tasks>")
+        assert "_ephemeral_key" not in second_messages[-1]
+        assert '<task id="1" status="pending" blocked_by="" blocks="">' in task_context
+        assert "<subject>Implement &lt;feature&gt;</subject>" in task_context
+        assert "<description>Update the &amp; parser.</description>" in task_context
         assert calls[1]["cache_control_injection_points"] == [
             {"location": "message", "role": "system"},
             {"location": "message", "index": -4},
