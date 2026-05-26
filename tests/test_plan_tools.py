@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from types import SimpleNamespace
 
 import pytest
 from conftest import create_test_agent
@@ -75,7 +74,7 @@ async def test_plan_update_requires_existing_plan_and_valid_status():
 
 
 @pytest.mark.asyncio
-async def test_plan_plugin_renders_workflow_and_current_plan_inside_system_prompt():
+async def test_plan_plugin_keeps_current_plan_out_of_system_prompt():
     plugin = PlanAgentPlugin()
     agent = create_test_agent(plugins=[plugin], tools=["PlanCreate"])
     await agent._invoke_tool(
@@ -86,15 +85,12 @@ async def test_plan_plugin_renders_workflow_and_current_plan_inside_system_promp
         open_questions=["Proceed?"],
         status="needs_input",
     )
-    agent._current_context = SimpleNamespace(chat_id="render-chat")
-
     prompt = await agent._build_system_prompt()
     system_end = prompt.index("</system_prompt>")
 
     assert prompt.index("<plan_workflow>") < system_end
-    assert prompt.index('<current_plan status="needs_input">') < system_end
-    assert "Implement &lt;plan&gt; support" in prompt
-    assert "Keep prompt XML safe" in prompt
+    assert "<current_plan" not in prompt[:system_end]
+    assert "Implement &lt;plan&gt; support" not in prompt[:system_end]
     assert prompt.index("<available_tools>") > system_end
 
 
@@ -147,11 +143,16 @@ async def test_plan_plugin_auto_triggers_current_plan_for_complex_request():
             ),
         )
 
-        prompt = captured["messages"][0]["content"]
-        assert '<current_plan status="in_progress">' in prompt
-        assert "Plan auto-triggered because the request appears complex." in prompt
-        assert "Before doing substantive work, update the plan" in prompt
         assert [message["role"] for message in captured["messages"]].count("system") == 1
+        system_prompt = captured["messages"][0]["content"]
+        assert "<plan_workflow>" in system_prompt
+        assert "<current_plan" not in system_prompt
+        plan_context = captured["messages"][-1]["content"]
+        assert captured["messages"][-1]["role"] == "user"
+        assert '<current_plan status="in_progress">' in plan_context
+        assert "Plan auto-triggered because the request appears complex." in plan_context
+        assert "Before doing substantive work, update the plan" in plan_context
+        assert "_ephemeral_key" not in captured["messages"][-1]
         assert not any("<plan_trigger>" in message.get("content", "") for message in captured["messages"])
         plan = json.loads(await agent._invoke_tool("PlanGet", chat_id="complex-plan-chat"))["plan"]
         assert plan["status"] == "in_progress"

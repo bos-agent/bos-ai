@@ -340,16 +340,29 @@ class PlanAgentPlugin:
             return {"result": "Plan cleared." if removed else "No plan existed."}
 
     async def get_system_prompt_section(self, context: TurnContext | None) -> str | None:
-        sections = [_PLAN_PROMPT_SECTION]
-        chat_id = getattr(context, "chat_id", None)
-        if chat_id and (plan := self._plans.get(chat_id)) is not None:
-            sections.append(_render_current_plan(plan))
-        return "\n\n".join(sections)
+        return _PLAN_PROMPT_SECTION
 
     def get_interceptors(self) -> Sequence[TurnInterceptor]:
         if not self._auto_trigger:
-            return []
-        return [PlanAutoTriggerInterceptor(self._plans)]
+            return [PlanContextInterceptor(self._plans)]
+        return [PlanContextInterceptor(self._plans), PlanAutoTriggerInterceptor(self._plans)]
+
+
+class PlanContextInterceptor:
+    def __init__(self, plans: dict[str, _Plan]) -> None:
+        self._plans = plans
+
+    async def intercept(self, stage: str, context: TurnContext) -> None:
+        if stage != "before_llm":
+            return
+        plan = self._plans.get(context.chat_id)
+        if plan is None or plan.status in _TERMINAL_PLAN_STATUSES:
+            context.clear_ephemeral_message("plan.current_plan")
+            return
+        context.set_ephemeral_message(
+            "plan.current_plan",
+            {"role": "user", "content": _render_current_plan(plan)},
+        )
 
 
 class PlanAutoTriggerInterceptor:
