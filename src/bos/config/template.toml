@@ -23,12 +23,15 @@
 
 # ── Plugin System (BEP 4) ─────────────────────────────────────────────
 # Enable built-in plugins globally. Plugins are disabled by default.
-# enabled_plugins = ["MemoryPlugin", "TaskPlugin", "SkillsPlugin", "SubagentPlugin"]
+# enabled_plugins = ["MemoryPlugin", "PlanPlugin", "TaskPlugin", "SkillsPlugin", "SubagentPlugin"]
 
 # Workspace-level plugin defaults (does not enable the plugin by itself).
 # [platform.plugins.MemoryPlugin]
 # maxims = ["user", "soul", "identity", "rules"]
 # scope = "workspace"
+
+# [platform.plugins.PlanPlugin]
+# auto_trigger = true
 
 # [platform.plugins.SkillsPlugin]
 # skill_dirs = ["skills"]
@@ -54,8 +57,8 @@ model = "gemini/gemini-3.1-pro-preview"
 #tools = ["ReadFile", "SearchFiles"]
 #tools = "*"
 
-# The skills, subagents, and maxims are now managed through plugins (MemoryPlugin,
-# SkillsPlugin, SubagentPlugin). Use platform.plugins.<PluginName> and per-agent
+# The skills, subagents, maxims, and structured plans are now managed through plugins
+# (MemoryPlugin, PlanPlugin, SkillsPlugin, SubagentPlugin). Use platform.plugins.<PluginName> and per-agent
 # [[platform.agents.plugins.<PluginName>]] to configure them.
 #
 # The legacy keys (skills, subagents, maxims) in agent_defaults or per-agent config
