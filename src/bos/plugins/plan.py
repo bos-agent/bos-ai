@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING, Any
 from xml.sax.saxutils import escape
 
 from bos.core.contract import (
-    AgentBindContext,
     AgentPlugin,
     PluginServices,
     TurnInterceptor,
@@ -163,11 +162,11 @@ class PlanHarnessPlugin:
     async def setup(self, services: PluginServices) -> None:
         pass
 
-    def validate_config(self, config: Mapping[str, Any], context: AgentBindContext) -> None:
+    def validate_config(self, config: Mapping[str, Any]) -> None:
         if not isinstance(config.get("auto_trigger", True), bool):
             raise TypeError("PlanPlugin: 'auto_trigger' must be a boolean")
 
-    def bind(self, config: Mapping[str, Any], context: AgentBindContext) -> AgentPlugin:
+    def bind(self, config: Mapping[str, Any]) -> AgentPlugin:
         return PlanAgentPlugin(auto_trigger=config.get("auto_trigger", True))
 
     async def teardown(self) -> None:

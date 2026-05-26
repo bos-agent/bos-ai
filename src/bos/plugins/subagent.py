@@ -10,7 +10,6 @@ from xml.sax.saxutils import escape
 
 from bos.core._utils import _allowed, _pick_collection, _xml_attr
 from bos.core.contract import (
-    AgentBindContext,
     AgentPlugin,
     PluginServices,
     SubagentRuntime,
@@ -39,7 +38,7 @@ class SubagentHarnessPlugin:
     async def setup(self, services: PluginServices) -> None:
         self._runtime: SubagentRuntime = services.subagents
 
-    def validate_config(self, config: Mapping[str, Any], context: AgentBindContext) -> None:
+    def validate_config(self, config: Mapping[str, Any]) -> None:
         allow = config.get("allow")
         if allow is not None and not isinstance(allow, (str, list)):
             raise TypeError("SubagentPlugin: 'allow' must be a string, list, or None")
@@ -47,7 +46,7 @@ class SubagentHarnessPlugin:
         if exclude is not None and not isinstance(exclude, list):
             raise TypeError("SubagentPlugin: 'exclude' must be a list or None")
 
-    def bind(self, config: Mapping[str, Any], context: AgentBindContext) -> AgentPlugin:
+    def bind(self, config: Mapping[str, Any]) -> AgentPlugin:
         allow = config.get("allow")
         exclude = config.get("exclude", [])
         if isinstance(allow, str) and allow == "*":

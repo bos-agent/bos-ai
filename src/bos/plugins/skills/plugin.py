@@ -10,7 +10,6 @@ from xml.sax.saxutils import escape
 
 from bos.core._utils import _allowed, _pick_collection, _xml_attr
 from bos.core.contract import (
-    AgentBindContext,
     AgentPlugin,
     PluginServices,
     TurnInterceptor,
@@ -62,7 +61,7 @@ class SkillsHarnessPlugin:
         self._services = services
         self._loaders: dict[tuple[str, tuple[str, ...]], Any] = {}
 
-    def validate_config(self, config: Mapping[str, Any], context: AgentBindContext) -> None:
+    def validate_config(self, config: Mapping[str, Any]) -> None:
         _normalize_skill_dirs(config.get("skill_dirs", []))
         allow = config.get("allow")
         if allow is not None and not isinstance(allow, (str, list)):
@@ -71,7 +70,7 @@ class SkillsHarnessPlugin:
         if exclude is not None and not isinstance(exclude, list):
             raise TypeError("SkillsPlugin: 'exclude' must be a list or None")
 
-    def bind(self, config: Mapping[str, Any], context: AgentBindContext) -> AgentPlugin:
+    def bind(self, config: Mapping[str, Any]) -> AgentPlugin:
         cache_key = _loader_cache_key(config)
         loader_name, skill_dirs = cache_key
         if cache_key not in self._loaders:

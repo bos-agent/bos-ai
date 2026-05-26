@@ -125,6 +125,8 @@ async def test_named_agent_renders_metadata_attribution():
         ]
     )
     agent = NamedAgent(
+        kind="test",
+        agent_name="test",
         chat_store=store,
         consolidator=None,
         llm=FakeLLM(),
@@ -153,6 +155,8 @@ async def test_named_agent_filters_tool_noise_from_history():
         ]
     )
     agent = NamedAgent(
+        kind="test",
+        agent_name="test",
         chat_store=store,
         consolidator=None,
         llm=FakeLLM(),
@@ -192,6 +196,8 @@ async def test_named_agent_compaction_passes_message_objects():
         return compaction_locks[chat_id]
 
     agent = NamedAgent(
+        kind="test",
+        agent_name="test",
         chat_store=store,
         consolidator=consolidator,
         llm=FakeLLM(),

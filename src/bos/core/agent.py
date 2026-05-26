@@ -195,6 +195,8 @@ class ReActAgent:
     def __init__(
         self,
         *,
+        kind: str,
+        agent_name: str,
         chat_store: ChatStore,
         consolidator: Consolidator,
         plugins: Sequence[AgentPlugin] = (),
@@ -202,7 +204,6 @@ class ReActAgent:
         tools: list[str] | None = None,
         tools_usage: dict[str, str] | None = None,
         exclude_tools: list[str] | None = None,
-        name: str | None = None,  # TODO how is this assigned and used?
         model: str | None = None,
         reasoning_effort: Literal["low", "medium", "high"] | None = None,
         llm: LLMClient | None = None,
@@ -229,7 +230,8 @@ class ReActAgent:
         self._consolidator = consolidator
         self._local_tools = local_tools or ToolRegistry("Agent-scoped local tools.")
         self._tool_configs = tool_configs or {}
-        self._name = name or "__unknown__"
+        self._kind = kind
+        self._name = agent_name
         self._plugins = plugins
         self._current_context: TurnContext | None = None
         self._tool_noise_filter = tool_noise_filter
@@ -683,6 +685,8 @@ class ReActAgent:
 
         for key in _CAPABILITY_KEYS:
             kwargs[key] = map_value(key, kwargs.get(key))
+
+        kwargs["kind"] = name
 
         @ep_agent(name=name, description=description, defaults=kwargs)
         @wraps(ReActAgent)

@@ -194,6 +194,8 @@ async def test_react_agent_persists_named_actor_message_metadata():
 
     store = Store()
     agent = ReActAgent(
+        kind="test",
+        agent_name="test",
         chat_store=store,
         consolidator=None,
         llm=LLM(),

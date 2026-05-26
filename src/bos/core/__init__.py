@@ -15,6 +15,7 @@ from ._utils import (
     _build_params,
     _compact,
     _create_extension_instance,
+    _deep_merge,
     _flock,
     _get_bos_home,
     _litellm_response_to_llm_response,
@@ -32,7 +33,6 @@ from .actor import AgentActor
 from .agent import AbortTurn, ChainInterceptor, ReActAgent, TurnContext
 from .contract import (
     Agent,
-    AgentBindContext,
     AgentPlugin,
     Channel,
     ChatMeta,
@@ -77,7 +77,6 @@ __all__ = [
     "AbortTurn",
     "Agent",
     "AgentActor",
-    "AgentBindContext",
     "AgentHarness",
     "AgentPlugin",
     "CURRENT_HARNESS",
@@ -131,6 +130,7 @@ __all__ = [
     "_build_params",
     "_compact",
     "_create_extension_instance",
+    "_deep_merge",
     "_flock",
     "_litellm_response_to_llm_response",
     "_litellm_tool_calls_to_requests",

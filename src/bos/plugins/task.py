@@ -11,7 +11,6 @@ from xml.sax.saxutils import escape
 
 from bos.core._utils import _xml_attr
 from bos.core.contract import (
-    AgentBindContext,
     AgentPlugin,
     PluginServices,
     TurnInterceptor,
@@ -205,10 +204,10 @@ class TaskHarnessPlugin:
     async def setup(self, services: PluginServices) -> None:
         pass
 
-    def validate_config(self, config: Mapping[str, Any], context: AgentBindContext) -> None:
+    def validate_config(self, config: Mapping[str, Any]) -> None:
         pass
 
-    def bind(self, config: Mapping[str, Any], context: AgentBindContext) -> AgentPlugin:
+    def bind(self, config: Mapping[str, Any]) -> AgentPlugin:
         return TaskAgentPlugin()
 
     async def teardown(self) -> None:

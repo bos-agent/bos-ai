@@ -161,17 +161,12 @@ async def _run_actor_and_channels(actor, channels, harness) -> None:
             tg.create_task(ch.run(harness.mail_route.bind(address)), name=f"channel:{address}")
 
 
-async def _build_named_agent(harness, agent_kind: str, scope: str, actor_overrides: dict[str, Any]):
-    from bos.core import AgentBindContext, ep_agent
+async def _build_named_agent(harness, agent_kind: str, actor_name: str, actor_overrides: dict[str, Any]):
+    from bos.core import _deep_merge, ep_agent
 
     agent_spec: dict[str, Any] = {}
     if ep_agent.has(agent_kind):
         agent_spec.update(ep_agent.get(agent_kind).defaults)
-    agent_spec.update(actor_overrides)
-    agent_spec["name"] = agent_kind  # TODO why the name always be agent kind?
+    _deep_merge(agent_spec, actor_overrides)
 
-    bind_context = AgentBindContext(
-        agent_name=agent_kind,
-        actor_scope=scope,
-    )
-    return await harness.create_agent(agent_kind, agent_spec, bind_context=bind_context)
+    return await harness.create_agent(agent_kind, agent_spec)
