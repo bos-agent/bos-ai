@@ -127,7 +127,7 @@ async def test_ask_subagent_emits_child_lineage_events(tmp_path):
                     ToolCallRequest(
                         id="call_ask_subagent",
                         name="AskSubagent",
-                        arguments={"role": researcher_name, "message": "Summarize the event sink change."},
+                        arguments={"role": researcher_name, "task": "Summarize the event sink change."},
                     )
                 ],
             )

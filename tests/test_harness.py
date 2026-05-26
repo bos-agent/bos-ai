@@ -42,8 +42,9 @@ def test_react_agent_local_tools_describe_ask_subagent(caplog):
     schema = agent._local_tools.to_openai_schema()["AskSubagent"]
     assert schema["function"]["description"] == ask_subagent.description
     properties = schema["function"]["parameters"]["properties"]
-    assert set(properties) == {"role", "message"}
-    assert schema["function"]["parameters"]["required"] == ["role", "message"]
+    assert set(properties) == {"role", "task"}
+    assert schema["function"]["parameters"]["required"] == ["role", "task"]
+    assert agent._local_tools.metadata_for("AskSubagent")["parallel_safe"] is True
     assert agent._local_tools.get("ListAgents") is None
     assert agent._local_tools.get("SearchSkills") is None
 
@@ -143,6 +144,7 @@ def test_default_system_prompt_uses_compact_xml_contract():
 
     assert "Always explain your reasoning before calling a tool" not in prompt
     assert "track progress\n  with the task tools" not in prompt
+    assert "reserve subagents" not in prompt
     assert "Do not narrate hidden reasoning" in prompt
     assert "Verify meaningful code changes" in prompt
 
@@ -259,6 +261,7 @@ async def test_plugin_prompt_sections_render_inside_system_prompt():
         plugins=[
             MemoryAgentPlugin(store, {"user"}),
             TaskAgentPlugin(),
+            SubagentAgentPlugin(_MockSubagentRuntime(), allow=[], exclude=[]),
         ]
     )
     prompt = await agent._build_system_prompt()
@@ -267,6 +270,7 @@ async def test_plugin_prompt_sections_render_inside_system_prompt():
     assert prompt.index("<memory_workflow>") < system_end
     assert prompt.index("<active_maxims>") < system_end
     assert prompt.index("<task_workflow>") < system_end
+    assert prompt.index("<subagent_workflow>") < system_end
     assert prompt.index("<available_tools>") > system_end
 
 
@@ -320,7 +324,8 @@ async def test_prompt_sections_render_first_50_items_and_warn(caplog):
         assert "Tool050" not in tools_prompt
         assert "## skill_049" in skills_prompt
         assert "skill_050" not in skills_prompt
-        assert f"## {subagent_names[49]}" in subagents_prompt
+        assert "<subagent_workflow>" in subagents_prompt
+        assert f'<agent role="{subagent_names[49]}">Subagent description 049</agent>' in subagents_prompt
         assert subagent_names[50] not in subagents_prompt
         assert "first 50 tools" in caplog.text
     finally:
@@ -490,6 +495,70 @@ async def test_react_agent_injects_runtime_tool_context():
         assert '"turn_id": "' in result
     finally:
         ep_provider._extensions.pop(provider_name, None)
+
+
+@pytest.mark.asyncio
+async def test_parallel_safe_tool_calls_run_concurrently_in_result_order():
+    suffix = uuid.uuid4().hex
+    provider_name = f"test_parallel_safe_tools_{suffix}"
+    tools = ToolRegistry("parallel test tools")
+    first_started = asyncio.Event()
+    second_started = asyncio.Event()
+
+    @tools(
+        name="SafeFirst",
+        description="First parallel-safe test tool.",
+        parallel_safe=True,
+        parameters={"type": "object", "properties": {}, "required": []},
+    )
+    async def safe_first() -> str:
+        first_started.set()
+        try:
+            await asyncio.wait_for(second_started.wait(), timeout=0.5)
+        except asyncio.TimeoutError:
+            return "first:sequential"
+        await asyncio.sleep(0.05)
+        return "first:parallel"
+
+    @tools(
+        name="SafeSecond",
+        description="Second parallel-safe test tool.",
+        parallel_safe=True,
+        parameters={"type": "object", "properties": {}, "required": []},
+    )
+    async def safe_second() -> str:
+        second_started.set()
+        await asyncio.wait_for(first_started.wait(), timeout=0.5)
+        return "second:parallel"
+
+    @ep_provider(name=provider_name)
+    async def provider(messages, model=None, **kwargs):
+        tool_messages = [message for message in messages if message.get("role") == "tool"]
+        if tool_messages:
+            return LLMResponse(
+                content="|".join(message["content"] for message in tool_messages),
+                finish_reason="stop",
+            )
+        return LLMResponse(
+            content="",
+            tool_calls=[
+                ToolCallRequest(id="call_first", name="SafeFirst", arguments={}),
+                ToolCallRequest(id="call_second", name="SafeSecond", arguments={}),
+            ],
+            finish_reason="tool_calls",
+        )
+
+    try:
+        agent = create_test_agent(
+            model=f"{provider_name}/parallel",
+            local_tools=tools,
+            tools=["SafeFirst", "SafeSecond"],
+        )
+        result = await agent.ask("parallel-safe-chat", "Use the safe tools.")
+    finally:
+        ep_provider._extensions.pop(provider_name, None)
+
+    assert result == "first:parallel|second:parallel"
 
 
 @pytest.mark.asyncio
@@ -677,7 +746,7 @@ async def test_harness_ask_subagent_delegates_to_named_specialist(tmp_path):
                         name="AskSubagent",
                         arguments={
                             "role": researcher_name,
-                            "message": "Summarize BOS subagent orchestration in one line.",
+                            "task": "Summarize BOS subagent orchestration in one line.",
                         },
                     )
                 ],
@@ -767,7 +836,7 @@ async def test_ask_subagent_rejects_disallowed_registered_agent(tmp_path):
                     ToolCallRequest(
                         id="call_ask_subagent",
                         name="AskSubagent",
-                        arguments={"role": blocked_name, "message": "Should be rejected."},
+                        arguments={"role": blocked_name, "task": "Should be rejected."},
                     )
                 ],
             )

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
+from xml.sax.saxutils import escape
 
 from bos.core._utils import _allowed
 from bos.core.contract import (
@@ -56,16 +57,32 @@ class SubagentHarnessPlugin:
 _SUBAGENT_TOOL_USAGE = {
     "AskSubagent": """Delegate a task to an allowed named subagent and return its response.
 
-Use for broad codebase exploration, independent research, planning, implementation review, or
-isolated subtasks that would otherwise flood the main context. Do not delegate the immediate
-blocking next step if the main agent should do it directly.
+Use when a configured subagent is a better fit than doing the work locally: broad codebase
+exploration, independent research, planning, implementation review, or isolated subtasks that
+would otherwise flood the main context. Do not delegate the immediate blocking next step if the
+main agent should do it directly.
 
 Guidelines:
-- Make the message self-contained: goal, context, relevant files, constraints, and expected output.
-- Tell the subagent whether code changes are allowed or whether the task is read-only.
-- Subagents cannot see the full conversation history. Summarize what they need to know.
-- Verify subagent results before treating work as complete.""",
+- Write task like a brief to a capable teammate with no conversation history.
+- Include the goal, why it matters, what you already know or ruled out, relevant files/lines,
+  constraints, whether edits are allowed, and the output you need.
+- For lookups, hand over the exact command or target when known; for investigations, hand over
+  the question rather than over-prescribed steps.
+- Do not ask the subagent to both discover and decide your main implementation. Synthesize the
+  result yourself, then make or request the concrete change.
+- Verify or integrate the result before treating the parent task as complete.""",
 }
+
+_SUBAGENT_PROMPT_SECTION = """<subagent_workflow>
+Use subagents for broad exploration, independent research, planning, review, or isolated side work.
+
+- Use direct tools for known files, specific symbols, and immediate blocking next steps.
+- Delegate bounded side tasks that can run independently or protect the main context from noisy output.
+- Do not duplicate work between the main agent and a subagent.
+- Brief subagents with self-contained task context; they do not know the full conversation.
+- Include goal, known facts, relevant files or lines, constraints, edit permission, and desired output.
+- Treat subagent results as input to your own synthesis; verify important claims before completion.
+</subagent_workflow>"""
 
 
 class SubagentAgentPlugin:
@@ -92,6 +109,7 @@ class SubagentAgentPlugin:
             name="AskSubagent",
             description="Delegate a task to a named subagent and return its response.",
             usage=_SUBAGENT_TOOL_USAGE["AskSubagent"],
+            parallel_safe=True,
             parameters={
                 "type": "object",
                 "properties": {
@@ -99,25 +117,25 @@ class SubagentAgentPlugin:
                         "type": "string",
                         "description": "The role (kind) of the subagent to delegate to, case sensitive.",
                     },
-                    "message": {"type": "string", "description": "Task or message to send."},
+                    "task": {"type": "string", "description": "Self-contained task brief to send to the subagent."},
                 },
-                "required": ["role", "message"],
+                "required": ["role", "task"],
             },
         )
         async def ask_subagent(
             role: str,
-            message: str | None = None,
+            task: str | None = None,
             context: ToolContext | None = None,
         ) -> str:
             if not _allowed(role, allow, exclude):
                 return f"Error: Agent '{role}' is not an allowed subagent."
             if not ep_agent.has(role):
                 return f"Error: Agent '{role}' not found."
-            if not message:
-                return "Error: AskSubagent requires a non-empty message."
+            if not task:
+                return "Error: AskSubagent requires a non-empty task."
             if context is None:
                 return "Error: AskSubagent requires a ToolContext."
-            return await runtime.ask(role, message, parent=context)
+            return await runtime.ask(role, task, parent=context)
 
     async def get_system_prompt_section(self, context: TurnContext) -> str | None:
         import os
@@ -128,18 +146,23 @@ class SubagentAgentPlugin:
         from bos.core._utils import _pick_collection
 
         available = _pick_collection(available, self._allow, self._exclude)
+        sections = [_SUBAGENT_PROMPT_SECTION]
         if not available:
-            return None
+            return "\n\n".join(sections)
         try:
             limit = int(os.environ.get("BOS_CAPABILITY_LIMIT", 50))
         except Exception:
             limit = 50
         if len(available) > limit:
             available = dict(list(available.items())[:limit])
-        section = "<available_subagents>\n"
-        section += "\n\n".join([f"## {name}\n{desc}" for name, desc in available.items()])
-        section += "\n</available_subagents>"
-        return section
+        available_subagents = "<available_subagents>\n"
+        available_subagents += "\n".join(
+            f'<agent role="{escape(name, {"\"": "&quot;"})}">{escape(desc or "")}</agent>'
+            for name, desc in available.items()
+        )
+        available_subagents += "\n</available_subagents>"
+        sections.append(available_subagents)
+        return "\n\n".join(sections)
 
     def get_interceptors(self) -> Sequence[TurnInterceptor]:
         return []

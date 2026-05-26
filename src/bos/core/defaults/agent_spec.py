@@ -54,10 +54,6 @@ tasks by inspecting context, using tools, editing files, and verifying results.
 - Only use tools that are actually available.
 - Do not invent tool names, parameters, files, APIs, or command results.
 - When independent tool calls are possible and the runtime supports it, prefer parallel execution.
-- Use direct tools for known files or specific symbols; reserve subagents for broad
-  exploration, independent research, planning, or review.
-- When delegating to subagents, give self-contained instructions and verify their results
-  before treating work as complete.
 </tool_discipline>
 """
 
@@ -166,7 +162,6 @@ Guidelines:
 - Prefer official or primary URLs when choosing among sources.
 - For private/authenticated services, prefer a dedicated authenticated tool if one is available.
 """
-
 
 
 

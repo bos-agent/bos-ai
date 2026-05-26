@@ -444,30 +444,37 @@ class ReActAgent:
                     "thinking_blocks": response.thinking_blocks,
                 })
 
-                for tc in response.tool_calls:
-                    await _emit_event(
-                        "tool",
-                        "start",
-                        detail="tool_call",
-                        tool_name=tc.name,
-                        content=json.dumps(tc.arguments, default=str),
-                    )
-                    tool_result = await self._call_tool(tc, ctx, event_sink=event_sink)
-                    _add_message({
-                        "role": "tool",
-                        "tool_call_id": tc.id,
-                        "name": tc.name,
-                        "content": tool_result,
-                    })
-                    await _run_interceptor("after_tool")
-                    await _emit_event(
-                        "tool",
-                        "finish",
-                        stage="after_tool",
-                        detail="tool_result",
-                        tool_name=tc.name,
-                        content=tool_result,
-                    )
+                for batch in self._tool_call_batches(response.tool_calls):
+                    for tc in batch:
+                        await _emit_event(
+                            "tool",
+                            "start",
+                            detail="tool_call",
+                            tool_name=tc.name,
+                            content=json.dumps(tc.arguments, default=str),
+                        )
+                    if len(batch) > 1:
+                        tool_results = await asyncio.gather(
+                            *(self._call_tool(tc, ctx, event_sink=event_sink) for tc in batch)
+                        )
+                    else:
+                        tool_results = [await self._call_tool(batch[0], ctx, event_sink=event_sink)]
+                    for tc, tool_result in zip(batch, tool_results):
+                        _add_message({
+                            "role": "tool",
+                            "tool_call_id": tc.id,
+                            "name": tc.name,
+                            "content": tool_result,
+                        })
+                        await _run_interceptor("after_tool")
+                        await _emit_event(
+                            "tool",
+                            "finish",
+                            stage="after_tool",
+                            detail="tool_result",
+                            tool_name=tc.name,
+                            content=tool_result,
+                        )
             turn_status = "completed"
         except AbortTurn:
             turn_status = "aborted"
@@ -490,6 +497,31 @@ class ReActAgent:
     def _get_tool_defs(self) -> list[dict[str, Any]]:
         tool_defs = ep_tool.to_openai_schema() | self._local_tools.to_openai_schema()
         return list(_pick_collection(tool_defs, self._tools, self._exclude_tools).values())
+
+    def _tool_metadata(self, tool_name: str) -> dict[str, Any]:
+        if self._local_tools.has(tool_name):
+            return self._local_tools.metadata_for(tool_name)
+        if ep_tool.has(tool_name):
+            return ep_tool.metadata_for(tool_name)
+        return {}
+
+    def _tool_parallel_safe(self, tool_name: str) -> bool:
+        return bool(self._tool_metadata(tool_name).get("parallel_safe", False))
+
+    def _tool_call_batches(self, tool_calls: Sequence[ToolCallRequest]) -> list[list[ToolCallRequest]]:
+        batches: list[list[ToolCallRequest]] = []
+        pending_safe: list[ToolCallRequest] = []
+        for tc in tool_calls:
+            if self._tool_parallel_safe(tc.name):
+                pending_safe.append(tc)
+                continue
+            if pending_safe:
+                batches.append(pending_safe)
+                pending_safe = []
+            batches.append([tc])
+        if pending_safe:
+            batches.append(pending_safe)
+        return batches
 
     async def _call_tool(self, tc: ToolCallRequest, ctx: TurnContext, event_sink: EventSink | None = None) -> str:
         try:
