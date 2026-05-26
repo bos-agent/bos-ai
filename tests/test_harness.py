@@ -211,7 +211,9 @@ Use this skill to search YouTube.
     skill_metas = await loader.search_skills("YouTube")
     load_result = await agent._local_tools.invoke_async("LoadSkill", {"name": "youtube-searcher"})
 
-    assert "## youtube-searcher" in skills_prompt
+    assert "<skills_workflow>" in skills_prompt
+    assert 'Use the exact name attribute from available_skills as the LoadSkill name.' in skills_prompt
+    assert '<skill name="youtube-searcher">Search YouTube.</skill>' in skills_prompt
     assert "youtube-searcher-display-name" not in skills_prompt
     assert "Search YouTube." in skills_prompt
     assert str(skill_file) not in skills_prompt
@@ -230,16 +232,19 @@ async def test_memories_render_with_shared_prompt_section_format():
     assert "<memory_workflow>" in section
     assert "Use Recall" in section
     assert "<active_maxims>" in section
+    assert '<maxim name="user" scope="your knowledge about the user' in section
     assert "Prefers concise answers." in section
 
 
 @pytest.mark.asyncio
 async def test_memory_workflow_renders_without_active_maxims():
-    plugin = MemoryAgentPlugin(InMemMemoryExtension(), set())
+    plugin = MemoryAgentPlugin(InMemMemoryExtension(), {"user"})
     create_test_agent(plugins=[plugin])
     section = await plugin.get_system_prompt_section(None)
     assert "<memory_workflow>" in section
-    assert "<active_maxims>" not in section
+    assert "<active_maxims>" in section
+    assert '<maxim name="user" scope="your knowledge about the user' in section
+    assert "(empty)" not in section
     assert "Use Remember" in section
 
 
@@ -257,9 +262,18 @@ async def test_task_plugin_renders_workflow_prompt_section():
 async def test_plugin_prompt_sections_render_inside_system_prompt():
     store = InMemMemoryExtension()
     await store.set_maxim("user", "Prefers concise answers.")
+
+    class StaticSkillsLoader:
+        async def load_skill(self, name: str) -> str:
+            return name
+
+        async def search_skills(self, query: str | None = None) -> dict[str, SkillMeta]:
+            return {"code-review": SkillMeta(location="/skills/code-review/SKILL.md", description="Review code.")}
+
     agent = create_test_agent(
         plugins=[
             MemoryAgentPlugin(store, {"user"}),
+            SkillsAgentPlugin(StaticSkillsLoader(), allow=None, exclude=[]),
             TaskAgentPlugin(),
             SubagentAgentPlugin(_MockSubagentRuntime(), allow=[], exclude=[]),
         ]
@@ -269,6 +283,8 @@ async def test_plugin_prompt_sections_render_inside_system_prompt():
 
     assert prompt.index("<memory_workflow>") < system_end
     assert prompt.index("<active_maxims>") < system_end
+    assert prompt.index("<skills_workflow>") < system_end
+    assert prompt.index("<available_skills>") < system_end
     assert prompt.index("<task_workflow>") < system_end
     assert prompt.index("<subagent_workflow>") < system_end
     assert prompt.index("<available_tools>") > system_end
@@ -322,8 +338,9 @@ async def test_prompt_sections_render_first_50_items_and_warn(caplog):
 
         assert "## Tool049" in tools_prompt
         assert "Tool050" not in tools_prompt
-        assert "## skill_049" in skills_prompt
+        assert '<skill name="skill_049">Skill description 049</skill>' in skills_prompt
         assert "skill_050" not in skills_prompt
+        assert "<skills_workflow>" in skills_prompt
         assert "<subagent_workflow>" in subagents_prompt
         assert f'<agent role="{subagent_names[49]}">Subagent description 049</agent>' in subagents_prompt
         assert subagent_names[50] not in subagents_prompt

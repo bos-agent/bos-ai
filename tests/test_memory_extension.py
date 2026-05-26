@@ -169,6 +169,7 @@ class TestSystemPromptIntegration:
         agent = _create_memory_agent(memory=store, maxim_keys={"user"})
         prompt = await agent._build_system_prompt()
         assert "<active_maxims>" in prompt
+        assert '<maxim name="user" scope="your knowledge about the user' in prompt
         assert "test user content" in prompt
 
     @pytest.mark.asyncio
@@ -188,5 +189,14 @@ class TestSystemPromptIntegration:
         await store.set_maxim("soul", "soul content")
         agent = _create_memory_agent(memory=store, maxim_keys={"rules", "soul"})
         prompt = await agent._build_system_prompt()
-        assert "rules" in prompt
-        assert "soul" in prompt
+        assert '<maxim name="rules" scope="hard constraints' in prompt
+        assert '<maxim name="soul" scope="your character' in prompt
+
+    @pytest.mark.asyncio
+    async def test_empty_maxims_are_not_injected_into_prompt(self):
+        agent = _create_memory_agent(maxim_keys={"user"})
+        prompt = await agent._build_system_prompt()
+        assert "<memory_workflow>" in prompt
+        assert "<active_maxims>" in prompt
+        assert '<maxim name="user" scope="your knowledge about the user' in prompt
+        assert "(empty)" not in prompt

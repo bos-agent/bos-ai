@@ -5,8 +5,9 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
+from xml.sax.saxutils import escape
 
-from bos.core._utils import _allowed
+from bos.core._utils import _allowed, _xml_attr
 from bos.core.contract import (
     AgentBindContext,
     AgentPlugin,
@@ -47,7 +48,6 @@ task outcomes that may matter in future conversations.
 - Do not store transient task-planning details; use task tools for those.
 - Prefer a small set of high-signal entries over many low-signal entries.
 - When a memory is clearly stale or superseded, use Forget to remove it.""",
-
     "Recall": """Retrieve information from episodic memory.
 
 Use query to search for relevant memories, or entry_id to fetch a specific memory in full after
@@ -57,7 +57,6 @@ Guidelines:
 - Recall when the user references prior conversations, preferences, or remembered context.
 - Prefer current files, tests, and git history for facts about the repository.
 - Verify any memory-derived file, symbol, or behavior claim before acting on it.""",
-
     "Forget": """Remove information from episodic memory.
 
 Use entry_id to remove one specific memory, or query to remove all matching memories. Prefer
@@ -67,7 +66,6 @@ Guidelines:
 - Use when the user asks you to forget remembered information or when a memory is clearly stale.
 - Search with Recall first if you need to identify the exact memory.
 - Do not use Forget for current task state; update tasks instead.""",
-
     "ReviseMaxim": """Append a revision note to a maxim. Existing content is preserved.
 
 ### Maxims
@@ -215,8 +213,7 @@ class MemoryAgentPlugin:
                     "entry_id": {
                         "type": "string",
                         "description": (
-                            "ID of a specific memory entry to retrieve in full"
-                            " (from previous Recall results)."
+                            "ID of a specific memory entry to retrieve in full (from previous Recall results)."
                         ),
                     },
                     "top_k": {
@@ -287,15 +284,15 @@ class MemoryAgentPlugin:
         sections = [_MEMORY_PROMPT_SECTION]
         if not self._maxim_keys:
             return "\n\n".join(sections)
-        items: dict[str, str] = {}
+        items: list[str] = []
         for key in sorted(self._maxim_keys):
-            content = await self._backend.get_maxim(key) or "(empty)"
-            label = f"{key}: {_MAXIM_DESCRIPTIONS.get(key, '')}" if key in _MAXIM_DESCRIPTIONS else key
-            items[label] = content
-        if not items:
-            return "\n\n".join(sections)
+            content = await self._backend.get_maxim(key)
+            scope = _MAXIM_DESCRIPTIONS.get(key, "")
+            items.append(
+                f'<maxim name="{_xml_attr(key)}" scope="{_xml_attr(scope)}">\n{escape(content).strip()}\n</maxim>'
+            )
         active_maxims = "<active_maxims>\n"
-        active_maxims += "\n\n".join([f"## {k}\n{v}" for k, v in items.items()])
+        active_maxims += "\n".join(items)
         active_maxims += "\n</active_maxims>"
         sections.append(active_maxims)
         return "\n\n".join(sections)

@@ -10,6 +10,7 @@ from collections.abc import Callable
 from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from xml.sax.saxutils import escape
 
 from bos.protocol.content import MessageContent, content_as_parts
 
@@ -78,6 +79,10 @@ def _safe_format(template: str, **kwargs: Any) -> str:
             return f"{{{key}}}"
 
     return template.format_map(SafeMapping(kwargs))
+
+
+def _xml_attr(value: str) -> str:
+    return escape(value, {'"': "&quot;"})
 
 
 def _load_json(source: Path | str, from_string: bool = False) -> dict[str, Any]:

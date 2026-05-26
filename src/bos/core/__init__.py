@@ -26,6 +26,7 @@ from ._utils import (
     _read_text,
     _safe_format,
     _strip_think,
+    _xml_attr,
 )
 from .actor import AgentActor
 from .agent import AbortTurn, ChainInterceptor, ReActAgent, TurnContext
@@ -141,4 +142,5 @@ __all__ = [
     "_safe_format",
     "_strip_think",
     "_get_bos_home",
+    "_xml_attr",
 ]
