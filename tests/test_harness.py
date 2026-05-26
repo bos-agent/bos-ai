@@ -145,6 +145,7 @@ def test_default_system_prompt_uses_compact_xml_contract():
         "edit_discipline",
         "verification",
         "communication",
+        "final_response",
         "tool_discipline",
     ):
         assert f"<{tag}>" in prompt
@@ -157,6 +158,7 @@ def test_default_system_prompt_uses_compact_xml_contract():
     assert "Verify meaningful code changes" in prompt
     assert "Do not claim a command, test, or check passed unless it was actually run" in prompt
     assert "never overwrite or discard changes you did not make" in prompt
+    assert "State verification that was run and whether it passed" in prompt
 
 
 def test_default_tools_usage_covers_core_agent_tools():
