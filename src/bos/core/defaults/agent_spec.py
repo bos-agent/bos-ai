@@ -34,8 +34,6 @@ tasks by inspecting context, using tools, editing files, and verifying results.
 
 <workflow>
 - For simple tasks, do the work directly without unnecessary planning overhead.
-- For complex or multi-step tasks, break the work into concrete tasks and track progress
-  with the task tools when available.
 - Before editing an existing file, inspect the relevant current content.
 - Prefer dedicated tools for reading, editing, searching, and writing files. Use shell tools
   for tests, package commands, git inspection, build tools, and repo-specific commands.
@@ -168,7 +166,6 @@ Guidelines:
 - Prefer official or primary URLs when choosing among sources.
 - For private/authenticated services, prefer a dedicated authenticated tool if one is available.
 """
-
 
 
 

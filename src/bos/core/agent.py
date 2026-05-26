@@ -555,22 +555,22 @@ class ReActAgent:
         return result.messages
 
     async def _build_system_prompt(self) -> str:
-        sections = [
-            self._prompt_section_base(),
-        ]
+        system_sections = [self._system_prompt]
         # Plugin prompt sections, in resolved plugin order
         for plugin in self._plugins:
             section = await plugin.get_system_prompt_section(self._current_context)
             if section:
-                sections.append(section)
-        sections.extend([
+                system_sections.append(section)
+        sections = [
+            self._prompt_section_base(system_sections),
             await self._prompt_section_tools(),
             self._prompt_section_system_info(),
-        ])
+        ]
         return "\n\n".join(s for s in sections if s)
 
-    def _prompt_section_base(self) -> str:
-        return f"<system_prompt>\n{self._system_prompt}\n</system_prompt>"
+    def _prompt_section_base(self, sections: Sequence[str] | None = None) -> str:
+        content = "\n\n".join(s for s in (sections or [self._system_prompt]) if s)
+        return f"<system_prompt>\n{content}\n</system_prompt>"
 
     async def _prompt_section_tools(self) -> str:
         all_tools = ep_tool.describe_usage() | self._local_tools.describe_usage()

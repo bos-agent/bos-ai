@@ -142,6 +142,7 @@ def test_default_system_prompt_uses_compact_xml_contract():
         assert f"</{tag}>" in prompt
 
     assert "Always explain your reasoning before calling a tool" not in prompt
+    assert "track progress\n  with the task tools" not in prompt
     assert "Do not narrate hidden reasoning" in prompt
     assert "Verify meaningful code changes" in prompt
 
@@ -224,8 +225,49 @@ async def test_memories_render_with_shared_prompt_section_format():
     plugin = MemoryAgentPlugin(store, {"user"})
     create_test_agent(plugins=[plugin])
     section = await plugin.get_system_prompt_section(None)
+    assert "<memory_workflow>" in section
+    assert "Use Recall" in section
     assert "<active_maxims>" in section
     assert "Prefers concise answers." in section
+
+
+@pytest.mark.asyncio
+async def test_memory_workflow_renders_without_active_maxims():
+    plugin = MemoryAgentPlugin(InMemMemoryExtension(), set())
+    create_test_agent(plugins=[plugin])
+    section = await plugin.get_system_prompt_section(None)
+    assert "<memory_workflow>" in section
+    assert "<active_maxims>" not in section
+    assert "Use Remember" in section
+
+
+@pytest.mark.asyncio
+async def test_task_plugin_renders_workflow_prompt_section():
+    plugin = TaskAgentPlugin()
+    create_test_agent(plugins=[plugin])
+    section = await plugin.get_system_prompt_section(None)
+    assert "<task_workflow>" in section
+    assert "Use TaskCreate" in section
+    assert "Only mark a task completed" in section
+
+
+@pytest.mark.asyncio
+async def test_plugin_prompt_sections_render_inside_system_prompt():
+    store = InMemMemoryExtension()
+    await store.set_maxim("user", "Prefers concise answers.")
+    agent = create_test_agent(
+        plugins=[
+            MemoryAgentPlugin(store, {"user"}),
+            TaskAgentPlugin(),
+        ]
+    )
+    prompt = await agent._build_system_prompt()
+    system_end = prompt.index("</system_prompt>")
+
+    assert prompt.index("<memory_workflow>") < system_end
+    assert prompt.index("<active_maxims>") < system_end
+    assert prompt.index("<task_workflow>") < system_end
+    assert prompt.index("<available_tools>") > system_end
 
 
 @pytest.mark.asyncio
