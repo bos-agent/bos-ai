@@ -6,8 +6,9 @@ import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
+from xml.sax.saxutils import escape
 
-from bos.core._utils import _allowed, _pick_collection
+from bos.core._utils import _allowed, _pick_collection, _xml_attr
 from bos.core.contract import (
     AgentBindContext,
     AgentPlugin,
@@ -99,14 +100,28 @@ class SkillsHarnessPlugin:
 _SKILLS_TOOL_USAGE = {
     "LoadSkill": """Load an allowed skill's full instructions.
 
-Use when a skill clearly matches the user's request or the user explicitly names it. After loading
-a skill, follow its instructions before continuing with the task.
+Use progressive disclosure: available_skills gives only compact metadata; LoadSkill returns the
+full task-specific instructions. Use when a skill clearly matches the user's request or the user
+explicitly names it. After loading a skill, follow its instructions before continuing with the task.
 
 Guidelines:
 - Do not invent skill names.
 - Load only relevant skills.
+- Load the full skill before relying on skill-specific procedures, scripts, templates, or assets.
 - Treat skill instructions as task-specific operating guidance alongside repository instructions.""",
 }
+
+_SKILLS_PROMPT_SECTION = """<skills_workflow>
+Use skills as progressively disclosed task playbooks.
+
+- The available_skills list contains compact metadata only; it is not the full instruction body.
+- Use LoadSkill when a listed skill clearly matches the user's request, the user names a skill, or specialized
+  procedures/templates/assets would reduce risk or improve quality.
+- Load only relevant skills; do not load skills speculatively for unrelated work.
+- Do not invent skill names. Use the exact name attribute from available_skills as the LoadSkill name.
+- After loading a skill, follow its instructions together with user, repository, and system guidance.
+- If no listed skill applies, continue with ordinary tools and reasoning.
+</skills_workflow>"""
 
 
 class SkillsAgentPlugin:
@@ -142,14 +157,15 @@ class SkillsAgentPlugin:
             except Exception as ex:
                 return f"(Failed to load skill '{name}': {ex}.)"
 
-    async def get_system_prompt_section(self, context: TurnContext) -> str | None:
+    async def get_system_prompt_section(self, context: TurnContext | None) -> str | None:
         import logging
 
         logger = logging.getLogger(__name__)
         available = await self._loader.search_skills()
         available = _pick_collection(available, self._allow, self._exclude)
+        sections = [_SKILLS_PROMPT_SECTION]
         if not available:
-            return None
+            return "\n\n".join(sections)
         try:
             limit = int(os.environ.get("BOS_CAPABILITY_LIMIT", 50))
         except Exception:
@@ -162,9 +178,13 @@ class SkillsAgentPlugin:
             )
             available = dict(list(available.items())[:limit])
         section = "<available_skills>\n"
-        section += "\n\n".join([f"## {name}\n{meta.description}" for name, meta in available.items()])
+        section += "\n".join(
+            f'<skill name="{_xml_attr(name)}">{escape(meta.description or "")}</skill>'
+            for name, meta in available.items()
+        )
         section += "\n</available_skills>"
-        return section
+        sections.append(section)
+        return "\n\n".join(sections)
 
     def get_interceptors(self) -> Sequence[TurnInterceptor]:
         return []

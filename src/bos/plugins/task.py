@@ -7,7 +7,9 @@ import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
+from xml.sax.saxutils import escape
 
+from bos.core._utils import _xml_attr
 from bos.core.contract import (
     AgentBindContext,
     AgentPlugin,
@@ -69,8 +71,28 @@ class _TaskList:
         ]
 
 
+def _render_current_tasks(task_list: _TaskList) -> str:
+    lines = ["<current_tasks>"]
+    for task in sorted(task_list.tasks.values(), key=lambda t: t.created_at):
+        blocked_by = ",".join(task.blocked_by)
+        blocks = ",".join(task.blocks)
+        lines.extend(
+            [
+                (
+                    f'<task id="{_xml_attr(task.id)}" status="{_xml_attr(task.status)}" '
+                    f'blocked_by="{_xml_attr(blocked_by)}" blocks="{_xml_attr(blocks)}">'
+                ),
+                f"<subject>{escape(task.subject)}</subject>",
+                f"<description>{escape(task.description)}</description>",
+                "</task>",
+            ]
+        )
+    lines.append("</current_tasks>")
+    return "\n".join(lines)
+
+
 class TaskEventInterceptor:
-    """Emits task state events on after_tool and final_response."""
+    """Injects task state into LLM context and emits task state events."""
 
     def __init__(self, task_lists: dict[str, _TaskList]) -> None:
         self._task_lists = task_lists
@@ -83,6 +105,16 @@ class TaskEventInterceptor:
         ],
         context: TurnContext,
     ) -> None:
+        if stage == "before_llm":
+            task_list = self._task_lists.get(context.chat_id)
+            if task_list is not None and task_list.tasks:
+                context.set_ephemeral_message(
+                    "task.current_tasks",
+                    {"role": "user", "content": _render_current_tasks(task_list)},
+                )
+            else:
+                context.clear_ephemeral_message("task.current_tasks")
+            return
         if stage not in ("after_tool", "final_response"):
             return
         event_sink = getattr(context, "event_sink", None)
@@ -147,6 +179,18 @@ in_progress and record the blocker or next action.""",
     "TaskGet": """Fetch full details of a task including description and dependency state.
 Use before starting work on a task to verify its blockedBy list is empty.""",
 }
+
+_TASK_PROMPT_SECTION = """<task_workflow>
+Use task tools to track complex, multi-step work in the current conversation.
+
+- Use TaskCreate when the request has multiple parts, needs careful sequencing, or benefits from progress tracking.
+- Skip task tools for simple one-step requests where tracking would add noise.
+- Mark a task in_progress with TaskUpdate when you begin it.
+- Use TaskGet before starting a task when you need its full description or dependency state.
+- Use TaskList after completing or unblocking work to choose the next pending, unblocked task.
+- Only mark a task completed after the described work and relevant verification are both done.
+- Keep blocked, partial, unverified, or failing work in_progress and record the next action in the task.
+</task_workflow>"""
 
 
 @ep_plugin(name="TaskPlugin")
@@ -338,7 +382,7 @@ class TaskAgentPlugin:
             return "\n".join(parts)
 
     async def get_system_prompt_section(self, context: TurnContext) -> str | None:
-        return None
+        return _TASK_PROMPT_SECTION
 
     def get_interceptors(self) -> Sequence[TurnInterceptor]:
         return [TaskEventInterceptor(self._task_lists)]

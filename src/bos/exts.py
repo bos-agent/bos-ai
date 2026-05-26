@@ -51,6 +51,7 @@ import bos.extensions.tools.system  # noqa: F401
 
 # Plugin defaults register via their own ExtensionPoints on import
 import bos.plugins.memory  # noqa: F401
+import bos.plugins.plan  # noqa: F401
 import bos.plugins.skills  # noqa: F401
 import bos.plugins.subagent  # noqa: F401
 import bos.plugins.task  # noqa: F401

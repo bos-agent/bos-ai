@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from functools import wraps
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal, Sequence
+from xml.sax.saxutils import escape
 
 from bos.protocol import MessageContent, TurnEvent
 
@@ -22,6 +23,7 @@ from ._utils import (
     _create_extension_instance,
     _pick_collection,
     _strip_think,
+    _xml_attr,
 )
 from .contract import (
     AgentPlugin,
@@ -85,7 +87,25 @@ class TurnContext:
             self.current.append(Message(llm_message=llm_message, turn_id=self.turn_id, metadata=kwargs))
 
     def get_llm_messages(self) -> list[dict[str, Any]]:
-        return self.system + self.history + [m.llm_message for m in self.current] + self.ephemeral
+        return (
+            self.system
+            + self.history
+            + [m.llm_message for m in self.current]
+            + [{k: v for k, v in message.items() if not k.startswith("_")} for message in self.ephemeral]
+        )
+
+    def set_ephemeral_message(self, key: str, llm_message: dict[str, Any]) -> None:
+        """Set or replace a keyed ephemeral message for this turn.
+
+        Ephemeral messages are sent to the LLM after persisted/current messages, but are not
+        persisted to chat history. A stable key lets interceptors refresh dynamic context without
+        accumulating stale duplicates across LLM iterations in the same turn.
+        """
+        self.clear_ephemeral_message(key)
+        self.ephemeral.append(llm_message | {"_ephemeral_key": key})
+
+    def clear_ephemeral_message(self, key: str) -> None:
+        self.ephemeral = [message for message in self.ephemeral if message.get("_ephemeral_key") != key]
 
     @property
     def final_response(self) -> str:
@@ -444,30 +464,37 @@ class ReActAgent:
                     "thinking_blocks": response.thinking_blocks,
                 })
 
-                for tc in response.tool_calls:
-                    await _emit_event(
-                        "tool",
-                        "start",
-                        detail="tool_call",
-                        tool_name=tc.name,
-                        content=json.dumps(tc.arguments, default=str),
-                    )
-                    tool_result = await self._call_tool(tc, ctx, event_sink=event_sink)
-                    _add_message({
-                        "role": "tool",
-                        "tool_call_id": tc.id,
-                        "name": tc.name,
-                        "content": tool_result,
-                    })
-                    await _run_interceptor("after_tool")
-                    await _emit_event(
-                        "tool",
-                        "finish",
-                        stage="after_tool",
-                        detail="tool_result",
-                        tool_name=tc.name,
-                        content=tool_result,
-                    )
+                for batch in self._tool_call_batches(response.tool_calls):
+                    for tc in batch:
+                        await _emit_event(
+                            "tool",
+                            "start",
+                            detail="tool_call",
+                            tool_name=tc.name,
+                            content=json.dumps(tc.arguments, default=str),
+                        )
+                    if len(batch) > 1:
+                        tool_results = await asyncio.gather(
+                            *(self._call_tool(tc, ctx, event_sink=event_sink) for tc in batch)
+                        )
+                    else:
+                        tool_results = [await self._call_tool(batch[0], ctx, event_sink=event_sink)]
+                    for tc, tool_result in zip(batch, tool_results):
+                        _add_message({
+                            "role": "tool",
+                            "tool_call_id": tc.id,
+                            "name": tc.name,
+                            "content": tool_result,
+                        })
+                        await _run_interceptor("after_tool")
+                        await _emit_event(
+                            "tool",
+                            "finish",
+                            stage="after_tool",
+                            detail="tool_result",
+                            tool_name=tc.name,
+                            content=tool_result,
+                        )
             turn_status = "completed"
         except AbortTurn:
             turn_status = "aborted"
@@ -490,6 +517,31 @@ class ReActAgent:
     def _get_tool_defs(self) -> list[dict[str, Any]]:
         tool_defs = ep_tool.to_openai_schema() | self._local_tools.to_openai_schema()
         return list(_pick_collection(tool_defs, self._tools, self._exclude_tools).values())
+
+    def _tool_metadata(self, tool_name: str) -> dict[str, Any]:
+        if self._local_tools.has(tool_name):
+            return self._local_tools.metadata_for(tool_name)
+        if ep_tool.has(tool_name):
+            return ep_tool.metadata_for(tool_name)
+        return {}
+
+    def _tool_parallel_safe(self, tool_name: str) -> bool:
+        return bool(self._tool_metadata(tool_name).get("parallel_safe", False))
+
+    def _tool_call_batches(self, tool_calls: Sequence[ToolCallRequest]) -> list[list[ToolCallRequest]]:
+        batches: list[list[ToolCallRequest]] = []
+        pending_safe: list[ToolCallRequest] = []
+        for tc in tool_calls:
+            if self._tool_parallel_safe(tc.name):
+                pending_safe.append(tc)
+                continue
+            if pending_safe:
+                batches.append(pending_safe)
+                pending_safe = []
+            batches.append([tc])
+        if pending_safe:
+            batches.append(pending_safe)
+        return batches
 
     async def _call_tool(self, tc: ToolCallRequest, ctx: TurnContext, event_sink: EventSink | None = None) -> str:
         try:
@@ -555,22 +607,22 @@ class ReActAgent:
         return result.messages
 
     async def _build_system_prompt(self) -> str:
-        sections = [
-            self._prompt_section_base(),
-        ]
+        system_sections = [self._system_prompt]
         # Plugin prompt sections, in resolved plugin order
         for plugin in self._plugins:
             section = await plugin.get_system_prompt_section(self._current_context)
             if section:
-                sections.append(section)
-        sections.extend([
+                system_sections.append(section)
+        sections = [
+            self._prompt_section_base(system_sections),
             await self._prompt_section_tools(),
             self._prompt_section_system_info(),
-        ])
+        ]
         return "\n\n".join(s for s in sections if s)
 
-    def _prompt_section_base(self) -> str:
-        return f"<system_prompt>\n{self._system_prompt}\n</system_prompt>"
+    def _prompt_section_base(self, sections: Sequence[str] | None = None) -> str:
+        content = "\n\n".join(s for s in (sections or [self._system_prompt]) if s)
+        return f"<system_prompt>\n{content}\n</system_prompt>"
 
     async def _prompt_section_tools(self) -> str:
         all_tools = ep_tool.describe_usage() | self._local_tools.describe_usage()
@@ -580,16 +632,14 @@ class ReActAgent:
         )
         available_tools = {k: self._tools_usage.get(k, v).strip() for k, v in available_tools.items()}
 
-        return self._format_prompt_section("AVAILABLE TOOLS", available_tools)
-
-    @staticmethod
-    def _format_prompt_section(title: str, items: dict[str, Any]) -> str:
-        if not items:
-            return ""
-        tag = title.lower().replace(" ", "_")
-        section = f"<{tag}>\n"
-        section += "\n\n".join([f"## {key}\n{content}" for key, content in items.items()])
-        section += f"\n</{tag}>"
+        if not available_tools:
+            return "<available_tools>\n\n</available_tools>"
+        section = "<available_tools>\n"
+        section += "\n\n".join(
+            f'<tool name="{_xml_attr(name)}">\n{escape(str(content)).strip()}\n</tool>'
+            for name, content in available_tools.items()
+        )
+        section += "\n</available_tools>"
         return section
 
     def _prompt_section_system_info(self) -> str:

@@ -138,3 +138,7 @@ class ToolRegistry(ExtensionPoint):
 
     def describe_usage(self) -> dict[str, str]:
         return {k: v.metadata.get("usage", v.description) for k, v in self._extensions.items()}
+
+    def metadata_for(self, name: str) -> dict[str, Any]:
+        ext = self.get(name)
+        return ext.metadata if ext is not None else {}

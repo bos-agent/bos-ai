@@ -42,8 +42,9 @@ def test_react_agent_local_tools_describe_ask_subagent(caplog):
     schema = agent._local_tools.to_openai_schema()["AskSubagent"]
     assert schema["function"]["description"] == ask_subagent.description
     properties = schema["function"]["parameters"]["properties"]
-    assert set(properties) == {"role", "message"}
-    assert schema["function"]["parameters"]["required"] == ["role", "message"]
+    assert set(properties) == {"role", "task"}
+    assert schema["function"]["parameters"]["required"] == ["role", "task"]
+    assert agent._local_tools.metadata_for("AskSubagent")["parallel_safe"] is True
     assert agent._local_tools.get("ListAgents") is None
     assert agent._local_tools.get("SearchSkills") is None
 
@@ -137,13 +138,27 @@ def test_react_agent_rejects_dict_system_prompt():
 def test_default_system_prompt_uses_compact_xml_contract():
     prompt = default_agent_spec["system_prompt"]
 
-    for tag in ("role", "behavior", "workflow", "communication", "tool_discipline"):
+    for tag in (
+        "role",
+        "behavior",
+        "workflow",
+        "edit_discipline",
+        "verification",
+        "communication",
+        "final_response",
+        "tool_discipline",
+    ):
         assert f"<{tag}>" in prompt
         assert f"</{tag}>" in prompt
 
     assert "Always explain your reasoning before calling a tool" not in prompt
+    assert "track progress\n  with the task tools" not in prompt
+    assert "reserve subagents" not in prompt
     assert "Do not narrate hidden reasoning" in prompt
     assert "Verify meaningful code changes" in prompt
+    assert "Do not claim a command, test, or check passed unless it was actually run" in prompt
+    assert "never overwrite or discard changes you did not make" in prompt
+    assert "State verification that was run and whether it passed" in prompt
 
 
 def test_default_tools_usage_covers_core_agent_tools():
@@ -208,7 +223,9 @@ Use this skill to search YouTube.
     skill_metas = await loader.search_skills("YouTube")
     load_result = await agent._local_tools.invoke_async("LoadSkill", {"name": "youtube-searcher"})
 
-    assert "## youtube-searcher" in skills_prompt
+    assert "<skills_workflow>" in skills_prompt
+    assert 'Use the exact name attribute from available_skills as the LoadSkill name.' in skills_prompt
+    assert '<skill name="youtube-searcher">Search YouTube.</skill>' in skills_prompt
     assert "youtube-searcher-display-name" not in skills_prompt
     assert "Search YouTube." in skills_prompt
     assert str(skill_file) not in skills_prompt
@@ -224,8 +241,65 @@ async def test_memories_render_with_shared_prompt_section_format():
     plugin = MemoryAgentPlugin(store, {"user"})
     create_test_agent(plugins=[plugin])
     section = await plugin.get_system_prompt_section(None)
+    assert "<memory_workflow>" in section
+    assert "Use Recall" in section
     assert "<active_maxims>" in section
+    assert '<maxim name="user" scope="your knowledge about the user' in section
     assert "Prefers concise answers." in section
+
+
+@pytest.mark.asyncio
+async def test_memory_workflow_renders_without_active_maxims():
+    plugin = MemoryAgentPlugin(InMemMemoryExtension(), {"user"})
+    create_test_agent(plugins=[plugin])
+    section = await plugin.get_system_prompt_section(None)
+    assert "<memory_workflow>" in section
+    assert "<active_maxims>" in section
+    assert '<maxim name="user" scope="your knowledge about the user' in section
+    assert "(empty)" not in section
+    assert "Use Remember" in section
+
+
+@pytest.mark.asyncio
+async def test_task_plugin_renders_workflow_prompt_section():
+    plugin = TaskAgentPlugin()
+    create_test_agent(plugins=[plugin])
+    section = await plugin.get_system_prompt_section(None)
+    assert "<task_workflow>" in section
+    assert "Use TaskCreate" in section
+    assert "Only mark a task completed" in section
+
+
+@pytest.mark.asyncio
+async def test_plugin_prompt_sections_render_inside_system_prompt():
+    store = InMemMemoryExtension()
+    await store.set_maxim("user", "Prefers concise answers.")
+
+    class StaticSkillsLoader:
+        async def load_skill(self, name: str) -> str:
+            return name
+
+        async def search_skills(self, query: str | None = None) -> dict[str, SkillMeta]:
+            return {"code-review": SkillMeta(location="/skills/code-review/SKILL.md", description="Review code.")}
+
+    agent = create_test_agent(
+        plugins=[
+            MemoryAgentPlugin(store, {"user"}),
+            SkillsAgentPlugin(StaticSkillsLoader(), allow=None, exclude=[]),
+            TaskAgentPlugin(),
+            SubagentAgentPlugin(_MockSubagentRuntime(), allow=[], exclude=[]),
+        ]
+    )
+    prompt = await agent._build_system_prompt()
+    system_end = prompt.index("</system_prompt>")
+
+    assert prompt.index("<memory_workflow>") < system_end
+    assert prompt.index("<active_maxims>") < system_end
+    assert prompt.index("<skills_workflow>") < system_end
+    assert prompt.index("<available_skills>") < system_end
+    assert prompt.index("<task_workflow>") < system_end
+    assert prompt.index("<subagent_workflow>") < system_end
+    assert prompt.index("<available_tools>") > system_end
 
 
 @pytest.mark.asyncio
@@ -274,13 +348,16 @@ async def test_prompt_sections_render_first_50_items_and_warn(caplog):
             skills_prompt = await skills_plugin.get_system_prompt_section(None) or ""
             subagents_prompt = await subagent_plugin.get_system_prompt_section(None) or ""
 
-        assert "## Tool049" in tools_prompt
+        assert '<tool name="Tool049">\nTool description 049\n</tool>' in tools_prompt
         assert "Tool050" not in tools_prompt
-        assert "## skill_049" in skills_prompt
+        assert '<skill name="skill_049">Skill description 049</skill>' in skills_prompt
         assert "skill_050" not in skills_prompt
-        assert f"## {subagent_names[49]}" in subagents_prompt
+        assert "<skills_workflow>" in skills_prompt
+        assert "<subagent_workflow>" in subagents_prompt
+        assert f'<agent role="{subagent_names[49]}">Subagent description 049</agent>' in subagents_prompt
         assert subagent_names[50] not in subagents_prompt
         assert "first 50 tools" in caplog.text
+        assert "first 50 subagents" in caplog.text
     finally:
         for name in subagent_names:
             ep_agent._extensions.pop(name, None)
@@ -448,6 +525,70 @@ async def test_react_agent_injects_runtime_tool_context():
         assert '"turn_id": "' in result
     finally:
         ep_provider._extensions.pop(provider_name, None)
+
+
+@pytest.mark.asyncio
+async def test_parallel_safe_tool_calls_run_concurrently_in_result_order():
+    suffix = uuid.uuid4().hex
+    provider_name = f"test_parallel_safe_tools_{suffix}"
+    tools = ToolRegistry("parallel test tools")
+    first_started = asyncio.Event()
+    second_started = asyncio.Event()
+
+    @tools(
+        name="SafeFirst",
+        description="First parallel-safe test tool.",
+        parallel_safe=True,
+        parameters={"type": "object", "properties": {}, "required": []},
+    )
+    async def safe_first() -> str:
+        first_started.set()
+        try:
+            await asyncio.wait_for(second_started.wait(), timeout=0.5)
+        except asyncio.TimeoutError:
+            return "first:sequential"
+        await asyncio.sleep(0.05)
+        return "first:parallel"
+
+    @tools(
+        name="SafeSecond",
+        description="Second parallel-safe test tool.",
+        parallel_safe=True,
+        parameters={"type": "object", "properties": {}, "required": []},
+    )
+    async def safe_second() -> str:
+        second_started.set()
+        await asyncio.wait_for(first_started.wait(), timeout=0.5)
+        return "second:parallel"
+
+    @ep_provider(name=provider_name)
+    async def provider(messages, model=None, **kwargs):
+        tool_messages = [message for message in messages if message.get("role") == "tool"]
+        if tool_messages:
+            return LLMResponse(
+                content="|".join(message["content"] for message in tool_messages),
+                finish_reason="stop",
+            )
+        return LLMResponse(
+            content="",
+            tool_calls=[
+                ToolCallRequest(id="call_first", name="SafeFirst", arguments={}),
+                ToolCallRequest(id="call_second", name="SafeSecond", arguments={}),
+            ],
+            finish_reason="tool_calls",
+        )
+
+    try:
+        agent = create_test_agent(
+            model=f"{provider_name}/parallel",
+            local_tools=tools,
+            tools=["SafeFirst", "SafeSecond"],
+        )
+        result = await agent.ask("parallel-safe-chat", "Use the safe tools.")
+    finally:
+        ep_provider._extensions.pop(provider_name, None)
+
+    assert result == "first:parallel|second:parallel"
 
 
 @pytest.mark.asyncio
@@ -635,7 +776,7 @@ async def test_harness_ask_subagent_delegates_to_named_specialist(tmp_path):
                         name="AskSubagent",
                         arguments={
                             "role": researcher_name,
-                            "message": "Summarize BOS subagent orchestration in one line.",
+                            "task": "Summarize BOS subagent orchestration in one line.",
                         },
                     )
                 ],
@@ -725,7 +866,7 @@ async def test_ask_subagent_rejects_disallowed_registered_agent(tmp_path):
                     ToolCallRequest(
                         id="call_ask_subagent",
                         name="AskSubagent",
-                        arguments={"role": blocked_name, "message": "Should be rejected."},
+                        arguments={"role": blocked_name, "task": "Should be rejected."},
                     )
                 ],
             )
@@ -1060,6 +1201,72 @@ async def test_cache_hint_offsets_for_ephemeral_messages():
             "user",
         ]
         assert second_messages[-1]["content"] == "ephemeral note"
+        assert "_ephemeral_key" not in second_messages[-1]
+        assert calls[1]["cache_control_injection_points"] == [
+            {"location": "message", "role": "system"},
+            {"location": "message", "index": -4},
+        ]
+    finally:
+        ep_provider._extensions.pop(provider_name, None)
+
+
+@pytest.mark.asyncio
+async def test_task_plugin_injects_current_tasks_as_ephemeral_user_context():
+    suffix = uuid.uuid4().hex
+    provider_name = f"test_task_ephemeral_{suffix}"
+    calls: list[dict] = []
+
+    @ep_provider(name=provider_name)
+    async def provider(messages, model=None, tools=None, **kwargs):
+        calls.append(
+            {
+                "messages": messages,
+                "cache_control_injection_points": kwargs.get("cache_control_injection_points"),
+            }
+        )
+        if len(calls) == 1:
+            return LLMResponse(
+                content="",
+                tool_calls=[
+                    ToolCallRequest(
+                        id="tc_task_create",
+                        name="TaskCreate",
+                        arguments={
+                            "subject": "Implement <feature>",
+                            "description": "Update the & parser.",
+                        },
+                    )
+                ],
+                finish_reason="tool_calls",
+            )
+        return LLMResponse(content="done", finish_reason="stop")
+
+    try:
+        agent = create_test_agent(
+            model=f"{provider_name}/model",
+            plugins=[TaskAgentPlugin()],
+            tools=["TaskCreate"],
+        )
+
+        await agent.ask("task-ephemeral-chat", "Track the work.")
+
+        assert len(calls) == 2
+        first_messages = calls[0]["messages"]
+        second_messages = calls[1]["messages"]
+        assert "<current_tasks>" not in first_messages[0]["content"]
+        assert [message["role"] for message in second_messages] == [
+            "system",
+            "user",
+            "assistant",
+            "tool",
+            "user",
+        ]
+        task_context = second_messages[-1]["content"]
+        assert task_context.startswith("<current_tasks>")
+        assert "_ephemeral_key" not in second_messages[-1]
+        assert '<task id="1" status="pending" blocked_by="" blocks="">' in task_context
+        assert "<subject>Implement &lt;feature&gt;</subject>" in task_context
+        assert "<description>Update the &amp; parser.</description>" in task_context
         assert calls[1]["cache_control_injection_points"] == [
             {"location": "message", "role": "system"},
             {"location": "message", "index": -4},

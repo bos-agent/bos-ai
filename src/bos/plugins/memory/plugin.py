@@ -5,8 +5,9 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
+from xml.sax.saxutils import escape
 
-from bos.core._utils import _allowed
+from bos.core._utils import _allowed, _xml_attr
 from bos.core.contract import (
     AgentBindContext,
     AgentPlugin,
@@ -47,7 +48,6 @@ task outcomes that may matter in future conversations.
 - Do not store transient task-planning details; use task tools for those.
 - Prefer a small set of high-signal entries over many low-signal entries.
 - When a memory is clearly stale or superseded, use Forget to remove it.""",
-
     "Recall": """Retrieve information from episodic memory.
 
 Use query to search for relevant memories, or entry_id to fetch a specific memory in full after
@@ -57,7 +57,6 @@ Guidelines:
 - Recall when the user references prior conversations, preferences, or remembered context.
 - Prefer current files, tests, and git history for facts about the repository.
 - Verify any memory-derived file, symbol, or behavior claim before acting on it.""",
-
     "Forget": """Remove information from episodic memory.
 
 Use entry_id to remove one specific memory, or query to remove all matching memories. Prefer
@@ -67,7 +66,6 @@ Guidelines:
 - Use when the user asks you to forget remembered information or when a memory is clearly stale.
 - Search with Recall first if you need to identify the exact memory.
 - Do not use Forget for current task state; update tasks instead.""",
-
     "ReviseMaxim": """Append a revision note to a maxim. Existing content is preserved.
 
 ### Maxims
@@ -77,6 +75,17 @@ Deeply held convictions (e.g., user preferences, rules). Always visible in your 
 - Limits: 2048 chars total. Keep notes concise.
 - Do NOT use for: Facts, snippets, meeting notes, one-off details.""",
 }
+
+_MEMORY_PROMPT_SECTION = """<memory_workflow>
+Use memory tools for durable context that should help in future conversations, not for temporary task state.
+
+- Use Recall when the user references prior conversations, preferences, remembered context, or memory actions.
+- Treat recalled memories as context, not proof; verify repository facts against current files or git state.
+- Use Remember for stable user preferences, recurring feedback, non-obvious project context, and useful outcomes.
+- Do not remember facts that are derivable from the current repository, transient plans, or ordinary task progress.
+- Use Forget when the user asks you to forget something or when a memory is clearly stale or superseded.
+- Use ReviseMaxim only for compact, high-priority maxims that should remain visible every turn.
+</memory_workflow>"""
 
 
 @ep_plugin(name="MemoryPlugin")
@@ -204,8 +213,7 @@ class MemoryAgentPlugin:
                     "entry_id": {
                         "type": "string",
                         "description": (
-                            "ID of a specific memory entry to retrieve in full"
-                            " (from previous Recall results)."
+                            "ID of a specific memory entry to retrieve in full (from previous Recall results)."
                         ),
                     },
                     "top_k": {
@@ -273,19 +281,21 @@ class MemoryAgentPlugin:
             return "Error: Provide either 'entry_id' or 'query' to forget."
 
     async def get_system_prompt_section(self, context: TurnContext) -> str | None:
+        sections = [_MEMORY_PROMPT_SECTION]
         if not self._maxim_keys:
-            return None
-        items: dict[str, str] = {}
+            return "\n\n".join(sections)
+        items: list[str] = []
         for key in sorted(self._maxim_keys):
-            content = await self._backend.get_maxim(key) or "(empty)"
-            label = f"{key}: {_MAXIM_DESCRIPTIONS.get(key, '')}" if key in _MAXIM_DESCRIPTIONS else key
-            items[label] = content
-        if not items:
-            return None
-        section = "<active_maxims>\n"
-        section += "\n\n".join([f"## {k}\n{v}" for k, v in items.items()])
-        section += "\n</active_maxims>"
-        return section
+            content = await self._backend.get_maxim(key)
+            scope = _MAXIM_DESCRIPTIONS.get(key, "")
+            items.append(
+                f'<maxim name="{_xml_attr(key)}" scope="{_xml_attr(scope)}">\n{escape(content).strip()}\n</maxim>'
+            )
+        active_maxims = "<active_maxims>\n"
+        active_maxims += "\n".join(items)
+        active_maxims += "\n</active_maxims>"
+        sections.append(active_maxims)
+        return "\n\n".join(sections)
 
     def get_interceptors(self) -> Sequence[TurnInterceptor]:
         return []
