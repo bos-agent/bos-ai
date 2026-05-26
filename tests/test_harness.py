@@ -336,7 +336,7 @@ async def test_prompt_sections_render_first_50_items_and_warn(caplog):
             skills_prompt = await skills_plugin.get_system_prompt_section(None) or ""
             subagents_prompt = await subagent_plugin.get_system_prompt_section(None) or ""
 
-        assert "## Tool049" in tools_prompt
+        assert '<tool name="Tool049">\nTool description 049\n</tool>' in tools_prompt
         assert "Tool050" not in tools_prompt
         assert '<skill name="skill_049">Skill description 049</skill>' in skills_prompt
         assert "skill_050" not in skills_prompt

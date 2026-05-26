@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from functools import wraps
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal, Sequence
+from xml.sax.saxutils import escape
 
 from bos.protocol import MessageContent, TurnEvent
 
@@ -22,6 +23,7 @@ from ._utils import (
     _create_extension_instance,
     _pick_collection,
     _strip_think,
+    _xml_attr,
 )
 from .contract import (
     AgentPlugin,
@@ -612,16 +614,14 @@ class ReActAgent:
         )
         available_tools = {k: self._tools_usage.get(k, v).strip() for k, v in available_tools.items()}
 
-        return self._format_prompt_section("AVAILABLE TOOLS", available_tools)
-
-    @staticmethod
-    def _format_prompt_section(title: str, items: dict[str, Any]) -> str:
-        if not items:
-            return ""
-        tag = title.lower().replace(" ", "_")
-        section = f"<{tag}>\n"
-        section += "\n\n".join([f"## {key}\n{content}" for key, content in items.items()])
-        section += f"\n</{tag}>"
+        if not available_tools:
+            return "<available_tools>\n\n</available_tools>"
+        section = "<available_tools>\n"
+        section += "\n\n".join(
+            f'<tool name="{_xml_attr(name)}">\n{escape(str(content)).strip()}\n</tool>'
+            for name, content in available_tools.items()
+        )
+        section += "\n</available_tools>"
         return section
 
     def _prompt_section_system_info(self) -> str:
