@@ -26,7 +26,7 @@ subagents = []
 
     _config_path, bos_dir, config = resolve_config_source(str(config_file))
     ws = Workspace(str(workspace_dir), bos_dir, config)
-    assert ws.get_main_agent_name() == "custom-agent"
+    assert ws.get_main_agent_kind() == "custom-agent"
 
 
 def test_workspace_config_source_skips_discovery(tmp_path):

@@ -15,9 +15,9 @@ def debug():
 @debug.command()
 @click.option(
     "--agent",
-    "agent_name",
+    "agent_kind",
     default=None,
-    help="Agent name (defaults to the configured main agent).",
+    help="Agent kind (defaults to the configured main agent).",
 )
 @click.option(
     "-w",
@@ -27,13 +27,13 @@ def debug():
     help="Override the workspace directory.",
 )
 @click.pass_context
-def prompt(ctx, agent_name: str | None, workspace_dir: str | None):
+def prompt(ctx, agent_kind: str | None, workspace_dir: str | None):
     """Print the full system prompt for an agent."""
     from bos.cli.commands.agent import _build_workspace_for_ask
 
     ws = _build_workspace_for_ask(ctx, workspace_dir)
     ws.bootstrap_platform()
-    selected = agent_name or ws.get_main_agent_name()
+    selected = agent_kind or ws.get_main_agent_kind()
 
     async def _run() -> str:
         async with ws.harness() as harness:

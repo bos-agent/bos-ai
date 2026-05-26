@@ -57,12 +57,12 @@ async def start_named_actors(workspace: Workspace) -> None:
     channels_cfg = workspace.resolve_channels(runtime_kind=os.environ.get("BOS_RUNTIME", "process"))
 
     if not actors_cfg:
-        agent_name = workspace.get_main_agent_name()
+        agent_kind = workspace.get_main_agent_kind()
         actor_address = workspace.get_main_agent_address()
-        logger.info("No [main.actors] configured; starting single actor agent=%r", agent_name)
+        logger.info("No [main.actors] configured; starting single actor agent=%r", agent_kind)
         async with workspace.harness() as harness:
             chat_state = ChatState(workspace.bos_dir)
-            agent = await harness.create_agent(agent_name)
+            agent = await harness.create_agent(agent_kind, agent_cfg={"agent_name": "main"})
             actor = AgentActor(agent, harness.mail_route.bind(actor_address), chat_state=chat_state)
             channels = _create_channels(channels_cfg, ep_channel, Channel)
             task = asyncio.create_task(_run_actor_and_channels(actor, channels, harness))
@@ -92,7 +92,6 @@ async def start_named_actors(workspace: Workspace) -> None:
                 agent,
                 mailbox,
                 chat_state=chat_state,
-                actor_name=actor_name,
                 display_name=display_name,
                 agent_kind=agent_kind,
             )
@@ -110,7 +109,7 @@ async def start_named_actors(workspace: Workspace) -> None:
         async def _run_named_actors() -> None:
             async with asyncio.TaskGroup() as tg:
                 for actor in actors:
-                    tg.create_task(actor.run(), name=f"actor:{actor.actor_name}")
+                    tg.create_task(actor.run(), name=f"actor:{actor._agent.name}")
                 for ch, address in channels:
                     tg.create_task(ch.run(harness.mail_route.bind(address)), name=f"channel:{address}")
 
@@ -161,17 +160,12 @@ async def _run_actor_and_channels(actor, channels, harness) -> None:
             tg.create_task(ch.run(harness.mail_route.bind(address)), name=f"channel:{address}")
 
 
-async def _build_named_agent(harness, agent_kind: str, scope: str, actor_overrides: dict[str, Any]):
-    from bos.core import AgentBindContext, ep_agent
+async def _build_named_agent(harness, agent_kind: str, actor_name: str, actor_overrides: dict[str, Any]):
+    from bos.core import _deep_merge, ep_agent
 
-    agent_spec: dict[str, Any] = {}
+    agent_spec: dict[str, Any] = {"agent_name": actor_name}
     if ep_agent.has(agent_kind):
         agent_spec.update(ep_agent.get(agent_kind).defaults)
-    agent_spec.update(actor_overrides)
-    agent_spec["name"] = agent_kind  # TODO why the name always be agent kind?
+    _deep_merge(agent_spec, actor_overrides)
 
-    bind_context = AgentBindContext(
-        agent_name=agent_kind,
-        actor_scope=scope,
-    )
-    return await harness.create_agent(agent_kind, agent_spec, bind_context=bind_context)
+    return await harness.create_agent(agent_kind, agent_spec)

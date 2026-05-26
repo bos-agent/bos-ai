@@ -10,8 +10,13 @@ from bos.protocol import Envelope, MessageType
 
 
 class FakeAgent:
-    def __init__(self):
+    def __init__(self, name="bob"):
         self.calls = []
+        self._name = name
+
+    @property
+    def name(self):
+        return self._name
 
     async def ask(self, chat_id, message, **kwargs):
         self.calls.append((chat_id, message, kwargs))
@@ -19,10 +24,15 @@ class FakeAgent:
 
 
 class BlockingFakeAgent:
-    def __init__(self):
+    def __init__(self, name="bob"):
         self.calls = []
+        self._name = name
         self.started = asyncio.Event()
         self.finish = asyncio.Event()
+
+    @property
+    def name(self):
+        return self._name
 
     async def ask(self, chat_id, message, **kwargs):
         self.calls.append((chat_id, message, kwargs))
@@ -45,7 +55,7 @@ class FakeMailBox:
 
 def test_named_actor_builds_turn_metadata():
     agent = FakeAgent()
-    actor = NamedActor(agent, FakeMailBox(), actor_name="bob", display_name="Bob", agent_kind="architect")
+    actor = NamedActor(agent, FakeMailBox(), display_name="Bob", agent_kind="architect")
     env = Envelope(
         sender="channel@http",
         recipient="agent@bob",
@@ -74,7 +84,7 @@ async def test_named_actor_rejects_message_during_active_turn_with_busy():
     sender_address = f"channel@{uuid.uuid4().hex}"
     actor_mailbox = route.bind(actor_address)
     sender_mailbox = route.bind(sender_address)
-    actor = NamedActor(agent, actor_mailbox, actor_name="bob", display_name="Bob", agent_kind="architect")
+    actor = NamedActor(agent, actor_mailbox, display_name="Bob", agent_kind="architect")
     chat_id = "busy-chat"
 
     actor_task = asyncio.create_task(actor.run())
@@ -115,7 +125,7 @@ async def test_named_actor_accepts_message_after_turn_completes():
     sender_address = f"channel@{uuid.uuid4().hex}"
     actor_mailbox = route.bind(actor_address)
     sender_mailbox = route.bind(sender_address)
-    actor = NamedActor(agent, actor_mailbox, actor_name="bob", display_name="Bob", agent_kind="architect")
+    actor = NamedActor(agent, actor_mailbox, display_name="Bob", agent_kind="architect")
     chat_id = "sequential-chat"
 
     actor_task = asyncio.create_task(actor.run())
@@ -194,6 +204,8 @@ async def test_react_agent_persists_named_actor_message_metadata():
 
     store = Store()
     agent = ReActAgent(
+        kind="test",
+        agent_name="test",
         chat_store=store,
         consolidator=None,
         llm=LLM(),

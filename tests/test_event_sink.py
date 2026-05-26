@@ -19,6 +19,8 @@ from bos.protocol import MessageType
 
 
 def create_test_agent(**kwargs):
+    kwargs.setdefault("kind", "test")
+    kwargs.setdefault("agent_name", "test")
     kwargs.setdefault("chat_store", InMemChatStore())
     kwargs.setdefault("consolidator", MessageOnlyConsolidator())
     kwargs.setdefault("interceptor", ChainInterceptor())
@@ -194,7 +196,7 @@ async def test_actor_serializes_turn_events_to_mailbox():
         sender_address = f"channel@http-{suffix}"
         actor_mailbox = route.bind(actor_address)
         sender_mailbox = route.bind(sender_address)
-        agent = create_test_agent(model=f"{provider_name}/actor", name="main")
+        agent = create_test_agent(model=f"{provider_name}/actor", agent_name="main")
         actor = AgentActor(agent, actor_mailbox)
 
         task = asyncio.create_task(actor.run())
@@ -299,7 +301,7 @@ async def test_actor_turn_event_tool_payload_uses_canonical_shape():
         sender_address = f"channel@http-{suffix}"
         actor_mailbox = route.bind(actor_address)
         sender_mailbox = route.bind(sender_address)
-        agent = create_test_agent(model=f"{provider_name}/actor-tool", name="main", tools=["EchoWithContext"])
+        agent = create_test_agent(model=f"{provider_name}/actor-tool", agent_name="main", tools=["EchoWithContext"])
         agent._local_tools(
             name="EchoWithContext",
             description="Return a long string for tool result previews.",

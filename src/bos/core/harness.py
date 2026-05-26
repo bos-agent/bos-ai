@@ -12,13 +12,13 @@ from typing import Any
 from ._utils import (
     _aclose,
     _create_extension_instance,
+    _deep_merge,
     _load_ext_modules,
     _load_ext_paths,
     _safe_format,
 )
 from .agent import ChainInterceptor, ReActAgent
 from .contract import (
-    AgentBindContext,
     AgentPlugin,
     ChatStore,
     Consolidator,
@@ -91,16 +91,13 @@ def _resolve_plugin_configs(
     platform_plugins: dict[str, dict[str, Any]],
     agent_plugins: dict[str, Any],
 ) -> dict[str, dict[str, Any]]:
-    """Shallow merge: platform.plugins.<Name> < agent-local plugins.<Name>."""
     result: dict[str, dict[str, Any]] = {}
     all_names = set(platform_plugins.keys()) | set(agent_plugins.keys())
     for name in all_names:
-        merged = {}
-        if name in platform_plugins:
-            merged.update(platform_plugins[name])
+        merged = dict(platform_plugins.get(name, {}))
         agent_cfg = agent_plugins.get(name, {})
         if isinstance(agent_cfg, dict):
-            merged.update(agent_cfg)
+            _deep_merge(merged, agent_cfg)
         result[name] = merged
     return result
 
@@ -144,9 +141,7 @@ class _HarnessSubagentRuntime:
             )
 
         child_chat_id = self._harness._make_subagent_chat_id(parent.chat_id, role)
-        child_agent_cfg = {
-            k: v for k, v in subagent_cfg.items() if k not in {"name", "task_template"}
-        }
+        child_agent_cfg = {k: v for k, v in subagent_cfg.items() if k not in {"name", "task_template"}}
         agent = await self._harness.create_agent(role, child_agent_cfg)
         child_event_sink = derive_event_sink(
             parent.event_sink,
@@ -256,21 +251,20 @@ class AgentHarness:
 
     async def create_agent(
         self,
-        role: str | None = None,
+        kind: str | None = None,
         agent_cfg: dict[str, Any] = None,
-        bind_context: AgentBindContext | None = None,
     ) -> ReActAgent:
         if CURRENT_HARNESS.get(None) is None:
             raise RuntimeError("create_agent must be called within an active AgentHarness context.")
 
         # Resolve agent defaults from ep_agent so plugin config is visible
         agent_defaults: dict[str, Any] = {}
-        if role and ep_agent.has(role):
-            d = ep_agent.get(role).defaults
+        if kind and ep_agent.has(kind):
+            d = ep_agent.get(kind).defaults
             if d is not None:
                 agent_defaults = dict(d() if callable(d) else d)
 
-        if not any([role, agent_cfg]) and not agent_defaults:
+        if not any([kind, agent_cfg]) and not agent_defaults:
             agent_cfg = {
                 "system_prompt": "You are a helpful assistant.",
                 "tools": [],
@@ -278,29 +272,24 @@ class AgentHarness:
 
         merged_cfg = agent_defaults | (agent_cfg or {})
 
-        kwargs = (agent_cfg or {}) | {
-            "name": role or (agent_cfg or {}).get("name"),
+        kwargs = merged_cfg | {
+            "kind": kind or merged_cfg.get("kind") or "undef",
             "llm": self.llm,
             "chat_store": self.chat_store,
             "consolidator": self.consolidator,
             "interceptor": self.interceptor,
             "tool_configs": self._tools_cfg,
-            "plugins": await self._bind_plugins_for_agent(role, merged_cfg, bind_context),
+            "plugins": await self._bind_plugins_for_agent(merged_cfg),
             "chat_compaction_lock": self._get_compaction_lock,
         }
 
-        return ep_agent.invoke(role, kwargs) if role else ReActAgent(**kwargs)
+        return ep_agent.invoke(kind, kwargs) if kind else ReActAgent(**kwargs)
 
     async def _bind_plugins_for_agent(
         self,
-        role: str | None,
         agent_cfg: dict[str, Any],
-        bind_context: AgentBindContext | None = None,
     ) -> list[AgentPlugin]:
         """Resolve, validate, and bind enabled plugins for an agent."""
-        if bind_context is None:
-            agent_name = role or agent_cfg.get("name", "__unknown__")
-            bind_context = AgentBindContext(agent_name=agent_name)
 
         # Resolve merged configs for all known plugins
         merged_configs = _resolve_plugin_configs(
@@ -326,11 +315,16 @@ class AgentHarness:
                 continue
 
             cfg = dict(hp.default_config()) | merged_configs.get(pname, {})
-            hp.validate_config(cfg, bind_context)
+            hp.validate_config(cfg)
             try:
-                agent_plugin = hp.bind(cfg, bind_context)
+                agent_plugin = hp.bind(cfg)
             except Exception:
-                logger.error("Failed to bind plugin %r for agent %r", pname, bind_context.agent_name, exc_info=True)
+                logger.error(
+                    "Failed to bind plugin %r for agent %r",
+                    pname,
+                    agent_cfg.get("agent_name") or "unknown",
+                    exc_info=True,
+                )
                 raise
             bound.append(agent_plugin)
 

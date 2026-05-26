@@ -77,25 +77,23 @@ class NamedActor(AgentActor):
         mailbox: Any,
         chat_state: Any = None,
         *,
-        actor_name: str,
         display_name: str | None = None,
         agent_kind: str | None = None,
     ) -> None:
         super().__init__(agent, mailbox, chat_state)
-        self.actor_name = actor_name
         self.display_name = display_name
         self.agent_kind = agent_kind
-        self.display_label = _display_label(display_name, actor_name, agent_kind)
+        self.display_label = _display_label(display_name, agent.name, agent_kind)
 
     def _turn_metadata(self, reply_recipient: str, inbound_env: Envelope | None = None) -> dict[str, Any]:
         if inbound_env is None:
             return super()._turn_metadata(reply_recipient, inbound_env)
         return {
             "sender": reply_recipient,
-            "actor_name": self.actor_name,
+            "actor_name": self._agent.name,
             "actor_address": self._address,
             "actor_display": self.display_label,
-            "target_actor": inbound_env.metadata.get("target_actor") or self.actor_name,
+            "target_actor": inbound_env.metadata.get("target_actor") or self._agent.name,
             "user_message_metadata": self._user_metadata(inbound_env),
             "assistant_message_metadata": self._assistant_metadata(reply_recipient),
         }
@@ -104,7 +102,7 @@ class NamedActor(AgentActor):
         return self._assistant_metadata(reply_recipient)
 
     def _user_metadata(self, env: Envelope) -> dict[str, Any]:
-        target_actor = env.metadata.get("target_actor") or self.actor_name
+        target_actor = env.metadata.get("target_actor") or self._agent.name
         target_display = env.metadata.get("target_display") or self.display_label
         return {
             "speaker_type": "user",
@@ -121,7 +119,7 @@ class NamedActor(AgentActor):
     def _assistant_metadata(self, reply_recipient: str) -> dict[str, Any]:
         return {
             "speaker_type": "actor",
-            "from_actor": self.actor_name,
+            "from_actor": self._agent.name,
             "from_address": self._address,
             "from_display": self.display_label,
             "to": "user",

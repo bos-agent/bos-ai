@@ -12,6 +12,8 @@ from bos.extensions.memory_stores.in_memory import InMemMemoryExtension  # noqa:
 
 
 def create_test_agent(*, plugins: list[Any] | None = None, **kwargs: Any) -> ReActAgent:
+    kwargs.setdefault("kind", "test")
+    kwargs.setdefault("agent_name", "test")
     kwargs.setdefault("chat_store", InMemChatStore())
     kwargs.setdefault("consolidator", MessageOnlyConsolidator())
     kwargs.setdefault("interceptor", ChainInterceptor())

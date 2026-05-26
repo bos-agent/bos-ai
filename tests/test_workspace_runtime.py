@@ -39,7 +39,7 @@ def test_main_agent_address_is_stable_even_when_selecting_different_agent(tmp_pa
 
     ws = Workspace.from_discovery(tmp_path)
 
-    assert ws.get_main_agent_name() == "research"
+    assert ws.get_main_agent_kind() == "research"
     assert ws.get_main_agent_address() == "agent@main"
 
 

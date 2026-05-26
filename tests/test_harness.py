@@ -275,6 +275,11 @@ async def test_plugin_prompt_sections_render_inside_system_prompt():
     store = InMemMemoryExtension()
     await store.set_maxim("user", "Prefers concise answers.")
 
+    # Register a dummy agent so subagent section renders
+    from bos.core.agent import ReActAgent
+
+    ReActAgent.register("test-subagent", description="A test subagent.")
+
     class StaticSkillsLoader:
         async def load_skill(self, name: str) -> str:
             return name
@@ -287,7 +292,7 @@ async def test_plugin_prompt_sections_render_inside_system_prompt():
             MemoryAgentPlugin(store, {"user"}),
             SkillsAgentPlugin(StaticSkillsLoader(), allow=None, exclude=[]),
             TaskAgentPlugin(),
-            SubagentAgentPlugin(_MockSubagentRuntime(), allow=[], exclude=[]),
+            SubagentAgentPlugin(_MockSubagentRuntime(), allow=None, exclude=[]),
         ]
     )
     prompt = await agent._build_system_prompt()
@@ -300,6 +305,8 @@ async def test_plugin_prompt_sections_render_inside_system_prompt():
     assert prompt.index("<task_workflow>") < system_end
     assert prompt.index("<subagent_workflow>") < system_end
     assert prompt.index("<available_tools>") > system_end
+
+    ep_agent._extensions.pop("test-subagent", None)
 
 
 @pytest.mark.asyncio

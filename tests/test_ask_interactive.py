@@ -120,7 +120,7 @@ def test_build_workspace_for_ask_uses_discovery_when_workspace_exists(tmp_path, 
     ctx = type("Ctx", (), {"obj": {}})
     ws = _build_workspace_for_ask(ctx)
 
-    assert ws.get_main_agent_name() == "discovered-agent"
+    assert ws.get_main_agent_kind() == "discovered-agent"
     assert ws.bos_dir == bos_dir.resolve()
 
 

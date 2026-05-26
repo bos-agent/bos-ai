@@ -272,12 +272,6 @@ ep_plugin = ExtensionPoint(
 
 
 @dataclass(frozen=True)
-class AgentBindContext:
-    agent_name: str
-    actor_scope: str | None = None
-
-
-@dataclass(frozen=True)
 class ToolContext:
     agent_name: str
     chat_id: str
@@ -334,13 +328,11 @@ class HarnessPlugin(Protocol):
     def validate_config(
         self,
         config: Mapping[str, Any],
-        context: AgentBindContext,
     ) -> None: ...
 
     def bind(
         self,
         config: Mapping[str, Any],
-        context: AgentBindContext,
     ) -> AgentPlugin: ...
 
     async def teardown(self) -> None: ...

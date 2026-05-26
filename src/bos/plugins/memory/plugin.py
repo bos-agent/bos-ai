@@ -9,7 +9,6 @@ from xml.sax.saxutils import escape
 
 from bos.core._utils import _allowed, _xml_attr
 from bos.core.contract import (
-    AgentBindContext,
     AgentPlugin,
     PluginServices,
     TurnInterceptor,
@@ -101,15 +100,17 @@ class MemoryHarnessPlugin:
         self._services = services
         self._backend: MemoryBackend | None = None
 
-    def validate_config(self, config: Mapping[str, Any], context: AgentBindContext) -> None:
+    def validate_config(self, config: Mapping[str, Any]) -> None:
         maxims = config.get("maxims", [])
         if not isinstance(maxims, list):
             raise TypeError("MemoryPlugin: 'maxims' must be a list")
-        scope = config.get("scope", "workspace")
-        if scope not in ("workspace", "actor"):
-            raise ValueError(f"MemoryPlugin: 'scope' must be 'workspace' or 'actor', got {scope!r}")
+        scope = config.get("scope")
+        if scope is not None and not isinstance(scope, str):
+            raise TypeError("MemoryPlugin: 'scope' must be a string")
+        if isinstance(scope, str) and not scope.strip():
+            raise ValueError("MemoryPlugin: 'scope' must not be empty")
 
-    def bind(self, config: Mapping[str, Any], context: AgentBindContext) -> AgentPlugin:
+    def bind(self, config: Mapping[str, Any]) -> AgentPlugin:
         if self._backend is None:
             backend_name = config.get("backend", "_default")
             backend_ext = ep_memory_backend.get(backend_name)
@@ -117,11 +118,11 @@ class MemoryHarnessPlugin:
                 raise ValueError(f"MemoryPlugin: unknown backend {backend_name!r}")
             self._backend = backend_ext.fn(bos_dir=self._services.bos_dir)
         backend = self._backend
-        scope = config.get("scope", "workspace")
-        if scope == "actor" and context.actor_scope:
+        scope = config.get("scope")
+        if scope and scope != "workspace":
             from .scoped_memory import ScopedMemory
 
-            backend = ScopedMemory(backend, context.actor_scope)
+            backend = ScopedMemory(backend, scope)
         maxim_keys = set(config.get("maxims", []))
         return MemoryAgentPlugin(backend, maxim_keys)
 

@@ -95,7 +95,7 @@ def main() -> None:
             rd,
             runtime=runtime_kind,
             pid=os.getpid(),
-            selected_agent=ws.get_main_agent_name(),
+            selected_agent=ws.get_main_agent_kind(),
             container_id=container_id,
             container_name=container_name,
             started_at=datetime.now(timezone.utc).isoformat(),
