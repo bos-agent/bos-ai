@@ -30,7 +30,7 @@ class RouteResult:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
-_MENTION_RE = re.compile(r"@([\w][\w-]*)\s+")
+_MENTION_RE = re.compile(r"@([\w][\w-]*)(?:\s+|$)", re.IGNORECASE)
 
 
 class ActorRegistry:
@@ -59,15 +59,17 @@ class ActorRegistry:
             self._default = name
 
     def resolve_address(self, target_actor: str | None) -> str:
-        if target_actor is not None and target_actor in self._actors:
-            return self._actors[target_actor].address
+        resolved = self._find_actor(target_actor) if target_actor is not None else None
+        if resolved is not None:
+            return self._actors[resolved].address
         if self._default is not None:
             return self._actors[self._default].address
         raise KeyError(f"No actor for {target_actor!r} and no default configured")
 
     def resolve_mailbox(self, target_actor: str | None) -> MailBox:
-        if target_actor is not None and target_actor in self._actors:
-            return self._actors[target_actor].mailbox
+        resolved = self._find_actor(target_actor) if target_actor is not None else None
+        if resolved is not None:
+            return self._actors[resolved].mailbox
         if self._default is not None:
             return self._actors[self._default].mailbox
         raise KeyError(f"No actor for {target_actor!r} and no default configured")
@@ -75,23 +77,35 @@ class ActorRegistry:
     def list_actors(self) -> dict[str, ActorRecord]:
         return dict(self._actors)
 
+    def _find_actor(self, name: str) -> str | None:
+        lower = name.lower()
+        for key in self._actors:
+            if key.lower() == lower:
+                return key
+        return None
+
     def route(self, content: Any, metadata: dict[str, Any] | None = None) -> RouteResult:
         target_actor: str | None = None
         cleaned = content
         out_metadata = dict(metadata or {})
 
-        m = _MENTION_RE.match(content) if isinstance(content, str) else None
-        if m is not None:
-            name = m.group(1)
-            if name in self._actors:
-                target_actor = name
-                cleaned = content[m.end():]
-                out_metadata["target_actor"] = name
+        if isinstance(content, str):
+            stripped = content.lstrip()
+            m = _MENTION_RE.match(stripped)
+            if m is not None:
+                name = m.group(1)
+                resolved = self._find_actor(name)
+                if resolved is not None:
+                    target_actor = resolved
+                    cleaned = stripped[m.end():]
+                    out_metadata["target_actor"] = resolved
 
         if target_actor is None and metadata:
             metadata_target = metadata.get("target_actor")
-            if isinstance(metadata_target, str) and metadata_target in self._actors:
-                target_actor = metadata_target
+            if isinstance(metadata_target, str):
+                resolved = self._find_actor(metadata_target)
+                if resolved is not None:
+                    target_actor = resolved
 
         address = self.resolve_address(target_actor)
         if target_actor is not None and target_actor in self._actors:

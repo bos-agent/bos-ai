@@ -244,7 +244,7 @@ class _TaskProgressDisplay:
 
 async def _run_interactive(
     ws: "Workspace",
-    agent_name: str,
+    agent_kind: str,
     agent_cfg: dict | None,
     *,
     initial_message: str | None = None,
@@ -260,7 +260,7 @@ async def _run_interactive(
     from bos.core.chat_state import ChatState
 
     async with ws.harness() as harness:
-        agent = await harness.create_agent(agent_name, agent_cfg=agent_cfg)
+        agent = await harness.create_agent(agent_kind, agent_cfg=agent_cfg)
         actor_mbox = harness.mail_route.bind("agent@main")
         client_mbox = harness.mail_route.bind("client@local")
 
@@ -307,9 +307,9 @@ async def _run_interactive(
 @click.argument("message", required=False)
 @click.option(
     "--agent",
-    "agent_name",
+    "agent_kind",
     default=None,
-    help="Agent name to use (defaults to the configured main agent).",
+    help="Agent kind to use (defaults to the configured main agent).",
 )
 @click.option(
     "--default-model",
@@ -349,7 +349,7 @@ async def _run_interactive(
 def ask(
     ctx,
     message: str | None,
-    agent_name: str | None,
+    agent_kind: str | None,
     default_model: str | None,
     use_stdin: bool,
     max_iterations: int | None,
@@ -376,22 +376,26 @@ def ask(
 
     ws = _build_workspace_for_ask(ctx, workspace_dir)
     ws.bootstrap_platform()
-    selected_agent = agent_name or ws.get_main_agent_name()
+    selected_agent = agent_kind or ws.get_main_agent_kind()
 
     if default_model:
         os.environ["BOS_MODEL"] = default_model
 
     if interactive:
-        agent_cfg = {"max_iterations": max_iterations} if max_iterations is not None else None
+        agent_cfg: dict = {"agent_name": "main"}
+        if max_iterations is not None:
+            agent_cfg["max_iterations"] = max_iterations
         try:
             asyncio.run(_run_interactive(ws, selected_agent, agent_cfg, initial_message=message))
         except ValueError as exc:
             raise click.UsageError(str(exc)) from exc
         return
 
-    # One-shot mode (unchanged from current logic)
+    # One-shot mode
     async def _run(event_sink: _TaskProgressDisplay | None = None) -> str:
-        agent_cfg = {"max_iterations": max_iterations} if max_iterations is not None else None
+        agent_cfg: dict = {"agent_name": "main"}
+        if max_iterations is not None:
+            agent_cfg["max_iterations"] = max_iterations
         async with ws.harness() as harness:
             agent = await harness.create_agent(selected_agent, agent_cfg=agent_cfg)
             return await agent.ask(

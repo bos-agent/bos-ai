@@ -196,7 +196,6 @@ class ReActAgent:
         self,
         *,
         kind: str,
-        agent_name: str,
         chat_store: ChatStore,
         consolidator: Consolidator,
         plugins: Sequence[AgentPlugin] = (),
@@ -205,6 +204,7 @@ class ReActAgent:
         tools_usage: dict[str, str] | None = None,
         exclude_tools: list[str] | None = None,
         model: str | None = None,
+        agent_name: str | None = None,
         reasoning_effort: Literal["low", "medium", "high"] | None = None,
         llm: LLMClient | None = None,
         local_tools: ToolRegistry | None = None,
@@ -231,7 +231,7 @@ class ReActAgent:
         self._local_tools = local_tools or ToolRegistry("Agent-scoped local tools.")
         self._tool_configs = tool_configs or {}
         self._kind = kind
-        self._name = agent_name
+        self._name = agent_name or kind
         self._plugins = plugins
         self._current_context: TurnContext | None = None
         self._tool_noise_filter = tool_noise_filter
@@ -247,6 +247,10 @@ class ReActAgent:
         # Register plugin tools into the agent-local tool registry
         for plugin in self._plugins:
             plugin.register_tools(self._local_tools)
+
+    @property
+    def name(self) -> str:
+        return self._name
 
     async def ask(
         self,

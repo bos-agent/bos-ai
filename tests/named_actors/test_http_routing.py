@@ -10,7 +10,7 @@ from bos.named_actors.registry import ActorRegistry
 
 
 class FakeRegistry:
-    _MENTION_RE = re.compile(r"@([\w][\w-]*)\s+")
+    _MENTION_RE = re.compile(r"@([\w][\w-]*)(?:\s+|$)", re.IGNORECASE)
 
     def __init__(self):
         self.routes = []
@@ -23,11 +23,13 @@ class FakeRegistry:
         target = None
         cleaned = content
 
-        m = self._MENTION_RE.match(content) if isinstance(content, str) else None
-        if m:
-            target = m.group(1)
-            cleaned = content[m.end():]
-            out_metadata["target_actor"] = target
+        if isinstance(content, str):
+            stripped = content.lstrip()
+            m = self._MENTION_RE.match(stripped)
+            if m:
+                target = m.group(1)
+                cleaned = stripped[m.end():]
+                out_metadata["target_actor"] = target
 
         if target is None:
             target = out_metadata.get("target_actor", "main")

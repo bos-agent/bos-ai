@@ -272,13 +272,8 @@ class AgentHarness:
 
         merged_cfg = agent_defaults | (agent_cfg or {})
 
-        # Resolve identity once; everything downstream uses these
-        resolved_kind = kind or merged_cfg.get("name") or "undef"
-        resolved_name = merged_cfg.get("agent_name") or resolved_kind
-
         kwargs = merged_cfg | {
-            "kind": resolved_kind,
-            "agent_name": resolved_name,
+            "kind": kind or merged_cfg.get("kind") or "undef",
             "llm": self.llm,
             "chat_store": self.chat_store,
             "consolidator": self.consolidator,
@@ -326,7 +321,9 @@ class AgentHarness:
             except Exception:
                 logger.error(
                     "Failed to bind plugin %r for agent %r",
-                    pname, agent_cfg.get("agent_name") or "unknown", exc_info=True,
+                    pname,
+                    agent_cfg.get("agent_name") or "unknown",
+                    exc_info=True,
                 )
                 raise
             bound.append(agent_plugin)

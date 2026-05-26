@@ -33,7 +33,7 @@ class SubagentHarnessPlugin:
         return "SubagentPlugin"
 
     def default_config(self) -> Mapping[str, Any]:
-        return {"allow": "*", "exclude": []}
+        return {"allow": None, "exclude": []}
 
     async def setup(self, services: PluginServices) -> None:
         self._runtime: SubagentRuntime = services.subagents
@@ -49,8 +49,10 @@ class SubagentHarnessPlugin:
     def bind(self, config: Mapping[str, Any]) -> AgentPlugin:
         allow = config.get("allow")
         exclude = config.get("exclude", [])
-        if isinstance(allow, str) and allow == "*":
-            allow = None  # None means all allowed
+        if allow is None:
+            allow = []  # nothing allowed
+        elif isinstance(allow, str) and allow == "*":
+            allow = None  # None means all allowed in _allowed / _pick_collection
         return SubagentAgentPlugin(self._runtime, allow, exclude)
 
     async def teardown(self) -> None:
@@ -145,9 +147,9 @@ class SubagentAgentPlugin:
         available.pop("_default", None)
 
         available = _pick_collection(available, self._allow, self._exclude)
-        sections = [_SUBAGENT_PROMPT_SECTION]
         if not available:
-            return "\n\n".join(sections)
+            return None
+        sections = [_SUBAGENT_PROMPT_SECTION]
         try:
             limit = int(os.environ.get("BOS_CAPABILITY_LIMIT", 50))
         except Exception:

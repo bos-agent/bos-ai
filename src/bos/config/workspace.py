@@ -520,7 +520,7 @@ class Workspace:
             settings = settings.get(seg, {})
         return settings.get(segments[-1])
 
-    def get_main_agent_name(self) -> str:
+    def get_main_agent_kind(self) -> str:
         return self.get_setting("main.agent") or "_default"
 
     def get_main_agent_address(self) -> str:

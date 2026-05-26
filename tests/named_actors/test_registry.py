@@ -92,7 +92,37 @@ class TestRoute:
         with pytest.raises(KeyError):
             reg.route("hello")
 
-    def test_content_without_leading_mention_preserved(self, registry):
+    def test_leading_whitespace_stripped_before_mention_match(self, registry):
         result = registry.route("  @researcher find papers")
+        assert result.target_address == "agent@researcher"
+        assert result.target_actor == "researcher"
+        assert result.content == "find papers"
+
+    def test_mention_at_end_of_string_without_trailing_content(self, registry):
+        result = registry.route("@researcher")
+        assert result.target_address == "agent@researcher"
+        assert result.target_actor == "researcher"
+        assert result.content == ""
+
+    def test_mention_with_only_trailing_whitespace(self, registry):
+        result = registry.route("@researcher   ")
+        assert result.target_address == "agent@researcher"
+        assert result.target_actor == "researcher"
+        assert result.content == ""
+
+    def test_content_without_leading_mention_preserved(self, registry):
+        result = registry.route("hello @researcher")
         assert result.target_address == "agent@main"
-        assert result.content == "  @researcher find papers"
+        assert result.content == "hello @researcher"
+
+    def test_mention_case_insensitive(self, registry):
+        result = registry.route("@Researcher find papers")
+        assert result.target_address == "agent@researcher"
+        assert result.target_actor == "researcher"
+        assert result.content == "find papers"
+
+    def test_mention_case_insensitive_upper(self, registry):
+        result = registry.route("@RESEARCHER find papers")
+        assert result.target_address == "agent@researcher"
+        assert result.target_actor == "researcher"
+        assert result.content == "find papers"
