@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import logging
+import os
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 from xml.sax.saxutils import escape
 
-from bos.core._utils import _allowed
+from bos.core._utils import _allowed, _pick_collection, _xml_attr
 from bos.core.contract import (
     AgentBindContext,
     AgentPlugin,
@@ -21,6 +23,8 @@ from bos.core.registry import ToolRegistry
 if TYPE_CHECKING:
     from bos.core.agent import TurnContext
     from bos.core.contract import ToolContext
+
+logger = logging.getLogger(__name__)
 
 
 @ep_plugin(name="SubagentPlugin")
@@ -138,12 +142,8 @@ class SubagentAgentPlugin:
             return await runtime.ask(role, task, parent=context)
 
     async def get_system_prompt_section(self, context: TurnContext) -> str | None:
-        import os
-
         available = dict(ep_agent.describe())
         available.pop("_default", None)
-        # Apply allow/exclude
-        from bos.core._utils import _pick_collection
 
         available = _pick_collection(available, self._allow, self._exclude)
         sections = [_SUBAGENT_PROMPT_SECTION]
@@ -154,10 +154,15 @@ class SubagentAgentPlugin:
         except Exception:
             limit = 50
         if len(available) > limit:
+            logger.warning(
+                "Rendering only the first %d subagents in the system prompt; %d are available.",
+                limit,
+                len(available),
+            )
             available = dict(list(available.items())[:limit])
         available_subagents = "<available_subagents>\n"
         available_subagents += "\n".join(
-            f'<agent role="{escape(name, {"\"": "&quot;"})}">{escape(desc or "")}</agent>'
+            f'<agent role="{_xml_attr(name)}">{escape(desc or "")}</agent>'
             for name, desc in available.items()
         )
         available_subagents += "\n</available_subagents>"

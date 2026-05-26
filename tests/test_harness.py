@@ -345,6 +345,7 @@ async def test_prompt_sections_render_first_50_items_and_warn(caplog):
         assert f'<agent role="{subagent_names[49]}">Subagent description 049</agent>' in subagents_prompt
         assert subagent_names[50] not in subagents_prompt
         assert "first 50 tools" in caplog.text
+        assert "first 50 subagents" in caplog.text
     finally:
         for name in subagent_names:
             ep_agent._extensions.pop(name, None)
