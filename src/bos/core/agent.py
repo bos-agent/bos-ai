@@ -198,8 +198,9 @@ class ReActAgent:
         kind: str,
         chat_store: ChatStore,
         consolidator: Consolidator,
-        plugins: Sequence[AgentPlugin] = (),
         system_prompt: str | None = None,
+        plugins: Sequence[AgentPlugin] = (),
+        plugins_prompt: dict[str, str] | None = None,
         tools: list[str] | None = None,
         tools_usage: dict[str, str] | None = None,
         exclude_tools: list[str] | None = None,
@@ -233,6 +234,7 @@ class ReActAgent:
         self._kind = kind
         self._name = agent_name or kind
         self._plugins = plugins
+        self._plugins_prompt = plugins_prompt or {}
         self._current_context: TurnContext | None = None
         self._tool_noise_filter = tool_noise_filter
         self._compaction_lock = chat_compaction_lock
@@ -616,7 +618,10 @@ class ReActAgent:
         system_sections = [self._system_prompt]
         # Plugin prompt sections, in resolved plugin order
         for plugin in self._plugins:
-            section = await plugin.get_system_prompt_section(self._current_context)
+            if plugin.name in self._plugins_prompt:
+                section = self._plugins_prompt[plugin.name]
+            else:
+                section = await plugin.get_system_prompt_section(self._current_context)
             if section:
                 system_sections.append(section)
         sections = [
