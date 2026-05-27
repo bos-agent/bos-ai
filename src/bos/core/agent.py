@@ -38,7 +38,6 @@ from .contract import (
     ep_tool,
     ep_turn_interceptor,
 )
-from .defaults import bos_tools_usage
 from .llm import LLMClient, ToolCallRequest
 from .registry import ToolRegistry
 
@@ -212,7 +211,7 @@ class ReActAgent:
         tools_config: dict[str, dict[str, Any]] | None = None,
         interceptor: TurnInterceptor | None = None,
         max_tokens: int = 128 * 1024,
-        max_iterations: int = 25,
+        max_iterations: int = 60,
         tool_noise_filter: ToolNoiseFilter | None = None,
         chat_compaction_lock: Callable[[str], AbstractAsyncContextManager] | None = None,
     ):
@@ -220,7 +219,7 @@ class ReActAgent:
             raise TypeError("system_prompt must be a string or None")
         self._system_prompt = system_prompt or ""
         self._tools = tools
-        self._tools_usage = bos_tools_usage | (tools_usage or {})
+        self._tools_usage = tools_usage or {}
         self._exclude_tools = exclude_tools
         self._model = model
         self._reasoning_effort = reasoning_effort

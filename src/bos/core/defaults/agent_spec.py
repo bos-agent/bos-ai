@@ -78,19 +78,6 @@ tasks by inspecting context, using tools, editing files, and verifying results.
 </tool_discipline>
 """
 
-default_agent_spec: dict[str, Any] = {
-    "name": "_default",
-    "system_prompt": _system_prompt,
-    "tools": "*",
-    "plugins": {
-        "MemoryPlugin": {"enabled": True},
-        "PlanPlugin": {"enabled": True},
-        "TaskPlugin": {"enabled": True},
-        "SkillsPlugin": {"enabled": True},
-        "SubagentPlugin": {"enabled": True},
-    },
-}
-
 bos_tools_usage: dict[str, str] = {}
 
 bos_tools_usage["Bash"] = """Execute shell commands for shell-native work.
@@ -185,4 +172,16 @@ Guidelines:
 - For private/authenticated services, prefer a dedicated authenticated tool if one is available.
 """
 
-
+default_agent_spec: dict[str, Any] = {
+    "name": "_default",
+    "system_prompt": _system_prompt,
+    "tools": "*",
+    "tools_usage": bos_tools_usage,
+    "plugins": {
+        "MemoryPlugin": {"enabled": True},
+        "PlanPlugin": {"enabled": True},
+        "TaskPlugin": {"enabled": True},
+        "SkillsPlugin": {"enabled": True},
+        "SubagentPlugin": {"enabled": True},
+    },
+}
