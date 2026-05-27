@@ -278,7 +278,7 @@ class AgentHarness:
             "chat_store": self.chat_store,
             "consolidator": self.consolidator,
             "interceptor": self.interceptor,
-            "tool_configs": self._tools_cfg,
+            "tools_config": self._tools_cfg,
             "plugins": await self._bind_plugins_for_agent(merged_cfg),
             "chat_compaction_lock": self._get_compaction_lock,
         }

@@ -209,7 +209,7 @@ class ReActAgent:
         reasoning_effort: Literal["low", "medium", "high"] | None = None,
         llm: LLMClient | None = None,
         local_tools: ToolRegistry | None = None,
-        tool_configs: dict[str, dict[str, Any]] | None = None,
+        tools_config: dict[str, dict[str, Any]] | None = None,
         interceptor: TurnInterceptor | None = None,
         max_tokens: int = 128 * 1024,
         max_iterations: int = 25,
@@ -230,7 +230,7 @@ class ReActAgent:
         self._chat_store = chat_store
         self._consolidator = consolidator
         self._local_tools = local_tools or ToolRegistry("Agent-scoped local tools.")
-        self._tool_configs = tool_configs or {}
+        self._tools_config = tools_config or {}
         self._kind = kind
         self._name = agent_name or kind
         self._plugins = plugins
@@ -575,7 +575,7 @@ class ReActAgent:
             "chat_id": params.pop("chat_id", ""),
             "turn_id": params.pop("turn_id", ""),
             "event_sink": params.pop("event_sink", None),
-            "tool_config": self._tool_configs.get(tool_name, {}),
+            "tool_config": self._tools_config.get(tool_name, {}),
             "context": ToolContext(
                 agent_name=self._name,
                 chat_id=chat_id,
