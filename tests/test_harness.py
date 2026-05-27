@@ -11,15 +11,17 @@ from conftest import (
     create_test_agent,
 )
 
+from bos.config.presets.default import DefaultPreset, bos_tools_usage
 from bos.config.workspace import Workspace
 from bos.core import AgentHarness, LLMResponse, Message, ToolCallRequest, bootstrap_platform, ep_agent, ep_provider
 from bos.core.agent import ReActAgent
-from bos.core.defaults.agent_spec import bos_tools_usage, default_agent_spec
 from bos.core.registry import ToolRegistry
 from bos.plugins.memory import MemoryAgentPlugin
 from bos.plugins.skills import SkillMeta, SkillsAgentPlugin
 from bos.plugins.subagent import SubagentAgentPlugin
 from bos.plugins.task import TaskAgentPlugin
+
+default_agent_spec = DefaultPreset().get_agent_spec()
 
 
 class _MockSubagentRuntime:

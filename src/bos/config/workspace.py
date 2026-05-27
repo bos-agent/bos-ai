@@ -10,6 +10,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal
 
+import bos.config.presets  # noqa: F401 — side-effect: registers @ep_preset entries
 from bos.core import AgentHarness, _apply
 from bos.core._utils import _get_bos_home, _resolve_path
 
@@ -112,7 +113,14 @@ def _load_config(config_path: Path | str) -> dict[str, Any]:
     return tomllib.loads(config_path.read_text(encoding="utf-8"))
 
 
+_PRESET_CONFIG_SENTINEL = Path("<preset>")
+
+
 def presets_dir() -> Path:
+    """Deprecated: use ``ep_preset.describe()`` for available preset names.
+
+    Retained for backward compatibility. Returns the legacy presets directory path.
+    """
     return Path(__file__).resolve().parent / "presets"
 
 
@@ -120,7 +128,7 @@ def resolve_config_source(config_arg: str) -> tuple[Path, Path, dict[str, Any]]:
     """Resolve a ``-c`` / ``--config`` argument to ``(config_path, bos_dir, config)``.
 
     * If *config_arg* is an existing file path → ``bos_dir`` is the file's parent.
-    * If *config_arg* matches a built-in preset name → ``bos_dir`` is
+    * If *config_arg* matches a registered preset → ``bos_dir`` is
       ``~/.bos/agents/<preset>`` (created if necessary).
 
     Raises :class:`WorkspaceResolutionError` if neither matches.
@@ -130,14 +138,18 @@ def resolve_config_source(config_arg: str) -> tuple[Path, Path, dict[str, Any]]:
         resolved = config_path.resolve()
         return resolved, resolved.parent, _load_config(resolved)
 
-    presets = presets_dir()
-    preset = presets / f"{config_arg}.toml"
-    if preset.exists():
+    # ep_preset is already populated — bos.config.presets was imported at module level
+    from bos.core.contract import ep_preset
+
+    if ep_preset.has(config_arg):
         bos_dir = _get_bos_home() / "agents" / config_arg
         bos_dir.mkdir(parents=True, exist_ok=True)
-        return preset, bos_dir, _load_config(preset)
+        preset = ep_preset.invoke(config_arg)
+        agent_spec = preset.get_agent_spec()
+        config = {"platform": {"agents": [agent_spec]}}
+        return _PRESET_CONFIG_SENTINEL, bos_dir, config
 
-    available = sorted(p.stem for p in presets.glob("*.toml")) if presets.exists() else []
+    available = sorted(ep_preset.describe().keys())
     presets_msg = f"Available presets: {', '.join(available)}" if available else "No presets available"
     raise WorkspaceResolutionError(f"Unknown config source {config_arg!r}. {presets_msg}")
 

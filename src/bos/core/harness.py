@@ -30,7 +30,6 @@ from .contract import (
     ep_agent,
     ep_plugin,
 )
-from .defaults import default_agent_spec
 from .events import derive_event_sink
 from .llm import LLMClient
 
@@ -70,12 +69,13 @@ def bootstrap_platform(
 
     defaults = agent_defaults or {}
 
-    # the agent defaults in configuration takes precedence over the spec in the fallback _default agent
-    _default_spec = default_agent_spec | defaults
-    # the specifice agent definition takes precedence over the agent_defaults
     agent_specs = [defaults | spec for spec in (agents or [])]
-    # register all the agents
-    for agent_spec in [_default_spec] + agent_specs:
+    # If no _default agent was provided by config, fall back to DefaultPreset
+    if not any(spec.get("name") == "_default" for spec in agent_specs):
+        from bos.config.presets.default import DefaultPreset
+
+        agent_specs.insert(0, defaults | DefaultPreset().get_agent_spec())
+    for agent_spec in agent_specs:
         ReActAgent.register(**(agent_spec))
 
     # prevent the litellm to call load_dotenv automatically, and supress logs.

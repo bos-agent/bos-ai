@@ -20,7 +20,7 @@ from rich.panel import Panel
 from rich.text import Text
 
 from bos.config import ConfigNotFoundError, Workspace, WorkspaceResolutionError, resolve_config_source
-from bos.config.workspace import _resolve_path, presets_dir
+from bos.config.workspace import _resolve_path
 from bos.protocol import TurnEvent
 from bos.runner.proc import RunDir
 
@@ -81,8 +81,8 @@ def _build_workspace_for_daemon(ctx, workspace_override: str | None = None) -> W
         return ws
     except WorkspaceResolutionError as exc:
         hint = str(exc)
-        presets = presets_dir()
-        available = sorted(p.stem for p in presets.glob("*.toml")) if presets.exists() else []
+        from bos.core.contract import ep_preset
+        available = sorted(ep_preset.describe().keys())
         names = ", ".join(available) or "none"
         hint += f"\nTip: use -c <preset> to run without a workspace. Available presets: {names}."
         raise click.UsageError(hint) from exc

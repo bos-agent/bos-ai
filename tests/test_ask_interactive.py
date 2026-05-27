@@ -11,10 +11,12 @@ from bos.core import _get_bos_home
 
 def test_resolve_config_source_builtin_preset():
     """resolve_config_source with a preset name resolves to the built-in preset."""
+    from pathlib import Path
+
     config_path, bos_dir, config = resolve_config_source("default")
-    assert config_path.name == "default.toml"
-    assert config_path.exists()
+    assert config_path == Path("<preset>")
     assert isinstance(config, dict)
+    assert config["platform"]["agents"][0]["name"] == "_default"
 
 
 def test_resolve_config_source_unknown_name_raises():
@@ -101,7 +103,7 @@ def test_build_workspace_for_ask_falls_back_to_default_preset(tmp_path, monkeypa
     ws = _build_workspace_for_ask(ctx)
     assert ws.bos_dir == _get_bos_home() / "agents" / "default"
     assert isinstance(ws.config, dict)
-    assert ws.config_file.name == "default.toml"
+    assert ws.config_file.name == "<preset>"
 
 
 def test_build_workspace_for_ask_uses_discovery_when_workspace_exists(tmp_path, monkeypatch):
