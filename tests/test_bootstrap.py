@@ -1,7 +1,7 @@
 import sys
 
 from bos.config.workspace import Workspace
-from bos.core import ReActAgent
+from bos.core import AgentRegistry
 
 
 def test_workspace_bootstrap_loads_extensions_bundle(tmp_path):
@@ -47,7 +47,7 @@ system_prompt = "Resolved prompt"
     )
 
     registered: list[dict] = []
-    monkeypatch.setattr("bos.core.harness.ReActAgent.register", lambda **kwargs: registered.append(kwargs))
+    monkeypatch.setattr("bos.core.harness.AgentRegistry.register", lambda **kwargs: registered.append(kwargs))
 
     Workspace.from_discovery(tmp_path).bootstrap_platform()
 
@@ -81,9 +81,9 @@ skills = ["writer"]
 
     try:
         Workspace.from_discovery(tmp_path).bootstrap_platform()
-        defaults = ReActAgent.get_defaults(agent_name)
+        defaults = AgentRegistry.get_defaults(agent_name)
 
         assert defaults["tools"] is None
         assert defaults["skills"] == ["writer"]
     finally:
-        ReActAgent._registry.pop(agent_name, None)
+        AgentRegistry._registry.pop(agent_name, None)

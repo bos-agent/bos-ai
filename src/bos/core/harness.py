@@ -37,6 +37,45 @@ from .llm import LLMClient
 logger = logging.getLogger(__name__)
 
 
+class AgentRegistry:
+    _registry: dict[str, dict[str, Any]] = {}
+
+    @classmethod
+    def register(cls, name: str, description: str | None = None, **kwargs):
+        _CAPABILITY_KEYS = ("tools",)
+
+        def map_value(key, value):
+            if isinstance(value, (list, dict)):
+                return value
+            if value is None:
+                return []  # mute the capability
+            if value == "*":
+                return None  # fully open the capability
+            raise TypeError(f"{key} must be a list, '*', or None")
+
+        for key in _CAPABILITY_KEYS:
+            kwargs[key] = map_value(key, kwargs.get(key))
+
+        kwargs["kind"] = name
+        cls._registry[name] = {
+            "defaults": kwargs,
+            "description": description or "",
+        }
+
+    @classmethod
+    def has_registered(cls, name: str) -> bool:
+        return name in cls._registry
+
+    @classmethod
+    def get_defaults(cls, name: str) -> dict[str, Any]:
+        entry = cls._registry.get(name)
+        return entry["defaults"] if entry else {}
+
+    @classmethod
+    def describe(cls) -> dict[str, str]:
+        return {name: entry["description"] for name, entry in cls._registry.items()}
+
+
 def bootstrap_platform(
     bos_dir: str | Path,
     envs: dict[str, str] | None = None,
@@ -76,7 +115,7 @@ def bootstrap_platform(
     agent_specs = [defaults | spec for spec in (agents or [])]
     # register all the agents
     for agent_spec in [_default_spec] + agent_specs:
-        ReActAgent.register(**(agent_spec))
+        AgentRegistry.register(**(agent_spec))
 
     # prevent the litellm to call load_dotenv automatically, and supress logs.
     os.environ["LITELLM_MODE"] = "extension"
@@ -257,10 +296,10 @@ class AgentHarness:
         if CURRENT_HARNESS.get(None) is None:
             raise RuntimeError("create_agent must be called within an active AgentHarness context.")
 
-        # Resolve agent defaults from ReActAgent registry so plugin config is visible
+        # Resolve agent defaults from AgentRegistry so plugin config is visible
         agent_defaults: dict[str, Any] = {}
-        if kind and ReActAgent.has_registered(kind):
-            agent_defaults = ReActAgent.get_defaults(kind)
+        if kind and AgentRegistry.has_registered(kind):
+            agent_defaults = AgentRegistry.get_defaults(kind)
 
         if not any([kind, agent_cfg]) and not agent_defaults:
             agent_cfg = {

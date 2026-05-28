@@ -131,11 +131,11 @@ class SubagentAgentPlugin:
             task: str | None = None,
             context: ToolContext | None = None,
         ) -> str:
-            from bos.core.agent import ReActAgent
+            from bos.core import AgentRegistry
 
             if not _allowed(role, allow, exclude):
                 return f"Error: Agent '{role}' is not an allowed subagent."
-            if not ReActAgent.has_registered(role):
+            if not AgentRegistry.has_registered(role):
                 return f"Error: Agent '{role}' not found."
             if not task:
                 return "Error: AskSubagent requires a non-empty task."
@@ -144,9 +144,9 @@ class SubagentAgentPlugin:
             return await runtime.ask(role, task, parent=context)
 
     async def get_system_prompt_section(self, context: TurnContext) -> str | None:
-        from bos.core.agent import ReActAgent
+        from bos.core import AgentRegistry
 
-        available = dict(ReActAgent.describe())
+        available = dict(AgentRegistry.describe())
         available.pop("_default", None)
 
         available = _pick_collection(available, self._allow, self._exclude)

@@ -66,6 +66,7 @@ from .harness import (
     CURRENT_HARNESS,
     CURRENT_MAILBOX,
     AgentHarness,
+    AgentRegistry,
     bootstrap_platform,
 )
 from .llm import LLMClient, LLMResponse, ToolCallRequest
@@ -75,6 +76,7 @@ __all__ = [
     "AbortTurn",
     "AgentActor",
     "AgentHarness",
+    "AgentRegistry",
     "AgentPlugin",
     "CURRENT_HARNESS",
     "CURRENT_MAILBOX",

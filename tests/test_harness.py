@@ -15,8 +15,7 @@ import bos.extensions.tools.filesystem  # noqa: F401  — registers ep_tool entr
 import bos.extensions.tools.knowledge  # noqa: F401
 import bos.extensions.tools.system  # noqa: F401
 from bos.config.workspace import Workspace
-from bos.core import AgentHarness, LLMResponse, Message, ToolCallRequest, bootstrap_platform, ep_provider
-from bos.core.agent import ReActAgent
+from bos.core import AgentHarness, AgentRegistry, LLMResponse, Message, ToolCallRequest, bootstrap_platform, ep_provider
 from bos.core.contract import ep_tool
 from bos.core.defaults.agent_spec import default_agent_spec
 from bos.core.registry import ToolRegistry
@@ -73,7 +72,7 @@ async def test_registered_agent_defaults_to_no_capabilities(tmp_path):
     agent_name = f"locked_{uuid.uuid4().hex}"
 
     try:
-        ReActAgent.register(name=agent_name, description="Locked", system_prompt="Stay locked down.")
+        AgentRegistry.register(name=agent_name, description="Locked", system_prompt="Stay locked down.")
 
         async with AgentHarness(bos_dir=bos_dir, workspace=tmp_path, consolidator=MessageOnlyConsolidator()) as harness:
             agent = await harness.create_agent(agent_name)
@@ -81,7 +80,7 @@ async def test_registered_agent_defaults_to_no_capabilities(tmp_path):
             assert agent._tools == []
             assert agent._get_tool_defs() == []
     finally:
-        ReActAgent._registry.pop(agent_name, None)
+        AgentRegistry._registry.pop(agent_name, None)
 
 
 @pytest.mark.asyncio
@@ -91,7 +90,7 @@ async def test_registered_agent_star_capabilities_enable_all(tmp_path):
     agent_name = f"open_{uuid.uuid4().hex}"
 
     try:
-        ReActAgent.register(
+        AgentRegistry.register(
             name=agent_name,
             description="Open",
             system_prompt="Use everything.",
@@ -106,14 +105,14 @@ async def test_registered_agent_star_capabilities_enable_all(tmp_path):
             assert "ListAgents" not in tool_names
             assert "SearchSkills" not in tool_names
     finally:
-        ReActAgent._registry.pop(agent_name, None)
+        AgentRegistry._registry.pop(agent_name, None)
 
 
 def test_registered_agent_rejects_unknown_capability_string():
     agent_name = f"bad_caps_{uuid.uuid4().hex}"
 
     with pytest.raises(TypeError, match="tools must be a list, '\\*', or None"):
-        ReActAgent.register(name=agent_name, tools="all")
+        AgentRegistry.register(name=agent_name, tools="all")
 
 
 @pytest.mark.asyncio
@@ -281,9 +280,8 @@ async def test_plugin_prompt_sections_render_inside_system_prompt():
     await store.set_maxim("user", "Prefers concise answers.")
 
     # Register a dummy agent so subagent section renders
-    from bos.core.agent import ReActAgent
 
-    ReActAgent.register("test-subagent", description="A test subagent.")
+    AgentRegistry.register("test-subagent", description="A test subagent.")
 
     class StaticSkillsLoader:
         async def load_skill(self, name: str) -> str:
@@ -311,7 +309,7 @@ async def test_plugin_prompt_sections_render_inside_system_prompt():
     assert prompt.index("<subagent_workflow>") < system_end
     assert prompt.index("<available_tools>") > system_end
 
-    ReActAgent._registry.pop("test-subagent", None)
+    AgentRegistry._registry.pop("test-subagent", None)
 
 
 @pytest.mark.asyncio
@@ -367,9 +365,9 @@ async def test_prompt_sections_render_first_50_items_and_warn(caplog):
     subagent_names = [f"prompt_cap_agent_{uuid.uuid4().hex}_{i:03}" for i in range(51)]
     try:
         # Clean up leaked registrations from other tests
-        ReActAgent._registry.pop("test-agent", None)
+        AgentRegistry._registry.pop("test-agent", None)
         for i, name in enumerate(subagent_names):
-            ReActAgent.register(name=name, description=f"Subagent description {i:03}", tools=[])
+            AgentRegistry.register(name=name, description=f"Subagent description {i:03}", tools=[])
 
         skills_plugin = SkillsAgentPlugin(StaticSkillsLoader(), allow=None, exclude=[])
         subagent_plugin = SubagentAgentPlugin(_MockSubagentRuntime(), allow=None, exclude=[])
@@ -397,7 +395,7 @@ async def test_prompt_sections_render_first_50_items_and_warn(caplog):
         assert "first 50 subagents" in caplog.text
     finally:
         for name in subagent_names:
-            ReActAgent._registry.pop(name, None)
+            AgentRegistry._registry.pop(name, None)
 
 
 @pytest.mark.asyncio
@@ -832,14 +830,14 @@ async def test_harness_ask_subagent_delegates_to_named_specialist(tmp_path):
         return LLMResponse(content="Researcher says BOS delegates to named specialists via AskSubagent.")
 
     try:
-        ReActAgent.register(
+        AgentRegistry.register(
             name=manager_name,
             description="Manager",
             model=f"{provider_name}/manager",
             tools=["AskSubagent"],
             system_prompt="Delegate focused work to the researcher when useful.",
         )
-        ReActAgent.register(
+        AgentRegistry.register(
             name=researcher_name,
             description="Researcher",
             model=f"{provider_name}/researcher",
@@ -879,8 +877,8 @@ async def test_harness_ask_subagent_delegates_to_named_specialist(tmp_path):
         assert child_chats[0].startswith("parent-chat~researcher")
     finally:
         ep_provider._extensions.pop(provider_name, None)
-        ReActAgent._registry.pop(manager_name, None)
-        ReActAgent._registry.pop(researcher_name, None)
+        AgentRegistry._registry.pop(manager_name, None)
+        AgentRegistry._registry.pop(researcher_name, None)
 
 
 @pytest.mark.asyncio
@@ -910,15 +908,15 @@ async def test_ask_subagent_rejects_disallowed_registered_agent(tmp_path):
         return LLMResponse(content="blocked response")
 
     try:
-        ReActAgent.register(
+        AgentRegistry.register(
             name=manager_name,
             description="Manager",
             model=f"{provider_name}/manager",
             tools=["AskSubagent"],
             system_prompt="Delegate to allowed subagents only.",
         )
-        ReActAgent.register(name=allowed_name, description="Allowed", model=f"{provider_name}/a", tools=[])
-        ReActAgent.register(name=blocked_name, description="Blocked", model=f"{provider_name}/b", tools=[])
+        AgentRegistry.register(name=allowed_name, description="Allowed", model=f"{provider_name}/a", tools=[])
+        AgentRegistry.register(name=blocked_name, description="Blocked", model=f"{provider_name}/b", tools=[])
 
         bos_dir = tmp_path / ".bos"
         bos_dir.mkdir()
@@ -937,9 +935,9 @@ async def test_ask_subagent_rejects_disallowed_registered_agent(tmp_path):
         assert list(chats) == ["parent-chat"]
     finally:
         ep_provider._extensions.pop(provider_name, None)
-        ReActAgent._registry.pop(manager_name, None)
-        ReActAgent._registry.pop(allowed_name, None)
-        ReActAgent._registry.pop(blocked_name, None)
+        AgentRegistry._registry.pop(manager_name, None)
+        AgentRegistry._registry.pop(allowed_name, None)
+        AgentRegistry._registry.pop(blocked_name, None)
 
 
 @pytest.mark.asyncio

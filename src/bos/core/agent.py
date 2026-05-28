@@ -189,8 +189,6 @@ class _CompositePluginInterceptor:
 
 
 class ReActAgent:
-    _registry: dict[str, dict[str, Any]] = {}
-
     def __init__(
         self,
         *,
@@ -678,38 +676,4 @@ class ReActAgent:
         )
         return dict(list(collection.items())[:limit])
 
-    @classmethod
-    def register(cls, name: str, description: str | None = None, **kwargs):
-        _CAPABILITY_KEYS = ("tools",)
-
-        def map_value(key, value):
-            if isinstance(value, (list, dict)):
-                return value
-            if value is None:
-                return []  # mute the capability
-            if value == "*":
-                return None  # fully open the capability
-            raise TypeError(f"{key} must be a list, '*', or None")
-
-        for key in _CAPABILITY_KEYS:
-            kwargs[key] = map_value(key, kwargs.get(key))
-
-        kwargs["kind"] = name
-        cls._registry[name] = {
-            "defaults": kwargs,
-            "description": description or "",
-        }
-
-    @classmethod
-    def has_registered(cls, name: str) -> bool:
-        return name in cls._registry
-
-    @classmethod
-    def get_defaults(cls, name: str) -> dict[str, Any]:
-        entry = cls._registry.get(name)
-        return entry["defaults"] if entry else {}
-
-    @classmethod
-    def describe(cls) -> dict[str, str]:
-        return {name: entry["description"] for name, entry in cls._registry.items()}
 

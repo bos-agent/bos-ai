@@ -8,6 +8,7 @@ from conftest import InMemChatStore, InMemMailRoute, MessageOnlyConsolidator
 from bos.core import (
     AgentActor,
     AgentHarness,
+    AgentRegistry,
     LLMResponse,
     ToolCallRequest,
     ep_provider,
@@ -135,13 +136,13 @@ async def test_ask_subagent_emits_child_lineage_events(tmp_path):
         return LLMResponse(content="Researcher summary")
 
     try:
-        ReActAgent.register(
+        AgentRegistry.register(
             name=manager_name,
             description="Manager",
             model=f"{provider_name}/manager",
             tools=["AskSubagent"],
         )
-        ReActAgent.register(
+        AgentRegistry.register(
             name=researcher_name,
             description="Researcher",
             model=f"{provider_name}/researcher",
@@ -176,8 +177,8 @@ async def test_ask_subagent_emits_child_lineage_events(tmp_path):
         assert child_event.parent_agent_name == manager_name
     finally:
         ep_provider._extensions.pop(provider_name, None)
-        ReActAgent._registry.pop(manager_name, None)
-        ReActAgent._registry.pop(researcher_name, None)
+        AgentRegistry._registry.pop(manager_name, None)
+        AgentRegistry._registry.pop(researcher_name, None)
 
 
 @pytest.mark.asyncio

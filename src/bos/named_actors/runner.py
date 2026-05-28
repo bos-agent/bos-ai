@@ -161,11 +161,11 @@ async def _run_actor_and_channels(actor, channels, harness) -> None:
 
 
 async def _build_named_agent(harness, agent_kind: str, actor_name: str, actor_overrides: dict[str, Any]):
-    from bos.core import ReActAgent, _deep_merge
+    from bos.core import AgentRegistry, _deep_merge
 
     agent_spec: dict[str, Any] = {"agent_name": actor_name}
-    if ReActAgent.has_registered(agent_kind):
-        agent_spec.update(ReActAgent.get_defaults(agent_kind))
+    if AgentRegistry.has_registered(agent_kind):
+        agent_spec.update(AgentRegistry.get_defaults(agent_kind))
     _deep_merge(agent_spec, actor_overrides)
 
     return await harness.create_agent(agent_kind, agent_spec)
