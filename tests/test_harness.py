@@ -315,6 +315,31 @@ async def test_plugin_prompt_sections_render_inside_system_prompt():
 
 
 @pytest.mark.asyncio
+async def test_plugins_prompt_overrides_plugin_section():
+    class DummyPlugin:
+        @property
+        def name(self) -> str:
+            return "DummyPlugin"
+
+        def register_tools(self, registry) -> None:
+            pass
+
+        async def get_system_prompt_section(self, context) -> str | None:
+            return "Original dummy prompt section"
+
+        def get_interceptors(self):
+            return []
+
+    agent = create_test_agent(
+        plugins=[DummyPlugin()],
+        plugins_prompt={"DummyPlugin": "Overridden dummy prompt section"},
+    )
+    prompt = await agent._build_system_prompt()
+    assert "Overridden dummy prompt section" in prompt
+    assert "Original dummy prompt section" not in prompt
+
+
+@pytest.mark.asyncio
 async def test_prompt_sections_render_first_50_items_and_warn(caplog):
     local_tools = ToolRegistry("many test tools")
     tool_names = [f"Tool{i:03}" for i in range(51)]
