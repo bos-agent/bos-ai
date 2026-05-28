@@ -32,7 +32,6 @@ from ._utils import (
 from .actor import AgentActor
 from .agent import AbortTurn, ChainInterceptor, ReActAgent, TurnContext
 from .contract import (
-    Agent,
     AgentPlugin,
     Channel,
     ChatMeta,
@@ -54,7 +53,6 @@ from .contract import (
     ToolResultStatus,
     TurnInterceptor,
     ep_actor_command,
-    ep_agent,
     ep_channel,
     ep_chat_store,
     ep_consolidator,
@@ -75,7 +73,6 @@ from .registry import Extension, ExtensionPoint, ToolRegistry
 
 __all__ = [
     "AbortTurn",
-    "Agent",
     "AgentActor",
     "AgentHarness",
     "AgentPlugin",
@@ -113,7 +110,6 @@ __all__ = [
     "TurnEvent",
     "bootstrap_platform",
     "ep_actor_command",
-    "ep_agent",
     "ep_channel",
     "ep_chat_store",
     "ep_consolidator",

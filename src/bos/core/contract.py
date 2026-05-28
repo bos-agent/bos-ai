@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -187,20 +187,6 @@ class TurnInterceptor(Protocol):
         context: TurnContext,
     ) -> None: ...
 
-
-ep_agent = ExtensionPoint(description="Agent. A factory that creates agents implementing the Agent protocol.")
-
-
-class Agent(Protocol):
-    async def ask(
-        self,
-        chat_id: str,
-        message: MessageContent,
-        interrupt: Callable[[], dict[str, Any] | Awaitable[dict[str, Any]]] | None = None,
-        ctx_metadata: dict[str, Any] | None = None,
-        llm_args: dict[str, Any] | None = None,
-        event_sink: EventSink | None = None,
-    ) -> str: ...
 
 
 @runtime_checkable

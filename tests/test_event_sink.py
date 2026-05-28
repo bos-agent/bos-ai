@@ -10,7 +10,6 @@ from bos.core import (
     AgentHarness,
     LLMResponse,
     ToolCallRequest,
-    ep_agent,
     ep_provider,
 )
 from bos.core.agent import ChainInterceptor, ReActAgent
@@ -177,8 +176,8 @@ async def test_ask_subagent_emits_child_lineage_events(tmp_path):
         assert child_event.parent_agent_name == manager_name
     finally:
         ep_provider._extensions.pop(provider_name, None)
-        ep_agent._extensions.pop(manager_name, None)
-        ep_agent._extensions.pop(researcher_name, None)
+        ReActAgent._registry.pop(manager_name, None)
+        ReActAgent._registry.pop(researcher_name, None)
 
 
 @pytest.mark.asyncio

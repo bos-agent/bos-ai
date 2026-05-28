@@ -11,6 +11,7 @@ from typing import Any
 
 from ._utils import (
     _aclose,
+    _apply,
     _create_extension_instance,
     _deep_merge,
     _load_ext_modules,
@@ -27,7 +28,6 @@ from .contract import (
     MailRoute,
     PluginServices,
     ToolContext,
-    ep_agent,
     ep_plugin,
 )
 from .defaults import default_agent_spec
@@ -257,12 +257,10 @@ class AgentHarness:
         if CURRENT_HARNESS.get(None) is None:
             raise RuntimeError("create_agent must be called within an active AgentHarness context.")
 
-        # Resolve agent defaults from ep_agent so plugin config is visible
+        # Resolve agent defaults from ReActAgent registry so plugin config is visible
         agent_defaults: dict[str, Any] = {}
-        if kind and ep_agent.has(kind):
-            d = ep_agent.get(kind).defaults
-            if d is not None:
-                agent_defaults = dict(d() if callable(d) else d)
+        if kind and ReActAgent.has_registered(kind):
+            agent_defaults = ReActAgent.get_defaults(kind)
 
         if not any([kind, agent_cfg]) and not agent_defaults:
             agent_cfg = {
@@ -283,7 +281,7 @@ class AgentHarness:
             "chat_compaction_lock": self._get_compaction_lock,
         }
 
-        return ep_agent.invoke(kind, kwargs) if kind else ReActAgent(**kwargs)
+        return _apply(ReActAgent, kwargs)
 
     async def _bind_plugins_for_agent(
         self,

@@ -15,7 +15,7 @@ import bos.extensions.tools.filesystem  # noqa: F401  — registers ep_tool entr
 import bos.extensions.tools.knowledge  # noqa: F401
 import bos.extensions.tools.system  # noqa: F401
 from bos.config.workspace import Workspace
-from bos.core import AgentHarness, LLMResponse, Message, ToolCallRequest, bootstrap_platform, ep_agent, ep_provider
+from bos.core import AgentHarness, LLMResponse, Message, ToolCallRequest, bootstrap_platform, ep_provider
 from bos.core.agent import ReActAgent
 from bos.core.contract import ep_tool
 from bos.core.defaults.agent_spec import default_agent_spec
@@ -81,7 +81,7 @@ async def test_registered_agent_defaults_to_no_capabilities(tmp_path):
             assert agent._tools == []
             assert agent._get_tool_defs() == []
     finally:
-        ep_agent._extensions.pop(agent_name, None)
+        ReActAgent._registry.pop(agent_name, None)
 
 
 @pytest.mark.asyncio
@@ -106,7 +106,7 @@ async def test_registered_agent_star_capabilities_enable_all(tmp_path):
             assert "ListAgents" not in tool_names
             assert "SearchSkills" not in tool_names
     finally:
-        ep_agent._extensions.pop(agent_name, None)
+        ReActAgent._registry.pop(agent_name, None)
 
 
 def test_registered_agent_rejects_unknown_capability_string():
@@ -311,7 +311,7 @@ async def test_plugin_prompt_sections_render_inside_system_prompt():
     assert prompt.index("<subagent_workflow>") < system_end
     assert prompt.index("<available_tools>") > system_end
 
-    ep_agent._extensions.pop("test-subagent", None)
+    ReActAgent._registry.pop("test-subagent", None)
 
 
 @pytest.mark.asyncio
@@ -367,7 +367,7 @@ async def test_prompt_sections_render_first_50_items_and_warn(caplog):
     subagent_names = [f"prompt_cap_agent_{uuid.uuid4().hex}_{i:03}" for i in range(51)]
     try:
         # Clean up leaked registrations from other tests
-        ep_agent._extensions.pop("test-agent", None)
+        ReActAgent._registry.pop("test-agent", None)
         for i, name in enumerate(subagent_names):
             ReActAgent.register(name=name, description=f"Subagent description {i:03}", tools=[])
 
@@ -397,7 +397,7 @@ async def test_prompt_sections_render_first_50_items_and_warn(caplog):
         assert "first 50 subagents" in caplog.text
     finally:
         for name in subagent_names:
-            ep_agent._extensions.pop(name, None)
+            ReActAgent._registry.pop(name, None)
 
 
 @pytest.mark.asyncio
@@ -879,8 +879,8 @@ async def test_harness_ask_subagent_delegates_to_named_specialist(tmp_path):
         assert child_chats[0].startswith("parent-chat~researcher")
     finally:
         ep_provider._extensions.pop(provider_name, None)
-        ep_agent._extensions.pop(manager_name, None)
-        ep_agent._extensions.pop(researcher_name, None)
+        ReActAgent._registry.pop(manager_name, None)
+        ReActAgent._registry.pop(researcher_name, None)
 
 
 @pytest.mark.asyncio
@@ -937,9 +937,9 @@ async def test_ask_subagent_rejects_disallowed_registered_agent(tmp_path):
         assert list(chats) == ["parent-chat"]
     finally:
         ep_provider._extensions.pop(provider_name, None)
-        ep_agent._extensions.pop(manager_name, None)
-        ep_agent._extensions.pop(allowed_name, None)
-        ep_agent._extensions.pop(blocked_name, None)
+        ReActAgent._registry.pop(manager_name, None)
+        ReActAgent._registry.pop(allowed_name, None)
+        ReActAgent._registry.pop(blocked_name, None)
 
 
 @pytest.mark.asyncio

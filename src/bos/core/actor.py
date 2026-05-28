@@ -10,9 +10,9 @@ from typing import Any
 
 from bos.protocol import Envelope, MessageContent, MessageType, TurnEvent
 
-from .agent import AbortTurn
+from .agent import AbortTurn, ReActAgent
 from .chat_state import ChatState
-from .contract import Agent, MailBox, ep_actor_command
+from .contract import MailBox, ep_actor_command
 from .events import MailboxEventSink
 from .harness import CURRENT_HARNESS, CURRENT_MAILBOX
 
@@ -57,7 +57,7 @@ class AgentActor:
     Messages arriving during an active turn are rejected immediately.
     """
 
-    def __init__(self, agent: Agent, mailbox: MailBox, chat_state: ChatState | None = None):
+    def __init__(self, agent: ReActAgent, mailbox: MailBox, chat_state: ChatState | None = None):
         self._address = mailbox.address
         self._agent = agent
         self._mailbox = mailbox

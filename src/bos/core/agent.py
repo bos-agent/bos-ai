@@ -8,7 +8,6 @@ import platform
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
-from functools import wraps
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal, Sequence
 from xml.sax.saxutils import escape
 
@@ -34,7 +33,6 @@ from .contract import (
     ToolContext,
     ToolNoiseFilter,
     TurnInterceptor,
-    ep_agent,
     ep_tool,
     ep_turn_interceptor,
 )
@@ -191,6 +189,8 @@ class _CompositePluginInterceptor:
 
 
 class ReActAgent:
+    _registry: dict[str, dict[str, Any]] = {}
+
     def __init__(
         self,
         *,
@@ -678,8 +678,8 @@ class ReActAgent:
         )
         return dict(list(collection.items())[:limit])
 
-    @staticmethod
-    def register(name: str, description: str | None = None, **kwargs):
+    @classmethod
+    def register(cls, name: str, description: str | None = None, **kwargs):
         _CAPABILITY_KEYS = ("tools",)
 
         def map_value(key, value):
@@ -695,8 +695,21 @@ class ReActAgent:
             kwargs[key] = map_value(key, kwargs.get(key))
 
         kwargs["kind"] = name
+        cls._registry[name] = {
+            "defaults": kwargs,
+            "description": description or "",
+        }
 
-        @ep_agent(name=name, description=description, defaults=kwargs)
-        @wraps(ReActAgent)
-        def create_react_agent(*args, **kwargs):
-            return ReActAgent(*args, **kwargs)
+    @classmethod
+    def has_registered(cls, name: str) -> bool:
+        return name in cls._registry
+
+    @classmethod
+    def get_defaults(cls, name: str) -> dict[str, Any]:
+        entry = cls._registry.get(name)
+        return entry["defaults"] if entry else {}
+
+    @classmethod
+    def describe(cls) -> dict[str, str]:
+        return {name: entry["description"] for name, entry in cls._registry.items()}
+

@@ -14,7 +14,6 @@ from bos.core.contract import (
     PluginServices,
     SubagentRuntime,
     TurnInterceptor,
-    ep_agent,
     ep_plugin,
 )
 from bos.core.registry import ToolRegistry
@@ -132,9 +131,11 @@ class SubagentAgentPlugin:
             task: str | None = None,
             context: ToolContext | None = None,
         ) -> str:
+            from bos.core.agent import ReActAgent
+
             if not _allowed(role, allow, exclude):
                 return f"Error: Agent '{role}' is not an allowed subagent."
-            if not ep_agent.has(role):
+            if not ReActAgent.has_registered(role):
                 return f"Error: Agent '{role}' not found."
             if not task:
                 return "Error: AskSubagent requires a non-empty task."
@@ -143,7 +144,9 @@ class SubagentAgentPlugin:
             return await runtime.ask(role, task, parent=context)
 
     async def get_system_prompt_section(self, context: TurnContext) -> str | None:
-        available = dict(ep_agent.describe())
+        from bos.core.agent import ReActAgent
+
+        available = dict(ReActAgent.describe())
         available.pop("_default", None)
 
         available = _pick_collection(available, self._allow, self._exclude)

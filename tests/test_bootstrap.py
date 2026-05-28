@@ -1,7 +1,7 @@
 import sys
 
 from bos.config.workspace import Workspace
-from bos.core import ep_agent
+from bos.core import ReActAgent
 
 
 def test_workspace_bootstrap_loads_extensions_bundle(tmp_path):
@@ -81,9 +81,9 @@ skills = ["writer"]
 
     try:
         Workspace.from_discovery(tmp_path).bootstrap_platform()
-        defaults = ep_agent.get(agent_name).defaults
+        defaults = ReActAgent.get_defaults(agent_name)
 
         assert defaults["tools"] is None
         assert defaults["skills"] == ["writer"]
     finally:
-        ep_agent._extensions.pop(agent_name, None)
+        ReActAgent._registry.pop(agent_name, None)

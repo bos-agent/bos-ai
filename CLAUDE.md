@@ -37,7 +37,6 @@ The framework is built around named `ExtensionPoint` registries (defined in `src
 |---|---|---|
 | `ep_tool` | async fn → str | LLM-callable tools |
 | `ep_provider` | async fn → LLMResponse | Model backends (litellm by default) |
-| `ep_agent` | `Agent` protocol (`.ask()`) | Named agent factories |
 | `ep_channel` | `Channel` protocol (`.run(mailbox)`) | External interfaces (HTTP, Telegram) |
 | `ep_mail_route` | `MailRoute` protocol | Message transport between actors |
 | `ep_message_store` | `MessageStore` protocol | Chat history persistence |
@@ -53,7 +52,7 @@ Extensions register via decorator (e.g., `@ep_tool(name="...", description="..."
 
 1. **Config loading** (`src/bos/config/workspace.py`): `Workspace` resolves `.bos/config.toml` via upward directory search → `BOS_DIR` env var. Inline agents in TOML load first, then external agents from `agent_dirs/` (`.toml` or `.md` files, alphabetical), with last-wins deduplication.
 
-2. **Bootstrap** (`bootstrap_platform()`): Loads extensions, registers all named agents into `ep_agent`.
+2. **Bootstrap** (`bootstrap_platform()`): Loads extensions, registers all named agents into the `ReActAgent` registry.
 
 3. **Harness** (`AgentHarness` in `src/bos/core/harness.py`): Lifecycle container for shared services (mail route, message store, memory store, consolidator, skills loader, interceptors, LLM client). Created via `async with workspace.harness() as harness:`.
 
