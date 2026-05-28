@@ -55,6 +55,17 @@ async def _terminate_process(proc: asyncio.subprocess.Process) -> None:
         },
         "required": ["command"],
     },
+    usage="""Execute shell commands for shell-native work.
+
+Use for tests, package commands, git inspection, build tools, and commands not covered by a dedicated tool.
+Prefer ReadFile, WriteFile, EditFile, GlobSearch, and GrepSearch for file operations.
+
+Guidelines:
+- Keep commands bounded and scoped to the relevant workspace.
+- Follow repository instructions for command runners and toolchains.
+- Avoid destructive filesystem or git operations unless the user explicitly requested them.
+- If a command fails, inspect the error and change approach instead of repeating blindly.
+""",
 )
 async def tool_bash(command: str, cwd: str = ".", timeout: int = 60) -> str:
     proc: asyncio.subprocess.Process | None = None

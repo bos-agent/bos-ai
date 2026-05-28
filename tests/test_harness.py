@@ -11,10 +11,14 @@ from conftest import (
     create_test_agent,
 )
 
+import bos.extensions.tools.filesystem  # noqa: F401  — registers ep_tool entries
+import bos.extensions.tools.knowledge  # noqa: F401
+import bos.extensions.tools.system  # noqa: F401
 from bos.config.workspace import Workspace
 from bos.core import AgentHarness, LLMResponse, Message, ToolCallRequest, bootstrap_platform, ep_agent, ep_provider
 from bos.core.agent import ReActAgent
-from bos.core.defaults.agent_spec import bos_tools_usage, default_agent_spec
+from bos.core.contract import ep_tool
+from bos.core.defaults.agent_spec import default_agent_spec
 from bos.core.registry import ToolRegistry
 from bos.plugins.memory import MemoryAgentPlugin
 from bos.plugins.skills import SkillMeta, SkillsAgentPlugin
@@ -172,12 +176,13 @@ def test_default_tools_usage_covers_core_agent_tools():
         "WebSearch",
         "WebFetch",
     }
-    assert expected_tools <= bos_tools_usage.keys()
-    assert all(bos_tools_usage[name].strip() for name in expected_tools)
+    tools_usage = ep_tool.describe_usage()
+    assert expected_tools <= tools_usage.keys()
+    assert all(tools_usage[name].strip() for name in expected_tools)
 
 
 def test_default_tools_usage_references_actual_bos_names_only():
-    rendered = "\n".join(bos_tools_usage.values())
+    rendered = "\n".join(ep_tool.describe_usage().values())
 
     assert "TodoWrite" not in rendered
     assert "TodoRead" not in rendered
@@ -187,7 +192,7 @@ def test_default_tools_usage_references_actual_bos_names_only():
 
 
 def test_default_tools_usage_stays_compact():
-    assert sum(len(text.split()) for text in bos_tools_usage.values()) < 1800
+    assert sum(len(text.split()) for text in ep_tool.describe_usage().values()) < 1800
 
 
 @pytest.mark.asyncio

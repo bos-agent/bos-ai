@@ -7,6 +7,5 @@ from . import (
     litellm_provider,  # noqa: F401
 )
 from .agent_spec import (
-    bos_tools_usage,  # noqa: F401
     default_agent_spec,  # noqa: F401
 )
