@@ -1,7 +1,7 @@
 import sys
 
 from bos.config.workspace import Workspace
-from bos.core import ep_agent
+from bos.core import ep_agent_spec
 
 
 def test_workspace_bootstrap_loads_extensions_bundle(tmp_path):
@@ -23,7 +23,7 @@ def test_workspace_bootstrap_loads_extensions_bundle(tmp_path):
             sys.modules["bos.exts"] = previous_extensions
 
 
-def test_workspace_bootstrap_registers_external_agents_from_resolved_platform(tmp_path, monkeypatch):
+def test_workspace_bootstrap_registers_external_agents_from_resolved_platform(tmp_path):
     bos_dir = tmp_path / ".bos"
     agents_dir = bos_dir / "agents"
     bos_dir.mkdir()
@@ -46,19 +46,16 @@ system_prompt = "Resolved prompt"
         encoding="utf-8",
     )
 
-    registered: list[dict] = []
-    monkeypatch.setattr("bos.core.harness.ReActAgent.register", lambda **kwargs: registered.append(kwargs))
+    try:
+        Workspace.from_discovery(tmp_path).bootstrap_platform()
 
-    Workspace.from_discovery(tmp_path).bootstrap_platform()
-
-    non_default = [r for r in registered if r.get("name") != "_default"]
-    assert non_default == [
-        {
-            "name": "main",
-            "description": "External",
-            "system_prompt": "Resolved prompt",
-        }
-    ]
+        assert ep_agent_spec.has("main")
+        spec = ep_agent_spec.invoke("main")
+        assert spec["name"] == "main"
+        assert spec["system_prompt"] == "Resolved prompt"
+        assert spec["description"] == "External"
+    finally:
+        ep_agent_spec._extensions.pop("main", None)
 
 
 def test_workspace_bootstrap_normalizes_agent_capability_strings(tmp_path):
@@ -81,9 +78,9 @@ skills = ["writer"]
 
     try:
         Workspace.from_discovery(tmp_path).bootstrap_platform()
-        defaults = ep_agent.get(agent_name).defaults
+        spec = ep_agent_spec.invoke(agent_name)
 
-        assert defaults["tools"] is None
-        assert defaults["skills"] == ["writer"]
+        assert spec["tools"] is None
+        assert spec["skills"] == ["writer"]
     finally:
-        ep_agent._extensions.pop(agent_name, None)
+        ep_agent_spec._extensions.pop(agent_name, None)

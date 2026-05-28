@@ -1,7 +1,5 @@
 from typing import Any
 
-from bos.core.contract import ep_preset
-
 _system_prompt = """
 <role>
 You are BOS, an autonomous software-engineering agent. Help the user complete authorized
@@ -175,25 +173,18 @@ Guidelines:
 """
 
 
-class DefaultPreset:
-    """Built-in default agent preset."""
-
-    def get_agent_spec(self) -> dict[str, Any]:
-        return {
-            "name": "_default",
-            "system_prompt": _system_prompt,
-            "tools": "*",
-            "tools_usage": bos_tools_usage,
-            "plugins": {
-                "MemoryPlugin": {"enabled": True},
-                "PlanPlugin": {"enabled": True},
-                "TaskPlugin": {"enabled": True},
-                "SkillsPlugin": {"enabled": True},
-                "SubagentPlugin": {"enabled": True},
-            },
-        }
-
-
-@ep_preset(name="default")
-def _create_default_preset() -> DefaultPreset:
-    return DefaultPreset()
+def get_default_agent_spec() -> dict[str, Any]:
+    """Return the built-in default agent spec dict."""
+    return {
+        "name": "_default",
+        "system_prompt": _system_prompt,
+        "tools": "*",
+        "tools_usage": bos_tools_usage,
+        "plugins": {
+            "MemoryPlugin": {"enabled": True},
+            "PlanPlugin": {"enabled": True},
+            "TaskPlugin": {"enabled": True},
+            "SkillsPlugin": {"enabled": True},
+            "SubagentPlugin": {"enabled": True},
+        },
+    }

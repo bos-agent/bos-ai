@@ -5,11 +5,11 @@ import json
 import pytest
 from conftest import create_test_agent
 
-from bos.config.presets.default import DefaultPreset
+from bos.config.presets.default import get_default_agent_spec
 from bos.core import LLMResponse, ep_provider
 from bos.plugins.plan import PlanAgentPlugin
 
-default_agent_spec = DefaultPreset().get_agent_spec()
+default_agent_spec = get_default_agent_spec()
 
 
 @pytest.mark.asyncio

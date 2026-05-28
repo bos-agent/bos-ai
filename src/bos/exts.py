@@ -19,6 +19,9 @@ such as ``@ep_tool``::
         ...
 """
 
+# Agent spec presets (must load before core.defaults so agent specs are registered)
+import bos.config.presets  # noqa: F401
+
 # Core defaults (consolidator, litellm provider, etc.)
 import bos.core.defaults  # noqa: F401
 

@@ -11,6 +11,7 @@ from typing import Any
 
 from ._utils import (
     _aclose,
+    _build_params,
     _create_extension_instance,
     _deep_merge,
     _load_ext_modules,
@@ -27,11 +28,12 @@ from .contract import (
     MailRoute,
     PluginServices,
     ToolContext,
-    ep_agent,
+    ep_agent_spec,
     ep_plugin,
 )
 from .events import derive_event_sink
 from .llm import LLMClient
+from .registry import Extension
 
 logger = logging.getLogger(__name__)
 
@@ -69,14 +71,30 @@ def bootstrap_platform(
 
     defaults = agent_defaults or {}
 
-    agent_specs = [defaults | spec for spec in (agents or [])]
-    # If no _default agent was provided by config, fall back to DefaultPreset
-    if not any(spec.get("name") == "_default" for spec in agent_specs):
-        from bos.config.presets.default import DefaultPreset
+    _CAPABILITY_KEYS = ("tools",)
 
-        agent_specs.insert(0, defaults | DefaultPreset().get_agent_spec())
+    def _normalize_capability(value):
+        if isinstance(value, (list, dict)):
+            return value
+        if value is None:
+            return []
+        if value == "*":
+            return None
+        raise TypeError("Capability must be a list, '*', or None")
+
+    agent_specs = [defaults | spec for spec in (agents or [])]
     for agent_spec in agent_specs:
-        ReActAgent.register(**(agent_spec))
+        for key in _CAPABILITY_KEYS:
+            agent_spec[key] = _normalize_capability(agent_spec.get(key))
+        name = agent_spec.get("name", "_default")
+        agent_spec["kind"] = name
+        ep_agent_spec.register(
+            Extension(
+                name=name,
+                fn=lambda s=agent_spec: s,
+                description=agent_spec.get("description", ""),
+            )
+        )
 
     # prevent the litellm to call load_dotenv automatically, and supress logs.
     os.environ["LITELLM_MODE"] = "extension"
@@ -257,12 +275,10 @@ class AgentHarness:
         if CURRENT_HARNESS.get(None) is None:
             raise RuntimeError("create_agent must be called within an active AgentHarness context.")
 
-        # Resolve agent defaults from ep_agent so plugin config is visible
+        # Resolve agent defaults from ep_agent_spec
         agent_defaults: dict[str, Any] = {}
-        if kind and ep_agent.has(kind):
-            d = ep_agent.get(kind).defaults
-            if d is not None:
-                agent_defaults = dict(d() if callable(d) else d)
+        if kind and ep_agent_spec.has(kind):
+            agent_defaults = dict(ep_agent_spec.invoke(kind))
 
         if not any([kind, agent_cfg]) and not agent_defaults:
             agent_cfg = {
@@ -283,7 +299,8 @@ class AgentHarness:
             "chat_compaction_lock": self._get_compaction_lock,
         }
 
-        return ep_agent.invoke(kind, kwargs) if kind else ReActAgent(**kwargs)
+        args, filtered_kwargs = _build_params(ReActAgent, kwargs)
+        return ReActAgent(*args, **filtered_kwargs)
 
     async def _bind_plugins_for_agent(
         self,

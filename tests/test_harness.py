@@ -11,17 +11,35 @@ from conftest import (
     create_test_agent,
 )
 
-from bos.config.presets.default import DefaultPreset, bos_tools_usage
+from bos.config.presets.default import bos_tools_usage, get_default_agent_spec
 from bos.config.workspace import Workspace
-from bos.core import AgentHarness, LLMResponse, Message, ToolCallRequest, bootstrap_platform, ep_agent, ep_provider
-from bos.core.agent import ReActAgent
-from bos.core.registry import ToolRegistry
+from bos.core import AgentHarness, LLMResponse, Message, ToolCallRequest, bootstrap_platform, ep_agent_spec, ep_provider
+from bos.core.registry import Extension, ToolRegistry
 from bos.plugins.memory import MemoryAgentPlugin
 from bos.plugins.skills import SkillMeta, SkillsAgentPlugin
 from bos.plugins.subagent import SubagentAgentPlugin
 from bos.plugins.task import TaskAgentPlugin
 
-default_agent_spec = DefaultPreset().get_agent_spec()
+default_agent_spec = get_default_agent_spec()
+
+
+def _register_agent_spec(name, description=None, **kwargs):
+    """Register an agent spec into ep_agent_spec, normalizing capabilities."""
+    _CAPABILITY_KEYS = ("tools",)
+    for key in _CAPABILITY_KEYS:
+        value = kwargs.get(key)
+        if isinstance(value, (list, dict)):
+            continue
+        if value is None:
+            kwargs[key] = []
+        elif value == "*":
+            kwargs[key] = None
+        else:
+            raise TypeError(f"{key} must be a list, '*', or None")
+    kwargs["kind"] = name
+    ep_agent_spec.register(
+        Extension(name=name, fn=lambda s=kwargs: s, description=description or "")
+    )
 
 
 class _MockSubagentRuntime:
@@ -71,7 +89,7 @@ async def test_registered_agent_defaults_to_no_capabilities(tmp_path):
     agent_name = f"locked_{uuid.uuid4().hex}"
 
     try:
-        ReActAgent.register(name=agent_name, description="Locked", system_prompt="Stay locked down.")
+        _register_agent_spec(name=agent_name, description="Locked", system_prompt="Stay locked down.")
 
         async with AgentHarness(bos_dir=bos_dir, workspace=tmp_path, consolidator=MessageOnlyConsolidator()) as harness:
             agent = await harness.create_agent(agent_name)
@@ -79,7 +97,7 @@ async def test_registered_agent_defaults_to_no_capabilities(tmp_path):
             assert agent._tools == []
             assert agent._get_tool_defs() == []
     finally:
-        ep_agent._extensions.pop(agent_name, None)
+        ep_agent_spec._extensions.pop(agent_name, None)
 
 
 @pytest.mark.asyncio
@@ -89,7 +107,7 @@ async def test_registered_agent_star_capabilities_enable_all(tmp_path):
     agent_name = f"open_{uuid.uuid4().hex}"
 
     try:
-        ReActAgent.register(
+        _register_agent_spec(
             name=agent_name,
             description="Open",
             system_prompt="Use everything.",
@@ -104,14 +122,14 @@ async def test_registered_agent_star_capabilities_enable_all(tmp_path):
             assert "ListAgents" not in tool_names
             assert "SearchSkills" not in tool_names
     finally:
-        ep_agent._extensions.pop(agent_name, None)
+        ep_agent_spec._extensions.pop(agent_name, None)
 
 
 def test_registered_agent_rejects_unknown_capability_string():
     agent_name = f"bad_caps_{uuid.uuid4().hex}"
 
     with pytest.raises(TypeError, match="tools must be a list, '\\*', or None"):
-        ReActAgent.register(name=agent_name, tools="all")
+        _register_agent_spec(name=agent_name, tools="all")
 
 
 @pytest.mark.asyncio
@@ -278,9 +296,7 @@ async def test_plugin_prompt_sections_render_inside_system_prompt():
     await store.set_maxim("user", "Prefers concise answers.")
 
     # Register a dummy agent so subagent section renders
-    from bos.core.agent import ReActAgent
-
-    ReActAgent.register("test-subagent", description="A test subagent.")
+    _register_agent_spec("test-subagent", description="A test subagent.")
 
     class StaticSkillsLoader:
         async def load_skill(self, name: str) -> str:
@@ -308,7 +324,7 @@ async def test_plugin_prompt_sections_render_inside_system_prompt():
     assert prompt.index("<subagent_workflow>") < system_end
     assert prompt.index("<available_tools>") > system_end
 
-    ep_agent._extensions.pop("test-subagent", None)
+    ep_agent_spec._extensions.pop("test-subagent", None)
 
 
 @pytest.mark.asyncio
@@ -339,9 +355,9 @@ async def test_prompt_sections_render_first_50_items_and_warn(caplog):
     subagent_names = [f"prompt_cap_agent_{uuid.uuid4().hex}_{i:03}" for i in range(51)]
     try:
         # Clean up leaked registrations from other tests
-        ep_agent._extensions.pop("test-agent", None)
+        ep_agent_spec._extensions.pop("test-agent", None)
         for i, name in enumerate(subagent_names):
-            ReActAgent.register(name=name, description=f"Subagent description {i:03}", tools=[])
+            _register_agent_spec(name=name, description=f"Subagent description {i:03}", tools=[])
 
         skills_plugin = SkillsAgentPlugin(StaticSkillsLoader(), allow=None, exclude=[])
         subagent_plugin = SubagentAgentPlugin(_MockSubagentRuntime(), allow=None, exclude=[])
@@ -369,7 +385,7 @@ async def test_prompt_sections_render_first_50_items_and_warn(caplog):
         assert "first 50 subagents" in caplog.text
     finally:
         for name in subagent_names:
-            ep_agent._extensions.pop(name, None)
+            ep_agent_spec._extensions.pop(name, None)
 
 
 @pytest.mark.asyncio
@@ -804,14 +820,14 @@ async def test_harness_ask_subagent_delegates_to_named_specialist(tmp_path):
         return LLMResponse(content="Researcher says BOS delegates to named specialists via AskSubagent.")
 
     try:
-        ReActAgent.register(
+        _register_agent_spec(
             name=manager_name,
             description="Manager",
             model=f"{provider_name}/manager",
             tools=["AskSubagent"],
             system_prompt="Delegate focused work to the researcher when useful.",
         )
-        ReActAgent.register(
+        _register_agent_spec(
             name=researcher_name,
             description="Researcher",
             model=f"{provider_name}/researcher",
@@ -851,8 +867,8 @@ async def test_harness_ask_subagent_delegates_to_named_specialist(tmp_path):
         assert child_chats[0].startswith("parent-chat~researcher")
     finally:
         ep_provider._extensions.pop(provider_name, None)
-        ep_agent._extensions.pop(manager_name, None)
-        ep_agent._extensions.pop(researcher_name, None)
+        ep_agent_spec._extensions.pop(manager_name, None)
+        ep_agent_spec._extensions.pop(researcher_name, None)
 
 
 @pytest.mark.asyncio
@@ -882,15 +898,15 @@ async def test_ask_subagent_rejects_disallowed_registered_agent(tmp_path):
         return LLMResponse(content="blocked response")
 
     try:
-        ReActAgent.register(
+        _register_agent_spec(
             name=manager_name,
             description="Manager",
             model=f"{provider_name}/manager",
             tools=["AskSubagent"],
             system_prompt="Delegate to allowed subagents only.",
         )
-        ReActAgent.register(name=allowed_name, description="Allowed", model=f"{provider_name}/a", tools=[])
-        ReActAgent.register(name=blocked_name, description="Blocked", model=f"{provider_name}/b", tools=[])
+        _register_agent_spec(name=allowed_name, description="Allowed", model=f"{provider_name}/a", tools=[])
+        _register_agent_spec(name=blocked_name, description="Blocked", model=f"{provider_name}/b", tools=[])
 
         bos_dir = tmp_path / ".bos"
         bos_dir.mkdir()
@@ -909,9 +925,9 @@ async def test_ask_subagent_rejects_disallowed_registered_agent(tmp_path):
         assert list(chats) == ["parent-chat"]
     finally:
         ep_provider._extensions.pop(provider_name, None)
-        ep_agent._extensions.pop(manager_name, None)
-        ep_agent._extensions.pop(allowed_name, None)
-        ep_agent._extensions.pop(blocked_name, None)
+        ep_agent_spec._extensions.pop(manager_name, None)
+        ep_agent_spec._extensions.pop(allowed_name, None)
+        ep_agent_spec._extensions.pop(blocked_name, None)
 
 
 @pytest.mark.asyncio

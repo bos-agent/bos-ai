@@ -10,12 +10,32 @@ from bos.core import (
     AgentHarness,
     LLMResponse,
     ToolCallRequest,
-    ep_agent,
+    ep_agent_spec,
     ep_provider,
 )
 from bos.core.agent import ChainInterceptor, ReActAgent
+from bos.core.registry import Extension
 from bos.plugins.subagent import SubagentAgentPlugin  # noqa: F401  registers SubagentPlugin
 from bos.protocol import MessageType
+
+
+def _register_agent_spec(name, description=None, **kwargs):
+    """Register an agent spec into ep_agent_spec, normalizing capabilities."""
+    _CAPABILITY_KEYS = ("tools",)
+    for key in _CAPABILITY_KEYS:
+        value = kwargs.get(key)
+        if isinstance(value, (list, dict)):
+            continue
+        if value is None:
+            kwargs[key] = []
+        elif value == "*":
+            kwargs[key] = None
+        else:
+            raise TypeError(f"{key} must be a list, '*', or None")
+    kwargs["kind"] = name
+    ep_agent_spec.register(
+        Extension(name=name, fn=lambda s=kwargs: s, description=description or "")
+    )
 
 
 def create_test_agent(**kwargs):
@@ -136,13 +156,13 @@ async def test_ask_subagent_emits_child_lineage_events(tmp_path):
         return LLMResponse(content="Researcher summary")
 
     try:
-        ReActAgent.register(
+        _register_agent_spec(
             name=manager_name,
             description="Manager",
             model=f"{provider_name}/manager",
             tools=["AskSubagent"],
         )
-        ReActAgent.register(
+        _register_agent_spec(
             name=researcher_name,
             description="Researcher",
             model=f"{provider_name}/researcher",
@@ -177,8 +197,8 @@ async def test_ask_subagent_emits_child_lineage_events(tmp_path):
         assert child_event.parent_agent_name == manager_name
     finally:
         ep_provider._extensions.pop(provider_name, None)
-        ep_agent._extensions.pop(manager_name, None)
-        ep_agent._extensions.pop(researcher_name, None)
+        ep_agent_spec._extensions.pop(manager_name, None)
+        ep_agent_spec._extensions.pop(researcher_name, None)
 
 
 @pytest.mark.asyncio

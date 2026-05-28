@@ -8,7 +8,6 @@ import platform
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
-from functools import wraps
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal, Sequence
 from xml.sax.saxutils import escape
 
@@ -34,7 +33,6 @@ from .contract import (
     ToolContext,
     ToolNoiseFilter,
     TurnInterceptor,
-    ep_agent,
     ep_tool,
     ep_turn_interceptor,
 )
@@ -677,26 +675,3 @@ class ReActAgent:
             len(collection),
         )
         return dict(list(collection.items())[:limit])
-
-    @staticmethod
-    def register(name: str, description: str | None = None, **kwargs):
-        _CAPABILITY_KEYS = ("tools",)
-
-        def map_value(key, value):
-            if isinstance(value, (list, dict)):
-                return value
-            if value is None:
-                return []  # mute the capability
-            if value == "*":
-                return None  # fully open the capability
-            raise TypeError(f"{key} must be a list, '*', or None")
-
-        for key in _CAPABILITY_KEYS:
-            kwargs[key] = map_value(key, kwargs.get(key))
-
-        kwargs["kind"] = name
-
-        @ep_agent(name=name, description=description, defaults=kwargs)
-        @wraps(ReActAgent)
-        def create_react_agent(*args, **kwargs):
-            return ReActAgent(*args, **kwargs)

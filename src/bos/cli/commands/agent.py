@@ -19,7 +19,7 @@ from rich.live import Live
 from rich.panel import Panel
 from rich.text import Text
 
-from bos.config import ConfigNotFoundError, Workspace, WorkspaceResolutionError, resolve_config_source
+from bos.config import Workspace, WorkspaceResolutionError, resolve_config_source
 from bos.config.workspace import _resolve_path
 from bos.protocol import TurnEvent
 from bos.runner.proc import RunDir
@@ -29,8 +29,8 @@ def _build_workspace_for_ask(ctx, workspace_override: str | None = None) -> Work
     """Build a Workspace for ``boscli ask``.
 
     * workspace defaults to ``"."`` unless overridden by ``--workspace``.
-    * ``-c <preset|file>`` → resolve via :func:`resolve_config_source`.
-    * No ``-c`` → discover project config; fall back to ``default`` preset.
+    * ``-c <file>`` → resolve a TOML config file via :func:`resolve_config_source`.
+    * No ``-c`` → discover project config (error if not found).
     """
     config_arg = ctx.obj.get("CONFIG")
     ws_dir = workspace_override or "."
@@ -42,26 +42,20 @@ def _build_workspace_for_ask(ctx, workspace_override: str | None = None) -> Work
             raise click.UsageError(str(exc)) from exc
         return Workspace(ws_dir, bos_dir, config, config_file=config_path)
 
-    # No -c: try project discovery, fall back to default preset
+    # No -c: try project discovery
     try:
         ws = Workspace.from_discovery(".")
-        if workspace_override:
-            ws.workspace = _resolve_path(workspace_override)
-        return ws
-    except ConfigNotFoundError:
-        pass
-
-    try:
-        config_path, bos_dir, config = resolve_config_source("default")
     except WorkspaceResolutionError as exc:
         raise click.UsageError(str(exc)) from exc
-    return Workspace(ws_dir, bos_dir, config, config_file=config_path)
+    if workspace_override:
+        ws.workspace = _resolve_path(workspace_override)
+    return ws
 
 
 def _build_workspace_for_daemon(ctx, workspace_override: str | None = None) -> Workspace:
     """Build a Workspace for daemon commands (``boscli gateway start``).
 
-    * ``-c <preset|file>`` → workspace defaults to ``"."`` unless overridden.
+    * ``-c <file>`` → resolve a TOML config file via :func:`resolve_config_source`.
     * No ``-c`` → ancestor discovery (error if not found).
     """
     config_arg = ctx.obj.get("CONFIG")
@@ -80,12 +74,7 @@ def _build_workspace_for_daemon(ctx, workspace_override: str | None = None) -> W
             ws.workspace = _resolve_path(workspace_override)
         return ws
     except WorkspaceResolutionError as exc:
-        hint = str(exc)
-        from bos.core.contract import ep_preset
-        available = sorted(ep_preset.describe().keys())
-        names = ", ".join(available) or "none"
-        hint += f"\nTip: use -c <preset> to run without a workspace. Available presets: {names}."
-        raise click.UsageError(hint) from exc
+        raise click.UsageError(str(exc)) from exc
 
 
 def _get_ws_and_rd(ctx, workspace_override: str | None = None) -> tuple[Workspace, RunDir]:

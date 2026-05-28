@@ -188,17 +188,9 @@ class TurnInterceptor(Protocol):
     ) -> None: ...
 
 
-ep_agent = ExtensionPoint(description="Agent. A factory that creates agents implementing the Agent protocol.")
-
-ep_preset = ExtensionPoint(description="Preset. A factory that returns a Preset object for agent configuration.")
-
-
-class Preset(Protocol):
-    """A preset provides agent configuration for the ``-c`` CLI option."""
-
-    def get_agent_spec(self) -> dict[str, Any]:
-        """Return an agent spec dict with keys: name, system_prompt, tools, tools_usage, plugins, etc."""
-        ...
+ep_agent_spec = ExtensionPoint(
+    description="Agent spec. Named agent specification dicts used to configure ReActAgent instances."
+)
 
 
 class Agent(Protocol):
