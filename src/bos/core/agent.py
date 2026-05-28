@@ -188,7 +188,7 @@ class _CompositePluginInterceptor:
         await self._fallback.intercept(stage, context)
 
 
-class ReActAgent:
+class Agent:
     def __init__(
         self,
         *,

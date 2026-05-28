@@ -13,7 +13,7 @@ from bos.core import (
     ToolCallRequest,
     ep_provider,
 )
-from bos.core.agent import ChainInterceptor, ReActAgent
+from bos.core.agent import Agent, ChainInterceptor
 from bos.plugins.subagent import SubagentAgentPlugin  # noqa: F401  registers SubagentPlugin
 from bos.protocol import MessageType
 
@@ -24,7 +24,7 @@ def create_test_agent(**kwargs):
     kwargs.setdefault("chat_store", InMemChatStore())
     kwargs.setdefault("consolidator", MessageOnlyConsolidator())
     kwargs.setdefault("interceptor", ChainInterceptor())
-    return ReActAgent(**kwargs)
+    return Agent(**kwargs)
 
 
 class CaptureSink:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from bos.core import AgentActor, Message, ReActAgent
+from bos.core import Agent, AgentActor, Message
 from bos.core._utils import _compact
 from bos.core.contract import ContextResult
 from bos.protocol import Envelope, MessageContent, MessageContentPart
@@ -21,8 +21,8 @@ def _display_label(display_name: str | None, actor_name: str, agent_kind: str | 
     return f"{label} ({agent_kind})" if agent_kind else label
 
 
-class NamedAgent(ReActAgent):
-    """ReActAgent that renders shared history with actor attribution."""
+class NamedAgent(Agent):
+    """Agent that renders shared history with actor attribution."""
 
     def _format_history(self, result: ContextResult) -> list[dict[str, Any]]:
         return [self._history_item(src) for src in result.source_messages]

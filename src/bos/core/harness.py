@@ -18,7 +18,7 @@ from ._utils import (
     _load_ext_paths,
     _safe_format,
 )
-from .agent import ChainInterceptor, ReActAgent
+from .agent import Agent, ChainInterceptor
 from .contract import (
     AgentPlugin,
     ChatStore,
@@ -292,7 +292,7 @@ class AgentHarness:
         self,
         kind: str | None = None,
         agent_cfg: dict[str, Any] = None,
-    ) -> ReActAgent:
+    ) -> Agent:
         if CURRENT_HARNESS.get(None) is None:
             raise RuntimeError("create_agent must be called within an active AgentHarness context.")
 
@@ -320,7 +320,7 @@ class AgentHarness:
             "chat_compaction_lock": self._get_compaction_lock,
         }
 
-        return _apply(ReActAgent, kwargs)
+        return _apply(Agent, kwargs)
 
     async def _bind_plugins_for_agent(
         self,

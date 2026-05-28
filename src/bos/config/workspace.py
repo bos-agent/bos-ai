@@ -40,11 +40,7 @@ class _LoadedAgentCandidate:
 
 
 _EXTERNAL_AGENT_SUFFIXES = {".toml", ".md"}
-_FRONTMATTER_ALIAS_KEYS = {
-    # Keep this compatibility typo narrow: misspelling it otherwise creates an
-    # unusable ReActAgent default that fails only at agent construction time.
-    "exlude_tools": "exclude_tools",
-}
+
 
 
 def _find_discovered_config(workspace: Path) -> Path | None:
@@ -91,9 +87,7 @@ def _resolve_config(workspace: Path) -> Path:
     if env_bos_config:
         return env_bos_config
 
-    raise ConfigNotFoundError(
-        "No BOS workspace found. Run `boscli init`, `cd` into a workspace, or set `BOS_CONFIG`."
-    )
+    raise ConfigNotFoundError("No BOS workspace found. Run `boscli init`, `cd` into a workspace, or set `BOS_CONFIG`.")
 
 
 def _config_template_path() -> Path:
@@ -241,10 +235,7 @@ def _parse_simple_yaml_mapping(frontmatter: str) -> dict[str, Any]:
             result[key] = _parse_frontmatter_block(block_lines)
             idx = next_idx
 
-    for alias, canonical in _FRONTMATTER_ALIAS_KEYS.items():
-        if alias in result:
-            alias_value = result.pop(alias)
-            result.setdefault(canonical, alias_value)
+
 
     return result
 
@@ -461,9 +452,7 @@ class Workspace:
             return {}
         return {k: dict(v) if isinstance(v, dict) else {} for k, v in raw.items()}
 
-    def resolve_enabled_plugins(
-        self, agent_spec: dict[str, Any]
-    ) -> list[str]:
+    def resolve_enabled_plugins(self, agent_spec: dict[str, Any]) -> list[str]:
         """Determine ordered list of enabled plugins for an agent.
 
         Order:
@@ -499,15 +488,12 @@ class Workspace:
 
     def harness(self) -> AgentHarness:
         platform_cfg = self.config.get("platform", {})
-        harness_cfg = (
-            self.config.get("harness", {})
-            | {
-                "bos_dir": self.bos_dir,
-                "workspace": self.workspace,
-                "enabled_plugins": platform_cfg.get("enabled_plugins", []),
-                "platform_plugins": platform_cfg.get("plugins", {}),
-            }
-        )
+        harness_cfg = self.config.get("harness", {}) | {
+            "bos_dir": self.bos_dir,
+            "workspace": self.workspace,
+            "enabled_plugins": platform_cfg.get("enabled_plugins", []),
+            "platform_plugins": platform_cfg.get("plugins", {}),
+        }
         return _apply(AgentHarness, harness_cfg)
 
     def enable_interceptors(self, interceptors: list[str | dict[str, Any]]):

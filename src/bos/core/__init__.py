@@ -30,7 +30,7 @@ from ._utils import (
     _xml_attr,
 )
 from .actor import AgentActor
-from .agent import AbortTurn, ChainInterceptor, ReActAgent, TurnContext
+from .agent import AbortTurn, Agent, ChainInterceptor, TurnContext
 from .contract import (
     AgentPlugin,
     Channel,
@@ -98,7 +98,7 @@ __all__ = [
     "MailRoute",
     "Message",
     "PluginServices",
-    "ReActAgent",
+    "Agent",
     "SubagentRuntime",
     "TokenEstimate",
     "TokenEstimateSource",

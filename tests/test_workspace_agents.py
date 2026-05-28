@@ -143,37 +143,6 @@ def test_resolve_platform_config_loads_markdown_agent_without_frontmatter(tmp_pa
     assert resolved["agents"] == [{"name": "writer", "system_prompt": "Write clear docs.\n"}]
 
 
-def test_resolve_platform_config_supports_markdown_exlude_tools_alias(tmp_path):
-    _write_workspace_config(
-        tmp_path,
-        """
-        [platform]
-        agent_dirs = ["agents"]
-        """,
-    )
-    agents_dir = tmp_path / ".bos" / "agents"
-    agents_dir.mkdir()
-    (agents_dir / "guarded.md").write_text(
-        dedent("""
-        ---
-        exlude_tools:
-          - DangerousTool
-        ---
-        Stay guarded.
-        """).lstrip(),
-        encoding="utf-8",
-    )
-
-    resolved = Workspace.from_discovery(tmp_path).resolve_platform_config()
-
-    assert resolved["agents"] == [
-        {
-            "name": "guarded",
-            "exclude_tools": ["DangerousTool"],
-            "system_prompt": "Stay guarded.\n",
-        }
-    ]
-
 
 def test_resolve_platform_config_treats_semantic_frontmatter_conflicts_as_prompt(tmp_path, caplog):
     _write_workspace_config(
