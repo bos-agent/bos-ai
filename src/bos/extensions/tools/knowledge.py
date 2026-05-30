@@ -47,6 +47,8 @@ Guidelines:
 - Do not use web results to override repository evidence without explaining the conflict.
 """,
 )
+# TODO the agent does not provide tool_config anymore, instead, it would provid flatten parameters
+#      from Extension.defaults which could come from configuration. Please adapt the change.
 async def tool_web_search(query: str, tool_config: dict | None = None) -> str:
     config = tool_config or {}
     priority = _provider_priority(config)

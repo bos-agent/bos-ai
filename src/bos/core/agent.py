@@ -30,6 +30,7 @@ from .contract import (
     ContextResult,
     EventSink,
     Message,
+    ReasoningEffort,
     ToolContext,
     ToolNoiseFilter,
     TurnInterceptor,
@@ -203,10 +204,9 @@ class Agent:
         exclude_tools: list[str] | None = None,
         model: str | None = None,
         agent_name: str | None = None,
-        reasoning_effort: Literal["low", "medium", "high"] | None = None,
+        reasoning_effort: ReasoningEffort | None = None,
         llm: LLMClient | None = None,
         local_tools: ToolRegistry | None = None,
-        tools_config: dict[str, dict[str, Any]] | None = None,
         interceptor: TurnInterceptor | None = None,
         max_tokens: int = 128 * 1024,
         max_iterations: int = 25,
@@ -227,7 +227,6 @@ class Agent:
         self._chat_store = chat_store
         self._consolidator = consolidator
         self._local_tools = local_tools or ToolRegistry("Agent-scoped local tools.")
-        self._tools_config = tools_config or {}
         self._kind = kind
         self._name = agent_name or kind
         self._plugins = plugins
@@ -572,7 +571,6 @@ class Agent:
             "chat_id": params.pop("chat_id", ""),
             "turn_id": params.pop("turn_id", ""),
             "event_sink": params.pop("event_sink", None),
-            "tool_config": self._tools_config.get(tool_name, {}),
             "context": ToolContext(
                 agent_name=self._name,
                 chat_id=chat_id,
@@ -675,5 +673,3 @@ class Agent:
             len(collection),
         )
         return dict(list(collection.items())[:limit])
-
-

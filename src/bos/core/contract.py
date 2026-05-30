@@ -15,6 +15,7 @@ from .registry import ExtensionPoint, ToolRegistry
 ToolNoiseFilter = Literal["keep_signatures", "strip_all", "keep_all"]
 TokenEstimateSource = Literal["litellm", "fallback", "fallback-error"]
 ToolResultStatus = Literal["success", "error", "unknown"]
+ReasoningEffort = Literal["low", "medium", "high"]
 
 
 @runtime_checkable
@@ -55,6 +56,7 @@ ep_provider = ExtensionPoint(
             ...
     """
 )
+
 
 @dataclass
 class Message:
@@ -109,9 +111,7 @@ ep_chat_store = ExtensionPoint(
 @runtime_checkable
 class ChatStore(Protocol):
     # ── Turn persistence ──
-    async def save_turn(
-        self, chat_id: str, messages: Iterable[Message], *, turn_id: str | None = None
-    ) -> None: ...
+    async def save_turn(self, chat_id: str, messages: Iterable[Message], *, turn_id: str | None = None) -> None: ...
 
     # ── Context assembly: pure read, no consolidation ──
     async def get_context(
@@ -188,7 +188,6 @@ class TurnInterceptor(Protocol):
     ) -> None: ...
 
 
-
 @runtime_checkable
 class EventSink(Protocol):
     async def emit(self, event: TurnEvent) -> None: ...
@@ -252,9 +251,7 @@ ep_actor_command = ExtensionPoint(
 
 # ── BEP 4: Plugin Architecture ─────────────────────────────────────────────
 
-ep_plugin = ExtensionPoint(
-    description="Harness plugin. A class or factory implementing HarnessPlugin."
-)
+ep_plugin = ExtensionPoint(description="Harness plugin. A class or factory implementing HarnessPlugin.")
 
 
 @dataclass(frozen=True)

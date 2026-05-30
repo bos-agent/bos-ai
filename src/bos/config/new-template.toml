@@ -1,0 +1,89 @@
+[platform]
+envfile = ".env"
+extensions = ["bos.exts", "./extentions"]
+
+[platform.envs]
+BOS_CAPABILITY_LIMIT = 50
+
+[ext]
+consolidator = "_default"
+chat_store = "_default"
+interceptors = []
+
+# global settings for extensions these will be merged into the Extension.defaults
+[exts.ep_provider.Codex]
+# model resolution is: <agent_name>.model > agent.defaults.model > agents.<agent kind>.model > BOS_MODEL > exts.ep_provider.<provider name>.model
+model = "gpt-5o"
+
+[exts.ep_consolidator._default]
+# model resolution is: BOS_CONSOLIDATOR_MODEL > BOS_MODEL > exts.ep_consolidator.<provider name>.model
+model = "gemini/gemini-2.5-flash"
+
+[exts.ep_message_store._default]
+store_dir = "./messages"
+
+# default setting for all the agents
+[agent.defaults]
+# usaullay not going to use it. each agent should override
+system_prompt = "you are the bos agent that help user with anything."
+# defautl model for all agent. the precedence is: <agent_name>.model > platform.agent_defaults.model > BOS_MODEL > platform.ep_provider.<provider name>.model
+model = "gpt-4o"
+# usually be used in the named agent / actor
+agent_name = "bos"
+# other settings
+reasoning_effort = "medium"           # low, medium, high
+max_tokens = 131072
+max_iterations = 60
+tool_noise_filter = "keep_signatures" # keep_all, keep_signatures, strip_all
+# tools config
+[agent.defaults.tools]
+enabled = ["*"]
+disabled = ["WriteFile", "AskSubagent"]
+usages = {}
+
+[agent.defaults.plugins]
+enabled = ["MemoryPlugin", "PlanPlugin", "SubagentPlugin"]
+disabled = ["SkillsPlugin"]
+prompts = {}
+# the BoundPlugin config for the agent
+[agent.defaults.plugin-bindings.SubagentPlugin]
+task_template = """
+--- Sub-agent Instructions ---
+You are a background sub-agent `{role}`. Work only on the delegated task,
+use only the tools available to you, do not ask the user questions, and finish with
+a concise result. You can only modify or create files under {workspace}.
+If you cannot finish the task for some reason, please call it out in the response,
+instead of return empty message
+--- Task Description ---
+{task}
+"""
+
+# single agent settings
+[agents.main]
+system_prompt = "you are the main bos agent that help user with anything."
+
+[agents.main.plugins]
+enabled = ["PlanPlugin", "SkillsPlugin"]
+
+# the BoundPlugin options for the agent
+[agents.main.plugin-bindings.SkillsPlugin]
+skill_dirs = ["/path/to/skills"]
+
+
+[runtime]
+agent = "main"
+
+[runtime.actors.main]
+agent = "main"
+display_name = "Main"
+
+[runtime.actors.bob]
+agent = "researcher"
+display_name = "Bob"
+
+[[runtime.channels]]
+name = "HttpChannel"
+bind_address = "channel@http"
+target_address = "agent@main"
+host = "127.0.0.1"            # automatically becomes 0.0.0.0 in Docker
+port = 5920
