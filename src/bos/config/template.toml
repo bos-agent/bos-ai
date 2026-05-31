@@ -5,6 +5,9 @@
 
 # the env variables can be defined inline as well, that the platform will load on startup
 #[platform.envs]
+#BOS_MODEL=
+#BOS_CONSOLIDATOR_MODEL=
+#BOS_CAPABILITY_LIMIT=50
 
 # a list of module names or paths where the platform would scan and load extensions from.
 # by default, the platform will load all the bos built in extension as well as
@@ -37,15 +40,12 @@ mail_route = "_default"
 model = "gemini/gemini-2.5-flash"
 
 # [exts.ep_message_store._default]
-# name = "_default"
 # store_dir = "./messages"
 
 # [exts.ep_mail_route._default]
-# name = "_default"
 # store_dir = "./mailboxes"
 
 # [exts.ep_skills_loader._default]
-# name = "_default"
 # skill_dirs = ["skills"]
 
 # Tool-specific runtime configuration
@@ -62,9 +62,20 @@ model = "gemini/gemini-2.5-flash"
 # ── Agent Defaults ──────────────────────────────────────────────────
 
 [agent.defaults]
-model = "gemini/gemini-3.1-pro-preview"
-max_tokens = 131072
-max_iterations = 60
+# usaullay not going to use it. each agent should override
+#system_prompt = "you are the bos agent that help user with anything."
+
+# defautl model for all agent. the precedence is: <agent_name>.model > platform.agent_defaults.model > BOS_MODEL > platform.ep_provider.<provider name>.model
+#model = "gpt-4o"
+
+# the name of the agent, usually be used in the named agent / actor
+#agent_name = "bos"
+
+# other settings
+#reasoning_effort = "medium"           # low, medium, high
+#max_tokens = 131072
+#max_iterations = 60
+#tool_noise_filter = "keep_signatures" # keep_all, keep_signatures, strip_all
 
 [agent.defaults.tools]
 enabled = ["*"]
@@ -72,7 +83,9 @@ enabled = ["*"]
 #usages = {}
 
 [agent.defaults.plugins]
-enabled = ["MemoryPlugin", "PlanPlugin", "TaskPlugin", "SkillsPlugin", "SubagentPlugin"]
+enabled = [
+    "*",
+] # ["MemoryPlugin", "PlanPlugin", "TaskPlugin", "SkillsPlugin", "SubagentPlugin"]
 #disabled = []
 #prompts = {}
 
