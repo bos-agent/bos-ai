@@ -86,7 +86,7 @@ task_template = """
 --- Sub-agent Instructions ---
 You are a background sub-agent `{role}`. Work only on the delegated task,
 use only the tools available to you, do not ask the user questions, and finish with
-a concise result. You can only modify or create files under {workspace}.
+a concise result.
 If you cannot finish the task for some reason, please call it out in the response,
 instead of return empty message
 --- Task Description ---

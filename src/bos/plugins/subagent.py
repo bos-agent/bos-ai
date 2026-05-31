@@ -32,7 +32,7 @@ class SubagentHarnessPlugin:
         return "SubagentPlugin"
 
     def default_config(self) -> Mapping[str, Any]:
-        return {"allow": None, "exclude": []}
+        return {"allow": None, "exclude": [], "task_template": None}
 
     async def setup(self, services: PluginServices) -> None:
         self._runtime: SubagentRuntime = services.subagents
@@ -52,7 +52,7 @@ class SubagentHarnessPlugin:
             allow = []  # nothing allowed
         elif isinstance(allow, str) and allow == "*":
             allow = None  # None means all allowed in _allowed / _pick_collection
-        return SubagentAgentPlugin(self._runtime, allow, exclude)
+        return SubagentAgentPlugin(self._runtime, allow, exclude, task_template=config.get("task_template"))
 
     async def teardown(self) -> None:
         pass
@@ -95,10 +95,13 @@ class SubagentAgentPlugin:
         runtime: SubagentRuntime,
         allow: list[str] | str | None,
         exclude: list[str],
+        *,
+        task_template: str | None = None,
     ) -> None:
         self._runtime = runtime
         self._allow = allow
         self._exclude = exclude
+        self._task_template = task_template
 
     @property
     def name(self) -> str:
@@ -108,6 +111,7 @@ class SubagentAgentPlugin:
         runtime = self._runtime
         allow = self._allow
         exclude = self._exclude
+        task_template = self._task_template
 
         @registry(
             name="AskSubagent",
@@ -132,6 +136,7 @@ class SubagentAgentPlugin:
             context: ToolContext | None = None,
         ) -> str:
             from bos.core import AgentRegistry
+            from bos.core._utils import _safe_format
 
             if not _allowed(role, allow, exclude):
                 return f"Error: Agent '{role}' is not an allowed subagent."
@@ -141,6 +146,10 @@ class SubagentAgentPlugin:
                 return "Error: AskSubagent requires a non-empty task."
             if context is None:
                 return "Error: AskSubagent requires a ToolContext."
+
+            if task_template:
+                task = _safe_format(task_template, role=role, task=task, message=task)
+
             return await runtime.ask(role, task, parent=context)
 
     async def get_system_prompt_section(self, context: TurnContext) -> str | None:
