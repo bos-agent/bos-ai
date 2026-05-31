@@ -50,38 +50,14 @@ Guidelines:
 async def tool_web_search(
     query: str,
     *,
-    # ── general settings ──
     priority: list[str] | None = None,
     timeout_seconds: int = 15,
     max_results: int = 5,
-    # ── tavily provider settings ──
-    tavily_api_key: str | None = None,
-    tavily_api_key_env: str = "TAVILY_API_KEY",
-    tavily_search_depth: str = "basic",
-    tavily_include_answer: bool | None = None,
-    tavily_include_raw_content: bool | None = None,
-    tavily_include_images: bool | None = None,
-    tavily_topic: str | None = None,
-    tavily_days: int | None = None,
-    tavily_include_domains: list[str] | None = None,
-    tavily_exclude_domains: list[str] | None = None,
-    tavily_fallback_on_status: list[int] | None = None,
+    tavily: dict[str, object] | None = None,
 ) -> str:
     priority = priority or ["duckduckgo"]
     errors: list[str] = []
-
-    # Build tavily config dict from flattened params
-    tavily_config: dict[str, object] = {"api_key_env": tavily_api_key_env}
-    if tavily_api_key is not None:
-        tavily_config["api_key"] = tavily_api_key
-    for key in (
-        "search_depth", "include_answer", "include_raw_content",
-        "include_images", "topic", "days", "include_domains",
-        "exclude_domains", "fallback_on_status",
-    ):
-        value = locals().get(f"tavily_{key}")
-        if value is not None:
-            tavily_config[key] = value
+    tavily_config = dict(tavily) if tavily else {}
 
     for provider in priority:
         try:
@@ -160,7 +136,7 @@ async def _search_tavily(
 ) -> tuple[str | None, list[SearchResult]]:
     api_key = config.get("api_key")
     if not api_key:
-        api_key_env = str(config.get("api_key_env") or "TAVILY_API_KEY")
+        api_key_env = str(config.get("api_key_env", "TAVILY_API_KEY"))
         api_key = os.getenv(api_key_env)
     if not api_key:
         raise WebSearchProviderError("tavily", "missing API key")

@@ -58,10 +58,10 @@ async def test_web_search_uses_tavily_when_prioritized(monkeypatch):
         priority=["tavily", "duckduckgo"],
         timeout_seconds=7,
         max_results=3,
-        tavily_search_depth="basic",
+        tavily={"search_depth": "basic"},
     )
 
-    assert calls == [("bos ai", {"api_key_env": "TAVILY_API_KEY", "search_depth": "basic"}, 7, 3)]
+    assert calls == [("bos ai", {"search_depth": "basic"}, 7, 3)]
     assert result.startswith("Direct answer")
     assert "[https://example.test/tavily] Tavily result" in result
 
