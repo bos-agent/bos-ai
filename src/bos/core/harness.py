@@ -13,6 +13,7 @@ from ._utils import (
     _aclose,
     _apply,
     _create_extension_instance,
+    _deep_merge,
 )
 from .agent import Agent, ChainInterceptor
 from .contract import (
@@ -89,11 +90,12 @@ class _HarnessSubagentRuntime:
     def __init__(self, harness: AgentHarness) -> None:
         self._harness = harness
 
-    async def ask(self, role: str, message: str, *, parent: ToolContext) -> str:
-        # Subagent config (task_template, per-role overrides) removed from harness —
-        # deferred to SubagentPlugin future BEP. Subagents are now plain create_agent(role).
+    async def ask(
+        self, role: str, message: str, *, parent: ToolContext,
+        agent_cfg: dict[str, Any] | None = None,
+    ) -> str:
         child_chat_id = self._harness._make_subagent_chat_id(parent.chat_id, role)
-        agent = await self._harness.create_agent(role)
+        agent = await self._harness.create_agent(role, agent_cfg)
         child_event_sink = derive_event_sink(
             parent.event_sink,
             parent_turn_id=parent.turn_id,
@@ -206,7 +208,7 @@ class AgentHarness:
                 "tools": [],
             }
 
-        merged_cfg = agent_defaults | (agent_cfg or {})
+        merged_cfg = _deep_merge(dict(agent_defaults), agent_cfg or {})
 
         kwargs = merged_cfg | {
             "kind": kind or merged_cfg.get("kind") or "undef",

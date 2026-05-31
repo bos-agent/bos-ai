@@ -272,6 +272,7 @@ class SubagentRuntime(Protocol):
         message: str,
         *,
         parent: ToolContext,
+        agent_cfg: dict[str, Any] | None = None,
     ) -> str:
         """Delegate to a configured subagent and return its response."""
         ...

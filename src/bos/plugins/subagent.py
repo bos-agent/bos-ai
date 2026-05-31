@@ -32,27 +32,33 @@ class SubagentHarnessPlugin:
         return "SubagentPlugin"
 
     def default_config(self) -> Mapping[str, Any]:
-        return {"allow": None, "exclude": [], "task_template": None}
+        return {"enabled": [], "disabled": [], "task_template": None}
 
     async def setup(self, services: PluginServices) -> None:
         self._runtime: SubagentRuntime = services.subagents
 
     def validate_config(self, config: Mapping[str, Any]) -> None:
-        allow = config.get("allow")
-        if allow is not None and not isinstance(allow, (str, list)):
-            raise TypeError("SubagentPlugin: 'allow' must be a string, list, or None")
-        exclude = config.get("exclude")
-        if exclude is not None and not isinstance(exclude, list):
-            raise TypeError("SubagentPlugin: 'exclude' must be a list or None")
+        enabled = config.get("enabled")
+        if enabled is not None and not isinstance(enabled, (str, list)):
+            raise TypeError("SubagentPlugin: 'enabled' must be a list, '*', or None")
+        disabled = config.get("disabled")
+        if disabled is not None and not isinstance(disabled, list):
+            raise TypeError("SubagentPlugin: 'disabled' must be a list or None")
 
     def bind(self, config: Mapping[str, Any]) -> AgentPlugin:
-        allow = config.get("allow")
-        exclude = config.get("exclude", [])
-        if allow is None:
-            allow = []  # nothing allowed
-        elif isinstance(allow, str) and allow == "*":
-            allow = None  # None means all allowed in _allowed / _pick_collection
-        return SubagentAgentPlugin(self._runtime, allow, exclude, task_template=config.get("task_template"))
+        enabled = config.get("enabled", [])
+        disabled = config.get("disabled", [])
+        if not isinstance(enabled, list):
+            enabled = []
+        if not isinstance(disabled, list):
+            disabled = []
+        # Map to internal _allowed / _pick_collection conventions:
+        # None = all allowed, [] = none allowed
+        if "*" in enabled:
+            enabled = None  # wildcard: all subagents allowed
+        elif not enabled:
+            enabled = []  # empty: nothing allowed
+        return SubagentAgentPlugin(self._runtime, enabled, disabled, task_template=config.get("task_template"))
 
     async def teardown(self) -> None:
         pass
@@ -93,14 +99,14 @@ class SubagentAgentPlugin:
     def __init__(
         self,
         runtime: SubagentRuntime,
-        allow: list[str] | str | None,
-        exclude: list[str],
+        enabled: list[str] | None,
+        disabled: list[str],
         *,
         task_template: str | None = None,
     ) -> None:
         self._runtime = runtime
-        self._allow = allow
-        self._exclude = exclude
+        self._enabled = enabled
+        self._disabled = disabled
         self._task_template = task_template
 
     @property
@@ -109,8 +115,8 @@ class SubagentAgentPlugin:
 
     def register_tools(self, registry: ToolRegistry) -> None:
         runtime = self._runtime
-        allow = self._allow
-        exclude = self._exclude
+        enabled = self._enabled
+        disabled = self._disabled
         task_template = self._task_template
 
         @registry(
@@ -138,8 +144,8 @@ class SubagentAgentPlugin:
             from bos.core import AgentRegistry
             from bos.core._utils import _safe_format
 
-            if not _allowed(role, allow, exclude):
-                return f"Error: Agent '{role}' is not an allowed subagent."
+            if not _allowed(role, enabled, disabled):
+                return f"Error: Agent '{role}' is not an enabled subagent."
             if not AgentRegistry.has_registered(role):
                 return f"Error: Agent '{role}' not found."
             if not task:
@@ -158,7 +164,7 @@ class SubagentAgentPlugin:
         available = dict(AgentRegistry.describe())
         available.pop("_default", None)
 
-        available = _pick_collection(available, self._allow, self._exclude)
+        available = _pick_collection(available, self._enabled, self._disabled)
         if not available:
             return None
         sections = [_SUBAGENT_PROMPT_SECTION]

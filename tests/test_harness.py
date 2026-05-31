@@ -32,7 +32,7 @@ class _MockSubagentRuntime:
 
 def test_react_agent_local_tools_describe_ask_subagent(caplog):
     local_tools = ToolRegistry("test tools")
-    subagent = SubagentAgentPlugin(_MockSubagentRuntime(), allow=None, exclude=[])
+    subagent = SubagentAgentPlugin(_MockSubagentRuntime(), enabled=None, disabled=[])
 
     with caplog.at_level(logging.WARNING):
         agent = create_test_agent(local_tools=local_tools, plugins=[subagent])
@@ -301,7 +301,7 @@ async def test_plugin_prompt_sections_render_inside_system_prompt():
             MemoryAgentPlugin(store, {"user"}),
             SkillsAgentPlugin(StaticSkillsLoader(), allow=None, exclude=[]),
             TaskAgentPlugin(),
-            SubagentAgentPlugin(_MockSubagentRuntime(), allow=None, exclude=[]),
+            SubagentAgentPlugin(_MockSubagentRuntime(), enabled=None, disabled=[]),
         ]
     )
     prompt = await agent._build_system_prompt()
@@ -376,7 +376,7 @@ async def test_prompt_sections_render_first_50_items_and_warn(caplog):
             AgentRegistry.register(name=name, description=f"Subagent description {i:03}", tools=[])
 
         skills_plugin = SkillsAgentPlugin(StaticSkillsLoader(), allow=None, exclude=[])
-        subagent_plugin = SubagentAgentPlugin(_MockSubagentRuntime(), allow=None, exclude=[])
+        subagent_plugin = SubagentAgentPlugin(_MockSubagentRuntime(), enabled=None, disabled=[])
 
         agent = create_test_agent(
             local_tools=local_tools,
