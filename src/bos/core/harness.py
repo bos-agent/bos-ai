@@ -224,7 +224,7 @@ class AgentHarness:
         self._mail_route_cfg = mail_route
         self._chat_store_cfg = chat_store
         self._consolidator_cfg = consolidator
-        self._providers_cfg = providers
+        # providers_cfg removed — LLMClient reads from EP defaults
         self._interceptors_cfg = interceptors
         self._tools_cfg = tools or {}
         self._enabled_plugins = enabled_plugins or []
@@ -254,7 +254,7 @@ class AgentHarness:
 
         self.mail_route = self._create_and_own("ep_mail_route", MailRoute, self._mail_route_cfg)
         self.chat_store = self._create_and_own("ep_chat_store", ChatStore, self._chat_store_cfg)
-        self.llm = LLMClient(self._providers_cfg)
+        self.llm = LLMClient()
         self.consolidator = self._create_consolidator()
         self.interceptor = ChainInterceptor(self._interceptors_cfg)
 

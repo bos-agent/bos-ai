@@ -44,14 +44,15 @@ class ToolCallRequest:
         }
 
 class LLMClient:
-    """Extensible LLM client with provider routing and scoped config."""
+    """Extensible LLM client with provider routing via ep_provider defaults.
 
-    def __init__(self, providers_cfg: dict[str, dict[str, Any]] | None = None) -> None:
-        self._providers_cfg: dict[str, dict[str, Any]] = (
-            {k: {kk: vv for kk, vv in v.items() if vv is not None} for k, v in providers_cfg.items() if v is not None}
-            if providers_cfg is not None
-            else {}
-        )
+    Provider configuration is managed through ``[exts.ep_provider.<impl>]`` in
+    config and merged into EP defaults during bootstrap. No per-instance
+    provider config is needed.
+    """
+
+    def __init__(self) -> None:
+        pass
 
     async def complete(self, messages: list[dict], **kwargs: Any) -> LLMResponse:
         if model := kwargs.get("model") or os.getenv("BOS_MODEL"):
@@ -60,5 +61,5 @@ class LLMClient:
                 provider_name, model_name = "_default", model
         else:
             provider_name, model_name = "_default", None
-        params = self._providers_cfg.get(provider_name, {}) | kwargs | {"messages": messages, "model": model_name}
+        params = kwargs | {"messages": messages, "model": model_name}
         return await ep_provider.invoke_async(provider_name, params)
