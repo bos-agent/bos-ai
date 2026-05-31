@@ -14,8 +14,8 @@ from conftest import (
 import bos.extensions.tools.filesystem  # noqa: F401  — registers ep_tool entries
 import bos.extensions.tools.knowledge  # noqa: F401
 import bos.extensions.tools.system  # noqa: F401
-from bos.config.workspace import Workspace
-from bos.core import AgentHarness, AgentRegistry, LLMResponse, Message, ToolCallRequest, bootstrap_platform, ep_provider
+from bos.config.workspace import Workspace, bootstrap_platform
+from bos.core import AgentHarness, AgentRegistry, LLMResponse, Message, ToolCallRequest, ep_provider
 from bos.core.contract import ep_tool
 from bos.core.defaults.agent_spec import default_agent_spec
 from bos.core.registry import ToolRegistry

@@ -478,73 +478,78 @@ class Workspace:
         self.config.agents = agents
 
     def bootstrap_platform(self):
-        from bos.core import _apply, bootstrap_platform
+        """Bootstrap the platform from this Workspace.
 
-        platform_cfg = self.resolve_platform_config() | {"bos_dir": self.bos_dir}
-        _apply(bootstrap_platform, platform_cfg)
-
-    def resolve_platform_config(self) -> dict[str, Any]:
-        raw_platform_cfg = self.config.get("platform", {})
-        if not isinstance(raw_platform_cfg, dict):
-            raise ValueError("[platform] must be a table.")
-
-        resolved_platform_cfg = copy.deepcopy({k: v for k, v in raw_platform_cfg.items() if k != "agent_dirs"})
-
-        if resolved_platform_cfg.get("extensions") is None:
-            resolved_platform_cfg["extensions"] = ["bos.exts", "./extensions"]
-
-        try:
-            resolved_agents, source_history = self._resolve_platform_agents(raw_platform_cfg)
-        except Exception:
-            self.agent_source_history = {}
-            raise
-        self.agent_source_history = source_history
-
-        if "agents" in raw_platform_cfg or raw_platform_cfg.get("agent_dirs") is not None or resolved_agents:
-            resolved_platform_cfg["agents"] = resolved_agents
-
-        return resolved_platform_cfg
-
-    def _resolve_platform_plugins(self) -> dict[str, dict[str, Any]]:
-        """Return {plugin_name: config_dict} from platform.plugins.*."""
-        raw = self.config.get("platform", {}).get("plugins", {})
-        if not isinstance(raw, dict):
-            return {}
-        return {k: dict(v) if isinstance(v, dict) else {} for k, v in raw.items()}
-
-    def resolve_enabled_plugins(self, agent_spec: dict[str, Any]) -> list[str]:
-        """Determine ordered list of enabled plugins for an agent.
-
-        Order:
-        1. globally enabled plugins in platform.enabled_plugins list order
-        2. agent-only enabled plugins in agent config declaration order
-
-        Agent can disable a globally enabled plugin with enabled = false.
-        Agent can enable a non-global plugin with enabled = true.
+        1. Load environment variables ([platform.envs] then [platform.envfile])
+        2. Load extensions ([platform.extensions])
+        3. Merge EP defaults from [exts] into registered EP implementations
+        4. Register agents into AgentRegistry
         """
-        raw_platform = self.config.get("platform", {})
-        global_enabled: list[str] = raw_platform.get("enabled_plugins", [])
-        if not isinstance(global_enabled, list):
-            global_enabled = []
+        from bos.core import (
+            AgentRegistry,
+            _load_ext_modules,
+            _load_ext_paths,
+        )
+        from bos.core.defaults import default_agent_spec
 
-        agent_plugins = agent_spec.get("plugins", {})
-        if not isinstance(agent_plugins, dict):
-            agent_plugins = {}
+        platform = self.config.platform
+        bos_root = self.bos_dir
 
-        resolved: list[str] = []
-        for name in global_enabled:
-            agent_cfg = agent_plugins.get(name, {})
-            disabled = isinstance(agent_cfg, dict) and agent_cfg.get("enabled") is False
-            if not disabled:
-                resolved.append(name)
+        # 1. Environment loading
+        if platform:
+            if platform.envs:
+                os.environ.update({k: str(v) for k, v in platform.envs.items()})
+            if platform.envfile:
+                from dotenv import load_dotenv
 
-        for name in agent_plugins:
-            if name not in resolved:
-                cfg = agent_plugins[name]
-                if isinstance(cfg, dict) and cfg.get("enabled") is True:
-                    resolved.append(name)
+                load_dotenv((bos_root / Path(platform.envfile).expanduser()).resolve(), override=True)
 
-        return resolved
+            # 2. Extension loading
+            if platform.extensions:
+                modules, paths = [], []
+                for ext in platform.extensions:
+                    p = bos_root / Path(ext).expanduser()
+                    if p.exists():
+                        paths.append(p)
+                    else:
+                        modules.append(ext)
+                if modules:
+                    _load_ext_modules(modules=modules)
+                if paths:
+                    _load_ext_paths(paths=paths)
+
+        # 3. Merge EP defaults from [exts]
+        import bos.core as _core
+
+        if self.config.exts:
+            exts_data = self.config.exts.model_dump()
+            for ep_key, impl_configs in exts_data.items():
+                if not ep_key.startswith("ep_") or not isinstance(impl_configs, dict):
+                    continue
+                ep = getattr(_core, ep_key, None)
+                if ep is None:
+                    continue
+                for impl_name, cfg in impl_configs.items():
+                    if isinstance(cfg, dict):
+                        ep.update_defaults(impl_name, cfg)
+
+        # 4. Agent registration
+        agent_defaults: dict[str, Any] = {}
+        if self.config.agent and self.config.agent.defaults:
+            agent_defaults = self.config.agent.defaults.model_dump(exclude_defaults=True)
+
+        for name, agent_config in (self.config.agents or {}).items():
+            cfg = agent_config.model_dump(exclude_defaults=True)
+            merged = _deep_merge(dict(agent_defaults), cfg)
+            AgentRegistry.register(name, **merged)
+
+        if not AgentRegistry.has_registered("_default"):
+            merged = _deep_merge(dict(agent_defaults), dict(default_agent_spec))
+            AgentRegistry.register("_default", **merged)
+
+        # Suppress litellm auto-loading
+        os.environ["LITELLM_MODE"] = "extension"
+        logging.getLogger("LiteLLM").setLevel(logging.ERROR)
 
     def harness(self) -> AgentHarness:
         harness_cfg = {}

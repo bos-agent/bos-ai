@@ -14,8 +14,6 @@ from ._utils import (
     _apply,
     _create_extension_instance,
     _deep_merge,
-    _load_ext_modules,
-    _load_ext_paths,
     _safe_format,
 )
 from .agent import Agent, ChainInterceptor
@@ -30,7 +28,6 @@ from .contract import (
     ToolContext,
     ep_plugin,
 )
-from .defaults import default_agent_spec
 from .events import derive_event_sink
 from .llm import LLMClient
 
@@ -89,52 +86,6 @@ class AgentRegistry:
     @classmethod
     def describe(cls) -> dict[str, str]:
         return {name: entry["description"] for name, entry in cls._registry.items()}
-
-
-def bootstrap_platform(
-    bos_dir: str | Path,
-    envs: dict[str, str] | None = None,
-    envfile: str | None = None,
-    extensions: list[str] | None = None,
-    agents: list[dict[str, Any]] | None = None,
-    agent_defaults: dict[str, Any] | None = None,
-) -> None:
-    bos_root = Path(bos_dir).expanduser().resolve()
-    bos_root.mkdir(parents=True, exist_ok=True)
-
-    if envs:
-        os.environ.update({k: str(v) for k, v in envs.items()})
-    if envfile:
-        from dotenv import load_dotenv
-
-        load_dotenv((bos_root / Path(envfile).expanduser()).resolve(), override=True)
-
-    if extensions:
-        modules, paths = [], []
-        for ext in extensions:
-            p = bos_root / Path(ext).expanduser()
-            if p.exists():
-                paths.append(p)
-            else:
-                modules.append(ext)
-        if modules:
-            _load_ext_modules(modules=modules)
-        if paths:
-            _load_ext_paths(paths=paths)
-
-    defaults = agent_defaults or {}
-
-    # the agent defaults in configuration takes precedence over the spec in the fallback _default agent
-    _default_spec = default_agent_spec | defaults
-    # the specifice agent definition takes precedence over the agent_defaults
-    agent_specs = [defaults | spec for spec in (agents or [])]
-    # register all the agents
-    for agent_spec in [_default_spec] + agent_specs:
-        AgentRegistry.register(**(agent_spec))
-
-    # prevent the litellm to call load_dotenv automatically, and supress logs.
-    os.environ["LITELLM_MODE"] = "extension"
-    logging.getLogger("LiteLLM").setLevel(logging.ERROR)
 
 
 CURRENT_HARNESS: contextvars.ContextVar[AgentHarness] = contextvars.ContextVar("current_harness")

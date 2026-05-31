@@ -68,7 +68,6 @@ from .harness import (
     CURRENT_MAILBOX,
     AgentHarness,
     AgentRegistry,
-    bootstrap_platform,
 )
 from .llm import LLMClient, LLMResponse, ToolCallRequest
 from .registry import Extension, ExtensionPoint, ToolRegistry
@@ -112,7 +111,6 @@ __all__ = [
     "TurnContext",
     "TurnInterceptor",
     "TurnEvent",
-    "bootstrap_platform",
     "ep_actor_command",
     "ep_channel",
     "ep_chat_store",
