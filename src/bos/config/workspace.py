@@ -461,17 +461,12 @@ class Workspace:
         if not candidates:
             return
 
-        # Merge validated candidates into config.agents
+        # External agent files replace inline agents with the same name.
         agents = self.config.agents or {}
         for candidate in candidates:
             name = candidate.spec["name"]
             validated = validate_agent_config(candidate.spec)
-            if name in agents:
-                existing = agents[name].model_dump(exclude_defaults=True)
-                _deep_merge(existing, validated)
-                agents[name] = AgentConfig.model_validate(existing)
-            else:
-                agents[name] = AgentConfig.model_validate(validated)
+            agents[name] = AgentConfig.model_validate(validated)
         self.config.agents = agents
 
     def bootstrap_platform(self):

@@ -188,8 +188,8 @@ def test_resolve_agents_explicit_name_in_file(tmp_path):
     assert ws.config.agents["realname"].system_prompt == "Hi"
 
 
-def test_resolve_agents_inline_and_external_merge(tmp_path):
-    """Inline agent merged with external file of same name."""
+def test_resolve_agents_external_replaces_inline(tmp_path):
+    """External file with same name replaces inline agent entirely (not merge)."""
     bos_dir = tmp_path / ".bos"
     bos_dir.mkdir(parents=True)
     agents_dir = bos_dir / "agents"
@@ -209,12 +209,11 @@ def test_resolve_agents_inline_and_external_merge(tmp_path):
     ws.resolve_agents()
 
     agent = ws.config.agents["main"]
-    # External file loaded after inline, so system_prompt from file wins
+    # External file replaces inline — only file fields survive
     assert agent.system_prompt == "From file"
-    # model from file
     assert agent.model == "file-model"
-    # tools only in inline, preserved
-    assert agent.tools.enabled == ["ReadFile"]
+    # tools from inline are gone — replaced, not merged
+    assert agent.tools.enabled == []
 
 
 def test_bootstrap_registers_both_inline_and_external_agents(tmp_path):
