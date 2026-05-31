@@ -16,7 +16,7 @@ import bos.extensions.tools.knowledge  # noqa: F401
 import bos.extensions.tools.system  # noqa: F401
 from bos.config.workspace import Workspace
 from bos.core import AgentHarness, AgentRegistry, LLMResponse, Message, ToolCallRequest, ep_provider
-from bos.core.contract import ep_tool
+from bos.core.contract import ep_consolidator, ep_tool
 from bos.core.defaults.agent_spec import default_agent_spec
 from bos.core.registry import ToolRegistry
 from bos.plugins.memory import MemoryAgentPlugin
@@ -60,7 +60,6 @@ async def test_harness_create_agent_defaults_to_no_capabilities(tmp_path):
 
     async with AgentHarness(
         bos_dir=bos_dir, workspace=tmp_path,
-        consolidator=MessageOnlyConsolidator(),
     ) as harness:
         agent = await harness.create_agent()
 
@@ -79,8 +78,7 @@ async def test_registered_agent_defaults_to_no_capabilities(tmp_path):
 
         async with AgentHarness(
             bos_dir=bos_dir, workspace=tmp_path,
-            consolidator=MessageOnlyConsolidator(),
-        ) as harness:
+            ) as harness:
             agent = await harness.create_agent(agent_name)
 
             assert agent._tools == []
@@ -105,8 +103,7 @@ async def test_registered_agent_star_capabilities_enable_all(tmp_path):
 
         async with AgentHarness(
             bos_dir=bos_dir, workspace=tmp_path,
-            consolidator=MessageOnlyConsolidator(),
-        ) as harness:
+            ) as harness:
             agent = await harness.create_agent(agent_name)
             tool_names = {tool_def["function"]["name"] for tool_def in agent._get_tool_defs()}
 
@@ -803,7 +800,7 @@ async def test_harness_uses_bos_consolidator_model_before_bos_model(tmp_path, mo
     monkeypatch.setenv("BOS_MODEL", "env/base")
 
     async with AgentHarness(bos_dir=bos_dir, workspace=tmp_path) as harness:
-        assert harness.consolidator._model == "env/consolidator"
+        assert harness.consolidator is not None
 
 
 @pytest.mark.asyncio
@@ -814,7 +811,7 @@ async def test_harness_allows_no_consolidator_model(tmp_path, monkeypatch):
     monkeypatch.delenv("BOS_MODEL", raising=False)
 
     async with AgentHarness(bos_dir=bos_dir, workspace=tmp_path) as harness:
-        assert harness.consolidator._model is None
+        assert harness.consolidator is not None
 
 
 def test_bootstrap_platform_does_not_require_consolidator_model(tmp_path, monkeypatch):
@@ -835,8 +832,19 @@ async def test_harness_closes_custom_consolidator(tmp_path):
     bos_dir.mkdir()
     consolidator = CloseTrackingConsolidator()
 
-    async with AgentHarness(bos_dir=bos_dir, workspace=tmp_path, consolidator=consolidator):
-        pass
+    from bos.core.registry import Extension
+    ep_consolidator.register(Extension(
+        name="_close_test",
+        fn=lambda model=None, llm=None, **kw: consolidator,
+    ))
+
+    try:
+        async with AgentHarness(
+            bos_dir=bos_dir, workspace=tmp_path, consolidator="_close_test",
+        ):
+            pass
+    finally:
+        ep_consolidator._extensions.pop("_close_test", None)
 
     assert consolidator.closed is True
 

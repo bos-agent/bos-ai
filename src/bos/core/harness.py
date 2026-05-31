@@ -123,7 +123,7 @@ class AgentHarness:
         *,
         bos_dir: str | Path = ".bos",
         workspace: str | Path = ".",
-        consolidator: str | Consolidator = "_default",
+        consolidator: str = "_default",
         chat_store: str = "_default",
         mail_route: str = "_default",
         interceptors: list[str] | None = None,
@@ -131,10 +131,10 @@ class AgentHarness:
         self._bos_root = Path(bos_dir).expanduser().resolve()
         self._workspace = Path(workspace).expanduser().resolve()
         self.workspace = self._workspace
-        self._consolidator_cfg = consolidator
+        self._consolidator_impl = consolidator
         self._chat_store_impl = chat_store
         self._mail_route_impl = mail_route
-        self._interceptors = interceptors or []
+        self._interceptors_impl = interceptors or []
 
         self._owned: list[Any] = []
         self._token: contextvars.Token | None = None
@@ -162,7 +162,7 @@ class AgentHarness:
         self.chat_store = self._create_and_own("ep_chat_store", ChatStore, None, impl=self._chat_store_impl)
         self.llm = LLMClient()
         self.consolidator = self._create_consolidator()
-        self.interceptor = ChainInterceptor(self._interceptors)
+        self.interceptor = ChainInterceptor(self._interceptors_impl)
 
         # Build plugin services
         self._plugin_services = PluginServices(
@@ -313,13 +313,9 @@ class AgentHarness:
         return instance
 
     def _create_consolidator(self) -> Consolidator:
-        # Pass-through: if the consolidator is already an instance (test convenience), use it.
-        if isinstance(self._consolidator_cfg, Consolidator):
-            self._owned.append(self._consolidator_cfg)
-            return self._consolidator_cfg
         cfg = {"model": os.getenv("BOS_CONSOLIDATOR_MODEL"), "llm": self.llm}
         from . import __dict__ as core_exports
-        instance = core_exports["ep_consolidator"].invoke(self._consolidator_cfg, cfg)
+        instance = core_exports["ep_consolidator"].invoke(self._consolidator_impl, cfg)
         if instance is not None:
             self._owned.append(instance)
         return instance
