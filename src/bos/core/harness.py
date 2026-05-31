@@ -92,42 +92,6 @@ CURRENT_HARNESS: contextvars.ContextVar[AgentHarness] = contextvars.ContextVar("
 CURRENT_MAILBOX: contextvars.ContextVar[MailBox] = contextvars.ContextVar("current_mailbox")
 
 
-def _resolve_plugin_configs(
-    platform_plugins: dict[str, dict[str, Any]],
-    agent_plugins: dict[str, Any],
-) -> dict[str, dict[str, Any]]:
-    result: dict[str, dict[str, Any]] = {}
-    all_names = set(platform_plugins.keys()) | set(agent_plugins.keys())
-    for name in all_names:
-        merged = dict(platform_plugins.get(name, {}))
-        agent_cfg = agent_plugins.get(name, {})
-        if isinstance(agent_cfg, dict):
-            _deep_merge(merged, agent_cfg)
-        result[name] = merged
-    return result
-
-
-def _resolve_enabled_plugin_names(
-    global_enabled: list[str],
-    agent_plugins: dict[str, Any],
-) -> list[str]:
-    """Determine ordered list of enabled plugin names for an agent."""
-    resolved: list[str] = []
-    for name in global_enabled:
-        agent_cfg = agent_plugins.get(name, {})
-        disabled = isinstance(agent_cfg, dict) and agent_cfg.get("enabled") is False
-        if not disabled:
-            resolved.append(name)
-
-    for name in agent_plugins:
-        if name not in resolved:
-            cfg = agent_plugins[name]
-            if isinstance(cfg, dict) and cfg.get("enabled") is True:
-                resolved.append(name)
-
-    return resolved
-
-
 class _HarnessSubagentRuntime:
     """Adapter that implements SubagentRuntime using AgentHarness internals."""
 
@@ -135,19 +99,10 @@ class _HarnessSubagentRuntime:
         self._harness = harness
 
     async def ask(self, role: str, message: str, *, parent: ToolContext) -> str:
-        subagent_cfg = self._harness._get_subagent_config(role)
-        if task_template := subagent_cfg.get("task_template"):
-            message = _safe_format(
-                task_template,
-                task=message,
-                message=message,
-                role=role,
-                workspace=self._harness.workspace,
-            )
-
+        # Subagent config (task_template, per-role overrides) removed from harness —
+        # deferred to SubagentPlugin future BEP. Subagents are now plain create_agent(role).
         child_chat_id = self._harness._make_subagent_chat_id(parent.chat_id, role)
-        child_agent_cfg = {k: v for k, v in subagent_cfg.items() if k not in {"name", "task_template"}}
-        agent = await self._harness.create_agent(role, child_agent_cfg)
+        agent = await self._harness.create_agent(role)
         child_event_sink = derive_event_sink(
             parent.event_sink,
             parent_turn_id=parent.turn_id,
@@ -168,41 +123,22 @@ class AgentHarness:
     def __init__(
         self,
         *,
-        mail_route: dict[str, Any] | None = None,
-        chat_store: dict[str, Any] | None = None,
-        consolidator: dict[str, Any] | None = None,
-        providers: dict[str, dict[str, Any]] | None = None,
-        interceptors: list[str | dict[str, Any]] | None = None,
-        tools: dict[str, dict[str, Any]] | None = None,
-        subagent_defaults: dict[str, Any] | None = None,
-        subagents: list[dict[str, Any]] | None = None,
         bos_dir: str | Path = ".bos",
         workspace: str | Path = ".",
-        enabled_plugins: list[str] | None = None,
-        platform_plugins: dict[str, dict[str, Any]] | None = None,
+        harness_config: dict[str, Any] | None = None,
     ) -> None:
         self._bos_root = Path(bos_dir).expanduser().resolve()
         self._workspace = Path(workspace).expanduser().resolve()
         self.workspace = self._workspace
-        self._subagent_defaults = subagent_defaults or {}
-        self._subagents_cfg = {cfg["name"]: cfg for cfg in subagents} if subagents else {}
-
-        self._mail_route_cfg = mail_route
-        self._chat_store_cfg = chat_store
-        self._consolidator_cfg = consolidator
-        # providers_cfg removed — LLMClient reads from EP defaults
-        self._interceptors_cfg = interceptors
-        self._tools_cfg = tools or {}
-        self._enabled_plugins = enabled_plugins or []
-        self._platform_plugins = platform_plugins or {}
+        self._harness_cfg = harness_config or {}
 
         self._owned: list[Any] = []
         self._token: contextvars.Token | None = None
-        self.mail_route = None
-        self.chat_store = None
-        self.consolidator = None
-        self.interceptor = None
-        self.llm = None
+        self.mail_route: MailRoute | None = None
+        self.chat_store: ChatStore | None = None
+        self.consolidator: Consolidator | None = None
+        self.interceptor: ChainInterceptor | None = None
+        self.llm: LLMClient | None = None
 
         # Plugin state
         self._harness_plugins: dict[str, HarnessPlugin] = {}
@@ -218,11 +154,17 @@ class AgentHarness:
                 "the current harness instead of re-entering."
             )
 
-        self.mail_route = self._create_and_own("ep_mail_route", MailRoute, self._mail_route_cfg)
-        self.chat_store = self._create_and_own("ep_chat_store", ChatStore, self._chat_store_cfg)
+        cfg = self._harness_cfg
+
+        mail_route_impl = cfg.get("mail_route", "_default")
+        self.mail_route = self._create_and_own("ep_mail_route", MailRoute, None, impl=mail_route_impl)
+
+        chat_store_impl = cfg.get("chat_store", "_default")
+        self.chat_store = self._create_and_own("ep_chat_store", ChatStore, None, impl=chat_store_impl)
+
         self.llm = LLMClient()
         self.consolidator = self._create_consolidator()
-        self.interceptor = ChainInterceptor(self._interceptors_cfg)
+        self.interceptor = ChainInterceptor(cfg.get("interceptors", []))
 
         # Build plugin services
         self._plugin_services = PluginServices(
@@ -292,22 +234,36 @@ class AgentHarness:
         self,
         agent_cfg: dict[str, Any],
     ) -> list[AgentPlugin]:
-        """Resolve, validate, and bind enabled plugins for an agent."""
+        """Resolve, validate, and bind enabled plugins for an agent.
 
-        # Resolve merged configs for all known plugins
-        merged_configs = _resolve_plugin_configs(
-            self._platform_plugins,
-            agent_cfg.get("plugins", {}),
-        )
+        Uses the BEP6 flat-list plugin model: plugins.enabled / plugins.disabled
+        from the agent config, with plugin-bindings.<Name> for per-plugin settings.
+        """
+        plugins_cfg = agent_cfg.get("plugins", {})
+        if isinstance(plugins_cfg, (list, tuple)):
+            # Legacy list — treat as enabled
+            enabled_names = list(plugins_cfg)
+            disabled: list[str] = []
+        elif isinstance(plugins_cfg, dict):
+            enabled = plugins_cfg.get("enabled", [])
+            disabled = plugins_cfg.get("disabled", [])
+            if isinstance(enabled, (list, tuple)):
+                enabled_names = list(enabled)
+            else:
+                enabled_names = list(ep_plugin._extensions.keys())
+            if isinstance(disabled, (list, tuple)):
+                disabled = list(disabled)
+        else:
+            return []
 
-        # Determine enabled plugin names in order
-        enabled_names = _resolve_enabled_plugin_names(
-            self._enabled_plugins,
-            agent_cfg.get("plugins", {}),
-        )
+        bindings = agent_cfg.get("plugin-bindings", {})
+        if hasattr(bindings, "model_dump"):
+            bindings = bindings.model_dump()
 
         bound: list[AgentPlugin] = []
         for pname in enabled_names:
+            if pname in disabled:
+                continue
             hp = self._harness_plugins.get(pname)
             if hp is None and ep_plugin.has(pname):
                 hp = await self._instantiate_and_setup_plugin(pname)
@@ -317,7 +273,8 @@ class AgentHarness:
                 logger.warning("Unknown plugin %r; skipping.", pname)
                 continue
 
-            cfg = dict(hp.default_config()) | merged_configs.get(pname, {})
+            plugin_binding = bindings.get(pname, {})
+            cfg = dict(hp.default_config()) | (plugin_binding if isinstance(plugin_binding, dict) else {})
             hp.validate_config(cfg)
             try:
                 agent_plugin = hp.bind(cfg)
@@ -342,27 +299,30 @@ class AgentHarness:
             await instance.setup(self._plugin_services)
         return instance
 
-    def _create_and_own(self, ep_name: str, protocol: type, cfg: Any) -> Any:
+    def _create_and_own(self, ep_name: str, protocol: type, cfg: Any, *, impl: str | None = None) -> Any:
         from . import __dict__ as core_exports
 
-        config = (cfg or {}) | {"bos_dir": str(self._bos_root), "workspace_dir": str(self._workspace)}
-        instance = _create_extension_instance(core_exports[ep_name], protocol, config)
+        ep = core_exports[ep_name]
+        if impl is not None and cfg is None:
+            # Use EP invoke with defaults (already merged during bootstrap)
+            instance = ep.invoke(impl)
+        elif impl is not None:
+            instance = ep.invoke(impl, cfg)
+        else:
+            config = (cfg or {}) | {"bos_dir": str(self._bos_root), "workspace_dir": str(self._workspace)}
+            instance = _create_extension_instance(ep, protocol, config)
         if instance is not None:
             self._owned.append(instance)
         return instance
 
     def _create_consolidator(self) -> Consolidator:
-        if isinstance(self._consolidator_cfg, Consolidator):
-            self._owned.append(self._consolidator_cfg)
-            return self._consolidator_cfg
-
-        cfg = (self._consolidator_cfg or {}).copy()
-        cfg["model"] = cfg.get("model") or os.getenv("BOS_CONSOLIDATOR_MODEL")
-        cfg["llm"] = self.llm
-        return self._create_and_own("ep_consolidator", Consolidator, cfg)
-
-    def _get_subagent_config(self, role: str) -> dict[str, Any]:
-        return self._subagent_defaults | (self._subagents_cfg.get(role) or {})
+        consolidator_impl = self._harness_cfg.get("consolidator", "_default")
+        cfg = {"model": os.getenv("BOS_CONSOLIDATOR_MODEL"), "llm": self.llm}
+        from . import __dict__ as core_exports
+        instance = core_exports["ep_consolidator"].invoke(consolidator_impl, cfg)
+        if instance is not None:
+            self._owned.append(instance)
+        return instance
 
     def _get_compaction_lock(self, chat_id: str) -> asyncio.Lock:
         if chat_id not in self._compaction_locks:
