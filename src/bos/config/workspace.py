@@ -434,19 +434,20 @@ class Workspace:
         return cls(workspace, bos_dir, config, config_file=config_path)
 
     def resolve_agents(self) -> None:
-        """Load external agent files from agent_dirs and deep-merge into config.agents.
+        """Load external agent files from agent_dirs into config.agents.
 
         Scans each directory in ``platform.agent_dirs`` for ``.toml`` and ``.md``
-        files, validates each via :func:`validate_agent_config`, and deep-merges
-        them into ``self.config.agents`` with last-wins semantics.
+        files, validates each via :func:`validate_agent_config`, and stores them
+        into ``self.config.agents``. External files with the same name as an
+        inline agent replace it entirely (no merge).
         """
-        platform = self.config.platform
-        if platform is None or not platform.agent_dirs:
+        agent_dirs = self.config.platform.agent_dirs if self.config.platform else ["./agents"]
+        if not agent_dirs:
             return
 
         candidates: list[_LoadedAgentCandidate] = []
         load_order = 0
-        for raw_dir in platform.agent_dirs:
+        for raw_dir in agent_dirs:
             agents_root = (self.bos_dir / Path(raw_dir.strip()).expanduser()).resolve()
             if not agents_root.exists() or not agents_root.is_dir():
                 continue
@@ -487,28 +488,32 @@ class Workspace:
         platform = self.config.platform
         bos_root = self.bos_dir
 
+        # Use PlatformConfig defaults when no [platform] section is present
+        envs = platform.envs if platform else {}
+        envfile = platform.envfile if platform else None
+        extensions = platform.extensions if platform else ["bos.exts", "./extensions"]
+
         # 1. Environment loading
-        if platform:
-            if platform.envs:
-                os.environ.update({k: str(v) for k, v in platform.envs.items()})
-            if platform.envfile:
-                from dotenv import load_dotenv
+        if envs:
+            os.environ.update({k: str(v) for k, v in envs.items()})
+        if envfile:
+            from dotenv import load_dotenv
 
-                load_dotenv((bos_root / Path(platform.envfile).expanduser()).resolve(), override=True)
+            load_dotenv((bos_root / Path(envfile).expanduser()).resolve(), override=True)
 
-            # 2. Extension loading
-            if platform.extensions:
-                modules, paths = [], []
-                for ext in platform.extensions:
-                    p = bos_root / Path(ext).expanduser()
-                    if p.exists():
-                        paths.append(p)
-                    else:
-                        modules.append(ext)
-                if modules:
-                    _load_ext_modules(modules=modules)
-                if paths:
-                    _load_ext_paths(paths=paths)
+        # 2. Extension loading
+        if extensions:
+            modules, paths = [], []
+            for ext in extensions:
+                p = bos_root / Path(ext).expanduser()
+                if p.exists():
+                    paths.append(p)
+                else:
+                    modules.append(ext)
+            if modules:
+                _load_ext_modules(modules=modules)
+            if paths:
+                _load_ext_paths(paths=paths)
 
         # 3. Merge EP defaults from [exts]
         import bos.core as _core
