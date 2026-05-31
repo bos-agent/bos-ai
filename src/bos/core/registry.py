@@ -6,7 +6,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from ._utils import _apply, _apply_async, _compact
+from ._utils import _apply, _apply_async, _compact, _deep_merge
 
 logger = logging.getLogger("bos")
 
@@ -49,6 +49,22 @@ class ExtensionPoint:
 
     async def invoke_async(self, name: str, kwargs: dict[str, Any] | None = None) -> Any:
         return await _apply_async(self.get(name).fn, _compact(self.get(name).defaults, kwargs or {}))
+
+    def update_defaults(self, name: str, defaults: dict[str, Any]) -> None:
+        """Merge *defaults* into the registered defaults for extension *name*.
+
+        If *name* is not registered yet, the call is a no-op (the EP may be
+        registered later during extension loading).
+        """
+        ext = self._extensions.get(name)
+        if ext is None or not defaults:
+            return
+        try:
+            origin = _deep_merge({}, ext.defaults)
+            _deep_merge(origin, defaults)
+            ext.defaults = origin
+        except Exception:
+            logger.warning(f"Failed to update defaults for extension {name}", exc_info=True)
 
     def __call__(
         self,

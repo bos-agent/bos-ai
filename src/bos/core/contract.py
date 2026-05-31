@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -15,6 +15,7 @@ from .registry import ExtensionPoint, ToolRegistry
 ToolNoiseFilter = Literal["keep_signatures", "strip_all", "keep_all"]
 TokenEstimateSource = Literal["litellm", "fallback", "fallback-error"]
 ToolResultStatus = Literal["success", "error", "unknown"]
+ReasoningEffort = Literal["low", "medium", "high"]
 
 
 @runtime_checkable
@@ -55,6 +56,7 @@ ep_provider = ExtensionPoint(
             ...
     """
 )
+
 
 @dataclass
 class Message:
@@ -109,9 +111,7 @@ ep_chat_store = ExtensionPoint(
 @runtime_checkable
 class ChatStore(Protocol):
     # ── Turn persistence ──
-    async def save_turn(
-        self, chat_id: str, messages: Iterable[Message], *, turn_id: str | None = None
-    ) -> None: ...
+    async def save_turn(self, chat_id: str, messages: Iterable[Message], *, turn_id: str | None = None) -> None: ...
 
     # ── Context assembly: pure read, no consolidation ──
     async def get_context(
@@ -188,21 +188,6 @@ class TurnInterceptor(Protocol):
     ) -> None: ...
 
 
-ep_agent = ExtensionPoint(description="Agent. A factory that creates agents implementing the Agent protocol.")
-
-
-class Agent(Protocol):
-    async def ask(
-        self,
-        chat_id: str,
-        message: MessageContent,
-        interrupt: Callable[[], dict[str, Any] | Awaitable[dict[str, Any]]] | None = None,
-        ctx_metadata: dict[str, Any] | None = None,
-        llm_args: dict[str, Any] | None = None,
-        event_sink: EventSink | None = None,
-    ) -> str: ...
-
-
 @runtime_checkable
 class EventSink(Protocol):
     async def emit(self, event: TurnEvent) -> None: ...
@@ -266,9 +251,7 @@ ep_actor_command = ExtensionPoint(
 
 # ── BEP 4: Plugin Architecture ─────────────────────────────────────────────
 
-ep_plugin = ExtensionPoint(
-    description="Harness plugin. A class or factory implementing HarnessPlugin."
-)
+ep_plugin = ExtensionPoint(description="Harness plugin. A class or factory implementing HarnessPlugin.")
 
 
 @dataclass(frozen=True)
@@ -289,6 +272,7 @@ class SubagentRuntime(Protocol):
         message: str,
         *,
         parent: ToolContext,
+        agent_cfg: dict[str, Any] | None = None,
     ) -> str:
         """Delegate to a configured subagent and return its response."""
         ...

@@ -33,8 +33,9 @@ async def start(workspace: Workspace) -> None:
     """
     from bos.core import AgentActor, Channel, _create_extension_instance, ep_channel
 
-    agent_kind = workspace.get_main_agent_kind()
-    actor_address = workspace.get_main_agent_address()
+    runtime = workspace.config.runtime
+    agent_kind = runtime.agent if runtime else "_default"
+    actor_address = "agent@main"
     channels_cfg = workspace.resolve_channels(runtime_kind=os.environ.get("BOS_RUNTIME", "process"))
 
     logger.info("Starting harness for agent=%r with %d channel(s)", agent_kind, len(channels_cfg))

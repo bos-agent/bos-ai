@@ -10,8 +10,14 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal
 
-from bos.core import AgentHarness, _apply
-from bos.core._utils import _get_bos_home, _resolve_path
+from bos.config.schema import (
+    AgentConfig,
+    RootConfig,
+    validate_agent_config,
+    validate_config,
+)
+from bos.core import AgentHarness
+from bos.core._utils import _deep_merge, _get_bos_home, _resolve_path
 
 
 class WorkspaceResolutionError(RuntimeError):
@@ -20,6 +26,10 @@ class WorkspaceResolutionError(RuntimeError):
 
 class ConfigNotFoundError(WorkspaceResolutionError):
     """Raised when no BOS config file is found in the workspace tree."""
+
+
+class ConfigValidationError(WorkspaceResolutionError):
+    """Raised when the BOS config file fails Pydantic validation."""
 
 
 @dataclass(frozen=True)
@@ -40,11 +50,6 @@ class _LoadedAgentCandidate:
 
 
 _EXTERNAL_AGENT_SUFFIXES = {".toml", ".md"}
-_FRONTMATTER_ALIAS_KEYS = {
-    # Keep this compatibility typo narrow: misspelling it otherwise creates an
-    # unusable ReActAgent default that fails only at agent construction time.
-    "exlude_tools": "exclude_tools",
-}
 
 
 def _find_discovered_config(workspace: Path) -> Path | None:
@@ -91,9 +96,7 @@ def _resolve_config(workspace: Path) -> Path:
     if env_bos_config:
         return env_bos_config
 
-    raise ConfigNotFoundError(
-        "No BOS workspace found. Run `boscli init`, `cd` into a workspace, or set `BOS_CONFIG`."
-    )
+    raise ConfigNotFoundError("No BOS workspace found. Run `boscli init`, `cd` into a workspace, or set `BOS_CONFIG`.")
 
 
 def _config_template_path() -> Path:
@@ -116,26 +119,29 @@ def presets_dir() -> Path:
     return Path(__file__).resolve().parent / "presets"
 
 
-def resolve_config_source(config_arg: str) -> tuple[Path, Path, dict[str, Any]]:
+def resolve_config_source(config_arg: str) -> tuple[Path, Path, RootConfig]:
     """Resolve a ``-c`` / ``--config`` argument to ``(config_path, bos_dir, config)``.
 
     * If *config_arg* is an existing file path → ``bos_dir`` is the file's parent.
     * If *config_arg* matches a built-in preset name → ``bos_dir`` is
       ``~/.bos/agents/<preset>`` (created if necessary).
 
-    Raises :class:`WorkspaceResolutionError` if neither matches.
+    Returns validated :class:`RootConfig`. Raises :class:`WorkspaceResolutionError`
+    if the source cannot be resolved.
     """
     config_path = Path(config_arg)
     if config_path.is_file():
         resolved = config_path.resolve()
-        return resolved, resolved.parent, _load_config(resolved)
+        raw = _load_config(resolved)
+        return resolved, resolved.parent, validate_config(raw)
 
     presets = presets_dir()
     preset = presets / f"{config_arg}.toml"
     if preset.exists():
         bos_dir = _get_bos_home() / "agents" / config_arg
         bos_dir.mkdir(parents=True, exist_ok=True)
-        return preset, bos_dir, _load_config(preset)
+        raw = _load_config(preset)
+        return preset, bos_dir, validate_config(raw)
 
     available = sorted(p.stem for p in presets.glob("*.toml")) if presets.exists() else []
     presets_msg = f"Available presets: {', '.join(available)}" if available else "No presets available"
@@ -240,11 +246,6 @@ def _parse_simple_yaml_mapping(frontmatter: str) -> dict[str, Any]:
             block_lines, next_idx = _collect_indented_block(lines, idx + 1)
             result[key] = _parse_frontmatter_block(block_lines)
             idx = next_idx
-
-    for alias, canonical in _FRONTMATTER_ALIAS_KEYS.items():
-        if alias in result:
-            alias_value = result.pop(alias)
-            result.setdefault(canonical, alias_value)
 
     return result
 
@@ -392,20 +393,26 @@ class Workspace:
         self,
         workspace: str | Path,
         bos_dir: str | Path,
-        config: dict[str, Any],
+        config: dict[str, Any] | RootConfig,
         *,
         config_file: str | Path | None = None,
     ):
-        if not isinstance(config, dict):
-            raise TypeError(f"config must be a dict, got {type(config).__name__}")
+        if isinstance(config, RootConfig):
+            self.config: RootConfig = config
+        elif isinstance(config, dict):
+            try:
+                self.config: RootConfig = validate_config(config)
+            except Exception as exc:
+                raise ConfigValidationError(str(exc)) from exc
+        else:
+            raise TypeError(f"config must be a dict or RootConfig, got {type(config).__name__}")
         self.workspace = _resolve_path(workspace)
         self.bos_dir = _resolve_path(bos_dir)
-        self.config: dict[str, Any] = config
         self.config_file: Path | None = _resolve_path(config_file) if config_file else None
         self.agent_source_history: dict[str, list[AgentSourceRecord]] = {}
 
     @classmethod
-    def from_discovery(cls, cwd: str | Path = ".") -> "Workspace":
+    def from_discovery(cls, cwd: str | Path = ".") -> Workspace:
         """Discover workspace layout by walking ancestor directories.
 
         This is the legacy convenience constructor. Prefer explicit construction
@@ -426,110 +433,153 @@ class Workspace:
 
         return cls(workspace, bos_dir, config, config_file=config_path)
 
-    def bootstrap_platform(self):
-        from bos.core import _apply, bootstrap_platform
+    def resolve_agents(self) -> None:
+        """Load external agent files from agent_dirs into config.agents.
 
-        platform_cfg = self.resolve_platform_config() | {"bos_dir": self.bos_dir}
-        _apply(bootstrap_platform, platform_cfg)
-
-    def resolve_platform_config(self) -> dict[str, Any]:
-        raw_platform_cfg = self.config.get("platform", {})
-        if not isinstance(raw_platform_cfg, dict):
-            raise ValueError("[platform] must be a table.")
-
-        resolved_platform_cfg = copy.deepcopy({k: v for k, v in raw_platform_cfg.items() if k != "agent_dirs"})
-
-        if resolved_platform_cfg.get("extensions") is None:
-            resolved_platform_cfg["extensions"] = ["bos.exts", "./extensions"]
-
-        try:
-            resolved_agents, source_history = self._resolve_platform_agents(raw_platform_cfg)
-        except Exception:
-            self.agent_source_history = {}
-            raise
-        self.agent_source_history = source_history
-
-        if "agents" in raw_platform_cfg or raw_platform_cfg.get("agent_dirs") is not None or resolved_agents:
-            resolved_platform_cfg["agents"] = resolved_agents
-
-        return resolved_platform_cfg
-
-    def _resolve_platform_plugins(self) -> dict[str, dict[str, Any]]:
-        """Return {plugin_name: config_dict} from platform.plugins.*."""
-        raw = self.config.get("platform", {}).get("plugins", {})
-        if not isinstance(raw, dict):
-            return {}
-        return {k: dict(v) if isinstance(v, dict) else {} for k, v in raw.items()}
-
-    def resolve_enabled_plugins(
-        self, agent_spec: dict[str, Any]
-    ) -> list[str]:
-        """Determine ordered list of enabled plugins for an agent.
-
-        Order:
-        1. globally enabled plugins in platform.enabled_plugins list order
-        2. agent-only enabled plugins in agent config declaration order
-
-        Agent can disable a globally enabled plugin with enabled = false.
-        Agent can enable a non-global plugin with enabled = true.
+        Scans each directory in ``platform.agent_dirs`` for ``.toml`` and ``.md``
+        files, validates each via :func:`validate_agent_config`, and stores them
+        into ``self.config.agents``. External files with the same name as an
+        inline agent replace it entirely (no merge).
         """
-        raw_platform = self.config.get("platform", {})
-        global_enabled: list[str] = raw_platform.get("enabled_plugins", [])
-        if not isinstance(global_enabled, list):
-            global_enabled = []
+        agent_dirs = self.config.platform.agent_dirs if self.config.platform else ["./agents"]
+        if not agent_dirs:
+            return
 
-        agent_plugins = agent_spec.get("plugins", {})
-        if not isinstance(agent_plugins, dict):
-            agent_plugins = {}
+        candidates: list[_LoadedAgentCandidate] = []
+        load_order = 0
+        for raw_dir in agent_dirs:
+            agents_root = (self.bos_dir / Path(raw_dir.strip()).expanduser()).resolve()
+            if not agents_root.exists() or not agents_root.is_dir():
+                continue
+            dir_candidates: list[Path] = []
+            for entry in agents_root.iterdir():
+                if entry.is_file() and entry.suffix.lower() in _EXTERNAL_AGENT_SUFFIXES:
+                    dir_candidates.append(entry)
+            for candidate_path in sorted(dir_candidates, key=lambda p: p.name):
+                load_order += 1
+                candidates.append(self._load_external_agent_candidate(candidate_path, load_order=load_order))
 
-        resolved: list[str] = []
-        for name in global_enabled:
-            agent_cfg = agent_plugins.get(name, {})
-            disabled = isinstance(agent_cfg, dict) and agent_cfg.get("enabled") is False
-            if not disabled:
-                resolved.append(name)
+        if not candidates:
+            return
 
-        for name in agent_plugins:
-            if name not in resolved:
-                cfg = agent_plugins[name]
-                if isinstance(cfg, dict) and cfg.get("enabled") is True:
-                    resolved.append(name)
+        # External agent files replace inline agents with the same name.
+        agents = self.config.agents or {}
+        for candidate in candidates:
+            name = candidate.spec["name"]
+            validated = validate_agent_config(candidate.spec)
+            agents[name] = AgentConfig.model_validate(validated)
+        self.config.agents = agents
 
-        return resolved
+    def bootstrap_platform(self):
+        """Bootstrap the platform from this Workspace.
+
+        1. Load environment variables ([platform.envs] then [platform.envfile])
+        2. Load extensions ([platform.extensions])
+        3. Merge EP defaults from [exts] into registered EP implementations
+        4. Register agents into AgentRegistry
+        """
+        from bos.config.default_agent_spec import default_agent_spec
+        from bos.core import (
+            AgentRegistry,
+            _load_ext_modules,
+            _load_ext_paths,
+        )
+
+        platform = self.config.platform
+        bos_root = self.bos_dir
+
+        # Use PlatformConfig defaults when no [platform] section is present
+        envs = platform.envs if platform else {}
+        envfile = platform.envfile if platform else None
+        extensions = platform.extensions if platform else ["bos.exts", "./extensions"]
+
+        # 1. Environment loading
+        if envs:
+            os.environ.update({k: str(v) for k, v in envs.items()})
+        if envfile:
+            from dotenv import load_dotenv
+
+            load_dotenv((bos_root / Path(envfile).expanduser()).resolve(), override=True)
+
+        # 2. Extension loading
+        if extensions:
+            modules, paths = [], []
+            for ext in extensions:
+                p = bos_root / Path(ext).expanduser()
+                if p.exists():
+                    paths.append(p)
+                else:
+                    modules.append(ext)
+            if modules:
+                _load_ext_modules(modules=modules)
+            if paths:
+                _load_ext_paths(paths=paths)
+
+        # 3. Merge EP defaults from [exts]
+        import bos.core as _core
+
+        if self.config.exts:
+            exts_data = self.config.exts.model_dump()
+            for ep_key, impl_configs in exts_data.items():
+                if not ep_key.startswith("ep_") or not isinstance(impl_configs, dict):
+                    continue
+                ep = getattr(_core, ep_key, None)
+                if ep is None:
+                    continue
+                for impl_name, cfg in impl_configs.items():
+                    if isinstance(cfg, dict):
+                        ep.update_defaults(impl_name, cfg)
+
+        # 4. Agent registration
+        agent_defaults: dict[str, Any] = {}
+        if self.config.agent and self.config.agent.defaults:
+            agent_defaults = self.config.agent.defaults.model_dump(exclude_defaults=True)
+
+        for name, agent_config in (self.config.agents or {}).items():
+            cfg = agent_config.model_dump(exclude_defaults=True)
+            merged = _deep_merge(dict(agent_defaults), cfg)
+            merged.pop("name", None)  # name is the registration key, not a kwarg
+            AgentRegistry.register(name, **merged)
+
+        if not AgentRegistry.has_registered("_default"):
+            merged = _deep_merge(dict(agent_defaults), dict(default_agent_spec))
+            merged.pop("name", None)
+            AgentRegistry.register("_default", **merged)
+
+        # Suppress litellm auto-loading
+        os.environ["LITELLM_MODE"] = "extension"
+        logging.getLogger("LiteLLM").setLevel(logging.ERROR)
 
     def harness(self) -> AgentHarness:
-        platform_cfg = self.config.get("platform", {})
-        harness_cfg = (
-            self.config.get("harness", {})
-            | {
-                "bos_dir": self.bos_dir,
-                "workspace": self.workspace,
-                "enabled_plugins": platform_cfg.get("enabled_plugins", []),
-                "platform_plugins": platform_cfg.get("plugins", {}),
-            }
+        kwargs: dict[str, Any] = {}
+        if self.config.harness:
+            kwargs = self.config.harness.model_dump()
+        return AgentHarness(
+            bos_dir=self.bos_dir,
+            workspace=self.workspace,
+            consolidator=kwargs.get("consolidator", "_default"),
+            chat_store=kwargs.get("chat_store", "_default"),
+            mail_route=kwargs.get("mail_route", "_default"),
+            interceptors=kwargs.get("interceptors", []),
         )
-        return _apply(AgentHarness, harness_cfg)
-
-    def enable_interceptors(self, interceptors: list[str | dict[str, Any]]):
-        interceptors_cfg = self.config.setdefault("harness", {}).setdefault("interceptors", [])
-        interceptors_cfg.extend(i for i in interceptors if i not in interceptors_cfg)
-
-    def get_setting(self, key: str):
-        settings, segments = self.config, key.split(".")
-        for seg in segments[:-1]:
-            settings = settings.get(seg, {})
-        return settings.get(segments[-1])
 
     def get_main_agent_kind(self) -> str:
-        return self.get_setting("main.agent") or "_default"
+        runtime = self.config.runtime
+        return runtime.agent if runtime else "_default"
 
     def get_main_agent_address(self) -> str:
         return "agent@main"
 
     def get_runtime_config(self, *, force_kind: str | None = None) -> AgentRuntimeConfig:
-        runtime_cfg = self.config.get("main", {}).get("runtime", {})
-        workspace_dir = runtime_cfg.get("workspace_dir") or "/workspace"
-        bos_dir = runtime_cfg.get("bos_dir")
+        runtime = self.config.runtime
+        # Docker settings pass through via runtime.extra="allow"
+        runtime_extra: dict[str, Any] = {}
+        if runtime:
+            extra = runtime.model_dump()
+            runtime_extra = {k: v for k, v in extra.items() if k not in {"agent", "location", "channels", "actors"}}
+
+        workspace_dir = runtime_extra.get("workspace_dir") or "/workspace"
+        bos_dir = runtime_extra.get("bos_dir")
         if not bos_dir:
             try:
                 bos_rel = self.bos_dir.relative_to(self.workspace)
@@ -537,29 +587,33 @@ class Workspace:
             except ValueError:
                 bos_dir = "/bos"
 
+        location = runtime.location if runtime else "process"
         return AgentRuntimeConfig(
-            kind=force_kind or runtime_cfg.get("kind") or "process",
-            image=runtime_cfg.get("image"),
-            container_name=runtime_cfg.get("container_name"),
+            kind=force_kind or location,
+            image=runtime_extra.get("image"),
+            container_name=runtime_extra.get("container_name"),
             workspace_dir=str(Path(workspace_dir).as_posix()),
             bos_dir=str(Path(bos_dir).as_posix()),
         )
 
     def resolve_platform_envfile(self) -> Path | None:
-        envfile = self.config.get("platform", {}).get("envfile")
-        if not envfile:
+        platform = self.config.platform
+        if platform is None or not platform.envfile:
             return None
-        return (self.bos_dir / Path(envfile).expanduser()).resolve()
+        return (self.bos_dir / Path(platform.envfile).expanduser()).resolve()
 
     def resolve_channels(self, *, runtime_kind: str = "process") -> list[ResolvedChannelConfig]:
         actor_address = self.get_main_agent_address()
-        raw_channels = self.config.get("main", {}).get("channels") or [
-            {
-                "name": "HttpChannel",
-                "bind_address": "channel@http",
-                "target_address": actor_address,
-            }
-        ]
+        runtime = self.config.runtime
+        raw_channels = runtime.channels if runtime else []
+        if not raw_channels:
+            raw_channels = [
+                {
+                    "name": "HttpChannel",
+                    "bind_address": "channel@http",
+                    "target_address": actor_address,
+                }
+            ]
         channels: list[ResolvedChannelConfig] = []
         seen_bind_addresses: set[str] = set()
 

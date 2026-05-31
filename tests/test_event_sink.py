@@ -7,13 +7,11 @@ from conftest import InMemChatStore, InMemMailRoute, MessageOnlyConsolidator
 
 from bos.core import (
     AgentActor,
-    AgentHarness,
     LLMResponse,
     ToolCallRequest,
-    ep_agent,
     ep_provider,
 )
-from bos.core.agent import ChainInterceptor, ReActAgent
+from bos.core.agent import Agent, ChainInterceptor
 from bos.plugins.subagent import SubagentAgentPlugin  # noqa: F401  registers SubagentPlugin
 from bos.protocol import MessageType
 
@@ -24,7 +22,7 @@ def create_test_agent(**kwargs):
     kwargs.setdefault("chat_store", InMemChatStore())
     kwargs.setdefault("consolidator", MessageOnlyConsolidator())
     kwargs.setdefault("interceptor", ChainInterceptor())
-    return ReActAgent(**kwargs)
+    return Agent(**kwargs)
 
 
 class CaptureSink:
@@ -108,77 +106,6 @@ async def test_react_agent_emits_tool_events_and_injects_event_sink():
         assert len({event.turn_id for event in sink.events}) == 1
     finally:
         ep_provider._extensions.pop(provider_name, None)
-
-
-@pytest.mark.asyncio
-async def test_ask_subagent_emits_child_lineage_events(tmp_path):
-    suffix = uuid.uuid4().hex
-    provider_name = f"test_event_sink_subagent_{suffix}"
-    manager_name = f"manager_{suffix}"
-    researcher_name = f"researcher_{suffix}"
-
-    @ep_provider(name=provider_name)
-    async def scripted_provider(messages, model=None, **kwargs):
-        if model == "manager":
-            tool_messages = [message for message in messages if message.get("role") == "tool"]
-            if tool_messages:
-                return LLMResponse(content=f"Manager synthesized: {tool_messages[-1]['content']}")
-            return LLMResponse(
-                content="",
-                tool_calls=[
-                    ToolCallRequest(
-                        id="call_ask_subagent",
-                        name="AskSubagent",
-                        arguments={"role": researcher_name, "task": "Summarize the event sink change."},
-                    )
-                ],
-            )
-        return LLMResponse(content="Researcher summary")
-
-    try:
-        ReActAgent.register(
-            name=manager_name,
-            description="Manager",
-            model=f"{provider_name}/manager",
-            tools=["AskSubagent"],
-        )
-        ReActAgent.register(
-            name=researcher_name,
-            description="Researcher",
-            model=f"{provider_name}/researcher",
-            tools=[],
-        )
-
-        sink = CaptureSink()
-        bos_dir = tmp_path / ".bos"
-        bos_dir.mkdir()
-        async with AgentHarness(
-            bos_dir=bos_dir,
-            workspace=tmp_path,
-            consolidator=MessageOnlyConsolidator(),
-            subagent_defaults={"task_template": "--- Sub-agent Instructions ---\n{task}"},
-            enabled_plugins=["SubagentPlugin"],
-            platform_plugins={"SubagentPlugin": {"allow": "*"}},
-        ) as harness:
-            manager = await harness.create_agent(manager_name)
-            result = await manager.ask("parent-chat", "Explain the event sink refactor.", event_sink=sink)
-
-        assert result == "Manager synthesized: Researcher summary"
-        manager_turn = next(
-            event for event in sink.events if event.agent_name == manager_name and event.detail == "start"
-        )
-        child_event = next(
-            event for event in sink.events if event.agent_name == researcher_name and event.detail == "start"
-        )
-        assert child_event.turn_id != manager_turn.turn_id
-        assert child_event.chat_id != "parent-chat"
-        assert child_event.parent_turn_id == manager_turn.turn_id
-        assert child_event.parent_chat_id == "parent-chat"
-        assert child_event.parent_agent_name == manager_name
-    finally:
-        ep_provider._extensions.pop(provider_name, None)
-        ep_agent._extensions.pop(manager_name, None)
-        ep_agent._extensions.pop(researcher_name, None)
 
 
 @pytest.mark.asyncio

@@ -15,22 +15,17 @@ _ACTOR_RUNTIME_KEYS = {"agent", "display_name"}
 _FORBIDDEN_ACTOR_KEYS = {"identity", "memory_scope", "role_label", "name"}
 
 
-def _parse_actors_config(config: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    main = config.get("main", {})
-    if not isinstance(main, dict):
-        return {}
-    actors = main.get("actors", {})
-    if not isinstance(actors, dict):
-        return {}
-    parsed: dict[str, dict[str, Any]] = {}
-    for key, value in actors.items():
-        if not isinstance(value, dict):
-            continue
-        actor_name = str(key)
-        cfg = dict(value)
-        _validate_actor_config(actor_name, cfg)
-        parsed[actor_name] = cfg
-    return parsed
+def _parse_actors_config(config) -> dict[str, dict[str, Any]]:
+    """Parse actors from RootConfig.runtime.actors (or dict access)."""
+    if hasattr(config, 'runtime') and config.runtime and config.runtime.actors:
+        actors = config.runtime.actors
+        parsed: dict[str, dict[str, Any]] = {}
+        for key, actor_cfg in actors.items():
+            cfg = actor_cfg.model_dump() if hasattr(actor_cfg, 'model_dump') else dict(actor_cfg)
+            _validate_actor_config(key, cfg)
+            parsed[key] = cfg
+        return parsed
+    return {}
 
 
 def _validate_actor_config(actor_name: str, cfg: dict[str, Any]) -> None:
@@ -38,7 +33,7 @@ def _validate_actor_config(actor_name: str, cfg: dict[str, Any]) -> None:
     if forbidden:
         names = ", ".join(forbidden)
         raise ValueError(
-            f"main.actors.{actor_name} uses forbidden field(s): {names}. "
+            f"runtime.actors.{actor_name} uses forbidden field(s): {names}. "
             "The actor table key is the identity and memory scope; use 'agent' for the reusable agent kind."
         )
 
@@ -59,7 +54,7 @@ async def start_named_actors(workspace: Workspace) -> None:
     if not actors_cfg:
         agent_kind = workspace.get_main_agent_kind()
         actor_address = workspace.get_main_agent_address()
-        logger.info("No [main.actors] configured; starting single actor agent=%r", agent_kind)
+        logger.info("No [runtime.actors] configured; starting single actor agent=%r", agent_kind)
         async with workspace.harness() as harness:
             chat_state = ChatState(workspace.bos_dir)
             agent = await harness.create_agent(agent_kind, agent_cfg={"agent_name": "main"})
@@ -161,11 +156,11 @@ async def _run_actor_and_channels(actor, channels, harness) -> None:
 
 
 async def _build_named_agent(harness, agent_kind: str, actor_name: str, actor_overrides: dict[str, Any]):
-    from bos.core import _deep_merge, ep_agent
+    from bos.core import AgentRegistry, _deep_merge
 
     agent_spec: dict[str, Any] = {"agent_name": actor_name}
-    if ep_agent.has(agent_kind):
-        agent_spec.update(ep_agent.get(agent_kind).defaults)
+    if AgentRegistry.has_registered(agent_kind):
+        agent_spec.update(AgentRegistry.get_defaults(agent_kind))
     _deep_merge(agent_spec, actor_overrides)
 
     return await harness.create_agent(agent_kind, agent_spec)

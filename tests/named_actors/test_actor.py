@@ -154,8 +154,8 @@ async def test_named_actor_accepts_message_after_turn_completes():
 
 
 @pytest.mark.asyncio
-async def test_react_agent_persists_named_actor_message_metadata():
-    from bos.core import ReActAgent
+async def test_agent_persists_named_actor_message_metadata():
+    from bos.core import Agent
 
     class Store:
         def __init__(self):
@@ -203,7 +203,7 @@ async def test_react_agent_persists_named_actor_message_metadata():
             return LLMResponse(content="answer", finish_reason="stop")
 
     store = Store()
-    agent = ReActAgent(
+    agent = Agent(
         kind="test",
         agent_name="test",
         chat_store=store,

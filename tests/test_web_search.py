@@ -34,8 +34,8 @@ async def test_web_search_defaults_to_duckduckgo(monkeypatch):
 async def test_web_search_uses_tavily_when_prioritized(monkeypatch):
     calls = []
 
-    async def fake_tavily(query: str, *, config: dict, timeout_seconds: int, max_results: int):
-        calls.append((query, config, timeout_seconds, max_results))
+    async def fake_tavily(query: str, *, config, timeout_seconds: int, max_results: int):
+        calls.append((query, dict(config), timeout_seconds, max_results))
         return (
             "Direct answer",
             [
@@ -55,12 +55,10 @@ async def test_web_search_uses_tavily_when_prioritized(monkeypatch):
 
     result = await knowledge.tool_web_search(
         "bos ai",
-        {
-            "priority": ["tavily", "duckduckgo"],
-            "timeout_seconds": 7,
-            "max_results": 3,
-            "providers": {"tavily": {"search_depth": "basic"}},
-        },
+        priority=["tavily", "duckduckgo"],
+        timeout_seconds=7,
+        max_results=3,
+        tavily={"search_depth": "basic"},
     )
 
     assert calls == [("bos ai", {"search_depth": "basic"}, 7, 3)]
@@ -89,7 +87,7 @@ async def test_web_search_falls_back_after_tavily_fallback_error(monkeypatch):
     monkeypatch.setattr(knowledge, "_search_tavily", fake_tavily)
     monkeypatch.setattr(knowledge, "_search_duckduckgo", fake_duckduckgo)
 
-    result = await knowledge.tool_web_search("bos ai", {"priority": ["tavily", "duckduckgo"]})
+    result = await knowledge.tool_web_search("bos ai", priority=["tavily", "duckduckgo"])
 
     assert calls == ["tavily", "duckduckgo"]
     assert "[https://example.test/fallback] Duck fallback" in result
@@ -110,7 +108,7 @@ async def test_web_search_stops_after_non_fallback_tavily_error(monkeypatch):
     monkeypatch.setattr(knowledge, "_search_tavily", fake_tavily)
     monkeypatch.setattr(knowledge, "_search_duckduckgo", fake_duckduckgo)
 
-    result = await knowledge.tool_web_search("bos ai", {"priority": ["tavily", "duckduckgo"]})
+    result = await knowledge.tool_web_search("bos ai", priority=["tavily", "duckduckgo"])
 
     assert calls == ["tavily"]
     assert result == "Error executing WebSearch: tavily: HTTP 401: unauthorized"
@@ -132,7 +130,7 @@ async def test_web_search_skips_unsupported_priority_entries(monkeypatch):
 
     monkeypatch.setattr(knowledge, "_search_duckduckgo", fake_duckduckgo)
 
-    result = await knowledge.tool_web_search("bos ai", {"priority": ["unknown", "duckduckgo"]})
+    result = await knowledge.tool_web_search("bos ai", priority=["unknown", "duckduckgo"])
 
     assert calls == ["duckduckgo"]
     assert "[https://example.test/duck] Duck result" in result

@@ -29,6 +29,18 @@ _READ_FILES: set[Path] = set()
         },
         "required": ["path"],
     },
+    usage="""Read a text file from the workspace.
+
+Use when you know the file path or need a focused line range. Before editing an existing file,
+read the relevant current content so edits match the actual code. For unknown files or symbols,
+search first with GlobSearch or GrepSearch.
+
+Guidelines:
+- Use line_offset and limit for large files or focused inspection.
+- Results include 1-based line numbers; use them when referencing code.
+- Read enough surrounding context to understand the existing pattern.
+- Do not reread immediately after a successful EditFile/WriteFile unless semantic verification requires it.
+""",
 )
 async def tool_read_file(path: str, line_offset: int = 0, limit: int = 500) -> str:
     return await asyncio.to_thread(_sync_tool_read_file, path, line_offset, limit)
@@ -71,6 +83,17 @@ def _sync_tool_read_file(path: str, line_offset: int = 0, limit: int = 500) -> s
         },
         "required": ["path", "content"],
     },
+    usage="""Write full file contents.
+
+Use mainly for new files or deliberate complete rewrites. Prefer EditFile for localized changes
+to existing files. Before overwriting an existing file, inspect its current content with ReadFile.
+
+Guidelines:
+- WriteFile refuses to overwrite an existing file until that file has been read with ReadFile.
+- Avoid creating documentation, plans, or broad new files unless the task requires them.
+- Preserve existing style and formatting when rewriting.
+- After writing meaningful code, verify with an appropriate test, import, or focused inspection.
+""",
 )
 async def tool_write_file(path: str, content: str) -> str:
     return await asyncio.to_thread(_sync_tool_write_file, path, content)
@@ -111,6 +134,17 @@ def _sync_tool_write_file(path: str, content: str) -> str:
         },
         "required": ["path", "old_string", "new_string"],
     },
+    usage="""Edit an existing file by exact text replacement.
+
+Use for precise, localized changes. Choose old_string with enough surrounding context to target
+the intended location. Use replace_all only when every occurrence should change.
+
+Guidelines:
+- Read the relevant file content before editing.
+- Preserve indentation and nearby style.
+- EditFile fails when old_string is ambiguous; include more context or use replace_all deliberately.
+- If the edit fails, search or reread the file and adjust the replacement; do not guess.
+""",
 )
 async def tool_edit_file(
     path: str, old_string: str, new_string: str, line_offset: int = 0, replace_all: bool = False
@@ -177,6 +211,15 @@ def _sync_tool_edit_file(
         },
         "required": ["pattern"],
     },
+    usage="""Find files by glob pattern.
+
+Use for path discovery when you know filename shapes or extensions. Prefer focused patterns over
+broad repository-wide scans.
+
+Examples:
+- Find Python tests: pattern="tests/**/*.py"
+- Find source modules: pattern="src/**/*.py"
+""",
 )
 async def tool_glob_search(pattern: str, cwd: str = ".") -> str:
     return await asyncio.to_thread(_sync_tool_glob_search, pattern, cwd)
@@ -206,6 +249,16 @@ def _sync_tool_glob_search(pattern: str, cwd: str = ".") -> str:
         },
         "required": ["query"],
     },
+    usage="""Search file contents by string or regex.
+
+Use for symbols, call sites, configuration keys, error messages, and behavior discovery. Search
+before assuming names or locations, then use ReadFile on the most relevant hits.
+
+Guidelines:
+- Prefer specific queries over broad terms.
+- Follow imports, tests, and references when a change may cross file boundaries.
+- Treat no matches as evidence to refine the query, not proof that the concept does not exist.
+""",
 )
 async def tool_grep_search(query: str, cwd: str = ".") -> str:
     # Attempt to use 'rg' first, then 'grep'.

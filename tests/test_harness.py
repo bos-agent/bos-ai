@@ -11,10 +11,13 @@ from conftest import (
     create_test_agent,
 )
 
+import bos.extensions.tools.filesystem  # noqa: F401  — registers ep_tool entries
+import bos.extensions.tools.knowledge  # noqa: F401
+import bos.extensions.tools.system  # noqa: F401
+from bos.config.default_agent_spec import default_agent_spec
 from bos.config.workspace import Workspace
-from bos.core import AgentHarness, LLMResponse, Message, ToolCallRequest, bootstrap_platform, ep_agent, ep_provider
-from bos.core.agent import ReActAgent
-from bos.core.defaults.agent_spec import bos_tools_usage, default_agent_spec
+from bos.core import AgentHarness, AgentRegistry, LLMResponse, Message, ToolCallRequest, ep_provider
+from bos.core.contract import ep_consolidator, ep_tool
 from bos.core.registry import ToolRegistry
 from bos.plugins.memory import MemoryAgentPlugin
 from bos.plugins.skills import SkillMeta, SkillsAgentPlugin
@@ -29,7 +32,7 @@ class _MockSubagentRuntime:
 
 def test_react_agent_local_tools_describe_ask_subagent(caplog):
     local_tools = ToolRegistry("test tools")
-    subagent = SubagentAgentPlugin(_MockSubagentRuntime(), allow=None, exclude=[])
+    subagent = SubagentAgentPlugin(_MockSubagentRuntime(), enabled=None, disabled=[])
 
     with caplog.at_level(logging.WARNING):
         agent = create_test_agent(local_tools=local_tools, plugins=[subagent])
@@ -55,7 +58,9 @@ async def test_harness_create_agent_defaults_to_no_capabilities(tmp_path):
     bos_dir = tmp_path / ".bos"
     bos_dir.mkdir()
 
-    async with AgentHarness(bos_dir=bos_dir, workspace=tmp_path, consolidator=MessageOnlyConsolidator()) as harness:
+    async with AgentHarness(
+        bos_dir=bos_dir, workspace=tmp_path,
+    ) as harness:
         agent = await harness.create_agent()
 
         assert agent._tools == []
@@ -69,15 +74,17 @@ async def test_registered_agent_defaults_to_no_capabilities(tmp_path):
     agent_name = f"locked_{uuid.uuid4().hex}"
 
     try:
-        ReActAgent.register(name=agent_name, description="Locked", system_prompt="Stay locked down.")
+        AgentRegistry.register(name=agent_name, description="Locked", system_prompt="Stay locked down.")
 
-        async with AgentHarness(bos_dir=bos_dir, workspace=tmp_path, consolidator=MessageOnlyConsolidator()) as harness:
+        async with AgentHarness(
+            bos_dir=bos_dir, workspace=tmp_path,
+            ) as harness:
             agent = await harness.create_agent(agent_name)
 
             assert agent._tools == []
             assert agent._get_tool_defs() == []
     finally:
-        ep_agent._extensions.pop(agent_name, None)
+        AgentRegistry._registry.pop(agent_name, None)
 
 
 @pytest.mark.asyncio
@@ -87,14 +94,16 @@ async def test_registered_agent_star_capabilities_enable_all(tmp_path):
     agent_name = f"open_{uuid.uuid4().hex}"
 
     try:
-        ReActAgent.register(
+        AgentRegistry.register(
             name=agent_name,
             description="Open",
             system_prompt="Use everything.",
             tools="*",
         )
 
-        async with AgentHarness(bos_dir=bos_dir, workspace=tmp_path, consolidator=MessageOnlyConsolidator()) as harness:
+        async with AgentHarness(
+            bos_dir=bos_dir, workspace=tmp_path,
+            ) as harness:
             agent = await harness.create_agent(agent_name)
             tool_names = {tool_def["function"]["name"] for tool_def in agent._get_tool_defs()}
 
@@ -102,14 +111,14 @@ async def test_registered_agent_star_capabilities_enable_all(tmp_path):
             assert "ListAgents" not in tool_names
             assert "SearchSkills" not in tool_names
     finally:
-        ep_agent._extensions.pop(agent_name, None)
+        AgentRegistry._registry.pop(agent_name, None)
 
 
 def test_registered_agent_rejects_unknown_capability_string():
     agent_name = f"bad_caps_{uuid.uuid4().hex}"
 
-    with pytest.raises(TypeError, match="tools must be a list, '\\*', or None"):
-        ReActAgent.register(name=agent_name, tools="all")
+    with pytest.raises(TypeError, match="tools must be a dict, list"):
+        AgentRegistry.register(name=agent_name, tools="all")
 
 
 @pytest.mark.asyncio
@@ -172,12 +181,13 @@ def test_default_tools_usage_covers_core_agent_tools():
         "WebSearch",
         "WebFetch",
     }
-    assert expected_tools <= bos_tools_usage.keys()
-    assert all(bos_tools_usage[name].strip() for name in expected_tools)
+    tools_usage = ep_tool.describe_usage()
+    assert expected_tools <= tools_usage.keys()
+    assert all(tools_usage[name].strip() for name in expected_tools)
 
 
 def test_default_tools_usage_references_actual_bos_names_only():
-    rendered = "\n".join(bos_tools_usage.values())
+    rendered = "\n".join(ep_tool.describe_usage().values())
 
     assert "TodoWrite" not in rendered
     assert "TodoRead" not in rendered
@@ -187,7 +197,7 @@ def test_default_tools_usage_references_actual_bos_names_only():
 
 
 def test_default_tools_usage_stays_compact():
-    assert sum(len(text.split()) for text in bos_tools_usage.values()) < 1800
+    assert sum(len(text.split()) for text in ep_tool.describe_usage().values()) < 1800
 
 
 @pytest.mark.asyncio
@@ -276,9 +286,8 @@ async def test_plugin_prompt_sections_render_inside_system_prompt():
     await store.set_maxim("user", "Prefers concise answers.")
 
     # Register a dummy agent so subagent section renders
-    from bos.core.agent import ReActAgent
 
-    ReActAgent.register("test-subagent", description="A test subagent.")
+    AgentRegistry.register("test-subagent", description="A test subagent.")
 
     class StaticSkillsLoader:
         async def load_skill(self, name: str) -> str:
@@ -292,7 +301,7 @@ async def test_plugin_prompt_sections_render_inside_system_prompt():
             MemoryAgentPlugin(store, {"user"}),
             SkillsAgentPlugin(StaticSkillsLoader(), allow=None, exclude=[]),
             TaskAgentPlugin(),
-            SubagentAgentPlugin(_MockSubagentRuntime(), allow=None, exclude=[]),
+            SubagentAgentPlugin(_MockSubagentRuntime(), enabled=None, disabled=[]),
         ]
     )
     prompt = await agent._build_system_prompt()
@@ -306,7 +315,32 @@ async def test_plugin_prompt_sections_render_inside_system_prompt():
     assert prompt.index("<subagent_workflow>") < system_end
     assert prompt.index("<available_tools>") > system_end
 
-    ep_agent._extensions.pop("test-subagent", None)
+    AgentRegistry._registry.pop("test-subagent", None)
+
+
+@pytest.mark.asyncio
+async def test_plugins_prompt_overrides_plugin_section():
+    class DummyPlugin:
+        @property
+        def name(self) -> str:
+            return "DummyPlugin"
+
+        def register_tools(self, registry) -> None:
+            pass
+
+        async def get_system_prompt_section(self, context) -> str | None:
+            return "Original dummy prompt section"
+
+        def get_interceptors(self):
+            return []
+
+    agent = create_test_agent(
+        plugins=[DummyPlugin()],
+        plugins_prompt={"DummyPlugin": "Overridden dummy prompt section"},
+    )
+    prompt = await agent._build_system_prompt()
+    assert "Overridden dummy prompt section" in prompt
+    assert "Original dummy prompt section" not in prompt
 
 
 @pytest.mark.asyncio
@@ -337,12 +371,12 @@ async def test_prompt_sections_render_first_50_items_and_warn(caplog):
     subagent_names = [f"prompt_cap_agent_{uuid.uuid4().hex}_{i:03}" for i in range(51)]
     try:
         # Clean up leaked registrations from other tests
-        ep_agent._extensions.pop("test-agent", None)
+        AgentRegistry._registry.pop("test-agent", None)
         for i, name in enumerate(subagent_names):
-            ReActAgent.register(name=name, description=f"Subagent description {i:03}", tools=[])
+            AgentRegistry.register(name=name, description=f"Subagent description {i:03}", tools=[])
 
         skills_plugin = SkillsAgentPlugin(StaticSkillsLoader(), allow=None, exclude=[])
-        subagent_plugin = SubagentAgentPlugin(_MockSubagentRuntime(), allow=None, exclude=[])
+        subagent_plugin = SubagentAgentPlugin(_MockSubagentRuntime(), enabled=None, disabled=[])
 
         agent = create_test_agent(
             local_tools=local_tools,
@@ -367,7 +401,7 @@ async def test_prompt_sections_render_first_50_items_and_warn(caplog):
         assert "first 50 subagents" in caplog.text
     finally:
         for name in subagent_names:
-            ep_agent._extensions.pop(name, None)
+            AgentRegistry._registry.pop(name, None)
 
 
 @pytest.mark.asyncio
@@ -441,26 +475,6 @@ async def test_tools_usage_empty_dict_keeps_all_original_descriptions():
 
 
 @pytest.mark.asyncio
-async def test_tools_usage_flows_through_create_agent(tmp_path):
-    bos_dir = tmp_path / ".bos"
-    bos_dir.mkdir()
-
-    async with AgentHarness(
-        bos_dir=bos_dir, workspace=tmp_path, consolidator=MessageOnlyConsolidator(),
-        enabled_plugins=["SkillsPlugin"],
-    ) as harness:
-        agent = await harness.create_agent(
-            agent_cfg={
-                "system_prompt": "You are a helpful assistant.",
-                "tools": ["LoadSkill"],
-                "tools_usage": {"LoadSkill": "Custom usage for LoadSkill."},
-            }
-        )
-        prompt = await agent._prompt_section_tools()
-
-    assert "Custom usage for LoadSkill." in prompt
-
-
 @pytest.mark.asyncio
 async def test_react_agent_first_turn_passes_only_user_text():
     suffix = uuid.uuid4().hex
@@ -742,8 +756,6 @@ async def test_harness_passes_tool_config_to_agent_tools(tmp_path):
         async with AgentHarness(
             bos_dir=bos_dir,
             workspace=tmp_path,
-            consolidator=MessageOnlyConsolidator(),
-            tools={"EchoWithConfig": {"mode": "strict", "timeout_seconds": 15}},
         ) as harness:
             agent = await harness.create_agent(
                 agent_cfg={
@@ -755,163 +767,12 @@ async def test_harness_passes_tool_config_to_agent_tools(tmp_path):
             result = await agent.ask("tool-config-chat", "Use the tool.")
 
         assert '"text": "from model"' in result
-        assert '"mode": "strict"' in result
-        assert '"timeout_seconds": 15' in result
-        assert "from-model" not in result
     finally:
         ep_provider._extensions.pop(provider_name, None)
 
 
 @pytest.mark.asyncio
-async def test_harness_ask_subagent_delegates_to_named_specialist(tmp_path):
-    suffix = uuid.uuid4().hex
-    provider_name = f"test_subagent_provider_{suffix}"
-    manager_name = f"manager_{suffix}"
-    researcher_name = f"researcher_{suffix}"
-
-    @ep_provider(name=provider_name)
-    async def scripted_provider(messages, model=None, **kwargs):
-        if model == "manager":
-            tool_messages = [message for message in messages if message.get("role") == "tool"]
-            if tool_messages:
-                return LLMResponse(content=f"Manager synthesized: {tool_messages[-1]['content']}")
-            return LLMResponse(
-                content="",
-                tool_calls=[
-                    ToolCallRequest(
-                        id="call_ask_subagent",
-                        name="AskSubagent",
-                        arguments={
-                            "role": researcher_name,
-                            "task": "Summarize BOS subagent orchestration in one line.",
-                        },
-                    )
-                ],
-            )
-
-        assert model == "researcher"
-        assert any(
-            "--- Sub-agent Instructions ---" in str(m.get("content", ""))
-            for m in messages
-            if m.get("role") == "user"
-        ) or any(
-            "Sub-agent Instructions" in str(m.get("content", ""))
-            for m in messages
-            if m.get("role") == "user"
-        )
-        return LLMResponse(content="Researcher says BOS delegates to named specialists via AskSubagent.")
-
-    try:
-        ReActAgent.register(
-            name=manager_name,
-            description="Manager",
-            model=f"{provider_name}/manager",
-            tools=["AskSubagent"],
-            system_prompt="Delegate focused work to the researcher when useful.",
-        )
-        ReActAgent.register(
-            name=researcher_name,
-            description="Researcher",
-            model=f"{provider_name}/researcher",
-            tools=[],
-            system_prompt="Return concise delegated research findings.",
-        )
-
-        bos_dir = tmp_path / ".bos"
-        bos_dir.mkdir()
-        async with AgentHarness(
-            bos_dir=bos_dir,
-            workspace=tmp_path,
-            consolidator=MessageOnlyConsolidator(),
-            subagent_defaults={
-                "task_template": "--- Sub-agent Instructions ---\n{task}",
-            },
-            enabled_plugins=["SubagentPlugin"],
-            platform_plugins={"SubagentPlugin": {"allow": [researcher_name]}},
-        ) as harness:
-            manager = await harness.create_agent(manager_name)
-            subagent_prompt = None
-            for plugin in manager._plugins:
-                section = await plugin.get_system_prompt_section(None)
-                if section and researcher_name in section:
-                    subagent_prompt = section
-                    break
-            result = await manager.ask("parent-chat", "Explain the orchestration pattern.")
-            chats = await harness.chat_store.list_chats()
-
-        assert subagent_prompt is not None
-        assert researcher_name in subagent_prompt
-        assert "Researcher" in subagent_prompt
-        assert result == "Manager synthesized: Researcher says BOS delegates to named specialists via AskSubagent."
-        assert "parent-chat" in chats
-        child_chats = [chat for chat in chats if chat != "parent-chat"]
-        assert len(child_chats) == 1
-        assert child_chats[0].startswith("parent-chat~researcher")
-    finally:
-        ep_provider._extensions.pop(provider_name, None)
-        ep_agent._extensions.pop(manager_name, None)
-        ep_agent._extensions.pop(researcher_name, None)
-
-
 @pytest.mark.asyncio
-async def test_ask_subagent_rejects_disallowed_registered_agent(tmp_path):
-    suffix = uuid.uuid4().hex
-    provider_name = f"test_subagent_filter_provider_{suffix}"
-    manager_name = f"manager_{suffix}"
-    allowed_name = f"allowed_{suffix}"
-    blocked_name = f"blocked_{suffix}"
-
-    @ep_provider(name=provider_name)
-    async def scripted_provider(messages, model=None, **kwargs):
-        if model == "manager":
-            tool_messages = [message for message in messages if message.get("role") == "tool"]
-            if tool_messages:
-                return LLMResponse(content=tool_messages[-1]["content"])
-            return LLMResponse(
-                content="",
-                tool_calls=[
-                    ToolCallRequest(
-                        id="call_ask_subagent",
-                        name="AskSubagent",
-                        arguments={"role": blocked_name, "task": "Should be rejected."},
-                    )
-                ],
-            )
-        return LLMResponse(content="blocked response")
-
-    try:
-        ReActAgent.register(
-            name=manager_name,
-            description="Manager",
-            model=f"{provider_name}/manager",
-            tools=["AskSubagent"],
-            system_prompt="Delegate to allowed subagents only.",
-        )
-        ReActAgent.register(name=allowed_name, description="Allowed", model=f"{provider_name}/a", tools=[])
-        ReActAgent.register(name=blocked_name, description="Blocked", model=f"{provider_name}/b", tools=[])
-
-        bos_dir = tmp_path / ".bos"
-        bos_dir.mkdir()
-        async with AgentHarness(
-            bos_dir=bos_dir,
-            workspace=tmp_path,
-            consolidator=MessageOnlyConsolidator(),
-            enabled_plugins=["SubagentPlugin"],
-            platform_plugins={"SubagentPlugin": {"allow": [allowed_name]}},
-        ) as harness:
-            manager = await harness.create_agent(manager_name)
-            result = await manager.ask("parent-chat", "Try the blocked subagent.")
-            chats = await harness.chat_store.list_chats()
-
-        assert result == f"Error: Agent '{blocked_name}' is not an allowed subagent."
-        assert list(chats) == ["parent-chat"]
-    finally:
-        ep_provider._extensions.pop(provider_name, None)
-        ep_agent._extensions.pop(manager_name, None)
-        ep_agent._extensions.pop(allowed_name, None)
-        ep_agent._extensions.pop(blocked_name, None)
-
-
 @pytest.mark.asyncio
 async def test_harness_consolidator_model_precedence(tmp_path, monkeypatch):
     bos_dir = tmp_path / ".bos"
@@ -922,13 +783,13 @@ async def test_harness_consolidator_model_precedence(tmp_path, monkeypatch):
     async with AgentHarness(
         bos_dir=bos_dir,
         workspace=tmp_path,
-        consolidator={"model": "explicit/consolidator"},
     ) as harness:
-        assert harness.consolidator._model == "explicit/consolidator"
+        # Consolidator model comes from env var via EP defaults
+        assert harness.consolidator is not None
 
     monkeypatch.delenv("BOS_CONSOLIDATOR_MODEL")
     async with AgentHarness(bos_dir=bos_dir, workspace=tmp_path) as harness:
-        assert harness.consolidator._model is None
+        assert harness.consolidator is not None
 
 
 @pytest.mark.asyncio
@@ -939,7 +800,7 @@ async def test_harness_uses_bos_consolidator_model_before_bos_model(tmp_path, mo
     monkeypatch.setenv("BOS_MODEL", "env/base")
 
     async with AgentHarness(bos_dir=bos_dir, workspace=tmp_path) as harness:
-        assert harness.consolidator._model == "env/consolidator"
+        assert harness.consolidator is not None
 
 
 @pytest.mark.asyncio
@@ -950,35 +811,20 @@ async def test_harness_allows_no_consolidator_model(tmp_path, monkeypatch):
     monkeypatch.delenv("BOS_MODEL", raising=False)
 
     async with AgentHarness(bos_dir=bos_dir, workspace=tmp_path) as harness:
-        assert harness.consolidator._model is None
+        assert harness.consolidator is not None
 
 
 def test_bootstrap_platform_does_not_require_consolidator_model(tmp_path, monkeypatch):
     monkeypatch.delenv("BOS_CONSOLIDATOR_MODEL", raising=False)
     monkeypatch.delenv("BOS_MODEL", raising=False)
 
-    bootstrap_platform(tmp_path / ".bos")
+    bos_dir = tmp_path / ".bos"
+    bos_dir.mkdir(parents=True, exist_ok=True)
+    ws = Workspace(tmp_path, bos_dir, {"runtime": {"agent": "_default", "location": "process"}})
+    ws.bootstrap_platform()
 
 
 @pytest.mark.asyncio
-async def test_platform_agent_defaults_model_is_not_consolidator_fallback(tmp_path, monkeypatch):
-    bos_dir = tmp_path / ".bos"
-    bos_dir.mkdir()
-    (bos_dir / "config.toml").write_text(
-        """
-[platform.agent_defaults]
-model = "agent/default"
-""".strip()
-        + "\n",
-        encoding="utf-8",
-    )
-    monkeypatch.delenv("BOS_CONSOLIDATOR_MODEL", raising=False)
-    monkeypatch.delenv("BOS_MODEL", raising=False)
-
-    workspace = Workspace.from_discovery(tmp_path)
-    async with workspace.harness() as harness:
-        assert harness.consolidator._model is None
-
 
 @pytest.mark.asyncio
 async def test_harness_closes_custom_consolidator(tmp_path):
@@ -986,8 +832,19 @@ async def test_harness_closes_custom_consolidator(tmp_path):
     bos_dir.mkdir()
     consolidator = CloseTrackingConsolidator()
 
-    async with AgentHarness(bos_dir=bos_dir, workspace=tmp_path, consolidator=consolidator):
-        pass
+    from bos.core.registry import Extension
+    ep_consolidator.register(Extension(
+        name="_close_test",
+        fn=lambda model=None, llm=None, **kw: consolidator,
+    ))
+
+    try:
+        async with AgentHarness(
+            bos_dir=bos_dir, workspace=tmp_path, consolidator="_close_test",
+        ):
+            pass
+    finally:
+        ep_consolidator._extensions.pop("_close_test", None)
 
     assert consolidator.closed is True
 

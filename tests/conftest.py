@@ -4,20 +4,20 @@ from __future__ import annotations
 
 from typing import Any
 
-from bos.core.agent import ChainInterceptor, ReActAgent
-from bos.core.contract import Message
+from bos.core.agent import Agent, ChainInterceptor
+from bos.core.contract import Message, ep_consolidator
 from bos.extensions.chat_stores.in_memory import InMemChatStore
 from bos.extensions.mailboxes.in_memory import InMemMailRoute  # noqa: F401
 from bos.extensions.memory_stores.in_memory import InMemMemoryExtension  # noqa: F401
 
 
-def create_test_agent(*, plugins: list[Any] | None = None, **kwargs: Any) -> ReActAgent:
+def create_test_agent(*, plugins: list[Any] | None = None, **kwargs: Any) -> Agent:
     kwargs.setdefault("kind", "test")
     kwargs.setdefault("agent_name", "test")
     kwargs.setdefault("chat_store", InMemChatStore())
     kwargs.setdefault("consolidator", MessageOnlyConsolidator())
     kwargs.setdefault("interceptor", ChainInterceptor())
-    return ReActAgent(plugins=plugins or [], **kwargs)
+    return Agent(plugins=plugins or [], **kwargs)
 
 
 class RecordingConsolidator:
@@ -45,3 +45,9 @@ class CloseTrackingConsolidator(RecordingConsolidator):
 
     async def aclose(self) -> None:
         self.closed = True
+
+
+@ep_consolidator(name="_default")
+def _default_test_consolidator(model=None, llm=None, **kwargs):
+    """Default test consolidator factory — returns a MessageOnlyConsolidator."""
+    return MessageOnlyConsolidator()

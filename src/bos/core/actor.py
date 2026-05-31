@@ -10,9 +10,9 @@ from typing import Any
 
 from bos.protocol import Envelope, MessageContent, MessageType, TurnEvent
 
-from .agent import AbortTurn
+from .agent import AbortTurn, Agent
 from .chat_state import ChatState
-from .contract import Agent, MailBox, ep_actor_command
+from .contract import MailBox, ep_actor_command
 from .events import MailboxEventSink
 from .harness import CURRENT_HARNESS, CURRENT_MAILBOX
 

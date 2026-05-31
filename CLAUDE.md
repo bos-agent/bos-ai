@@ -18,7 +18,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 src/bos/
   cli/          - Click CLI entrypoints (boscli init, start, stop, tui, auth)
   config/       - Workspace discovery, TOML config loading, agent resolution
-  core/         - Runtime primitives: ReActAgent, AgentActor, AgentHarness,
+  core/         - Runtime primitives: Agent, AgentActor, AgentHarness,
                   ExtensionPoint, ToolRegistry, contracts, LLM client
   extensions/   - Channel, provider, tool, store, interceptor implementations
   protocol/     - Message envelope, content types, turn events
@@ -37,7 +37,6 @@ The framework is built around named `ExtensionPoint` registries (defined in `src
 |---|---|---|
 | `ep_tool` | async fn → str | LLM-callable tools |
 | `ep_provider` | async fn → LLMResponse | Model backends (litellm by default) |
-| `ep_agent` | `Agent` protocol (`.ask()`) | Named agent factories |
 | `ep_channel` | `Channel` protocol (`.run(mailbox)`) | External interfaces (HTTP, Telegram) |
 | `ep_mail_route` | `MailRoute` protocol | Message transport between actors |
 | `ep_message_store` | `MessageStore` protocol | Chat history persistence |
@@ -53,7 +52,7 @@ Extensions register via decorator (e.g., `@ep_tool(name="...", description="..."
 
 1. **Config loading** (`src/bos/config/workspace.py`): `Workspace` resolves `.bos/config.toml` via upward directory search → `BOS_DIR` env var. Inline agents in TOML load first, then external agents from `agent_dirs/` (`.toml` or `.md` files, alphabetical), with last-wins deduplication.
 
-2. **Bootstrap** (`bootstrap_platform()`): Loads extensions, registers all named agents into `ep_agent`.
+2. **Bootstrap** (`bootstrap_platform()`): Loads extensions, registers all named agents into the `AgentRegistry`.
 
 3. **Harness** (`AgentHarness` in `src/bos/core/harness.py`): Lifecycle container for shared services (mail route, message store, memory store, consolidator, skills loader, interceptors, LLM client). Created via `async with workspace.harness() as harness:`.
 
@@ -61,9 +60,9 @@ Extensions register via decorator (e.g., `@ep_tool(name="...", description="..."
 
 ### AgentActor (`src/bos/core/actor.py`)
 
-The actor is the concurrency spine. It polls its bound `MailBox` for messages, maintains per-`chat_id` session state (pending/interrupt buffers, generation counters), and drives the `ReActAgent.ask()` loop in a per-chat task. It handles interrupt/abort semantics and merges multiple pending messages from the same chat.
+The actor is the concurrency spine. It polls its bound `MailBox` for messages, maintains per-`chat_id` session state (pending/interrupt buffers, generation counters), and drives the `Agent.ask()` loop in a per-chat task. It handles interrupt/abort semantics and merges multiple pending messages from the same chat.
 
-### ReActAgent (`src/bos/core/agent.py`)
+### Agent (`src/bos/core/agent.py`)
 
 The turn loop implementation. Each `ask()` call:
 1. Loads chat history, builds system prompt (base + memories + tools + skills + subagents + system info)

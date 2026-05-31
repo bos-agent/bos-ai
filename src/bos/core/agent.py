@@ -8,7 +8,6 @@ import platform
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
-from functools import wraps
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal, Sequence
 from xml.sax.saxutils import escape
 
@@ -31,14 +30,13 @@ from .contract import (
     ContextResult,
     EventSink,
     Message,
+    ReasoningEffort,
     ToolContext,
     ToolNoiseFilter,
     TurnInterceptor,
-    ep_agent,
     ep_tool,
     ep_turn_interceptor,
 )
-from .defaults import bos_tools_usage
 from .llm import LLMClient, ToolCallRequest
 from .registry import ToolRegistry
 
@@ -191,24 +189,24 @@ class _CompositePluginInterceptor:
         await self._fallback.intercept(stage, context)
 
 
-class ReActAgent:
+class Agent:
     def __init__(
         self,
         *,
         kind: str,
         chat_store: ChatStore,
         consolidator: Consolidator,
-        plugins: Sequence[AgentPlugin] = (),
         system_prompt: str | None = None,
+        plugins: Sequence[AgentPlugin] = (),
+        plugins_prompt: dict[str, str] | None = None,
         tools: list[str] | None = None,
         tools_usage: dict[str, str] | None = None,
         exclude_tools: list[str] | None = None,
         model: str | None = None,
         agent_name: str | None = None,
-        reasoning_effort: Literal["low", "medium", "high"] | None = None,
+        reasoning_effort: ReasoningEffort | None = None,
         llm: LLMClient | None = None,
         local_tools: ToolRegistry | None = None,
-        tool_configs: dict[str, dict[str, Any]] | None = None,
         interceptor: TurnInterceptor | None = None,
         max_tokens: int = 128 * 1024,
         max_iterations: int = 25,
@@ -219,7 +217,7 @@ class ReActAgent:
             raise TypeError("system_prompt must be a string or None")
         self._system_prompt = system_prompt or ""
         self._tools = tools
-        self._tools_usage = bos_tools_usage | (tools_usage or {})
+        self._tools_usage = tools_usage or {}
         self._exclude_tools = exclude_tools
         self._model = model
         self._reasoning_effort = reasoning_effort
@@ -229,10 +227,10 @@ class ReActAgent:
         self._chat_store = chat_store
         self._consolidator = consolidator
         self._local_tools = local_tools or ToolRegistry("Agent-scoped local tools.")
-        self._tool_configs = tool_configs or {}
         self._kind = kind
         self._name = agent_name or kind
         self._plugins = plugins
+        self._plugins_prompt = plugins_prompt or {}
         self._current_context: TurnContext | None = None
         self._tool_noise_filter = tool_noise_filter
         self._compaction_lock = chat_compaction_lock
@@ -573,7 +571,6 @@ class ReActAgent:
             "chat_id": params.pop("chat_id", ""),
             "turn_id": params.pop("turn_id", ""),
             "event_sink": params.pop("event_sink", None),
-            "tool_config": self._tool_configs.get(tool_name, {}),
             "context": ToolContext(
                 agent_name=self._name,
                 chat_id=chat_id,
@@ -616,7 +613,10 @@ class ReActAgent:
         system_sections = [self._system_prompt]
         # Plugin prompt sections, in resolved plugin order
         for plugin in self._plugins:
-            section = await plugin.get_system_prompt_section(self._current_context)
+            if plugin.name in self._plugins_prompt:
+                section = self._plugins_prompt[plugin.name]
+            else:
+                section = await plugin.get_system_prompt_section(self._current_context)
             if section:
                 system_sections.append(section)
         sections = [
@@ -673,26 +673,3 @@ class ReActAgent:
             len(collection),
         )
         return dict(list(collection.items())[:limit])
-
-    @staticmethod
-    def register(name: str, description: str | None = None, **kwargs):
-        _CAPABILITY_KEYS = ("tools",)
-
-        def map_value(key, value):
-            if isinstance(value, (list, dict)):
-                return value
-            if value is None:
-                return []  # mute the capability
-            if value == "*":
-                return None  # fully open the capability
-            raise TypeError(f"{key} must be a list, '*', or None")
-
-        for key in _CAPABILITY_KEYS:
-            kwargs[key] = map_value(key, kwargs.get(key))
-
-        kwargs["kind"] = name
-
-        @ep_agent(name=name, description=description, defaults=kwargs)
-        @wraps(ReActAgent)
-        def create_react_agent(*args, **kwargs):
-            return ReActAgent(*args, **kwargs)
