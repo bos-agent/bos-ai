@@ -6,7 +6,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from ._utils import _apply, _apply_async, _compact
+from ._utils import _apply, _apply_async, _compact, _deep_merge
 
 logger = logging.getLogger("bos")
 
@@ -57,16 +57,14 @@ class ExtensionPoint:
         registered later during extension loading).
         """
         ext = self._extensions.get(name)
-        if ext is None:
+        if ext is None or not defaults:
             return
-        if callable(ext.defaults):
-            ext.defaults = ext.defaults()
-        if isinstance(ext.defaults, dict):
-            from bos.core._utils import _deep_merge
-
-            _deep_merge(ext.defaults, defaults)
-        else:
-            ext.defaults = defaults
+        try:
+            origin = _deep_merge({}, ext.defaults)
+            _deep_merge(origin, defaults)
+            ext.defaults = origin
+        except Exception:
+            logger.warning(f"Failed to update defaults for extension {name}", exc_info=True)
 
     def __call__(
         self,
