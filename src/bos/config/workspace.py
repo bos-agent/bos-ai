@@ -22,6 +22,10 @@ class ConfigNotFoundError(WorkspaceResolutionError):
     """Raised when no BOS config file is found in the workspace tree."""
 
 
+class ConfigValidationError(WorkspaceResolutionError):
+    """Raised when the BOS config file fails Pydantic validation."""
+
+
 @dataclass(frozen=True)
 class AgentSourceRecord:
     name: str
