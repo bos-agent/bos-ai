@@ -52,17 +52,10 @@ class AgentRegistry:
 
         def _resolve_plugins(value):
             if isinstance(value, dict):
-                if "enabled" in value or "disabled" in value:
-                    # BEP6 structured format: {enabled, disabled, prompts}
-                    return value
-                # Legacy dict format: {Name: {enabled: true}}
-                enabled = [k for k, v in value.items() if isinstance(v, dict) and v.get("enabled") is not False]
-                return {"enabled": enabled, "disabled": [], "prompts": {}}
-            if isinstance(value, list):
-                return {"enabled": value, "disabled": [], "prompts": {}}
+                return value
             if value is None:
                 return {"enabled": [], "disabled": [], "prompts": {}}
-            raise TypeError(f"plugins must be a dict or list, got {type(value).__name__}")
+            raise TypeError(f"plugins must be a dict or None, got {type(value).__name__}")
 
         kwargs["tools"] = _resolve_tools(kwargs.get("tools"))
         kwargs["plugins"] = _resolve_plugins(kwargs.get("plugins"))
@@ -237,24 +230,19 @@ class AgentHarness:
         from the agent config, with plugin-bindings.<Name> for per-plugin settings.
         """
         plugins_cfg = agent_cfg.get("plugins", {})
-        if isinstance(plugins_cfg, (list, tuple)):
-            enabled_names = list(plugins_cfg)
-            disabled: list[str] = []
-        elif isinstance(plugins_cfg, dict):
-            enabled = plugins_cfg.get("enabled", [])
-            disabled = plugins_cfg.get("disabled", [])
-            if isinstance(enabled, (list, tuple)):
-                enabled_names = list(enabled)
-            else:
-                enabled_names = list(ep_plugin._extensions.keys())
-            if isinstance(disabled, (list, tuple)):
-                disabled = list(disabled)
-        else:
+        if not isinstance(plugins_cfg, dict):
             return []
 
+        enabled = plugins_cfg.get("enabled", [])
+        disabled = plugins_cfg.get("disabled", [])
+        if not isinstance(enabled, (list, tuple)):
+            return []
+        if not isinstance(disabled, (list, tuple)):
+            disabled = []
+
+        enabled_names = list(enabled)
         if "*" in enabled_names:
             enabled_names = [n for n in ep_plugin._extensions.keys() if n not in disabled]
-            disabled = []
 
         bindings = agent_cfg.get("plugin-bindings", {})
         if hasattr(bindings, "model_dump"):

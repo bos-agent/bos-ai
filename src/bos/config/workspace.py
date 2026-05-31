@@ -52,7 +52,6 @@ class _LoadedAgentCandidate:
 _EXTERNAL_AGENT_SUFFIXES = {".toml", ".md"}
 
 
-
 def _find_discovered_config(workspace: Path) -> Path | None:
     for parent in [workspace] + list(workspace.parents):
         has_dotbos = (parent / ".bos").exists()
@@ -248,8 +247,6 @@ def _parse_simple_yaml_mapping(frontmatter: str) -> dict[str, Any]:
             result[key] = _parse_frontmatter_block(block_lines)
             idx = next_idx
 
-
-
     return result
 
 
@@ -415,7 +412,7 @@ class Workspace:
         self.agent_source_history: dict[str, list[AgentSourceRecord]] = {}
 
     @classmethod
-    def from_discovery(cls, cwd: str | Path = ".") -> "Workspace":
+    def from_discovery(cls, cwd: str | Path = ".") -> Workspace:
         """Discover workspace layout by walking ancestor directories.
 
         This is the legacy convenience constructor. Prefer explicit construction
@@ -611,12 +608,12 @@ class Workspace:
         raw_channels = runtime.channels if runtime else []
         if not raw_channels:
             raw_channels = [
-            {
-                "name": "HttpChannel",
-                "bind_address": "channel@http",
-                "target_address": actor_address,
-            }
-        ]
+                {
+                    "name": "HttpChannel",
+                    "bind_address": "channel@http",
+                    "target_address": actor_address,
+                }
+            ]
         channels: list[ResolvedChannelConfig] = []
         seen_bind_addresses: set[str] = set()
 
