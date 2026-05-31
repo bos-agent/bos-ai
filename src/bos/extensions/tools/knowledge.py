@@ -47,31 +47,58 @@ Guidelines:
 - Do not use web results to override repository evidence without explaining the conflict.
 """,
 )
-# TODO the agent does not provide tool_config anymore, instead, it would provid flatten parameters
-#      from Extension.defaults which could come from configuration. Please adapt the change.
-async def tool_web_search(query: str, tool_config: dict | None = None) -> str:
-    config = tool_config or {}
-    priority = _provider_priority(config)
+async def tool_web_search(
+    query: str,
+    *,
+    # ── general settings ──
+    priority: list[str] | None = None,
+    timeout_seconds: int = 15,
+    max_results: int = 5,
+    # ── tavily provider settings ──
+    tavily_api_key: str | None = None,
+    tavily_api_key_env: str = "TAVILY_API_KEY",
+    tavily_search_depth: str = "basic",
+    tavily_include_answer: bool | None = None,
+    tavily_include_raw_content: bool | None = None,
+    tavily_include_images: bool | None = None,
+    tavily_topic: str | None = None,
+    tavily_days: int | None = None,
+    tavily_include_domains: list[str] | None = None,
+    tavily_exclude_domains: list[str] | None = None,
+    tavily_fallback_on_status: list[int] | None = None,
+) -> str:
+    priority = priority or ["duckduckgo"]
     errors: list[str] = []
 
-    for provider in priority:
-        provider_config = _provider_config(config, provider)
+    # Build tavily config dict from flattened params
+    tavily_config: dict[str, object] = {"api_key_env": tavily_api_key_env}
+    if tavily_api_key is not None:
+        tavily_config["api_key"] = tavily_api_key
+    for key in (
+        "search_depth", "include_answer", "include_raw_content",
+        "include_images", "topic", "days", "include_domains",
+        "exclude_domains", "fallback_on_status",
+    ):
+        value = locals().get(f"tavily_{key}")
+        if value is not None:
+            tavily_config[key] = value
 
+    for provider in priority:
         try:
             if provider == "duckduckgo":
                 results = await _search_duckduckgo(
                     query,
-                    timeout_seconds=_positive_int(config.get("timeout_seconds"), 15),
-                    max_results=_positive_int(config.get("max_results"), 5),
+                    timeout_seconds=_positive_int(timeout_seconds, 15),
+                    max_results=_positive_int(max_results, 5),
                 )
                 return _format_search_results(results)
 
             if provider == "tavily":
                 answer, results = await _search_tavily(
                     query,
-                    config=provider_config,
-                    timeout_seconds=_positive_int(config.get("timeout_seconds"), 15),
-                    max_results=_positive_int(config.get("max_results"), 5),
+                    config=tavily_config,
+                    timeout_seconds=_positive_int(timeout_seconds, 15),
+                    max_results=_positive_int(max_results, 5),
                 )
                 return _format_search_results(results, answer=answer)
 
@@ -84,23 +111,6 @@ async def tool_web_search(query: str, tool_config: dict | None = None) -> str:
             errors.append(f"{provider}: {e}")
 
     return "Error executing WebSearch: " + "; ".join(errors)
-
-
-def _provider_priority(config: dict) -> list[str]:
-    priority = config.get("priority")
-    if not priority:
-        return ["duckduckgo"]
-    if isinstance(priority, str):
-        return [priority]
-    if isinstance(priority, list):
-        return [str(provider) for provider in priority if str(provider).strip()]
-    return ["duckduckgo"]
-
-
-def _provider_config(config: dict, provider: str) -> dict:
-    providers = config.get("providers") or {}
-    provider_config = providers.get(provider) if isinstance(providers, dict) else {}
-    return provider_config if isinstance(provider_config, dict) else {}
 
 
 def _positive_int(value: object, default: int) -> int:
@@ -144,7 +154,7 @@ async def _search_duckduckgo(query: str, *, timeout_seconds: int, max_results: i
 async def _search_tavily(
     query: str,
     *,
-    config: dict,
+    config: dict[str, object],
     timeout_seconds: int,
     max_results: int,
 ) -> tuple[str | None, list[SearchResult]]:
@@ -155,23 +165,17 @@ async def _search_tavily(
     if not api_key:
         raise WebSearchProviderError("tavily", "missing API key")
 
-    payload = {
+    payload: dict[str, object] = {
         "query": query,
         "max_results": max_results,
-        "search_depth": config.get("search_depth", "basic"),
-        "include_answer": bool(config.get("include_answer", False)),
-        "include_raw_content": bool(config.get("include_raw_content", False)),
+        "search_depth": str(config.get("search_depth", "basic")),
     }
-    if "include_images" in config:
-        payload["include_images"] = bool(config["include_images"])
-    if "topic" in config:
-        payload["topic"] = config["topic"]
-    if "days" in config:
-        payload["days"] = config["days"]
-    if "include_domains" in config:
-        payload["include_domains"] = config["include_domains"]
-    if "exclude_domains" in config:
-        payload["exclude_domains"] = config["exclude_domains"]
+    for key in (
+        "include_answer", "include_raw_content", "include_images",
+        "topic", "days", "include_domains", "exclude_domains",
+    ):
+        if key in config and config[key] is not None:
+            payload[key] = config[key]
 
     req = urllib.request.Request(
         "https://api.tavily.com/search",
@@ -189,7 +193,7 @@ async def _search_tavily(
             return urllib.request.urlopen(req, timeout=timeout_seconds).read()
         except HTTPError as e:
             body = e.read().decode("utf-8", errors="replace")
-            fallback_statuses = config.get("fallback_on_status", [429, 432, 433, 500, 502, 503, 504])
+            fallback_statuses = config.get("fallback_on_status") or [429, 432, 433, 500, 502, 503, 504]
             fallback_allowed = e.code in set(fallback_statuses)
             detail = body.strip() or e.reason or "request failed"
             raise WebSearchProviderError("tavily", f"HTTP {e.code}: {detail}", fallback_allowed=fallback_allowed)
