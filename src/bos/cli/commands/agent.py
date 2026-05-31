@@ -375,6 +375,7 @@ def ask(
         raise click.UsageError("Provide a task message, use --stdin, or use -i for interactive mode.")
 
     ws = _build_workspace_for_ask(ctx, workspace_dir)
+    ws.resolve_agents()
     ws.bootstrap_platform()
     selected_agent = agent_kind or ws.get_main_agent_kind()
 
@@ -439,6 +440,7 @@ def start(ctx, foreground: bool, docker: bool, workspace_dir: str | None):
     """Start the agent actor and channel server."""
     ws, rd = _get_ws_and_rd(ctx, workspace_dir)
 
+    ws.resolve_agents()
     ws.bootstrap_platform()
 
     from bos.named_actors.runner import start_named_actors

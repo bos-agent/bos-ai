@@ -54,6 +54,7 @@ def main() -> None:
         ws = Workspace(".", bos_dir, config, config_file=config_path)
     else:
         ws = Workspace.from_discovery(".")
+    ws.resolve_agents()
     ws.bootstrap_platform()
 
     rd = RunDir(ws.bos_dir)
@@ -95,7 +96,7 @@ def main() -> None:
             rd,
             runtime=runtime_kind,
             pid=os.getpid(),
-            selected_agent=ws.get_main_agent_kind(),
+            selected_agent=ws.config.runtime.agent if ws.config.runtime else "_default",
             container_id=container_id,
             container_name=container_name,
             started_at=datetime.now(timezone.utc).isoformat(),

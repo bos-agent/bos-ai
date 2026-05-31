@@ -1,2 +1,18 @@
-# use the default configuration from bos.core.defalts.agent_spec
-# the agent persist storage location is at ~/.bos/agents/default
+# BOS default preset — uses Python default_agent_spec for the _default agent.
+# Agent persist storage is at ~/.bos/agents/default
+
+[harness]
+consolidator = "_default"
+chat_store = "_default"
+mail_route = "_default"
+
+[runtime]
+agent = "_default"
+location = "process"
+
+[[runtime.channels]]
+name = "HttpChannel"
+bind_address = "channel@http"
+target_address = "agent@main"
+host = "127.0.0.1"
+port = 5920

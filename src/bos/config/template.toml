@@ -1,160 +1,80 @@
 [platform]
-# env file that will be loaded on startup. if a relateive path is provided it would be
+# env file that will be loaded on startup. if a relative path is provided it would be
 # resolved basing on <bos_dir>, which is the folder that this toml file is in.
 #envfile = ".env"
 
 # the env variables can be defined inline as well, that the platform will load on startup
 #[platform.envs]
 
-# The limit of the capabilites, like tools, skills and subagents, to be loaded into the context.
-#BOS_CAPABILITY_LIMIT = 50
-
-# a list of module names or paths where the platform would scan and load extendisons from.
+# a list of module names or paths where the platform would scan and load extensions from.
 # by default, the platform will load all the bos built in extension as well as
 # the extensions under <bos_dir>/extensions
-#extensions = ["bos.exts", "./extentions"]
+#extensions = ["bos.exts", "./extensions"]
 
 # a list of path where the platform would scan and load the agents definition spec, in addition
 # to the agents configured inline in this file. for the agent specs with same name (role), the
 # last loaded one will overwrite previous one. both .toml and .md are supported format for the
-# individule agent config specs
+# individual agent config specs
 # by default, the platform will scan the agents from <bos_dir>/agents
 #agent_dirs = ["./agents"]
 
-# ── Plugin System (BEP 4) ─────────────────────────────────────────────
-# Enable built-in plugins globally. Plugins are disabled by default.
-# enabled_plugins = ["MemoryPlugin", "PlanPlugin", "TaskPlugin", "SkillsPlugin", "SubagentPlugin"]
+# ── Harness ─────────────────────────────────────────────────────────
+# Select extension implementations for harness-level services
+[harness]
+consolidator = "_default"
+chat_store = "_default"
+mail_route = "_default"
 
-# Workspace-level plugin defaults (does not enable the plugin by itself).
-# [platform.plugins.MemoryPlugin]
+# Ordered chain of turn interceptors
+#interceptors = ["logging", "rate_limit"]
+
+# ── Extension Configurations ────────────────────────────────────────
+
+# LLM provider defaults
+# [exts.ep_provider._default]
+
+[exts.ep_consolidator._default]
+model = "gemini/gemini-2.5-flash"
+
+# [exts.ep_message_store._default]
+# name = "_default"
+# store_dir = "./messages"
+
+# [exts.ep_mail_route._default]
+# name = "_default"
+# store_dir = "./mailboxes"
+
+# [exts.ep_skills_loader._default]
+# name = "_default"
+# skill_dirs = ["skills"]
+
+# Tool-specific runtime configuration
+# [exts.ep_tool.WebSearch._default]
+# priority = ["tavily", "duckduckgo"]
+
+# ── Agent Defaults ──────────────────────────────────────────────────
+
+[agent.defaults]
+model = "gemini/gemini-3.1-pro-preview"
+max_tokens = 131072
+max_iterations = 60
+
+[agent.defaults.tools]
+enabled = ["*"]
+#disabled = ["WriteFile"]
+#usages = {}
+
+[agent.defaults.plugins]
+enabled = ["MemoryPlugin", "PlanPlugin", "TaskPlugin", "SkillsPlugin", "SubagentPlugin"]
+#disabled = []
+#prompts = {}
+
+# Per-plugin configuration
+# [agent.defaults.plugin-bindings.MemoryPlugin]
 # maxims = ["user", "soul", "identity", "rules"]
 # scope = "workspace"
 
-# [platform.plugins.PlanPlugin]
-# auto_trigger = true
-
-# [platform.plugins.SkillsPlugin]
-# skill_dirs = ["skills"]
-# allow = "*"
-
-# [platform.plugins.SubagentPlugin]
-# allow = "*"
-
-# ── Agent Defaults ────────────────────────────────────────────────────
-
-# define he default setup for all agents
-[platform.agent_defaults]
-
-# a model for agent is almost mandatory unless you are using a llm provider that has built in
-# default model. if you are using a customize llm provider, the model would have format like:
-#    <provier name>/<model name the provier expects>
-model = "gemini/gemini-3.1-pro-preview"
-
-# the tools that is available for the agent. by default, the platform does not enable any tool
-# to the agents. the tools set should be set explicity for the agent to access. you can provide
-# a list of tool names or use wildcard to enable all the tools to the agent. to be noted, the
-# tool names are case sensitive
-#tools = ["ReadFile", "SearchFiles"]
-#tools = "*"
-
-# The skills, subagents, maxims, and structured plans are now managed through plugins
-# (MemoryPlugin, PlanPlugin, SkillsPlugin, SubagentPlugin). Use platform.plugins.<PluginName> and per-agent
-# [[platform.agents.plugins.<PluginName>]] to configure them.
-#
-# The legacy keys (skills, subagents, maxims) in agent_defaults or per-agent config
-# are no longer processed by the kernel.
-
-# llm reasonging effort level, which would be sent along the llm model call
-#reasoning_effort = "medium"
-
-# the dynamic history budget for this agent. once exceeded, chat history compaction
-# may happen. this does not describe the full model context window and does not
-# include built system prompt, tool definitions, maxims, or other static prompt parts.
-#max_tokens = 131072
-
-# the max tool call iteration limit for a turn
-#max_iterations = 25
-
-# inline agent specs. define the agents, which can be used as the main agent or subagent
-# all the keys in the agent_defaults above are valid for each agent here to override.
-#[[platform.agents]]
-#name = "main"
-#description = "The main agent."
-#tools = ["AskSubagent"]
-#system_prompt = """
-#You are an personal assistant.
-#"""
-
-# Per-agent plugin configuration example:
-# [platform.agents.plugins.MemoryPlugin]
-# maxims = ["user", "soul"]
-# scope = "actor"
-#
-# [platform.agents.plugins.SkillsPlugin]
-# enabled = true
-# allow = ["code-review", "repo-navigation"]
-
-# define he defualt setup for all agents
-[platform.agent_defaults.tools_usage]
-# Bash = """
-# The usage of Bash command that will overwrite the usage defined on registration.
-# """
-
-
-[harness]
-
-# Tool-specific runtime configuration is passed to tools as `tool_config`.
-# Uncomment to prefer Tavily for WebSearch and fall back to DuckDuckGo on quota/rate-limit/server errors.
-#
-#[harness.tools.WebSearch]
-#priority = ["tavily", "duckduckgo"]
-#timeout_seconds = 15
-#max_results = 5
-#
-#[harness.tools.WebSearch.providers.tavily]
-#api_key_env = "TAVILY_API_KEY"
-#search_depth = "basic"
-#fallback_on_status = [429, 432, 433, 500, 502, 503, 504]
-
-# cofigure the message store extension
-#[harness.message_store]
-#configure the storage path for the builtin jsonl message store default is <bos_dir>/message
-#name = "_default"
-#store_dir = "./messages"
-
-# cofigure the memory extension
-#[harness.memory]
-#configure the storage path for the builtin jsonl message store default is <bos_dir>/memory
-#name = "_default"
-#store_dir = "./memory"
-
-# configure the harness-level consolidator service. this is separate from
-# platform.agent_defaults.model. model resolution is:
-# harness.consolidator.model -> BOS_CONSOLIDATOR_MODEL -> BOS_MODEL.
-[harness.consolidator]
-model = "gemini/gemini-2.5-flash"
-#instruction = """
-#Provide a dense, concise summary of the conversation history for future turns.
-#Preserve user intent, decisions, unresolved tasks, tool results, and important constraints.
-#Keep it highly concise but retain all factual information without omitting details.
-#Avoid transcript style and verbose language. Keep the summary less than 2048 characters.
-#"""
-
-# cofigure the mail route extension
-#[harness.mail_route]
-# configure the storage path for the builtin jsonl mail route default is <bos_dir>/mailboxes
-#name = "_default"
-#store_dir = "./mailboxes"
-
-# conifgure the folders to find the skills for the built in skills loader
-#[harness.skills_loader]
-#name = "_default"
-#skill_dirs = ["skills"]
-
-# conifgure the default subagent settings. all the keys in the agent_defaults are applicable
-# here. in addition, you can define a task_template which is used for rendering the task message
-# that is sent to the subagent.
-[harness.subagent_defaults]
+[agent.defaults.plugin-bindings.SubagentPlugin]
 task_template = """
 --- Sub-agent Instructions ---
 You are a background sub-agent `{role}`. Work only on the delegated task,
@@ -166,63 +86,36 @@ instead of return empty message
 {task}
 """
 
-# run time configurations
-#[main]
+# ── Named Agents ────────────────────────────────────────────────────
 
-# the agent name (kind) to be used as the main agent
-#agent = "main"
+# [agents.main]
+# system_prompt = "You are the main BOS agent."
+# tools = { enabled = ["AskSubagent"] }
 
-#[main.runtime]
+# [agents.researcher]
+# system_prompt = "You research codebases."
+# tools = { enabled = ["ReadFile", "WebSearch"] }
 
-# runtime settings: process or docker. default is process
-#kind = "process"
+# ── Runtime ─────────────────────────────────────────────────────────
 
-# you can specify the docker image, if the runtime is docker
-#image = "ghcr.io/your-org/bos-ai:latest"
+[runtime]
+agent = "main"
+location = "process"
 
-# the http channel settings. http channle is where the tui connected
-[[main.channels]]
+[[runtime.channels]]
 name = "HttpChannel"
 bind_address = "channel@http"
 target_address = "agent@main"
-host = "127.0.0.1"            # automatically becomes 0.0.0.0 in Docker
+host = "127.0.0.1"
 port = 5920
 
-# the telegram channel settings.
-#[[main.channels]]
-#name = "TelegramChannel"
-#bind_address = "channel@telegram"
-#target_address = "agent@main"
-#token = "123456:telegram-bot-token"
-#poll_timeout = 30
-#allowed_chat_ids = [123456789]        # optional allowlist
+# [[runtime.channels]]
+# name = "TelegramChannel"
+# bind_address = "channel@telegram"
+# target_address = "agent@main"
+# token = "123456:telegram-bot-token"
 
-# Named actors: define multiple long-lived actors in one runtime. Each actor gets
-# its own mailbox at agent@<key> and can be addressed via @<key> in channels that
-# support mention routing (e.g. "@researcher find papers on topic X"). The actor
-# key is also the actor's identity and memory scope. The "main" actor is the
-# default when no @mention is used.
-#
-# When [main.actors] is NOT set, the system falls back to a single agent.
-#
-#[main.actors.main]
-#agent = "main"
-#display_name = "Main"
-#tools = ["AskSubagent"]
-#subagents = ["researcher", "reviewer"]
-#
-#[main.actors.bob]
-#agent = "architect"
-#display_name = "Bob"
-#tools = ["ReadFile", "AskSubagent"]
-#
-#[main.actors.researcher]
-#agent = "assistant"
-#display_name = "Researcher"
-#description = "Research assistant for finding and summarizing information."
-#tools = ["WebSearch", "ReadFile"]
-#skills = ["brainstorming"]
-#
-#[main.actors.reviewer]
-#agent = "reviewer"
-#description = "Code reviewer for quality and correctness checks."
+# Named actors: define multiple long-lived actors in one runtime
+# [runtime.actors.main]
+# agent = "main"
+# display_name = "Main"

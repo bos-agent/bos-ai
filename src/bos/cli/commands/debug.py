@@ -32,6 +32,7 @@ def prompt(ctx, agent_kind: str | None, workspace_dir: str | None):
     from bos.cli.commands.agent import _build_workspace_for_ask
 
     ws = _build_workspace_for_ask(ctx, workspace_dir)
+    ws.resolve_agents()
     ws.bootstrap_platform()
     selected = agent_kind or ws.get_main_agent_kind()
 
