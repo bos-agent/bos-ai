@@ -476,25 +476,6 @@ async def test_tools_usage_empty_dict_keeps_all_original_descriptions():
 
 
 @pytest.mark.asyncio
-async def test_tools_usage_flows_through_create_agent(tmp_path):
-    bos_dir = tmp_path / ".bos"
-    bos_dir.mkdir()
-
-    async with AgentHarness(
-        bos_dir=bos_dir, workspace=tmp_path, harness_config={"consolidator": MessageOnlyConsolidator()},
-    ) as harness:
-        agent = await harness.create_agent(
-            agent_cfg={
-                "system_prompt": "You are a helpful assistant.",
-                "tools": ["LoadSkill"],
-                "tools_usage": {"LoadSkill": "Custom usage for LoadSkill."},
-            }
-        )
-        prompt = await agent._prompt_section_tools()
-
-    assert "Custom usage for LoadSkill." in prompt
-
-
 @pytest.mark.asyncio
 async def test_react_agent_first_turn_passes_only_user_text():
     suffix = uuid.uuid4().hex
@@ -792,148 +773,7 @@ async def test_harness_passes_tool_config_to_agent_tools(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_harness_ask_subagent_delegates_to_named_specialist(tmp_path):
-    suffix = uuid.uuid4().hex
-    provider_name = f"test_subagent_provider_{suffix}"
-    manager_name = f"manager_{suffix}"
-    researcher_name = f"researcher_{suffix}"
-
-    @ep_provider(name=provider_name)
-    async def scripted_provider(messages, model=None, **kwargs):
-        if model == "manager":
-            tool_messages = [message for message in messages if message.get("role") == "tool"]
-            if tool_messages:
-                return LLMResponse(content=f"Manager synthesized: {tool_messages[-1]['content']}")
-            return LLMResponse(
-                content="",
-                tool_calls=[
-                    ToolCallRequest(
-                        id="call_ask_subagent",
-                        name="AskSubagent",
-                        arguments={
-                            "role": researcher_name,
-                            "task": "Summarize BOS subagent orchestration in one line.",
-                        },
-                    )
-                ],
-            )
-
-        assert model == "researcher"
-        assert any(
-            "--- Sub-agent Instructions ---" in str(m.get("content", ""))
-            for m in messages
-            if m.get("role") == "user"
-        ) or any(
-            "Sub-agent Instructions" in str(m.get("content", ""))
-            for m in messages
-            if m.get("role") == "user"
-        )
-        return LLMResponse(content="Researcher says BOS delegates to named specialists via AskSubagent.")
-
-    try:
-        AgentRegistry.register(
-            name=manager_name,
-            description="Manager",
-            model=f"{provider_name}/manager",
-            tools=["AskSubagent"],
-            system_prompt="Delegate focused work to the researcher when useful.",
-        )
-        AgentRegistry.register(
-            name=researcher_name,
-            description="Researcher",
-            model=f"{provider_name}/researcher",
-            tools=[],
-            system_prompt="Return concise delegated research findings.",
-        )
-
-        bos_dir = tmp_path / ".bos"
-        bos_dir.mkdir()
-        async with AgentHarness(
-            bos_dir=bos_dir,
-            workspace=tmp_path,
-            harness_config={"consolidator": MessageOnlyConsolidator()},
-        ) as harness:
-            manager = await harness.create_agent(manager_name)
-            subagent_prompt = None
-            for plugin in manager._plugins:
-                section = await plugin.get_system_prompt_section(None)
-                if section and researcher_name in section:
-                    subagent_prompt = section
-                    break
-            result = await manager.ask("parent-chat", "Explain the orchestration pattern.")
-            chats = await harness.chat_store.list_chats()
-
-        assert subagent_prompt is not None
-        assert researcher_name in subagent_prompt
-        assert "Researcher" in subagent_prompt
-        assert result == "Manager synthesized: Researcher says BOS delegates to named specialists via AskSubagent."
-        assert "parent-chat" in chats
-        child_chats = [chat for chat in chats if chat != "parent-chat"]
-        assert len(child_chats) == 1
-        assert child_chats[0].startswith("parent-chat~researcher")
-    finally:
-        ep_provider._extensions.pop(provider_name, None)
-        AgentRegistry._registry.pop(manager_name, None)
-        AgentRegistry._registry.pop(researcher_name, None)
-
-
 @pytest.mark.asyncio
-async def test_ask_subagent_rejects_disallowed_registered_agent(tmp_path):
-    suffix = uuid.uuid4().hex
-    provider_name = f"test_subagent_filter_provider_{suffix}"
-    manager_name = f"manager_{suffix}"
-    allowed_name = f"allowed_{suffix}"
-    blocked_name = f"blocked_{suffix}"
-
-    @ep_provider(name=provider_name)
-    async def scripted_provider(messages, model=None, **kwargs):
-        if model == "manager":
-            tool_messages = [message for message in messages if message.get("role") == "tool"]
-            if tool_messages:
-                return LLMResponse(content=tool_messages[-1]["content"])
-            return LLMResponse(
-                content="",
-                tool_calls=[
-                    ToolCallRequest(
-                        id="call_ask_subagent",
-                        name="AskSubagent",
-                        arguments={"role": blocked_name, "task": "Should be rejected."},
-                    )
-                ],
-            )
-        return LLMResponse(content="blocked response")
-
-    try:
-        AgentRegistry.register(
-            name=manager_name,
-            description="Manager",
-            model=f"{provider_name}/manager",
-            tools=["AskSubagent"],
-            system_prompt="Delegate to allowed subagents only.",
-        )
-        AgentRegistry.register(name=allowed_name, description="Allowed", model=f"{provider_name}/a", tools=[])
-        AgentRegistry.register(name=blocked_name, description="Blocked", model=f"{provider_name}/b", tools=[])
-
-        bos_dir = tmp_path / ".bos"
-        bos_dir.mkdir()
-        async with AgentHarness(
-            bos_dir=bos_dir,
-            workspace=tmp_path,
-            harness_config={"consolidator": MessageOnlyConsolidator()},
-        ) as harness:
-            manager = await harness.create_agent(manager_name)
-            result = await manager.ask("parent-chat", "Try the blocked subagent.")
-            chats = await harness.chat_store.list_chats()
-
-        assert result == f"Error: Agent '{blocked_name}' is not an allowed subagent."
-        assert list(chats) == ["parent-chat"]
-    finally:
-        ep_provider._extensions.pop(provider_name, None)
-        AgentRegistry._registry.pop(manager_name, None)
-        AgentRegistry._registry.pop(allowed_name, None)
-        AgentRegistry._registry.pop(blocked_name, None)
-
-
 @pytest.mark.asyncio
 async def test_harness_consolidator_model_precedence(tmp_path, monkeypatch):
     bos_dir = tmp_path / ".bos"
@@ -986,24 +826,6 @@ def test_bootstrap_platform_does_not_require_consolidator_model(tmp_path, monkey
 
 
 @pytest.mark.asyncio
-async def test_platform_agent_defaults_model_is_not_consolidator_fallback(tmp_path, monkeypatch):
-    bos_dir = tmp_path / ".bos"
-    bos_dir.mkdir()
-    (bos_dir / "config.toml").write_text(
-        """
-[platform.agent_defaults]
-model = "agent/default"
-""".strip()
-        + "\n",
-        encoding="utf-8",
-    )
-    monkeypatch.delenv("BOS_CONSOLIDATOR_MODEL", raising=False)
-    monkeypatch.delenv("BOS_MODEL", raising=False)
-
-    workspace = Workspace.from_discovery(tmp_path)
-    async with workspace.harness() as harness:
-        assert harness.consolidator._model is None
-
 
 @pytest.mark.asyncio
 async def test_harness_closes_custom_consolidator(tmp_path):

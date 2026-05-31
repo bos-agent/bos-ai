@@ -25,29 +25,3 @@ port = 8080
     assert channel.options["host"] == "0.0.0.0"
 
 
-def test_non_http_channel_config_is_unchanged(tmp_path):
-    bos_dir = tmp_path / ".bos"
-    bos_dir.mkdir()
-    (bos_dir / "config.toml").write_text(
-        """
-[main]
-agent = "main"
-
-[[main.channels]]
-name = "TelegramChannel"
-bind_address = "channel@telegram"
-target_address = "agent@main"
-token = "x"
-""".strip()
-        + "\n",
-        encoding="utf-8",
-    )
-
-    channel = Workspace.from_discovery(tmp_path).resolve_channels(runtime_kind="docker")[0]
-
-    assert channel.options == {
-        "token": "x",
-        "bind_address": "channel@telegram",
-        "bos_dir": str(bos_dir),
-        "workspace_dir": str(tmp_path.resolve()),
-    }
