@@ -53,7 +53,6 @@ import bos.extensions.providers.gemini_cli_provider  # noqa: F401
 # Tools
 import bos.extensions.tools.filesystem  # noqa: F401
 import bos.extensions.tools.knowledge  # noqa: F401
-import bos.extensions.tools.orchestration  # noqa: F401
 import bos.extensions.tools.system  # noqa: F401
 
 # Plugin defaults register via their own ExtensionPoints on import

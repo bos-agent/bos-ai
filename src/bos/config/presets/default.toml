@@ -1,8 +1,8 @@
 # BOS default preset — uses Python default_agent_spec for the _default agent.
 # Agent persist storage is at ~/.bos/agents/default
 
-[platform]
-extensions = ["bos.exts"]
+# [platform]
+# extensions = ["bos.exts"]
 
 [harness]
 consolidator = "_default"
