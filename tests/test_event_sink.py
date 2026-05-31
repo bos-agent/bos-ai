@@ -155,10 +155,7 @@ async def test_ask_subagent_emits_child_lineage_events(tmp_path):
         async with AgentHarness(
             bos_dir=bos_dir,
             workspace=tmp_path,
-            consolidator=MessageOnlyConsolidator(),
-            subagent_defaults={"task_template": "--- Sub-agent Instructions ---\n{task}"},
-            enabled_plugins=["SubagentPlugin"],
-            platform_plugins={"SubagentPlugin": {"allow": "*"}},
+            harness_config={"consolidator": MessageOnlyConsolidator()},
         ) as harness:
             manager = await harness.create_agent(manager_name)
             result = await manager.ask("parent-chat", "Explain the event sink refactor.", event_sink=sink)

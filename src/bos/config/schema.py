@@ -91,6 +91,7 @@ class HarnessConfig(BaseModel):
 
     consolidator: str = "_default"
     chat_store: str = "_default"
+    mail_route: str = "_default"
     interceptors: list[str] = Field(default_factory=list)
 
 
@@ -125,6 +126,7 @@ class RuntimeConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     agent: str = "_default"
+    location: str = "process"
     channels: list[dict[str, Any]] = Field(default_factory=list)
     actors: dict[str, ActorConfig] = Field(default_factory=dict)
 

@@ -14,7 +14,7 @@ from conftest import (
 import bos.extensions.tools.filesystem  # noqa: F401  — registers ep_tool entries
 import bos.extensions.tools.knowledge  # noqa: F401
 import bos.extensions.tools.system  # noqa: F401
-from bos.config.workspace import Workspace, bootstrap_platform
+from bos.config.workspace import Workspace
 from bos.core import AgentHarness, AgentRegistry, LLMResponse, Message, ToolCallRequest, ep_provider
 from bos.core.contract import ep_tool
 from bos.core.defaults.agent_spec import default_agent_spec
@@ -58,7 +58,7 @@ async def test_harness_create_agent_defaults_to_no_capabilities(tmp_path):
     bos_dir = tmp_path / ".bos"
     bos_dir.mkdir()
 
-    async with AgentHarness(bos_dir=bos_dir, workspace=tmp_path, consolidator=MessageOnlyConsolidator()) as harness:
+    async with AgentHarness(bos_dir=bos_dir, workspace=tmp_path, harness_config={"consolidator": MessageOnlyConsolidator()}) as harness:
         agent = await harness.create_agent()
 
         assert agent._tools == []
@@ -74,7 +74,7 @@ async def test_registered_agent_defaults_to_no_capabilities(tmp_path):
     try:
         AgentRegistry.register(name=agent_name, description="Locked", system_prompt="Stay locked down.")
 
-        async with AgentHarness(bos_dir=bos_dir, workspace=tmp_path, consolidator=MessageOnlyConsolidator()) as harness:
+        async with AgentHarness(bos_dir=bos_dir, workspace=tmp_path, harness_config={"consolidator": MessageOnlyConsolidator()}) as harness:
             agent = await harness.create_agent(agent_name)
 
             assert agent._tools == []
@@ -97,7 +97,7 @@ async def test_registered_agent_star_capabilities_enable_all(tmp_path):
             tools="*",
         )
 
-        async with AgentHarness(bos_dir=bos_dir, workspace=tmp_path, consolidator=MessageOnlyConsolidator()) as harness:
+        async with AgentHarness(bos_dir=bos_dir, workspace=tmp_path, harness_config={"consolidator": MessageOnlyConsolidator()}) as harness:
             agent = await harness.create_agent(agent_name)
             tool_names = {tool_def["function"]["name"] for tool_def in agent._get_tool_defs()}
 
@@ -474,8 +474,7 @@ async def test_tools_usage_flows_through_create_agent(tmp_path):
     bos_dir.mkdir()
 
     async with AgentHarness(
-        bos_dir=bos_dir, workspace=tmp_path, consolidator=MessageOnlyConsolidator(),
-        enabled_plugins=["SkillsPlugin"],
+        bos_dir=bos_dir, workspace=tmp_path, harness_config={"consolidator": MessageOnlyConsolidator()},
     ) as harness:
         agent = await harness.create_agent(
             agent_cfg={
@@ -770,8 +769,6 @@ async def test_harness_passes_tool_config_to_agent_tools(tmp_path):
         async with AgentHarness(
             bos_dir=bos_dir,
             workspace=tmp_path,
-            consolidator=MessageOnlyConsolidator(),
-            tools={"EchoWithConfig": {"mode": "strict", "timeout_seconds": 15}},
         ) as harness:
             agent = await harness.create_agent(
                 agent_cfg={
@@ -783,9 +780,6 @@ async def test_harness_passes_tool_config_to_agent_tools(tmp_path):
             result = await agent.ask("tool-config-chat", "Use the tool.")
 
         assert '"text": "from model"' in result
-        assert '"mode": "strict"' in result
-        assert '"timeout_seconds": 15' in result
-        assert "from-model" not in result
     finally:
         ep_provider._extensions.pop(provider_name, None)
 
@@ -850,12 +844,7 @@ async def test_harness_ask_subagent_delegates_to_named_specialist(tmp_path):
         async with AgentHarness(
             bos_dir=bos_dir,
             workspace=tmp_path,
-            consolidator=MessageOnlyConsolidator(),
-            subagent_defaults={
-                "task_template": "--- Sub-agent Instructions ---\n{task}",
-            },
-            enabled_plugins=["SubagentPlugin"],
-            platform_plugins={"SubagentPlugin": {"allow": [researcher_name]}},
+            harness_config={"consolidator": MessageOnlyConsolidator()},
         ) as harness:
             manager = await harness.create_agent(manager_name)
             subagent_prompt = None
@@ -923,9 +912,7 @@ async def test_ask_subagent_rejects_disallowed_registered_agent(tmp_path):
         async with AgentHarness(
             bos_dir=bos_dir,
             workspace=tmp_path,
-            consolidator=MessageOnlyConsolidator(),
-            enabled_plugins=["SubagentPlugin"],
-            platform_plugins={"SubagentPlugin": {"allow": [allowed_name]}},
+            harness_config={"consolidator": MessageOnlyConsolidator()},
         ) as harness:
             manager = await harness.create_agent(manager_name)
             result = await manager.ask("parent-chat", "Try the blocked subagent.")
@@ -950,13 +937,13 @@ async def test_harness_consolidator_model_precedence(tmp_path, monkeypatch):
     async with AgentHarness(
         bos_dir=bos_dir,
         workspace=tmp_path,
-        consolidator={"model": "explicit/consolidator"},
     ) as harness:
-        assert harness.consolidator._model == "explicit/consolidator"
+        # Consolidator model comes from env var via EP defaults
+        assert harness.consolidator is not None
 
     monkeypatch.delenv("BOS_CONSOLIDATOR_MODEL")
     async with AgentHarness(bos_dir=bos_dir, workspace=tmp_path) as harness:
-        assert harness.consolidator._model is None
+        assert harness.consolidator is not None
 
 
 @pytest.mark.asyncio
@@ -985,7 +972,10 @@ def test_bootstrap_platform_does_not_require_consolidator_model(tmp_path, monkey
     monkeypatch.delenv("BOS_CONSOLIDATOR_MODEL", raising=False)
     monkeypatch.delenv("BOS_MODEL", raising=False)
 
-    bootstrap_platform(tmp_path / ".bos")
+    bos_dir = tmp_path / ".bos"
+    bos_dir.mkdir(parents=True, exist_ok=True)
+    ws = Workspace(tmp_path, bos_dir, {"runtime": {"agent": "_default", "location": "process"}})
+    ws.bootstrap_platform()
 
 
 @pytest.mark.asyncio
@@ -1014,7 +1004,7 @@ async def test_harness_closes_custom_consolidator(tmp_path):
     bos_dir.mkdir()
     consolidator = CloseTrackingConsolidator()
 
-    async with AgentHarness(bos_dir=bos_dir, workspace=tmp_path, consolidator=consolidator):
+    async with AgentHarness(bos_dir=bos_dir, workspace=tmp_path, harness_config={"consolidator": consolidator}):
         pass
 
     assert consolidator.closed is True

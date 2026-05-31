@@ -1,420 +1,286 @@
+"""Tests for BEP6 agent resolution: inline [agents.<name>], external files, resolve_agents()."""
 from copy import deepcopy
 from textwrap import dedent
+from pathlib import Path
 
 import pytest
-
 from bos.config.workspace import Workspace
+from bos.core import AgentRegistry
 
 
-def _write_workspace_config(tmp_path, config_text: str) -> None:
+def test_inline_agent_loaded_and_registered(tmp_path):
+    """agents.<name> in config are validated and registered."""
+    config = {
+        "agents": {
+            "main": {
+                "system_prompt": "Hello",
+                "tools": {"enabled": ["ReadFile"]},
+            }
+        }
+    }
+    ws = Workspace(tmp_path, tmp_path / ".bos", config)
+    ws.bootstrap_platform()
+    assert AgentRegistry.has_registered("main")
+    defaults = AgentRegistry.get_defaults("main")
+    assert defaults["kind"] == "main"
+    assert defaults["system_prompt"] == "Hello"
+
+
+def test_agent_defaults_merged_into_agents(tmp_path):
+    """[agent.defaults] is merged as base for all agents."""
+    config = {
+        "agent": {
+            "defaults": {
+                "model": "gpt-4o",
+                "tools": {"enabled": ["ReadFile"]},
+            }
+        },
+        "agents": {
+            "researcher": {
+                "system_prompt": "You research.",
+                "tools": {"enabled": ["WebSearch"]},
+            }
+        },
+    }
+    ws = Workspace(tmp_path, tmp_path / ".bos", config)
+    ws.bootstrap_platform()
+    assert AgentRegistry.has_registered("researcher")
+    defaults = AgentRegistry.get_defaults("researcher")
+    assert defaults["model"] == "gpt-4o"  # From agent.defaults
+    assert defaults["system_prompt"] == "You research."  # From agent.researcher
+    # tools.enabled list is replaced, not unioned
+    assert defaults["tools"] == ["WebSearch"]
+
+
+def test_default_agent_registered_from_python_spec(tmp_path):
+    """_default agent is registered from Python default_agent_spec when no TOML override."""
+    ws = Workspace(tmp_path, tmp_path / ".bos", {"runtime": {"agent": "_default", "location": "process"}})
+    ws.bootstrap_platform()
+    assert AgentRegistry.has_registered("_default")
+    defaults = AgentRegistry.get_defaults("_default")
+    assert defaults["kind"] == "_default"
+    assert defaults["tools"] is None  # "*" → None (all)
+
+
+def test_default_agent_can_be_overridden_in_toml(tmp_path):
+    """[agents._default] in TOML replaces the Python spec."""
+    config = {
+        "agents": {
+            "_default": {
+                "system_prompt": "Custom default",
+                "tools": {"enabled": ["ReadFile"]},
+            }
+        }
+    }
+    ws = Workspace(tmp_path, tmp_path / ".bos", config)
+    ws.bootstrap_platform()
+    assert AgentRegistry.has_registered("_default")
+    defaults = AgentRegistry.get_defaults("_default")
+    assert defaults["system_prompt"] == "Custom default"
+    assert defaults["tools"] == ["ReadFile"]
+
+
+def test_resolve_agents_loads_external_toml(tmp_path):
+    """resolve_agents() scans agent_dirs and merges external .toml files."""
     bos_dir = tmp_path / ".bos"
-    bos_dir.mkdir(exist_ok=True)
-    (bos_dir / "config.toml").write_text(dedent(config_text).strip() + "\n", encoding="utf-8")
-
-
-def test_resolve_platform_config_keeps_raw_config_unchanged(tmp_path):
-    _write_workspace_config(
-        tmp_path,
-        """
-        [platform]
-        agent_dirs = ["agents"]
-
-        [[platform.agents]]
-        name = "main"
-        description = "inline"
-        """,
-    )
-    agents_dir = tmp_path / ".bos" / "agents"
+    bos_dir.mkdir(parents=True)
+    agents_dir = bos_dir / "agents"
     agents_dir.mkdir()
-    (agents_dir / "main.toml").write_text('name = "main"\ndescription = "external"\n', encoding="utf-8")
-
-    ws = Workspace.from_discovery(tmp_path)
-    raw_platform = deepcopy(ws.config["platform"])
-
-    resolved = ws.resolve_platform_config()
-
-    assert ws.config["platform"] == raw_platform
-    assert resolved["agents"] == [{"name": "main", "description": "external"}]
-    assert "agent_dirs" not in resolved
-
-
-def test_resolve_platform_config_auto_scans_default_agents_dir(tmp_path):
-    _write_workspace_config(
-        tmp_path,
-        """
-        [platform]
-
-        [[platform.agents]]
-        name = "main"
-        description = "inline"
-        """,
+    (agents_dir / "helper.toml").write_text(
+        'system_prompt = "I help."\ntools = { enabled = ["ReadFile"] }\n'
     )
-    # Default agent_dirs = ["agents"], relative to .bos/
-    agents_dir = tmp_path / ".bos" / "agents"
+
+    config = {"platform": {"agent_dirs": ["./agents"]}}
+    ws = Workspace(tmp_path, bos_dir, config)
+    ws.resolve_agents()
+
+    assert "helper" in ws.config.agents
+    assert ws.config.agents["helper"].system_prompt == "I help."
+
+
+def test_resolve_agents_derives_name_from_filename_stem(tmp_path):
+    """External agent without explicit name uses filename stem."""
+    bos_dir = tmp_path / ".bos"
+    bos_dir.mkdir(parents=True)
+    agents_dir = bos_dir / "agents"
     agents_dir.mkdir()
-    (agents_dir / "main.toml").write_text('name = "main"\ndescription = "external"\n', encoding="utf-8")
+    (agents_dir / "researcher.toml").write_text('system_prompt = "I search."\n')
 
-    resolved = Workspace.from_discovery(tmp_path).resolve_platform_config()
+    config = {"platform": {"agent_dirs": ["./agents"]}}
+    ws = Workspace(tmp_path, bos_dir, config)
+    ws.resolve_agents()
 
-    # Auto-scanned; last-wins means external overrides inline
-    assert resolved["agents"] == [{"name": "main", "description": "external"}]
+    assert "researcher" in ws.config.agents
 
 
-def test_resolve_platform_config_loads_flat_agent_definitions(tmp_path):
-    _write_workspace_config(
-        tmp_path,
-        """
-        [platform]
-        agent_dirs = ["agents"]
-        """,
-    )
-    agents_dir = tmp_path / ".bos" / "agents"
+def test_resolve_agents_loads_markdown_agent(tmp_path):
+    """resolve_agents() loads .md files with frontmatter."""
+    bos_dir = tmp_path / ".bos"
+    bos_dir.mkdir(parents=True)
+    agents_dir = bos_dir / "agents"
     agents_dir.mkdir()
-    (agents_dir / "foo.toml").write_text('name = "foo"\ndescription = "flat"\n', encoding="utf-8")
-    (agents_dir / "bar.toml").write_text(
-        'name = "bar"\ndescription = "also flat"\nsystem_prompt = "Hello"\n',
-        encoding="utf-8",
-    )
-
-    resolved = Workspace.from_discovery(tmp_path).resolve_platform_config()
-
-    assert [agent["name"] for agent in resolved["agents"]] == ["bar", "foo"]
-    assert resolved["agents"][0]["system_prompt"] == "Hello"
-
-
-def test_resolve_platform_config_loads_markdown_agent_with_frontmatter(tmp_path):
-    _write_workspace_config(
-        tmp_path,
-        """
-        [platform]
-        agent_dirs = ["agents"]
-        """,
-    )
-    agents_dir = tmp_path / ".bos" / "agents"
-    agents_dir.mkdir()
-    (agents_dir / "researcher.md").write_text(
-        dedent("""
+    (agents_dir / "assistant.md").write_text(dedent("""\
         ---
-        name: repo-researcher
-        description: Focused repo analyst
-        tools:
-          - ReadFile
-          - SearchFiles
-        exclude_tools: [WriteFile, Shell]
-        reasoning_effort: high
-        max_iterations: 3
+        model: gpt-4o
         ---
-        You are the researcher.
+        You are a helpful assistant.
+    """))
 
-        Return concise findings.
-        """).lstrip(),
-        encoding="utf-8",
-    )
+    config = {"platform": {"agent_dirs": ["./agents"]}}
+    ws = Workspace(tmp_path, bos_dir, config)
+    ws.resolve_agents()
 
-    resolved = Workspace.from_discovery(tmp_path).resolve_platform_config()
+    assert "assistant" in ws.config.agents
+    assert ws.config.agents["assistant"].system_prompt == "You are a helpful assistant.\n"
 
-    assert resolved["agents"] == [
-        {
-            "name": "repo-researcher",
-            "description": "Focused repo analyst",
-            "tools": ["ReadFile", "SearchFiles"],
-            "exclude_tools": ["WriteFile", "Shell"],
-            "reasoning_effort": "high",
-            "max_iterations": 3,
-            "system_prompt": "You are the researcher.\n\nReturn concise findings.\n",
+
+def test_resolve_agents_markdown_without_frontmatter_becomes_prompt(tmp_path):
+    """Markdown without frontmatter treats whole file as system_prompt."""
+    bos_dir = tmp_path / ".bos"
+    bos_dir.mkdir(parents=True)
+    agents_dir = bos_dir / "agents"
+    agents_dir.mkdir()
+    (agents_dir / "notes.md").write_text("Just some notes.\nNo frontmatter.\n")
+
+    config = {"platform": {"agent_dirs": ["./agents"]}}
+    ws = Workspace(tmp_path, bos_dir, config)
+    ws.resolve_agents()
+
+    assert "notes" in ws.config.agents
+    assert ws.config.agents["notes"].system_prompt == "Just some notes.\nNo frontmatter.\n"
+
+
+def test_resolve_agents_last_wins_on_duplicate_name(tmp_path):
+    """External files with same name deep-merge, later wins per key."""
+    bos_dir = tmp_path / ".bos"
+    bos_dir.mkdir(parents=True)
+    agents_dir = bos_dir / "agents"
+    agents_dir.mkdir()
+    # a.toml comes first alphabetically
+    (agents_dir / "a.toml").write_text('system_prompt = "First"\nmodel = "a"\n')
+    # z.toml comes after
+    (agents_dir / "z.toml").write_text('system_prompt = "Second"\n')
+
+    config = {"platform": {"agent_dirs": ["./agents"]}}
+    ws = Workspace(tmp_path, bos_dir, config)
+    ws.resolve_agents()
+
+    # Both files define the same agent name, but name is derived from filename
+    # a.toml → "a", z.toml → "z" — different agents
+    assert "a" in ws.config.agents
+    assert "z" in ws.config.agents
+    assert ws.config.agents["a"].system_prompt == "First"
+    assert ws.config.agents["z"].system_prompt == "Second"
+
+
+def test_resolve_agents_explicit_name_in_file(tmp_path):
+    """External agent with explicit 'name' field uses it over filename stem."""
+    bos_dir = tmp_path / ".bos"
+    bos_dir.mkdir(parents=True)
+    agents_dir = bos_dir / "agents"
+    agents_dir.mkdir()
+    (agents_dir / "whatever.toml").write_text('name = "realname"\nsystem_prompt = "Hi"\n')
+
+    config = {"platform": {"agent_dirs": ["./agents"]}}
+    ws = Workspace(tmp_path, bos_dir, config)
+    ws.resolve_agents()
+
+    assert "realname" in ws.config.agents
+    assert ws.config.agents["realname"].system_prompt == "Hi"
+
+
+def test_resolve_agents_inline_and_external_merge(tmp_path):
+    """Inline agent merged with external file of same name."""
+    bos_dir = tmp_path / ".bos"
+    bos_dir.mkdir(parents=True)
+    agents_dir = bos_dir / "agents"
+    agents_dir.mkdir()
+    (agents_dir / "main.toml").write_text('system_prompt = "From file"\nmodel = "file-model"\n')
+
+    config = {
+        "platform": {"agent_dirs": ["./agents"]},
+        "agents": {
+            "main": {
+                "system_prompt": "From inline",
+                "tools": {"enabled": ["ReadFile"]},
+            }
+        },
+    }
+    ws = Workspace(tmp_path, bos_dir, config)
+    ws.resolve_agents()
+
+    agent = ws.config.agents["main"]
+    # External file loaded after inline, so system_prompt from file wins
+    assert agent.system_prompt == "From file"
+    # model from file
+    assert agent.model == "file-model"
+    # tools only in inline, preserved
+    assert agent.tools.enabled == ["ReadFile"]
+
+
+def test_bootstrap_registers_both_inline_and_external_agents(tmp_path):
+    """bootstrap_platform registers agents from both inline and external sources."""
+    bos_dir = tmp_path / ".bos"
+    bos_dir.mkdir(parents=True)
+    agents_dir = bos_dir / "agents"
+    agents_dir.mkdir()
+    (agents_dir / "helper.toml").write_text('system_prompt = "Helper"\n')
+
+    config = {
+        "platform": {"agent_dirs": ["./agents"]},
+        "agents": {"main": {"system_prompt": "Main"}},
+        "runtime": {"agent": "main", "location": "process"},
+    }
+    ws = Workspace(tmp_path, bos_dir, config)
+    ws.resolve_agents()
+    ws.bootstrap_platform()
+
+    assert AgentRegistry.has_registered("main")
+    assert AgentRegistry.has_registered("helper")
+    assert AgentRegistry.has_registered("_default")
+
+
+def test_non_string_system_prompt_rejected_by_pydantic(tmp_path):
+    """Pydantic validation rejects non-string system_prompt in agents.<name>."""
+    config = {
+        "agents": {
+            "bad": {"system_prompt": 42}
         }
-    ]
+    }
+    with pytest.raises(Exception):
+        Workspace(tmp_path, tmp_path / ".bos", config)
 
 
-def test_resolve_platform_config_loads_markdown_agent_without_frontmatter(tmp_path):
-    _write_workspace_config(
-        tmp_path,
-        """
-        [platform]
-        agent_dirs = ["agents"]
-        """,
-    )
-    agents_dir = tmp_path / ".bos" / "agents"
-    agents_dir.mkdir()
-    (agents_dir / "writer.md").write_text("Write clear docs.\n", encoding="utf-8")
+def test_agent_dirs_relative_to_bos_dir(tmp_path):
+    """agent_dirs entries are resolved relative to bos_dir."""
+    bos_dir = tmp_path / ".bos"
+    bos_dir.mkdir(parents=True)
+    # Create agents in a custom subdirectory
+    custom_dir = bos_dir / "custom-agents"
+    custom_dir.mkdir()
+    (custom_dir / "special.toml").write_text('system_prompt = "Special"\n')
 
-    resolved = Workspace.from_discovery(tmp_path).resolve_platform_config()
+    config = {"platform": {"agent_dirs": ["./custom-agents"]}}
+    ws = Workspace(tmp_path, bos_dir, config)
+    ws.resolve_agents()
 
-    assert resolved["agents"] == [{"name": "writer", "system_prompt": "Write clear docs.\n"}]
-
+    assert "special" in ws.config.agents
 
 
-def test_resolve_platform_config_treats_semantic_frontmatter_conflicts_as_prompt(tmp_path, caplog):
-    _write_workspace_config(
-        tmp_path,
-        """
-        [platform]
-        agent_dirs = ["agents"]
-        """,
-    )
-    agents_dir = tmp_path / ".bos" / "agents"
-    agents_dir.mkdir()
-    (agents_dir / "main.md").write_text(
-        dedent("""
-        ---
-        system_prompt: not here
-        ---
-        Prompt body.
-        """).lstrip(),
-        encoding="utf-8",
-    )
+def test_multiple_agent_dirs_scanned(tmp_path):
+    """Multiple agent_dirs entries are all scanned."""
+    bos_dir = tmp_path / ".bos"
+    bos_dir.mkdir(parents=True)
+    dir1 = bos_dir / "agents"
+    dir2 = bos_dir / "more-agents"
+    dir1.mkdir()
+    dir2.mkdir()
+    (dir1 / "a.toml").write_text('system_prompt = "A"\n')
+    (dir2 / "b.toml").write_text('system_prompt = "B"\n')
 
-    with caplog.at_level("WARNING"):
-        resolved = Workspace.from_discovery(tmp_path).resolve_platform_config()
+    config = {"platform": {"agent_dirs": ["./agents", "./more-agents"]}}
+    ws = Workspace(tmp_path, bos_dir, config)
+    ws.resolve_agents()
 
-    assert resolved["agents"] == [
-        {
-            "name": "main",
-            "system_prompt": "---\nsystem_prompt: not here\n---\nPrompt body.\n",
-        }
-    ]
-    assert "defines system_prompt in frontmatter" in caplog.text
-    assert "using the whole file as system_prompt" in caplog.text
-
-
-def test_resolve_platform_config_treats_unclosed_frontmatter_as_prompt(tmp_path, caplog):
-    _write_workspace_config(
-        tmp_path,
-        """
-        [platform]
-        agent_dirs = ["agents"]
-        """,
-    )
-    agents_dir = tmp_path / ".bos" / "agents"
-    agents_dir.mkdir()
-    content = "---\nname: broken\nThis is actually prompt text.\n"
-    (agents_dir / "main.md").write_text(content, encoding="utf-8")
-
-    with caplog.at_level("WARNING"):
-        resolved = Workspace.from_discovery(tmp_path).resolve_platform_config()
-
-    assert resolved["agents"] == [{"name": "main", "system_prompt": content}]
-    assert "Invalid frontmatter in Markdown agent definition agents/main.md" in caplog.text
-    assert "using the whole file as system_prompt" in caplog.text
-
-
-def test_resolve_platform_config_treats_malformed_frontmatter_as_prompt(tmp_path, caplog):
-    _write_workspace_config(
-        tmp_path,
-        """
-        [platform]
-        agent_dirs = ["agents"]
-        """,
-    )
-    agents_dir = tmp_path / ".bos" / "agents"
-    agents_dir.mkdir()
-    content = "---\nname: broken\n  unexpected: indent\n---\nPrompt body.\n"
-    (agents_dir / "main.md").write_text(content, encoding="utf-8")
-
-    with caplog.at_level("WARNING"):
-        resolved = Workspace.from_discovery(tmp_path).resolve_platform_config()
-
-    assert resolved["agents"] == [{"name": "main", "system_prompt": content}]
-    assert "Invalid frontmatter in Markdown agent definition agents/main.md" in caplog.text
-    assert "using the whole file as system_prompt" in caplog.text
-
-
-def test_resolve_platform_config_rejects_non_string_inline_system_prompt(tmp_path):
-    _write_workspace_config(
-        tmp_path,
-        """
-        [platform]
-
-        [[platform.agents]]
-        name = "main"
-
-        [platform.agents.system_prompt]
-        _default = "inline"
-        """,
-    )
-
-    with pytest.raises(ValueError, match="system_prompt must be a string"):
-        Workspace.from_discovery(tmp_path).resolve_platform_config()
-
-
-def test_resolve_platform_config_uses_exact_name_last_wins_and_tracks_source_history(tmp_path):
-    _write_workspace_config(
-        tmp_path,
-        """
-        [platform]
-        agent_dirs = ["agents"]
-
-        [[platform.agents]]
-        name = "main"
-        description = "inline"
-        """,
-    )
-    agents_dir = tmp_path / ".bos" / "agents"
-    agents_dir.mkdir()
-    (agents_dir / "01-main.toml").write_text('name = "main"\ndescription = "first file"\n', encoding="utf-8")
-    (agents_dir / "zz-main.toml").write_text('name = "main"\ndescription = "final file"\n', encoding="utf-8")
-
-    ws = Workspace.from_discovery(tmp_path)
-    resolved = ws.resolve_platform_config()
-
-    assert resolved["agents"] == [{"name": "main", "description": "final file"}]
-    history = ws.agent_source_history["main"]
-    assert [(record.source_kind, record.source_path, record.won) for record in history] == [
-        ("inline", "config.toml", False),
-        ("file", "agents/01-main.toml", False),
-        ("file", "agents/zz-main.toml", True),
-    ]
-
-
-def test_resolve_platform_config_rejects_case_only_name_collisions(tmp_path):
-    _write_workspace_config(
-        tmp_path,
-        """
-        [platform]
-        agent_dirs = ["agents"]
-
-        [[platform.agents]]
-        name = "main"
-        """,
-    )
-    agents_dir = tmp_path / ".bos" / "agents"
-    agents_dir.mkdir()
-    (agents_dir / "upper.toml").write_text('name = "Main"\n', encoding="utf-8")
-
-    with pytest.raises(ValueError, match=r"'main'.*config.toml.*'Main'.*agents/upper.toml"):
-        Workspace.from_discovery(tmp_path).resolve_platform_config()
-
-
-def test_resolve_platform_config_rejects_non_list_platform_agents(tmp_path):
-    _write_workspace_config(
-        tmp_path,
-        """
-        [platform]
-        agents = ""
-        """,
-    )
-
-    with pytest.raises(ValueError, match="platform.agents must be a list of tables"):
-        Workspace.from_discovery(tmp_path).resolve_platform_config()
-
-
-def test_resolve_platform_config_rejects_non_list_agent_dirs(tmp_path):
-    _write_workspace_config(
-        tmp_path,
-        """
-        [platform]
-        agent_dirs = "agents"
-        """,
-    )
-
-    with pytest.raises(ValueError, match="platform.agent_dirs must be a list of strings"):
-        Workspace.from_discovery(tmp_path).resolve_platform_config()
-
-
-def test_resolve_platform_config_clears_stale_source_history_on_failure(tmp_path):
-    _write_workspace_config(
-        tmp_path,
-        """
-        [platform]
-        agent_dirs = ["agents"]
-
-        [[platform.agents]]
-        name = "main"
-        """,
-    )
-    agents_dir = tmp_path / ".bos" / "agents"
-    agents_dir.mkdir()
-    good_agent = agents_dir / "main.toml"
-    good_agent.write_text('name = "main"\n', encoding="utf-8")
-
-    ws = Workspace.from_discovery(tmp_path)
-    ws.resolve_platform_config()
-    assert "main" in ws.agent_source_history
-
-    good_agent.write_text('name = "Main"\n', encoding="utf-8")
-
-    with pytest.raises(ValueError, match="Case-only agent name collision"):
-        ws.resolve_platform_config()
-
-    assert ws.agent_source_history == {}
-
-
-def test_resolve_platform_config_derives_name_from_filename_stem(tmp_path):
-    """When name is omitted from an external agent file, derive it from the filename stem."""
-    _write_workspace_config(
-        tmp_path,
-        """
-        [platform]
-        agent_dirs = ["agents"]
-        """,
-    )
-    agents_dir = tmp_path / ".bos" / "agents"
-    agents_dir.mkdir()
-    (agents_dir / "researcher.toml").write_text('description = "no explicit name"\n', encoding="utf-8")
-
-    resolved = Workspace.from_discovery(tmp_path).resolve_platform_config()
-
-    assert resolved["agents"] == [{"name": "researcher", "description": "no explicit name"}]
-
-
-
-def test_resolve_platform_config_multiple_agent_dirs(tmp_path):
-    """agent_dirs supports multiple directories, scanned in order."""
-    _write_workspace_config(
-        tmp_path,
-        """
-        [platform]
-        agent_dirs = ["agents", "more_agents"]
-        """,
-    )
-    agents_dir = tmp_path / ".bos" / "agents"
-    agents_dir.mkdir()
-    (agents_dir / "alpha.toml").write_text('description = "from agents"\n', encoding="utf-8")
-
-    more_dir = tmp_path / ".bos" / "more_agents"
-    more_dir.mkdir()
-    (more_dir / "beta.toml").write_text('description = "from more_agents"\n', encoding="utf-8")
-
-    resolved = Workspace.from_discovery(tmp_path).resolve_platform_config()
-
-    names = [a["name"] for a in resolved["agents"]]
-    assert names == ["alpha", "beta"]
-    assert resolved["agents"][0]["description"] == "from agents"
-    assert resolved["agents"][1]["description"] == "from more_agents"
-
-
-def test_resolve_platform_config_relative_path_outside_bos(tmp_path):
-    """Relative paths are resolved against .bos/, so '../agents' goes to workspace root."""
-    _write_workspace_config(
-        tmp_path,
-        """
-        [platform]
-        agent_dirs = ["../agents"]
-        """,
-    )
-    agents_dir = tmp_path / "agents"
-    agents_dir.mkdir()
-    (agents_dir / "worker.toml").write_text('description = "outside bos"\n', encoding="utf-8")
-
-    resolved = Workspace.from_discovery(tmp_path).resolve_platform_config()
-
-    assert resolved["agents"] == [{"name": "worker", "description": "outside bos"}]
-
-
-def test_resolve_platform_config_absolute_path(tmp_path):
-    """Absolute paths are used as-is."""
-    agents_dir = tmp_path / "ext_agents"
-    agents_dir.mkdir()
-    (agents_dir / "ext.toml").write_text('description = "absolute"\n', encoding="utf-8")
-
-    _write_workspace_config(
-        tmp_path,
-        f"""
-        [platform]
-        agent_dirs = ["{agents_dir.as_posix()}"]
-        """,
-    )
-
-    resolved = Workspace.from_discovery(tmp_path).resolve_platform_config()
-
-    assert resolved["agents"] == [{"name": "ext", "description": "absolute"}]
+    assert "a" in ws.config.agents
+    assert "b" in ws.config.agents

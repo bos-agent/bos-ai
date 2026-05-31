@@ -79,7 +79,6 @@ tasks by inspecting context, using tools, editing files, and verifying results.
 """
 
 default_agent_spec: dict[str, Any] = {
-    "name": "_default",
     "system_prompt": _system_prompt,
     "tools": {
         "enabled": ["*"],

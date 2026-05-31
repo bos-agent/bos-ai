@@ -1,3 +1,4 @@
+"""Tests for workspace discovery and initialization with BEP6 config."""
 import pytest
 
 from bos.config.workspace import Workspace, WorkspaceResolutionError, initialize_workspace
@@ -12,7 +13,9 @@ def test_workspace_load_does_not_create_fallback_bos_dir(tmp_path, monkeypatch):
     ws = Workspace.from_discovery(workspace)
 
     assert ws.bos_dir == fallback_bos_dir.resolve()
-    assert ws.config == {}
+    # Empty config validates to RootConfig with all fields default
+    assert ws.config.platform is None
+    assert ws.config.runtime is None
     assert not fallback_bos_dir.exists()
 
 
@@ -48,7 +51,7 @@ def test_workspace_load_allows_matching_discovered_bos_dir_and_bos_dir_env(tmp_p
     ws = Workspace.from_discovery(workspace)
 
     assert ws.bos_dir == discovered_bos_dir.resolve()
-    assert ws.config == {}
+    assert ws.config.platform is None
 
 
 def test_initialize_workspace_creates_bos_toml_by_default(tmp_path, monkeypatch):
@@ -93,12 +96,15 @@ def test_workspace_loads_from_bos_toml(tmp_path, monkeypatch):
     monkeypatch.delenv("BOS_CONFIG", raising=False)
     workspace = tmp_path / "project"
     workspace.mkdir()
-    (workspace / "bos.toml").write_text('[platform]\nextensions = ["bos.exts"]\n', encoding="utf-8")
+    (workspace / "bos.toml").write_text(
+        '[platform]\nextensions = ["bos.exts"]\n', encoding="utf-8"
+    )
 
     ws = Workspace.from_discovery(workspace)
 
     assert ws.bos_dir == workspace.resolve()
-    assert ws.config == {"platform": {"extensions": ["bos.exts"]}}
+    assert ws.config.platform is not None
+    assert ws.config.platform.extensions == ["bos.exts"]
 
 
 def test_workspace_bos_toml_sets_bos_dir_equal_to_workspace(tmp_path, monkeypatch):

@@ -223,7 +223,6 @@ class AgentHarness:
             "chat_store": self.chat_store,
             "consolidator": self.consolidator,
             "interceptor": self.interceptor,
-            "tools_config": self._tools_cfg,
             "plugins": await self._bind_plugins_for_agent(merged_cfg),
             "chat_compaction_lock": self._get_compaction_lock,
         }
@@ -316,10 +315,15 @@ class AgentHarness:
         return instance
 
     def _create_consolidator(self) -> Consolidator:
-        consolidator_impl = self._harness_cfg.get("consolidator", "_default")
+        consolidator_cfg = self._harness_cfg.get("consolidator", "_default")
+        # Pass-through: if the config value is already a Consolidator instance
+        # (test convenience), use it directly.
+        if isinstance(consolidator_cfg, Consolidator):
+            self._owned.append(consolidator_cfg)
+            return consolidator_cfg
         cfg = {"model": os.getenv("BOS_CONSOLIDATOR_MODEL"), "llm": self.llm}
         from . import __dict__ as core_exports
-        instance = core_exports["ep_consolidator"].invoke(consolidator_impl, cfg)
+        instance = core_exports["ep_consolidator"].invoke(consolidator_cfg, cfg)
         if instance is not None:
             self._owned.append(instance)
         return instance

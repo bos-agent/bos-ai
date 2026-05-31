@@ -541,10 +541,12 @@ class Workspace:
         for name, agent_config in (self.config.agents or {}).items():
             cfg = agent_config.model_dump(exclude_defaults=True)
             merged = _deep_merge(dict(agent_defaults), cfg)
+            merged.pop("name", None)  # name is the registration key, not a kwarg
             AgentRegistry.register(name, **merged)
 
         if not AgentRegistry.has_registered("_default"):
             merged = _deep_merge(dict(agent_defaults), dict(default_agent_spec))
+            merged.pop("name", None)
             AgentRegistry.register("_default", **merged)
 
         # Suppress litellm auto-loading
