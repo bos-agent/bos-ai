@@ -238,7 +238,6 @@ class AgentHarness:
         """
         plugins_cfg = agent_cfg.get("plugins", {})
         if isinstance(plugins_cfg, (list, tuple)):
-            # Legacy list — treat as enabled
             enabled_names = list(plugins_cfg)
             disabled: list[str] = []
         elif isinstance(plugins_cfg, dict):
@@ -252,6 +251,10 @@ class AgentHarness:
                 disabled = list(disabled)
         else:
             return []
+
+        if "*" in enabled_names:
+            enabled_names = [n for n in ep_plugin._extensions.keys() if n not in disabled]
+            disabled = []
 
         bindings = agent_cfg.get("plugin-bindings", {})
         if hasattr(bindings, "model_dump"):
