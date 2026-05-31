@@ -1,9 +1,8 @@
 """Tests for BEP6 agent resolution: inline [agents.<name>], external files, resolve_agents()."""
-from copy import deepcopy
 from textwrap import dedent
-from pathlib import Path
 
 import pytest
+
 from bos.config.workspace import Workspace
 from bos.core import AgentRegistry
 

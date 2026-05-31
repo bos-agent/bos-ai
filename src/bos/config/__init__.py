@@ -1,8 +1,8 @@
 from bos.config.schema import (
     ActorConfig,
     AgentConfig,
-    HarnessConfig,
     ExtensionsConfig,
+    HarnessConfig,
     PlatformConfig,
     RootConfig,
     RuntimeConfig,

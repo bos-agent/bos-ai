@@ -13,8 +13,6 @@ from ._utils import (
     _aclose,
     _apply,
     _create_extension_instance,
-    _deep_merge,
-    _safe_format,
 )
 from .agent import Agent, ChainInterceptor
 from .contract import (

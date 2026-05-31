@@ -1,6 +1,6 @@
 """Tests for BEP6 [runtime] section access via Workspace."""
+
 import pytest
-from pathlib import Path
 
 from bos.config.workspace import Workspace
 
