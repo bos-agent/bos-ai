@@ -10,8 +10,14 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal
 
+from bos.config.schema import (
+    AgentConfig,
+    RootConfig,
+    validate_agent_config,
+    validate_config,
+)
 from bos.core import AgentHarness, _apply
-from bos.core._utils import _get_bos_home, _resolve_path
+from bos.core._utils import _deep_merge, _get_bos_home, _resolve_path
 
 
 class WorkspaceResolutionError(RuntimeError):
@@ -114,26 +120,29 @@ def presets_dir() -> Path:
     return Path(__file__).resolve().parent / "presets"
 
 
-def resolve_config_source(config_arg: str) -> tuple[Path, Path, dict[str, Any]]:
+def resolve_config_source(config_arg: str) -> tuple[Path, Path, RootConfig]:
     """Resolve a ``-c`` / ``--config`` argument to ``(config_path, bos_dir, config)``.
 
     * If *config_arg* is an existing file path → ``bos_dir`` is the file's parent.
     * If *config_arg* matches a built-in preset name → ``bos_dir`` is
       ``~/.bos/agents/<preset>`` (created if necessary).
 
-    Raises :class:`WorkspaceResolutionError` if neither matches.
+    Returns validated :class:`RootConfig`. Raises :class:`WorkspaceResolutionError`
+    if the source cannot be resolved.
     """
     config_path = Path(config_arg)
     if config_path.is_file():
         resolved = config_path.resolve()
-        return resolved, resolved.parent, _load_config(resolved)
+        raw = _load_config(resolved)
+        return resolved, resolved.parent, validate_config(raw)
 
     presets = presets_dir()
     preset = presets / f"{config_arg}.toml"
     if preset.exists():
         bos_dir = _get_bos_home() / "agents" / config_arg
         bos_dir.mkdir(parents=True, exist_ok=True)
-        return preset, bos_dir, _load_config(preset)
+        raw = _load_config(preset)
+        return preset, bos_dir, validate_config(raw)
 
     available = sorted(p.stem for p in presets.glob("*.toml")) if presets.exists() else []
     presets_msg = f"Available presets: {', '.join(available)}" if available else "No presets available"
@@ -387,15 +396,21 @@ class Workspace:
         self,
         workspace: str | Path,
         bos_dir: str | Path,
-        config: dict[str, Any],
+        config: dict[str, Any] | RootConfig,
         *,
         config_file: str | Path | None = None,
     ):
-        if not isinstance(config, dict):
-            raise TypeError(f"config must be a dict, got {type(config).__name__}")
+        if isinstance(config, RootConfig):
+            self.config: RootConfig = config
+        elif isinstance(config, dict):
+            try:
+                self.config: RootConfig = validate_config(config)
+            except Exception as exc:
+                raise ConfigValidationError(str(exc)) from exc
+        else:
+            raise TypeError(f"config must be a dict or RootConfig, got {type(config).__name__}")
         self.workspace = _resolve_path(workspace)
         self.bos_dir = _resolve_path(bos_dir)
-        self.config: dict[str, Any] = config
         self.config_file: Path | None = _resolve_path(config_file) if config_file else None
         self.agent_source_history: dict[str, list[AgentSourceRecord]] = {}
 
@@ -420,6 +435,47 @@ class Workspace:
             workspace = resolved_cwd
 
         return cls(workspace, bos_dir, config, config_file=config_path)
+
+    def resolve_agents(self) -> None:
+        """Load external agent files from agent_dirs and deep-merge into config.agents.
+
+        Scans each directory in ``platform.agent_dirs`` for ``.toml`` and ``.md``
+        files, validates each via :func:`validate_agent_config`, and deep-merges
+        them into ``self.config.agents`` with last-wins semantics.
+        """
+        platform = self.config.platform
+        if platform is None or not platform.agent_dirs:
+            return
+
+        candidates: list[_LoadedAgentCandidate] = []
+        load_order = 0
+        for raw_dir in platform.agent_dirs:
+            agents_root = (self.bos_dir / Path(raw_dir.strip()).expanduser()).resolve()
+            if not agents_root.exists() or not agents_root.is_dir():
+                continue
+            dir_candidates: list[Path] = []
+            for entry in agents_root.iterdir():
+                if entry.is_file() and entry.suffix.lower() in _EXTERNAL_AGENT_SUFFIXES:
+                    dir_candidates.append(entry)
+            for candidate_path in sorted(dir_candidates, key=lambda p: p.name):
+                load_order += 1
+                candidates.append(self._load_external_agent_candidate(candidate_path, load_order=load_order))
+
+        if not candidates:
+            return
+
+        # Merge validated candidates into config.agents
+        agents = self.config.agents or {}
+        for candidate in candidates:
+            name = candidate.spec["name"]
+            validated = validate_agent_config(candidate.spec)
+            if name in agents:
+                existing = agents[name].model_dump(exclude_defaults=True)
+                _deep_merge(existing, validated)
+                agents[name] = AgentConfig.model_validate(existing)
+            else:
+                agents[name] = AgentConfig.model_validate(validated)
+        self.config.agents = agents
 
     def bootstrap_platform(self):
         from bos.core import _apply, bootstrap_platform
@@ -491,35 +547,32 @@ class Workspace:
         return resolved
 
     def harness(self) -> AgentHarness:
-        platform_cfg = self.config.get("platform", {})
-        harness_cfg = self.config.get("harness", {}) | {
-            "bos_dir": self.bos_dir,
-            "workspace": self.workspace,
-            "enabled_plugins": platform_cfg.get("enabled_plugins", []),
-            "platform_plugins": platform_cfg.get("plugins", {}),
-        }
-        return _apply(AgentHarness, harness_cfg)
-
-    def enable_interceptors(self, interceptors: list[str | dict[str, Any]]):
-        interceptors_cfg = self.config.setdefault("harness", {}).setdefault("interceptors", [])
-        interceptors_cfg.extend(i for i in interceptors if i not in interceptors_cfg)
-
-    def get_setting(self, key: str):
-        settings, segments = self.config, key.split(".")
-        for seg in segments[:-1]:
-            settings = settings.get(seg, {})
-        return settings.get(segments[-1])
+        harness_cfg = {}
+        if self.config.harness:
+            harness_cfg = self.config.harness.model_dump()
+        return AgentHarness(
+            bos_dir=self.bos_dir,
+            workspace=self.workspace,
+            harness_config=harness_cfg,
+        )
 
     def get_main_agent_kind(self) -> str:
-        return self.get_setting("main.agent") or "_default"
+        runtime = self.config.runtime
+        return runtime.agent if runtime else "_default"
 
     def get_main_agent_address(self) -> str:
         return "agent@main"
 
     def get_runtime_config(self, *, force_kind: str | None = None) -> AgentRuntimeConfig:
-        runtime_cfg = self.config.get("main", {}).get("runtime", {})
-        workspace_dir = runtime_cfg.get("workspace_dir") or "/workspace"
-        bos_dir = runtime_cfg.get("bos_dir")
+        runtime = self.config.runtime
+        # Docker settings pass through via runtime.extra="allow"
+        runtime_extra: dict[str, Any] = {}
+        if runtime:
+            extra = runtime.model_dump()
+            runtime_extra = {k: v for k, v in extra.items() if k not in {"agent", "location", "channels", "actors"}}
+
+        workspace_dir = runtime_extra.get("workspace_dir") or "/workspace"
+        bos_dir = runtime_extra.get("bos_dir")
         if not bos_dir:
             try:
                 bos_rel = self.bos_dir.relative_to(self.workspace)
@@ -527,23 +580,27 @@ class Workspace:
             except ValueError:
                 bos_dir = "/bos"
 
+        location = runtime.location if runtime else "process"
         return AgentRuntimeConfig(
-            kind=force_kind or runtime_cfg.get("kind") or "process",
-            image=runtime_cfg.get("image"),
-            container_name=runtime_cfg.get("container_name"),
+            kind=force_kind or location,
+            image=runtime_extra.get("image"),
+            container_name=runtime_extra.get("container_name"),
             workspace_dir=str(Path(workspace_dir).as_posix()),
             bos_dir=str(Path(bos_dir).as_posix()),
         )
 
     def resolve_platform_envfile(self) -> Path | None:
-        envfile = self.config.get("platform", {}).get("envfile")
-        if not envfile:
+        platform = self.config.platform
+        if platform is None or not platform.envfile:
             return None
-        return (self.bos_dir / Path(envfile).expanduser()).resolve()
+        return (self.bos_dir / Path(platform.envfile).expanduser()).resolve()
 
     def resolve_channels(self, *, runtime_kind: str = "process") -> list[ResolvedChannelConfig]:
         actor_address = self.get_main_agent_address()
-        raw_channels = self.config.get("main", {}).get("channels") or [
+        runtime = self.config.runtime
+        raw_channels = runtime.channels if runtime else []
+        if not raw_channels:
+            raw_channels = [
             {
                 "name": "HttpChannel",
                 "bind_address": "channel@http",
