@@ -81,12 +81,14 @@ tasks by inspecting context, using tools, editing files, and verifying results.
 default_agent_spec: dict[str, Any] = {
     "name": "_default",
     "system_prompt": _system_prompt,
-    "tools": "*",
+    "tools": {
+        "enabled": ["*"],
+        "disabled": [],
+        "usages": {},
+    },
     "plugins": {
-        "MemoryPlugin": {"enabled": True},
-        "PlanPlugin": {"enabled": True},
-        "TaskPlugin": {"enabled": True},
-        "SkillsPlugin": {"enabled": True},
-        "SubagentPlugin": {"enabled": True},
+        "enabled": ["MemoryPlugin", "PlanPlugin", "TaskPlugin", "SkillsPlugin", "SubagentPlugin"],
+        "disabled": [],
+        "prompts": {},
     },
 }

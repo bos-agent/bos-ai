@@ -42,20 +42,35 @@ class AgentRegistry:
 
     @classmethod
     def register(cls, name: str, description: str | None = None, **kwargs):
-        _CAPABILITY_KEYS = ("tools",)
-
-        def map_value(key, value):
-            if isinstance(value, (list, dict)):
+        def _resolve_tools(value):
+            if isinstance(value, dict):
+                # BEP6 structured format: {enabled, disabled, usages}
+                enabled = value.get("enabled", [])
+                return None if "*" in enabled else enabled
+            if isinstance(value, list):
                 return value
             if value is None:
-                return []  # mute the capability
+                return []
             if value == "*":
                 return None  # fully open the capability
-            raise TypeError(f"{key} must be a list, '*', or None")
+            raise TypeError(f"tools must be a dict, list, '*', or None, got {type(value).__name__}")
 
-        for key in _CAPABILITY_KEYS:
-            kwargs[key] = map_value(key, kwargs.get(key))
+        def _resolve_plugins(value):
+            if isinstance(value, dict):
+                if "enabled" in value or "disabled" in value:
+                    # BEP6 structured format: {enabled, disabled, prompts}
+                    return value
+                # Legacy dict format: {Name: {enabled: true}}
+                enabled = [k for k, v in value.items() if isinstance(v, dict) and v.get("enabled") is not False]
+                return {"enabled": enabled, "disabled": [], "prompts": {}}
+            if isinstance(value, list):
+                return {"enabled": value, "disabled": [], "prompts": {}}
+            if value is None:
+                return {"enabled": [], "disabled": [], "prompts": {}}
+            raise TypeError(f"plugins must be a dict or list, got {type(value).__name__}")
 
+        kwargs["tools"] = _resolve_tools(kwargs.get("tools"))
+        kwargs["plugins"] = _resolve_plugins(kwargs.get("plugins"))
         kwargs["kind"] = name
         cls._registry[name] = {
             "defaults": kwargs,

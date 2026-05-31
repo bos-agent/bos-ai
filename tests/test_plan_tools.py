@@ -110,9 +110,9 @@ async def test_plan_plugin_renders_without_current_plan():
 
 
 def test_default_agent_enables_plan_plugin_before_task_plugin():
-    plugins = list(default_agent_spec["plugins"])
+    plugins = default_agent_spec["plugins"]["enabled"]
 
-    assert "PlanPlugin" in default_agent_spec["plugins"]
+    assert "PlanPlugin" in plugins
     assert plugins.index("MemoryPlugin") < plugins.index("PlanPlugin") < plugins.index("TaskPlugin")
 
 

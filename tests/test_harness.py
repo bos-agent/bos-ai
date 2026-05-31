@@ -111,7 +111,7 @@ async def test_registered_agent_star_capabilities_enable_all(tmp_path):
 def test_registered_agent_rejects_unknown_capability_string():
     agent_name = f"bad_caps_{uuid.uuid4().hex}"
 
-    with pytest.raises(TypeError, match="tools must be a list, '\\*', or None"):
+    with pytest.raises(TypeError, match="tools must be a dict, list"):
         AgentRegistry.register(name=agent_name, tools="all")
 
 
