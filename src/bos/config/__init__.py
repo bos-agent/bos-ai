@@ -1,7 +1,7 @@
 from bos.config.schema import (
     ActorConfig,
     AgentConfig,
-    ExtConfig,
+    HarnessConfig,
     ExtensionsConfig,
     PlatformConfig,
     RootConfig,
@@ -23,7 +23,7 @@ __all__ = [
     "ActorConfig",
     "AgentConfig",
     "ConfigNotFoundError",
-    "ExtConfig",
+    "HarnessConfig",
     "ConfigValidationError",
     "ExtensionsConfig",
     "PlatformConfig",

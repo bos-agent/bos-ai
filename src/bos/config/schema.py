@@ -81,11 +81,10 @@ class AgentConfig(BaseModel):
 # ── Top-level sections ──────────────────────────────────────────────
 
 
-class ExtConfig(BaseModel):
-    """The ``[ext]`` section — selects which implementation to use per EP.
+class HarnessConfig(BaseModel):
+    """The ``[harness]`` section — selects which implementation to use per EP.
 
-    ``extra='allow'`` so newly registered EPs automatically accept
-    selection without schema changes.
+    ``extra='forbid'`` — every key here must be known to the harness.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -147,7 +146,7 @@ class RootConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     platform: PlatformConfig | None = None
-    ext: ExtConfig | None = None
+    harness: HarnessConfig | None = None
     exts: ExtensionsConfig | None = None
     agent: AgentSection | None = None
     agents: dict[str, AgentConfig] = Field(default_factory=dict)
