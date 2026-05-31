@@ -554,13 +554,16 @@ class Workspace:
         logging.getLogger("LiteLLM").setLevel(logging.ERROR)
 
     def harness(self) -> AgentHarness:
-        harness_cfg = {}
+        kwargs: dict[str, Any] = {}
         if self.config.harness:
-            harness_cfg = self.config.harness.model_dump()
+            kwargs = self.config.harness.model_dump()
         return AgentHarness(
             bos_dir=self.bos_dir,
             workspace=self.workspace,
-            harness_config=harness_cfg,
+            consolidator=kwargs.get("consolidator", "_default"),
+            chat_store=kwargs.get("chat_store", "_default"),
+            mail_route=kwargs.get("mail_route", "_default"),
+            interceptors=kwargs.get("interceptors", []),
         )
 
     def get_main_agent_kind(self) -> str:

@@ -60,7 +60,7 @@ async def test_harness_create_agent_defaults_to_no_capabilities(tmp_path):
 
     async with AgentHarness(
         bos_dir=bos_dir, workspace=tmp_path,
-        harness_config={"consolidator": MessageOnlyConsolidator()},
+        consolidator=MessageOnlyConsolidator(),
     ) as harness:
         agent = await harness.create_agent()
 
@@ -77,9 +77,9 @@ async def test_registered_agent_defaults_to_no_capabilities(tmp_path):
     try:
         AgentRegistry.register(name=agent_name, description="Locked", system_prompt="Stay locked down.")
 
-        hcfg = {"consolidator": MessageOnlyConsolidator()}
         async with AgentHarness(
-            bos_dir=bos_dir, workspace=tmp_path, harness_config=hcfg,
+            bos_dir=bos_dir, workspace=tmp_path,
+            consolidator=MessageOnlyConsolidator(),
         ) as harness:
             agent = await harness.create_agent(agent_name)
 
@@ -103,8 +103,10 @@ async def test_registered_agent_star_capabilities_enable_all(tmp_path):
             tools="*",
         )
 
-        hcfg = {"consolidator": MessageOnlyConsolidator()}
-        async with AgentHarness(bos_dir=bos_dir, workspace=tmp_path, harness_config=hcfg) as harness:
+        async with AgentHarness(
+            bos_dir=bos_dir, workspace=tmp_path,
+            consolidator=MessageOnlyConsolidator(),
+        ) as harness:
             agent = await harness.create_agent(agent_name)
             tool_names = {tool_def["function"]["name"] for tool_def in agent._get_tool_defs()}
 
@@ -833,7 +835,7 @@ async def test_harness_closes_custom_consolidator(tmp_path):
     bos_dir.mkdir()
     consolidator = CloseTrackingConsolidator()
 
-    async with AgentHarness(bos_dir=bos_dir, workspace=tmp_path, harness_config={"consolidator": consolidator}):
+    async with AgentHarness(bos_dir=bos_dir, workspace=tmp_path, consolidator=consolidator):
         pass
 
     assert consolidator.closed is True

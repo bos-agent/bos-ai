@@ -123,12 +123,18 @@ class AgentHarness:
         *,
         bos_dir: str | Path = ".bos",
         workspace: str | Path = ".",
-        harness_config: dict[str, Any] | None = None,
+        consolidator: str | Consolidator = "_default",
+        chat_store: str = "_default",
+        mail_route: str = "_default",
+        interceptors: list[str] | None = None,
     ) -> None:
         self._bos_root = Path(bos_dir).expanduser().resolve()
         self._workspace = Path(workspace).expanduser().resolve()
         self.workspace = self._workspace
-        self._harness_cfg = harness_config or {}
+        self._consolidator_cfg = consolidator
+        self._chat_store_impl = chat_store
+        self._mail_route_impl = mail_route
+        self._interceptors = interceptors or []
 
         self._owned: list[Any] = []
         self._token: contextvars.Token | None = None
@@ -152,17 +158,11 @@ class AgentHarness:
                 "the current harness instead of re-entering."
             )
 
-        cfg = self._harness_cfg
-
-        mail_route_impl = cfg.get("mail_route", "_default")
-        self.mail_route = self._create_and_own("ep_mail_route", MailRoute, None, impl=mail_route_impl)
-
-        chat_store_impl = cfg.get("chat_store", "_default")
-        self.chat_store = self._create_and_own("ep_chat_store", ChatStore, None, impl=chat_store_impl)
-
+        self.mail_route = self._create_and_own("ep_mail_route", MailRoute, None, impl=self._mail_route_impl)
+        self.chat_store = self._create_and_own("ep_chat_store", ChatStore, None, impl=self._chat_store_impl)
         self.llm = LLMClient()
         self.consolidator = self._create_consolidator()
-        self.interceptor = ChainInterceptor(cfg.get("interceptors", []))
+        self.interceptor = ChainInterceptor(self._interceptors)
 
         # Build plugin services
         self._plugin_services = PluginServices(
@@ -313,15 +313,13 @@ class AgentHarness:
         return instance
 
     def _create_consolidator(self) -> Consolidator:
-        consolidator_cfg = self._harness_cfg.get("consolidator", "_default")
-        # Pass-through: if the config value is already a Consolidator instance
-        # (test convenience), use it directly.
-        if isinstance(consolidator_cfg, Consolidator):
-            self._owned.append(consolidator_cfg)
-            return consolidator_cfg
+        # Pass-through: if the consolidator is already an instance (test convenience), use it.
+        if isinstance(self._consolidator_cfg, Consolidator):
+            self._owned.append(self._consolidator_cfg)
+            return self._consolidator_cfg
         cfg = {"model": os.getenv("BOS_CONSOLIDATOR_MODEL"), "llm": self.llm}
         from . import __dict__ as core_exports
-        instance = core_exports["ep_consolidator"].invoke(consolidator_cfg, cfg)
+        instance = core_exports["ep_consolidator"].invoke(self._consolidator_cfg, cfg)
         if instance is not None:
             self._owned.append(instance)
         return instance
