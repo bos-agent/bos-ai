@@ -221,6 +221,3 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
-
-# Test artifacts
-messages/

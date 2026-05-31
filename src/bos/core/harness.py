@@ -300,13 +300,13 @@ class AgentHarness:
         from . import __dict__ as core_exports
 
         ep = core_exports[ep_name]
+        context = {"bos_dir": str(self._bos_root), "workspace_dir": str(self._workspace)}
         if impl is not None and cfg is None:
-            # Use EP invoke with defaults (already merged during bootstrap)
-            instance = ep.invoke(impl)
+            instance = ep.invoke(impl, context)
         elif impl is not None:
-            instance = ep.invoke(impl, cfg)
+            instance = ep.invoke(impl, cfg | context)
         else:
-            config = (cfg or {}) | {"bos_dir": str(self._bos_root), "workspace_dir": str(self._workspace)}
+            config = (cfg or {}) | context
             instance = _create_extension_instance(ep, protocol, config)
         if instance is not None:
             self._owned.append(instance)
