@@ -6,6 +6,3 @@ from . import (
     jsonl_mailbox,  # noqa: F401
     litellm_provider,  # noqa: F401
 )
-from .agent_spec import (
-    default_agent_spec,  # noqa: F401
-)

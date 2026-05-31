@@ -477,12 +477,12 @@ class Workspace:
         3. Merge EP defaults from [exts] into registered EP implementations
         4. Register agents into AgentRegistry
         """
+        from bos.config.default_agent_spec import default_agent_spec
         from bos.core import (
             AgentRegistry,
             _load_ext_modules,
             _load_ext_paths,
         )
-        from bos.core.defaults import default_agent_spec
 
         platform = self.config.platform
         bos_root = self.bos_dir

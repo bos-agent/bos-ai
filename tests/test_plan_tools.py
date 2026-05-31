@@ -5,8 +5,8 @@ import json
 import pytest
 from conftest import create_test_agent
 
+from bos.config.default_agent_spec import default_agent_spec
 from bos.core import LLMResponse, ep_provider
-from bos.core.defaults.agent_spec import default_agent_spec
 from bos.plugins.plan import PlanAgentPlugin
 
 
