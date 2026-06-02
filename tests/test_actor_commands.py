@@ -181,6 +181,30 @@ async def test_command_result_preserves_channel_metadata():
 
 
 @pytest.mark.asyncio
+async def test_resume_uses_channel_metadata_as_cursor_identity():
+    mailbox = FakeMailbox("agent@main")
+    actor = AgentActor(StubAgent(), mailbox)
+    actor._chat_state.set_alias("work", "chat-b")
+    channel_metadata = {"channel_id": "tui-a", "channel_conversation_id": "default"}
+
+    await actor._handle_command(
+        Envelope(
+            sender="channel@tui-a",
+            recipient="agent@main",
+            content="/resume work",
+            content_type=MessageType.COMMAND,
+            chat_id="chat-a",
+            metadata={"channel": channel_metadata},
+        )
+    )
+
+    payload = json.loads(mailbox.sent[-1].content)
+    assert payload["ok"] is True
+    assert payload["chat_id"] == "chat-b"
+    assert actor._chat_state.get_cursor("tui-a:default") == "chat-b"
+
+
+@pytest.mark.asyncio
 async def test_new_command_pops_old_session_and_returns_fresh_id():
     mailbox = FakeMailbox("agent@main")
     agent = StubAgent()

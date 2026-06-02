@@ -109,6 +109,15 @@ class WSChannel(BaseChannel[dict[str, Any]]):
     async def _send_mail_loop(self, mailbox: MailBox) -> None:
         while not self._ws.closed:
             env = await mailbox.receive()
+            selected_chat_id = _selected_chat_from_command_result(env)
+            if selected_chat_id:
+                current_revision = await self._runtime.chat_coordinator.current_revision(selected_chat_id)
+                self._runtime.chat_coordinator.set_cursor(
+                    self.ref,
+                    selected_chat_id,
+                    observed_revision=current_revision,
+                )
+                self._chat_id = selected_chat_id
             await self._ws.send_json(_envelope_to_dict(env))
             revision = await self._runtime.chat_coordinator.current_revision(env.chat_id or self._chat_id)
             self._runtime.chat_coordinator.mark_observed(
@@ -201,6 +210,21 @@ def _base_revision(data: dict[str, Any], metadata: dict[str, Any]) -> int | None
     if isinstance(raw, str) and raw.isdigit():
         return int(raw)
     return None
+
+
+def _selected_chat_from_command_result(env: Envelope) -> str | None:
+    if env.content_type != MessageType.COMMAND_RESULT:
+        return None
+    try:
+        payload = json.loads(env.content) if isinstance(env.content, str) else env.content
+    except Exception:
+        return None
+    if not isinstance(payload, dict) or not payload.get("ok"):
+        return None
+    if payload.get("name") not in {"new", "resume"}:
+        return None
+    chat_id = payload.get("chat_id")
+    return chat_id if isinstance(chat_id, str) and chat_id.strip() else None
 
 
 def _envelope_to_dict(env: Envelope) -> dict[str, Any]:

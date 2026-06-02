@@ -14,10 +14,17 @@ if TYPE_CHECKING:
 
 def _client_id(env: Envelope) -> str | None:
     routing = env.metadata.get("routing")
-    if not isinstance(routing, dict):
-        return None
-    client_id = routing.get("client_id")
-    return client_id.strip() if isinstance(client_id, str) and client_id.strip() else None
+    if isinstance(routing, dict):
+        client_id = routing.get("client_id")
+        if isinstance(client_id, str) and client_id.strip():
+            return client_id.strip()
+    channel = env.metadata.get("channel")
+    if isinstance(channel, dict):
+        channel_id = channel.get("channel_id")
+        conversation_id = channel.get("channel_conversation_id")
+        if isinstance(channel_id, str) and channel_id.strip() and isinstance(conversation_id, str) and conversation_id:
+            return f"{channel_id}:{conversation_id}"
+    return None
 
 
 def _command_payload(name: str, *, ok: bool, result=None, error: str | None = None, **extra) -> dict:

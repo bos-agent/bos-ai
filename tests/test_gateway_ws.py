@@ -4,6 +4,7 @@ import aiohttp
 import pytest
 from aiohttp import web
 
+import bos.extensions.actor_commands.system_cmd  # noqa: F401
 from bos.config import Workspace
 from bos.core import Message
 from bos.extensions.chat_stores.in_memory import InMemChatStore
@@ -135,6 +136,33 @@ async def test_gateway_ws_stale_message_returns_missing_history(tmp_path, monkey
             assert content["event"] == "stale_chat"
             assert content["current_revision"] == 1
             assert content["missing_messages"]
+            await ws.close()
+    finally:
+        await gateway.actor_manager.stop_all()
+        await gateway.channel_manager.stop_all()
+        await runner.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_gateway_ws_new_command_updates_channel_cursor(tmp_path, monkeypatch):
+    monkeypatch.setenv("BOS_TEST_GATEWAY_KEY", "secret")
+    gateway = Gateway(workspace=_workspace(tmp_path), harness=FakeHarness())
+    runner, base_url = await _start_gateway_app(gateway)
+    try:
+        async with aiohttp.ClientSession(headers={"Authorization": "Bearer secret"}) as session:
+            ws = await session.ws_connect(f"{base_url}/ws?channel_id=tui-a&chat_id=chat-1")
+            await ws.receive_json()
+            await ws.send_json({"content": "/new", "content_type": MessageType.COMMAND, "base_revision": 0})
+            response = await ws.receive_json(timeout=2)
+
+            assert response["content_type"] == MessageType.COMMAND_RESULT
+            payload = json.loads(response["content"])
+            assert payload["name"] == "new"
+            assert payload["ok"] is True
+            assert payload["chat_id"] != "chat-1"
+            assert gateway.chat_coordinator.get_cursor(
+                gateway.channel_manager.channels["tui-a"].channel.ref
+            ) == payload["chat_id"]
             await ws.close()
     finally:
         await gateway.actor_manager.stop_all()
