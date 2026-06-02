@@ -90,7 +90,7 @@ The reference architecture draws from two prior-art projects: **nanobot** (chann
 1. **Gateway is the process root.** It owns the event loop. The runner bootstraps the gateway and exits — the gateway keeps the process alive.
 2. **Gateway is not a mail participant.** It owns the mail route but does not send or receive on it. Actors and channels are peers on the mail route.
 3. **HTTP Server is infrastructure.** It's the universal entrypoint for WebSocket and REST clients. It does not register as a channel.
-4. **Channels are duplex.** Every channel handles both inbound (user → agent) and outbound (agent → user) communication. A channel is the bidirectional relationship between user and agent — it owns both listening for user messages and delivering agent responses or agent-initiated pushes through the same transport.
+4. **Channels declare their capabilities.** A channel advertises what its transport supports: `inbound` (user → agent), `outbound` (agent → user), or both. WebSocket and chat platforms are naturally duplex. REST POST and webhooks are inbound-only. Push notification channels are outbound-only. The channel's transport determines what's possible — no forced duplex.
 5. **Channels are mail route peers.** Each channel binds a mailbox and bridges between an external platform and the mail route. Channels live in the gateway process.
 6. **WS connections are dynamic channels.** Each successful WebSocket handshake at `/ws` creates a channel instance that lives for the duration of that connection. The channel is keyed by `client_id`.
 
@@ -132,17 +132,21 @@ from typing import Any
 class BaseChannel(ABC):
     """Abstract base class for all channel implementations.
 
-    A channel is a named, duplex interaction context that bridges an external
+    A channel is a named interaction context that bridges an external
     client (or platform) to one or more actors via the mail route.
 
-    Duplex means every channel handles both directions:
-      - Inbound: listen for user messages (start()), deliver them to the actor
-      - Outbound: receive actor responses and actor-initiated pushes (send()),
-        deliver them to the external client
+    Channels declare what their transport supports via the ``capabilities``
+    class attribute:
 
-    There is no "inbound-only" or "outbound-only" channel. If the agent needs
-    to send a morning greeting, it goes through the same channel the user
-    chats on. The channel is the relationship, not the direction.
+      - ``"inbound"`` — can receive user messages and forward to the actor.
+        Requires ``start()`` to be implemented (listening loop).
+      - ``"outbound"`` — can deliver agent responses and agent-initiated
+        pushes to the external client. Requires ``send()`` to be implemented.
+      - ``{"inbound", "outbound"}`` — fully duplex (WebSocket, Telegram, etc.).
+
+    A REST-only client has ``{"inbound"}`` (fire-and-forget, no reply path).
+    A push notification channel has ``{"outbound"}`` (agent-initiated, no
+    user input). The transport determines what's possible — no forced duplex.
     """
 
     # ── Class-level identity ──
@@ -150,6 +154,7 @@ class BaseChannel(ABC):
     name: str = "base"               # unique identifier (e.g., "telegram", "tui")
     display_name: str = "Base"       # human-readable label
     kind: str = "persistent"         # "persistent" (config-driven) or "dynamic" (per-connection)
+    capabilities: set[str] = {"inbound", "outbound"}  # what this transport supports
 
     # ── Required abstract methods ──
 
@@ -249,12 +254,14 @@ class ChannelManager:
 
 ### Channel Kinds
 
-| Kind | Created by | Lifetime | Examples |
-|------|-----------|----------|----------|
-| `persistent` | Config → gateway spawn at startup | Process lifetime | TelegramChannel, SlackChannel |
-| `dynamic` | WebSocket handshake at `/ws` | Connection lifetime | TUI session, SDK client |
+| Kind | Created by | Lifetime | Typical capabilities | Examples |
+|------|-----------|----------|---------------------|----------|
+| `persistent` | Config → gateway spawn at startup | Process lifetime | `{inbound, outbound}` | TelegramChannel, SlackChannel |
+| `dynamic` | WebSocket handshake at `/ws` | Connection lifetime | `{inbound, outbound}` | TUI session |
 
-Both kinds share the same `BaseChannel` interface. The only difference is lifecycle ownership.
+Both kinds share the same `BaseChannel` interface. The `capabilities` set determines which methods must function: `inbound` requires `start()`, `outbound` requires `send()`. A channel can declare only one capability if its transport doesn't support the other.
+
+REST POST `/api/actors/{name}/send` is not a channel — it's a direct gateway API call. No session, no client_id, no mailbox binding. The gateway delivers the envelope and returns 202.
 
 ### Channel Identity: `client_id`
 
