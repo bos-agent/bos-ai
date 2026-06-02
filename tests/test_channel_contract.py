@@ -1,4 +1,4 @@
-from bos.core import BaseChannel
+from bos.core import BaseChannel, ep_channel
 
 
 def test_base_channel_stores_gateway_constructor_fields():
@@ -18,3 +18,9 @@ def test_base_channel_stores_gateway_constructor_fields():
     assert channel.identity_key is None
     assert channel._settings is settings
     assert channel._runtime is runtime
+
+
+def test_http_channel_is_not_registered_as_runtime_channel():
+    import bos.extensions.channels.http  # noqa: F401
+
+    assert not ep_channel.has("HttpChannel")

@@ -119,23 +119,27 @@ instead of return empty message
 # ── Runtime ─────────────────────────────────────────────────────────
 
 [runtime]
-agent = "main"
 location = "process"
+default_actor = "main"
 
-[[runtime.channels]]
-name = "HttpChannel"
-bind_address = "channel@http"
-target_address = "agent@main"
+[runtime.gateway]
 host = "127.0.0.1"
 port = 5920
+api_key_env = "BOS_GATEWAY_API_KEY"
 
+[runtime.actors.main]
+agent = "main"
+display_name = "Main"
+
+# Additional actors can be addressed with @actor-name mentions.
+# [runtime.actors.researcher]
+# agent = "researcher"
+# display_name = "Researcher"
+
+# Persistent channels use the gateway channel constructor contract.
 # [[runtime.channels]]
-# name = "TelegramChannel"
-# bind_address = "channel@telegram"
-# target_address = "agent@main"
-# token = "123456:telegram-bot-token"
-
-# Named actors: define multiple long-lived actors in one runtime
-# [runtime.actors.main]
-# agent = "main"
-# display_name = "Main"
+# type = "TelegramChannel"
+# channel_id = "telegram:main"
+# display_name = "Telegram"
+# target_actor = "main"
+# settings = { bot_id = "123456", token_env = "TELEGRAM_BOT_TOKEN" }

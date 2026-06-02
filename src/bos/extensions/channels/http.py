@@ -34,7 +34,7 @@ from typing import Any
 
 from aiohttp import WSMsgType, web
 
-from bos.core import MailBox, ep_channel
+from bos.core import MailBox
 from bos.core.chat_state import ChatState
 from bos.protocol import Envelope, MessageType
 
@@ -450,7 +450,6 @@ async def _actors_handler(request: web.Request) -> web.Response:
 # ── HttpChannel (server) ───────────────────────────────────────
 
 
-@ep_channel(name="HttpChannel")
 class HttpChannel:
     """aiohttp HTTP/WebSocket channel server registered on ``ep_channel``.
 
