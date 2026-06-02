@@ -147,12 +147,13 @@ async def test_inmem_message_store_list_chats_uses_structured_content_preview():
     store = InMemChatStore()
     content = _structured_message_content()
 
-    await store.save_turn(
+    await store.commit_turn(
         "thread-1",
         [
             Message(llm_message={"role": "user", "content": content}),
             Message(llm_message={"role": "assistant", "content": "processed"}),
         ],
+        turn_id="seed-turn",
     )
 
     chats = await store.list_chats()

@@ -23,6 +23,7 @@ from bos.protocol.content import content_preview
 from .._chat_store_utils import filter_tool_noise, project_message
 from .._utils import _flock
 from ..contract import (
+    ChatCommit,
     ChatMeta,
     ContextResult,
     Message,
@@ -86,6 +87,34 @@ class JsonlChatStore:
             default=str,
         )
 
+    @staticmethod
+    def _chat_revision(messages: list[Message]) -> int:
+        revision = 0
+        for message in messages:
+            raw = message.metadata.get("chat_revision")
+            if isinstance(raw, int):
+                revision = max(revision, raw)
+            elif isinstance(raw, str) and raw.isdigit():
+                revision = max(revision, int(raw))
+        return revision
+
+    @staticmethod
+    def _commit_messages(messages: list[Message], *, turn_id: str, revision: int) -> list[Message]:
+        committed: list[Message] = []
+        for message in messages:
+            metadata = dict(message.metadata)
+            metadata["chat_revision"] = revision
+            committed.append(
+                Message(
+                    llm_message=message.llm_message,
+                    created_at=message.created_at,
+                    turn_id=turn_id,
+                    is_summary=message.is_summary,
+                    metadata=metadata,
+                )
+            )
+        return committed
+
     def _active_messages(self, messages: list[Message]) -> list[Message]:
         """Return the latest summary (if any) plus all messages after it."""
         result: list[Message] = []
@@ -119,18 +148,31 @@ class JsonlChatStore:
 
     # ── ChatStore protocol ────────────────────────────────────────
 
-    async def save_turn(
-        self, chat_id: str, messages: list[Message], *, turn_id: str | None = None
-    ) -> None:
-        lines = [self._serialize_message(m) + "\n" for m in messages]
+    async def commit_turn(
+        self, chat_id: str, messages: list[Message], *, turn_id: str
+    ) -> ChatCommit:
+        pending = list(messages)
+        if not pending:
+            raise ValueError("commit_turn() requires at least one message.")
         path = self._chat_path(chat_id)
 
-        def _write() -> None:
+        def _write() -> ChatCommit:
             with _flock(path):
+                existing = self._read_messages_sync(chat_id)
+                revision = self._chat_revision(existing) + 1
+                committed = self._commit_messages(pending, turn_id=turn_id, revision=revision)
+                lines = [self._serialize_message(m) + "\n" for m in committed]
                 with path.open("a", encoding="utf-8") as f:
                     f.writelines(lines)
+                return ChatCommit(
+                    chat_id=chat_id,
+                    turn_id=turn_id,
+                    revision=revision,
+                    messages=committed,
+                    committed_at=datetime.now(),
+                )
 
-        await asyncio.to_thread(_write)
+        return await asyncio.to_thread(_write)
 
     async def get_context(
         self,

@@ -99,7 +99,11 @@ class NamedActor(AgentActor):
         }
 
     def _reply_metadata(self, reply_recipient: str, inbound_env: Envelope | None = None) -> dict[str, Any]:
-        return self._assistant_metadata(reply_recipient)
+        metadata = self._assistant_metadata(reply_recipient)
+        channel = self._channel_metadata(inbound_env)
+        if channel:
+            metadata["channel"] = channel
+        return metadata
 
     def _user_metadata(self, env: Envelope) -> dict[str, Any]:
         target_actor = env.metadata.get("target_actor") or self._agent.name

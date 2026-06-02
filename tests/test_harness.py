@@ -882,9 +882,10 @@ async def test_agent_auto_compaction_passes_message_objects(monkeypatch):
 
     store = InMemChatStore()
     consolidator = MessageOnlyConsolidator()
-    await store.save_turn(
+    await store.commit_turn(
         "compact-chat",
         [Message(llm_message={"role": "user", "content": "large history"})],
+        turn_id="seed-turn",
     )
 
     real_get_context = store.get_context

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import os
@@ -258,6 +259,8 @@ class Agent:
         ctx_metadata: dict[str, Any] | None = None,
         llm_args: dict[str, Any] | None = None,
         event_sink: EventSink | None = None,
+        turn_id: str | None = None,
+        commit_observer: Callable[[Any], Any | Awaitable[Any]] | None = None,
     ) -> str:
         llm_params = {
             "model": self._model,
@@ -268,7 +271,7 @@ class Agent:
         ctx = TurnContext(
             agent_name=self._name,
             chat_id=chat_id,
-            turn_id=uuid.uuid4().hex,
+            turn_id=turn_id or uuid.uuid4().hex,
             history=await self._load_and_compact_history(chat_id, budget_model=budget_model),
             tool_defs=self._get_tool_defs(),
             event_sink=event_sink,
@@ -334,7 +337,11 @@ class Agent:
             else:
                 messages = ctx.current
             if messages:
-                await self._chat_store.save_turn(chat_id, messages, turn_id=ctx.turn_id)
+                commit = await self._chat_store.commit_turn(chat_id, messages, turn_id=ctx.turn_id)
+                if commit_observer is not None:
+                    result = commit_observer(commit)
+                    if inspect.isawaitable(result):
+                        await result
 
         async def _run_interceptor(stage: str):
             try:

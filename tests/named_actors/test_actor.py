@@ -161,7 +161,7 @@ async def test_agent_persists_named_actor_message_metadata():
         def __init__(self):
             self.messages = []
 
-        async def save_turn(self, chat_id, messages, *, turn_id=None):
+        async def commit_turn(self, chat_id, messages, *, turn_id=None):
             self.messages.extend(messages)
 
         async def get_context(self, chat_id, *, tokenizer_model=None, filter_mode=None):

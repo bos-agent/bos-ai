@@ -29,11 +29,12 @@ from ._utils import (
     _strip_think,
     _xml_attr,
 )
-from .actor import AgentActor
+from .actor import ActorTurnContext, ActorTurnResult, AgentActor
 from .agent import AbortTurn, Agent, ChainInterceptor, TurnContext
 from .contract import (
     AgentPlugin,
     Channel,
+    ChatCommit,
     ChatMeta,
     ChatStore,
     Closeable,
@@ -75,6 +76,8 @@ from .registry import Extension, ExtensionPoint, ToolRegistry
 __all__ = [
     "AbortTurn",
     "AgentActor",
+    "ActorTurnContext",
+    "ActorTurnResult",
     "AgentHarness",
     "AgentRegistry",
     "AgentPlugin",
@@ -82,6 +85,7 @@ __all__ = [
     "CURRENT_MAILBOX",
     "Channel",
     "ChainInterceptor",
+    "ChatCommit",
     "ChatMeta",
     "ChatStore",
     "Closeable",

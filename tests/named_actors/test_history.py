@@ -12,7 +12,7 @@ class FakeChatStore:
         self.saved: list = []
         self.summaries: list = []
 
-    async def save_turn(self, chat_id, messages, *, turn_id=None):
+    async def commit_turn(self, chat_id, messages, *, turn_id=None):
         self.saved.extend(messages)
 
     async def get_context(self, chat_id, *, tokenizer_model=None, filter_mode=None):

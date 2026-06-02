@@ -108,10 +108,19 @@ ep_chat_store = ExtensionPoint(
 )
 
 
+@dataclass(frozen=True)
+class ChatCommit:
+    chat_id: str
+    turn_id: str
+    revision: int
+    messages: list[Message]
+    committed_at: datetime
+
+
 @runtime_checkable
 class ChatStore(Protocol):
     # ── Turn persistence ──
-    async def save_turn(self, chat_id: str, messages: Iterable[Message], *, turn_id: str | None = None) -> None: ...
+    async def commit_turn(self, chat_id: str, messages: Iterable[Message], *, turn_id: str) -> ChatCommit: ...
 
     # ── Context assembly: pure read, no consolidation ──
     async def get_context(

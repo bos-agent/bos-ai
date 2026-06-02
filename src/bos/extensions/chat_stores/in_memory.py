@@ -9,10 +9,12 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+from datetime import datetime
 from typing import Any
 
 from bos.core._chat_store_utils import filter_tool_noise, project_message
 from bos.core.contract import (
+    ChatCommit,
     ChatMeta,
     ContextResult,
     Message,
@@ -71,13 +73,54 @@ class InMemChatStore:
             count = math.ceil(len(serialized) / 3) + 12 * len(projected)
             return TokenEstimate(count=count, tokenizer_model=model, source="fallback-error")
 
+    @staticmethod
+    def _chat_revision(messages: list[Message]) -> int:
+        revision = 0
+        for message in messages:
+            raw = message.metadata.get("chat_revision")
+            if isinstance(raw, int):
+                revision = max(revision, raw)
+            elif isinstance(raw, str) and raw.isdigit():
+                revision = max(revision, int(raw))
+        return revision
+
+    @staticmethod
+    def _commit_messages(messages: list[Message], *, turn_id: str, revision: int) -> list[Message]:
+        committed: list[Message] = []
+        for message in messages:
+            metadata = dict(message.metadata)
+            metadata["chat_revision"] = revision
+            committed.append(
+                Message(
+                    llm_message=message.llm_message,
+                    created_at=message.created_at,
+                    turn_id=turn_id,
+                    is_summary=message.is_summary,
+                    metadata=metadata,
+                )
+            )
+        return committed
+
     # ── ChatStore protocol ────────────────────────────────────────
 
-    async def save_turn(
-        self, chat_id: str, messages: list[Message], *, turn_id: str | None = None
-    ) -> None:
+    async def commit_turn(
+        self, chat_id: str, messages: list[Message], *, turn_id: str
+    ) -> ChatCommit:
+        pending = list(messages)
+        if not pending:
+            raise ValueError("commit_turn() requires at least one message.")
         async with self._get_lock(chat_id):
-            self._messages.setdefault(chat_id, []).extend(messages)
+            existing = self._messages.setdefault(chat_id, [])
+            revision = self._chat_revision(existing) + 1
+            committed = self._commit_messages(pending, turn_id=turn_id, revision=revision)
+            existing.extend(committed)
+        return ChatCommit(
+            chat_id=chat_id,
+            turn_id=turn_id,
+            revision=revision,
+            messages=committed,
+            committed_at=datetime.now(),
+        )
 
     async def get_context(
         self,
