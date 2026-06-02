@@ -160,10 +160,10 @@ class GatewayClient:
         metadata = data.get("metadata") or {}
         if data.get("content_type") != MessageType.SYSTEM or metadata.get("event") != "session":
             raise RuntimeError("Gateway sent an invalid session acknowledgement.")
-        client_id = metadata.get("channel_id") or metadata.get("client_id")
+        channel_id = metadata.get("channel_id")
         chat_id = metadata.get("chat_id") or data.get("chat_id")
-        if isinstance(client_id, str) and client_id:
-            self._channel_id = client_id
+        if isinstance(channel_id, str) and channel_id:
+            self._channel_id = channel_id
         if isinstance(chat_id, str) and chat_id:
             self._chat_id = chat_id
 
@@ -303,7 +303,7 @@ class GatewayClient:
         return payload["part"]
 
     async def list_actors(self) -> dict[str, dict[str, Any]]:
-        """Fetch the list of available named actors from the server."""
+        """Fetch the list of available actors from the gateway."""
         if self._session is None or self._session.closed:
             raise RuntimeError("Not connected — connect the gateway client before listing actors.")
         async with self._session.get(f"{self._http_base_url}/api/actors") as response:

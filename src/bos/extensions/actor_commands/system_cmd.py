@@ -119,7 +119,7 @@ async def resume_chat(input: str, env: Envelope, actor: AgentActor) -> dict:
     """Resume a chat by alias or id for the current client."""
     client_id = _client_id(env)
     if not client_id:
-        return _command_payload("resume", ok=False, error="Cannot resume without client_id routing metadata.")
+        return _command_payload("resume", ok=False, error="Cannot resume without channel metadata.")
     if not input.strip():
         return _command_payload("resume", ok=False, error="Usage: /resume <alias-or-chat-id>")
     try:

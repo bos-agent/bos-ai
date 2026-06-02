@@ -40,7 +40,7 @@ def _turn_event_label(event: TurnEvent) -> str:
 
 
 class TurnEventMessage(Message):
-    """Structured runtime event forwarded from the agent process via the channel."""
+    """Structured runtime event forwarded from the gateway channel."""
 
     def __init__(self, event: TurnEvent) -> None:
         super().__init__()
@@ -352,7 +352,7 @@ class ChatApp(App):
             self._write_system(f"[yellow]⚠ Send failed — reconnecting: {exc}[/]")
 
     async def on_turn_event_message(self, message: TurnEventMessage) -> None:
-        """Handle structured runtime events from the agent process."""
+        """Handle structured runtime events from the gateway channel."""
         event = message.event
         log = self.query_one("#chat", RichLog)
         label = _turn_event_label(event)
@@ -477,7 +477,7 @@ class ChatApp(App):
                 "  /tokens   — rough token estimate\n"
                 "  /chats    — list all chats\n"
                 "  /clear    — clear the log\n"
-                "  /restart  — restart the agent process\n"
+                "  /restart  — restart the gateway\n"
                 "\n"
                 "[bold]Hot keys:[/]\n"
                 "  Escape      — abort the current turn\n"
@@ -485,7 +485,7 @@ class ChatApp(App):
                 "  Ctrl+C      — quit\n"
                 "  Ctrl+L      — clear the log\n"
                 "  Ctrl+N      — start a new chat\n"
-                "  Ctrl+R      — restart the agent process"
+                "  Ctrl+R      — restart the gateway"
             )
 
         elif normalized_cmd == "/new":
@@ -545,7 +545,7 @@ class ChatApp(App):
 
     async def action_restart_bos(self) -> None:
         """Restart the background BOS agent."""
-        self._write_system("[yellow]↻ Restarting agent process…[/]")
+        self._write_system("[yellow]↻ Restarting gateway…[/]")
         import sys
         try:
             process = await asyncio.create_subprocess_exec(
