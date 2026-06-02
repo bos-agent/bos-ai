@@ -90,7 +90,7 @@ The reference architecture draws from two prior-art projects: **nanobot** (chann
 1. **Gateway is the process root.** It owns the event loop. The runner bootstraps the gateway and exits — the gateway keeps the process alive.
 2. **Gateway is not a mail participant.** It owns the mail route but does not send or receive on it. Actors and channels are peers on the mail route.
 3. **HTTP Server is infrastructure.** It's the universal entrypoint for WebSocket and REST clients. It does not register as a channel.
-4. **Channels declare their capabilities.** A channel advertises what its transport supports: `inbound` (user → agent), `outbound` (agent → user), or both. WebSocket and chat platforms are naturally duplex. REST POST and webhooks are inbound-only. Push notification channels are outbound-only. The channel's transport determines what's possible — no forced duplex.
+4. **Channels declare their capabilities.** A channel advertises what its transport supports: `inbound` (user → agent), `outbound` (agent → user), or both. WebSocket and chat platforms are naturally duplex. REST POST is inbound-only (client makes an API call, no return path). Webhook is outbound-only (gateway pushes to a client's callback URL, no user input path). The channel's transport determines what's possible — no forced duplex.
 5. **Channels are mail route peers.** Each channel binds a mailbox and bridges between an external platform and the mail route. Channels live in the gateway process.
 6. **WS connections are dynamic channels.** Each successful WebSocket handshake at `/ws` creates a channel instance that lives for the duration of that connection. The channel is keyed by `client_id`.
 
@@ -145,8 +145,12 @@ class BaseChannel(ABC):
       - ``{"inbound", "outbound"}`` — fully duplex (WebSocket, Telegram, etc.).
 
     A REST-only client has ``{"inbound"}`` (fire-and-forget, no reply path).
-    A push notification channel has ``{"outbound"}`` (agent-initiated, no
-    user input). The transport determines what's possible — no forced duplex.
+    A webhook (push notification) has ``{"outbound"}`` (gateway POSTs to a
+    client callback URL, no user input path).
+    A REST + webhook pair can form one duplex channel: the client sends via
+    REST, the gateway pushes responses via webhook. Two simplex transports,
+    one logical channel. The transport determines what's possible — no
+    forced duplex.
     """
 
     # ── Class-level identity ──
@@ -257,9 +261,10 @@ class ChannelManager:
 | Kind | Created by | Lifetime | Typical capabilities | Examples |
 |------|-----------|----------|---------------------|----------|
 | `persistent` | Config → gateway spawn at startup | Process lifetime | `{inbound, outbound}` | TelegramChannel, SlackChannel |
+| `persistent` | Config → gateway spawn at startup | Process lifetime | `{inbound, outbound}` | WebhookChannel (REST in + webhook out) |
 | `dynamic` | WebSocket handshake at `/ws` | Connection lifetime | `{inbound, outbound}` | TUI session |
 
-Both kinds share the same `BaseChannel` interface. The `capabilities` set determines which methods must function: `inbound` requires `start()`, `outbound` requires `send()`. A channel can declare only one capability if its transport doesn't support the other.
+Both kinds share the same `BaseChannel` interface. The `capabilities` set determines which methods must function: `inbound` requires `start()`, `outbound` requires `send()`. A duplex channel can be implemented over a single bidirectional transport (WebSocket) or a pair of simplex transports (REST + webhook).
 
 REST POST `/api/actors/{name}/send` is not a channel — it's a direct gateway API call. No session, no client_id, no mailbox binding. The gateway delivers the envelope and returns 202.
 
