@@ -272,14 +272,14 @@ REST POST `/api/actors/{name}/send` is not a channel — it's a direct gateway A
 
 ### Channel Identity: `channel_id`
 
-Every channel has a `channel_id`, a user-chosen string unique across all channels. The platform adapter is identified by `name` (e.g., `"TelegramChannel"`). No platform prefix is needed in the `channel_id` — it's just a name. Within a channel, `chat_id` identifies the conversation context. One channel can handle multiple chats:
+Every channel has a `channel_id` derived from the platform's stable identity. This provides natural dedup (two channels can't bind the same bot/app) and survives credential rotation (Slack OAuth token refresh keeps the same `app_id`). For transports without a platform identity (WebSocket, TUI), the client provides it. Within a channel, `chat_id` identifies the conversation context. One channel can handle multiple chats:
 
 ```
-TelegramChannel  → channel_id = "daily-chat"
+TelegramChannel  → channel_id = "telegram:12345"        (bot_id from token)
                     chats: 123456, 789012…              (one bot, many users)
-SlackChannel     → channel_id = "work-desk"
+SlackChannel     → channel_id = "slack:A01234567"       (app_id, survives token refresh)
                     chats: C001, C002…                  (one app, many channels)
-TUI session      → channel_id = "tui-1"                (per-connection)
+TUI session      → channel_id = "tui-1"                (client-provided, per-connection)
 ```
 ```
 
@@ -451,25 +451,25 @@ display_name = "Coder"
 
 [[runtime.channels]]
 name = "TelegramChannel"
-channel_id = "daily-chat"
 display_name = "Daily Chat"
 target_actor = "main"
 token = "12345:abcdef"
+# channel_id auto-derived: "telegram:12345" (bot_id)
 
 [[runtime.channels]]
 name = "TelegramChannel"
-channel_id = "invest-advisor"
 display_name = "Invest Advisor"
 target_actor = "main"
 token = "67890:ghijkl"
+# channel_id auto-derived: "telegram:67890" (bot_id)
 
 [[runtime.channels]]
 name = "SlackChannel"
-channel_id = "work-desk"
 display_name = "Work Desk"
 target_actor = "main"
 app_id = "A01234567"
 token = "xoxb-..."
+# channel_id auto-derived: "slack:A01234567" (app_id)
 ```
 
 ### Channel config fields
@@ -478,7 +478,7 @@ token = "xoxb-..."
 |-----|------|----------|---------|
 | `name` | `str` | yes | Channel class name registered on `ep_channel` |
 | `display_name` | `str` | no | Human-readable label for UI listing |
-| `channel_id` | `str` | yes | Unique channel identity — any user-chosen string. The `name` field already identifies the platform adapter. No platform prefix convention needed. Survives token rotation, app migration, and platform changes. |
+| `channel_id` | `str` | auto | Unique channel identity. Derived from the platform's stable identity: `"telegram:{bot_id}"`, `"slack:{app_id}"`, `"feishu:{app_id}"`. Stable identities survive credential rotation (e.g., Slack OAuth token refresh keeps the same `app_id`). Can be overridden explicitly when needed. Provides natural dedup: two channels can't bind the same platform identity. |
 | `target_actor` | `str` | no | Default actor for messages without explicit routing. Falls back to `runtime.agent` |
 | *(extra)* | `any` | varies | Per-channel-adapter configuration passed through to the channel constructor |
 
