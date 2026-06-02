@@ -17,8 +17,11 @@ system_prompt = "Custom prompt"
 tools = { enabled = ["ReadFile"] }
 
 [runtime]
-agent = "custom-agent"
 location = "process"
+default_actor = "main"
+
+[runtime.actors.main]
+agent = "custom-agent"
 """.strip(),
         encoding="utf-8",
     )

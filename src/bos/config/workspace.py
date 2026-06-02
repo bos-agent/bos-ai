@@ -378,17 +378,6 @@ class AgentRuntimeConfig:
 
 
 @dataclass(frozen=True)
-class ResolvedChannelConfig:
-    name: str
-    bind_address: str
-    target_address: str
-    options: dict[str, Any] = field(default_factory=dict)
-
-    def extension_config(self) -> dict[str, Any]:
-        return {"name": self.name, "target_address": self.target_address} | self.options
-
-
-@dataclass(frozen=True)
 class ResolvedGatewayConfig:
     host: str = "127.0.0.1"
     port: int = 5920
@@ -604,15 +593,13 @@ class Workspace:
 
     def get_main_agent_kind(self) -> str:
         runtime = self.config.runtime
-        if not runtime:
+        if not runtime or not runtime.actors:
             return "_default"
-        main_actor = runtime.actors.get("main")
-        if main_actor is not None:
-            return main_actor.agent
-        return runtime.agent
-
-    def get_main_agent_address(self) -> str:
-        return "agent@main"
+        default_actor = runtime.default_actor
+        actor = runtime.actors.get(default_actor)
+        if actor is None:
+            raise ValueError(f"runtime.default_actor {default_actor!r} must exist in runtime.actors.")
+        return actor.agent
 
     def resolve_gateway_config(self) -> ResolvedGatewayConfig:
         gateway = self.config.runtime.gateway if self.config.runtime else None
@@ -711,7 +698,7 @@ class Workspace:
             runtime_extra = {
                 k: v
                 for k, v in extra.items()
-                if k not in {"agent", "location", "channels", "actors", "default_actor", "gateway", "actor_resolver"}
+                if k not in {"location", "channels", "actors", "default_actor", "gateway", "actor_resolver"}
             }
 
         workspace_dir = runtime_extra.get("workspace_dir") or "/workspace"
@@ -738,101 +725,12 @@ class Workspace:
             return None
         return (self.bos_dir / Path(platform.envfile).expanduser()).resolve()
 
-    def resolve_channels(self, *, runtime_kind: str = "process") -> list[ResolvedChannelConfig]:
-        actor_address = self.get_main_agent_address()
-        runtime = self.config.runtime
-        raw_channels = runtime.channels if runtime else []
-        if not raw_channels:
-            raw_channels = [
-                {
-                    "name": "HttpChannel",
-                    "bind_address": "channel@http",
-                    "target_address": actor_address,
-                }
-            ]
-        channels: list[ResolvedChannelConfig] = []
-        seen_bind_addresses: set[str] = set()
-
-        for idx, raw_cfg in enumerate(raw_channels, start=1):
-            if not isinstance(raw_cfg, dict):
-                raise ValueError(f"Channel entry #{idx} must be a table, got {type(raw_cfg).__name__}.")
-
-            name = str(raw_cfg.get("name") or "_default")
-            bind_address = str(raw_cfg.get("bind_address") or "").strip()
-            if not bind_address:
-                raise ValueError(f"Channel {name!r} must define bind_address.")
-            if not bind_address.startswith("channel@"):
-                raise ValueError(f"Channel {name!r} bind_address must start with 'channel@': {bind_address!r}")
-            if bind_address in seen_bind_addresses:
-                raise ValueError(f"Duplicate channel bind_address: {bind_address!r}")
-            seen_bind_addresses.add(bind_address)
-
-            target_address = str(raw_cfg.get("target_address") or actor_address).strip()
-            options = self._normalize_channel_options(
-                {key: value for key, value in raw_cfg.items() if key not in {"name", "target_address"}},
-                name=name,
-                runtime_kind=runtime_kind,
-            ) | {
-                "bind_address": bind_address,
-                "bos_dir": str(self.bos_dir),
-                "workspace_dir": str(self.workspace),
-            }
-            channels.append(
-                ResolvedChannelConfig(
-                    name=name,
-                    bind_address=bind_address,
-                    target_address=target_address,
-                    options=options,
-                )
-            )
-
-        self._validate_channel_topology(channels, actor_address=actor_address)
-        return channels
 
     @staticmethod
     def _validate_actor_name(name: str) -> None:
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]*", name):
             raise ValueError(f"Invalid actor name {name!r}; expected a mention-safe actor identity.")
 
-    @staticmethod
-    def _normalize_channel_options(
-        options: dict[str, Any],
-        *,
-        name: str,
-        runtime_kind: str,
-    ) -> dict[str, Any]:
-        normalized = dict(options)
-        if runtime_kind == "docker" and name == "HttpChannel":
-            host = normalized.get("host")
-            if host in (None, "", "127.0.0.1", "localhost"):
-                normalized["host"] = "0.0.0.0"
-        return normalized
-
-    @staticmethod
-    def _validate_channel_topology(channels: list[ResolvedChannelConfig], *, actor_address: str) -> None:
-        channel_names_by_address = {channel.bind_address: channel.name for channel in channels}
-        for channel in channels:
-            if channel.name == "BroadcastChannel":
-                raise ValueError("BroadcastChannel is no longer supported; configure channels to target agent@main.")
-            if channel.target_address == channel.bind_address:
-                raise ValueError(f"Channel {channel.bind_address!r} cannot target itself.")
-
-            if channel.target_address.startswith("agent@"):
-                continue
-
-            if not channel.target_address.startswith("channel@"):
-                raise ValueError(
-                    f"Channel {channel.bind_address!r} target_address must start with 'agent@' or 'channel@'."
-                )
-
-            if channel.target_address not in channel_names_by_address:
-                raise ValueError(
-                    f"Channel {channel.bind_address!r} targets unknown channel address {channel.target_address!r}."
-                )
-            raise ValueError(
-                f"Channel {channel.bind_address!r} must target the actor address {actor_address!r}; "
-                f"channel-to-channel routing is no longer supported."
-            )
 
     def _resolve_platform_agents(
         self,

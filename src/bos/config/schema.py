@@ -159,9 +159,6 @@ class RuntimeConfig(BaseModel):
 
     model_config = ConfigDict(extra="allow")
 
-    # Legacy single-actor field. BEP 7 gateway config should use
-    # ``runtime.default_actor`` plus ``runtime.actors`` instead.
-    agent: str = "_default"
     location: str = "process"
     channels: list[dict[str, Any]] = Field(default_factory=list)
     actors: dict[str, ActorConfig] = Field(default_factory=dict)
