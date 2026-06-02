@@ -12,9 +12,11 @@ from bos.config.workspace import ResolvedGatewayConfig
 
 JsonDict = dict[str, Any]
 StatusProvider = Callable[[], JsonDict]
+WSHandler = Callable[[web.Request], Awaitable[web.StreamResponse]]
 APP_API_KEY = web.AppKey("api_key", str)
 APP_GATEWAY_CONFIG = web.AppKey("gateway_config", ResolvedGatewayConfig)
 APP_STATUS_PROVIDER = web.AppKey("status_provider", object)
+APP_WS_HANDLER = web.AppKey("ws_handler", object)
 
 
 def require_gateway_api_key(config: ResolvedGatewayConfig, environ: dict[str, str] | None = None) -> str:
@@ -41,11 +43,14 @@ def create_gateway_app(
     config: ResolvedGatewayConfig,
     api_key: str,
     status_provider: StatusProvider,
+    ws_handler: WSHandler | None = None,
 ) -> web.Application:
     app = web.Application(client_max_size=config.max_upload_bytes, middlewares=[api_key_middleware])
     app[APP_API_KEY] = api_key
     app[APP_GATEWAY_CONFIG] = config
     app[APP_STATUS_PROVIDER] = status_provider
+    if ws_handler is not None:
+        app[APP_WS_HANDLER] = ws_handler
     app.router.add_get("/api/status", _status_handler)
     app.router.add_get("/api/actors", _actors_handler)
     app.router.add_post("/api/upload-image", _upload_image_handler)
@@ -84,8 +89,9 @@ async def _upload_image_handler(request: web.Request) -> web.Response:
 
 
 async def _ws_handler(request: web.Request) -> web.Response:
-    # Dynamic WS channels are implemented in a later slice. Auth middleware still
-    # protects the handshake endpoint now, preventing accidental open control-plane access.
+    handler = request.app.get(APP_WS_HANDLER)
+    if handler is not None:
+        return await handler(request)
     return web.json_response({"ok": False, "error": "ws_not_implemented"}, status=501)
 
 

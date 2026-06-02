@@ -133,14 +133,18 @@ class ChannelManager:
 
     async def start_all(self) -> None:
         for managed in self._channels.values():
-            if managed.task is None:
-                managed.mailbox = self.runtime.mail_route.bind(managed.address)
-                managed.status = "running"
-                managed.task = asyncio.create_task(
-                    self._run_channel(managed),
-                    name=f"bos-channel:{managed.channel.channel_id}",
-                )
+            await self.start_channel(managed)
         await self._notify_state_changed()
+
+    async def start_channel(self, managed: ManagedChannel) -> None:
+        if managed.task is not None:
+            return
+        managed.mailbox = self.runtime.mail_route.bind(managed.address)
+        managed.status = "running"
+        managed.task = asyncio.create_task(
+            self._run_channel(managed),
+            name=f"bos-channel:{managed.channel.channel_id}",
+        )
 
     async def stop_all(self) -> None:
         tasks = [managed.task for managed in self._channels.values() if managed.task is not None]

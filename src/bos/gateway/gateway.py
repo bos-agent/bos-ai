@@ -10,9 +10,10 @@ from .actor_manager import ActorManager
 from .actor_resolver import ActorDescriptor, ActorResolver
 from .channel_context import ChannelRuntimeContext
 from .channel_manager import ChannelManager
-from .chat_coordinator import ChatCoordinator
+from .chat_coordinator import ChannelConversationRef, ChatCoordinator
 from .http import create_gateway_app, require_gateway_api_key
 from .state import GatewayRunDir, write_gateway_state
+from .ws_channel import WSChannel
 
 if TYPE_CHECKING:
     from bos.config import Workspace
@@ -83,7 +84,56 @@ class Gateway:
 
     def build_app(self) -> web.Application:
         api_key = require_gateway_api_key(self.config)
-        return create_gateway_app(config=self.config, api_key=api_key, status_provider=self.status_snapshot)
+        return create_gateway_app(
+            config=self.config,
+            api_key=api_key,
+            status_provider=self.status_snapshot,
+            ws_handler=self.handle_ws,
+        )
+
+    async def handle_ws(self, request: web.Request) -> web.StreamResponse:
+        channel_id = (request.query.get("channel_id") or "").strip()
+        if not channel_id:
+            return web.json_response({"ok": False, "error": "channel_id is required"}, status=400)
+        takeover = request.query.get("takeover") in {"1", "true", "yes"}
+        if channel_id in self.channel_manager.channels and not takeover:
+            return web.json_response({"ok": False, "error": "duplicate_channel_id"}, status=409)
+
+        existing = self.channel_manager.channels.get(channel_id)
+        if existing is not None and hasattr(existing.channel, "close_for_takeover"):
+            await existing.channel.close_for_takeover()
+
+        conversation_id = (request.query.get("channel_conversation_id") or "default").strip() or "default"
+        ref = ChannelConversationRef(channel_id=channel_id, channel_conversation_id=conversation_id)
+        chat_id = (request.query.get("chat_id") or "").strip()
+        if chat_id:
+            current_revision = await self.chat_coordinator.current_revision(chat_id)
+            self.chat_coordinator.set_cursor(ref, chat_id, observed_revision=current_revision)
+        else:
+            chat_id = self.chat_coordinator.get_cursor(ref) or self.chat_coordinator.new_chat(ref)
+
+        ws = web.WebSocketResponse()
+        await ws.prepare(request)
+        channel = WSChannel(
+            channel_id=channel_id,
+            target_actor=self.workspace.resolve_default_actor(),
+            display_name=f"WebSocket {channel_id}",
+            settings={},
+            runtime=self.channel_manager.runtime,
+            websocket=ws,
+            chat_id=chat_id,
+            channel_conversation_id=conversation_id,
+        )
+        managed = self.channel_manager.register(
+            channel,
+            type_name="WSChannel",
+            kind="dynamic",
+            address=f"channel@{channel_id}",
+            takeover=takeover,
+        )
+        await self.channel_manager.start_channel(managed)
+        await managed.task
+        return ws
 
     async def _write_state(self) -> None:
         write_gateway_state(GatewayRunDir(self.workspace.bos_dir), self.status_snapshot())

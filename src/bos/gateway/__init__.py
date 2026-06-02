@@ -12,6 +12,7 @@ from .chat_coordinator import (
     PrepareSendResult,
 )
 from .gateway import Gateway
+from .ws_channel import WSChannel
 
 __all__ = [
     "ActiveTurn",
@@ -32,4 +33,5 @@ __all__ = [
     "ManagedChannel",
     "ManagedActor",
     "PrepareSendResult",
+    "WSChannel",
 ]
