@@ -272,13 +272,14 @@ REST POST `/api/actors/{name}/send` is not a channel — it's a direct gateway A
 
 ### Channel Identity: `channel_id`
 
-Every channel has a `channel_id`, which is its identity on the mail route. This is already the pattern in the current HttpChannel WebSocket handler:
+Every channel has a `channel_id`, which uniquely identifies the transport. Within a channel, `chat_id` identifies the conversation context. One channel can handle multiple chats:
 
 ```
-TelegramChannel  → channel_id = "telegram:{chat_id}"
-SlackChannel     → channel_id = "slack:{channel_id}"
-TUI session      → channel_id = "tui-1"  (provided by the client at WS connect)
-SDK client       → channel_id = "sdk-abc123"
+TelegramChannel  → channel_id = "telegram:bot_abc123"   (identifies the bot)
+                    chat within = Telegram chat 123456   (maps to BOS chat_id)
+                    chat within = Telegram chat 789012   (different BOS chat_id)
+SlackChannel     → channel_id = "slack:workspace_x"     (identifies the workspace/app)
+TUI session      → channel_id = "tui-1"                 (one connection = one channel)
 ```
 
 Rules:
@@ -450,23 +451,21 @@ display_name = "Coder"
 [[runtime.channels]]
 name = "TelegramChannel"
 display_name = "Daily Chat"
-channel_id = "telegram:main"
+channel_id = "telegram:bot_daily"
 target_actor = "main"
 token = "12345:abcdef"
-default_chat_id = "123456789"
 
 [[runtime.channels]]
 name = "TelegramChannel"
 display_name = "Invest Advisor"
-channel_id = "telegram:invest"
+channel_id = "telegram:bot_invest"
 target_actor = "main"
 token = "67890:ghijkl"
-default_chat_id = "987654321"
 
 [[runtime.channels]]
 name = "SlackChannel"
 display_name = "Work Desk"
-channel_id = "slack:work"
+channel_id = "slack:myworkspace"
 target_actor = "main"
 token = "xoxb-..."
 ```
@@ -477,7 +476,7 @@ token = "xoxb-..."
 |-----|------|----------|---------|
 | `name` | `str` | yes | Channel class name registered on `ep_channel` |
 | `display_name` | `str` | no | Human-readable label for UI listing |
-| `channel_id` | `str` | yes | Unique channel identity. Must be unique across all channels |
+| `channel_id` | `str` | yes | Unique transport identity. One channel can handle multiple chats (e.g., a Telegram bot serving many users). `channel_id` identifies the channel instance; `chat_id` identifies the conversation within it. |
 | `target_actor` | `str` | no | Default actor for messages without explicit routing. Falls back to `runtime.agent` |
 | *(extra)* | `any` | varies | Per-channel-adapter configuration passed through to the channel constructor |
 
