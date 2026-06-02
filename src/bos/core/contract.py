@@ -4,7 +4,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, ClassVar, Generic, Literal, Protocol, TypeVar, runtime_checkable
 
 from bos.protocol import Envelope, MessageContent, MessageType, TurnEvent
 
@@ -236,9 +236,67 @@ class MailRoute(Protocol):
 ep_channel = ExtensionPoint(description="Channel. Bridges external clients to/from a bound mailbox address.")
 
 
+SettingsT = TypeVar("SettingsT")
+
+
 @runtime_checkable
 class Channel(Protocol):
+    @property
+    def channel_id(self) -> str: ...
+
+    @property
+    def display_name(self) -> str | None: ...
+
+    @property
+    def target_actor(self) -> str: ...
+
+    @property
+    def identity_key(self) -> str | None: ...
+
     async def run(self, mailbox: MailBox) -> None: ...
+
+
+class BaseChannel(Generic[SettingsT]):
+    """Optional helper for gateway-created conversational channels.
+
+    The public channel contract remains structural. This helper exists only to
+    centralize common constructor/settings handling for adapters that want it.
+    ``runtime`` is intentionally typed as ``Any`` so core does not import
+    gateway-owned ``ChannelRuntimeContext``.
+    """
+
+    SettingsType: ClassVar[type[SettingsT] | None] = None
+
+    def __init__(
+        self,
+        *,
+        channel_id: str,
+        target_actor: str,
+        settings: SettingsT,
+        display_name: str | None = None,
+        runtime: Any = None,
+    ) -> None:
+        self._channel_id = channel_id
+        self._target_actor = target_actor
+        self._display_name = display_name
+        self._settings = settings
+        self._runtime = runtime
+
+    @property
+    def channel_id(self) -> str:
+        return self._channel_id
+
+    @property
+    def display_name(self) -> str | None:
+        return self._display_name
+
+    @property
+    def target_actor(self) -> str:
+        return self._target_actor
+
+    @property
+    def identity_key(self) -> str | None:
+        return None
 
 
 ep_actor_command = ExtensionPoint(

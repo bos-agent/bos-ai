@@ -33,6 +33,7 @@ from .actor import ActorTurnContext, ActorTurnResult, AgentActor
 from .agent import AbortTurn, Agent, ChainInterceptor, TurnContext
 from .contract import (
     AgentPlugin,
+    BaseChannel,
     Channel,
     ChatCommit,
     ChatMeta,
@@ -81,6 +82,7 @@ __all__ = [
     "AgentHarness",
     "AgentRegistry",
     "AgentPlugin",
+    "BaseChannel",
     "CURRENT_HARNESS",
     "CURRENT_MAILBOX",
     "Channel",
