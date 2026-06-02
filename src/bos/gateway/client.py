@@ -1,4 +1,4 @@
-"""HttpChannelClient — WebSocket client for connecting to a running BOS gateway.
+"""GatewayClient — WebSocket client for connecting to a running BOS gateway.
 
 This module has no extension point registrations — safe to import standalone
 without triggering any server-side or ``ep_channel`` side effects.
@@ -40,7 +40,7 @@ def _envelope_to_dict(env: Envelope) -> dict[str, Any]:
     return d
 
 
-class HttpChannelClient:
+class GatewayClient:
     """aiohttp WebSocket client for connecting to a running BOS gateway.
 
     Used by ``boscli tui`` to send/receive envelopes over WebSocket without
@@ -51,7 +51,7 @@ class HttpChannelClient:
 
     Example::
 
-        client = HttpChannelClient(host="127.0.0.1", port=5920, address="tui")
+        client = GatewayClient(host="127.0.0.1", port=5920, address="tui")
         await client.connect()
         await client.send("hello")
         reply = await client.receive()
@@ -65,7 +65,6 @@ class HttpChannelClient:
         address: str = "tui",
         *,
         channel_id: str | None = None,
-        client_id: str | None = None,
         chat_id: str | None = None,
         endpoint_resolver: EndpointResolver | None = None,
         api_key: str | None = None,
@@ -75,7 +74,7 @@ class HttpChannelClient:
         self._endpoint_resolver = endpoint_resolver
         self._rebuild_urls()
         self._address = address
-        self._channel_id = (channel_id or client_id or address or uuid.uuid4().hex).strip()
+        self._channel_id = (channel_id or address or uuid.uuid4().hex).strip()
         self._api_key = api_key
         self._chat_id = (
             chat_id.strip() if isinstance(chat_id, str) and chat_id else None
@@ -130,7 +129,7 @@ class HttpChannelClient:
         """Open the WebSocket connection and start the background reader."""
         await self._do_connect(takeover=takeover)
         self._reader_task = asyncio.create_task(self._reader_loop())
-        logger.debug("HttpChannelClient connected to %s (address=%r)", self._url, self._address)
+        logger.debug("GatewayClient connected to %s (address=%r)", self._url, self._address)
 
     async def _do_connect(self, *, takeover: bool = False) -> None:
         """Low-level connect (or reconnect). Creates session + WS."""
@@ -143,7 +142,7 @@ class HttpChannelClient:
             await self._session.close()
 
         self._session = aiohttp.ClientSession(headers=self._auth_headers())
-        query: dict[str, str] = {"channel_id": self._channel_id, "client_id": self._channel_id}
+        query: dict[str, str] = {"channel_id": self._channel_id}
         if self._chat_id:
             query["chat_id"] = self._chat_id
         if takeover:
@@ -327,4 +326,4 @@ class HttpChannelClient:
             await self._ws.close()
         if self._session and not self._session.closed:
             await self._session.close()
-        logger.debug("HttpChannelClient disconnected")
+        logger.debug("GatewayClient disconnected")

@@ -1,7 +1,7 @@
 """Textual Chat Application — connects to a running BOS gateway.
 
 This TUI is a pure external client. It communicates with the gateway over
-WebSocket through ``HttpChannelClient``. It never imports or references the
+WebSocket through ``GatewayClient``. It never imports or references the
 agent, harness, or actor directly.
 
 Slash commands that need server-side data (``/history``, ``/compact``, etc.)
@@ -24,7 +24,7 @@ from textual.message import Message
 from textual.widgets import Footer, Header, Input, RichLog, Static
 from textual_autocomplete import AutoComplete, DropdownItem
 
-from bos.extensions.channels.http_client import HttpChannelClient
+from bos.gateway.client import GatewayClient
 from bos.protocol import WS_TAKEOVER_CLOSE_REASON, MessageType, TurnEvent
 
 logger = logging.getLogger(__name__)
@@ -111,7 +111,7 @@ class SlashAutoComplete(AutoComplete):
 class ChatApp(App):
     """Full-screen agent chat — channel-mode only.
 
-    Communicates with the gateway via ``HttpChannelClient``.
+    Communicates with the gateway via ``GatewayClient``.
     """
 
     TITLE = "boscli tui"
@@ -192,7 +192,7 @@ class ChatApp(App):
 
     def __init__(
         self,
-        client: HttpChannelClient,
+        client: GatewayClient,
         *,
         local_mode: bool = False,
     ) -> None:
@@ -688,13 +688,13 @@ class ChatApp(App):
 
 
 async def run_chat_tui(
-    client: HttpChannelClient,
+    client: GatewayClient,
     *,
     local_mode: bool = False,
 ) -> None:
     """Launch the TUI connected to a running gateway.
 
-    ``client`` must be an ``HttpChannelClient`` that has already called
+    ``client`` must be an ``GatewayClient`` that has already called
     ``connect()``.
 
     When ``local_mode`` is True, slash commands and @mention autocomplete

@@ -1,6 +1,6 @@
 """LocalClient — in-process mailbox-backed client for ChatApp.
 
-Implements the same interface as HttpChannelClient so ChatApp can be
+Implements the same interface as GatewayClient so ChatApp can be
 reused unchanged when running in interactive mode (``boscli ask -i``).
 """
 
@@ -19,7 +19,7 @@ class LocalClient:
     """In-process client that bridges ChatApp to an AgentActor via mailboxes.
 
     Same ``send`` / ``receive`` / ``connect`` / ``list_actors`` / ``aclose``
-    interface as ``HttpChannelClient``, but backed by in-memory mailboxes
+    interface as ``GatewayClient``, but backed by in-memory mailboxes
     instead of WebSocket.
     """
 

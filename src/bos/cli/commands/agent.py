@@ -667,10 +667,10 @@ def tui(ctx, host: str | None, port: int | None, channel_id: str | None):
         raise click.UsageError(f"Gateway API key environment variable {gateway_config.api_key_env!r} is not set.")
 
     from bos.cli.tui_app import run_chat_tui
-    from bos.extensions.channels.http_client import HttpChannelClient
+    from bos.gateway.client import GatewayClient
 
     async def _run():
-        client = HttpChannelClient(
+        client = GatewayClient(
             host=host,
             port=port,
             address="tui",

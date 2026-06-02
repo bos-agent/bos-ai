@@ -11,6 +11,7 @@ from .chat_coordinator import (
     ChatCoordinator,
     PrepareSendResult,
 )
+from .client import GatewayClient
 from .gateway import Gateway
 from .ws_channel import WSChannel
 
@@ -28,6 +29,7 @@ __all__ = [
     "ChannelStatus",
     "CoordinatedActor",
     "Gateway",
+    "GatewayClient",
     "ChatCoordinationError",
     "ChatCoordinator",
     "ManagedChannel",
