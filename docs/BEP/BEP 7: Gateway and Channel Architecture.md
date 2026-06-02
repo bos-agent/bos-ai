@@ -23,7 +23,7 @@ The reference architecture draws from two prior-art projects: **nanobot** (chann
 1. **Gateway as process root** — the gateway owns the harness, actor manager, HTTP server, and channel lifecycle. It's the stable spine that survives actor restarts.
 2. **HTTP server as infrastructure** — the REST/WebSocket API is gateway-owned, not a channel. Channels consume the API or the mail route; they don't own the server.
 3. **Channels as named interaction contexts** — a channel is a user-facing concept (a "desk," a "device," a "purpose"), not just a transport adapter. Channels have names, display names, and target actors.
-4. **`client_id` as channel identity** — one `client_id` = one channel = one active connection. Already the pattern in the current WebSocket handler; generalized to all channels.
+4. **`channel_id` as channel identity** — one `channel_id` = one channel = one active connection. Already the pattern in the current WebSocket handler; generalized to all channels.
 5. **Streaming support** — channels can optionally support delta streaming (`send_delta`, `send_reasoning_delta`) for real-time response rendering.
 6. **Actor-aware routing** — the gateway resolves actor targets per message (via `@mention`, REST path, or channel default), enabling multi-actor routing without mailbox address leakage.
 7. **Multi-channel chat portability** — a user can resume the same `chat_id` across different channels (TUI → phone → TUI), because channels are views into a shared conversation graph.
@@ -94,7 +94,7 @@ The reference architecture draws from two prior-art projects: **nanobot** (chann
 3. **HTTP Server is infrastructure.** It's the universal entrypoint for WebSocket and REST clients. It does not register as a channel.
 4. **Channels declare their capabilities.** A channel advertises what its transport supports: `inbound` (user → agent), `outbound` (agent → user), or both. WebSocket and chat platforms are naturally duplex. REST POST is inbound-only (client makes an API call, no return path). Webhook is outbound-only (gateway pushes to a client's callback URL, no user input path). The channel's transport determines what's possible — no forced duplex.
 5. **Channels are mail route peers.** Each channel binds a mailbox and bridges between an external platform and the mail route. Channels live in the gateway process.
-6. **WS connections are dynamic channels.** Each successful WebSocket handshake at `/ws` creates a channel instance that lives for the duration of that connection. The channel is keyed by `client_id`.
+6. **WS connections are dynamic channels.** Each successful WebSocket handshake at `/ws` creates a channel instance that lives for the duration of that connection. The channel is keyed by `channel_id`.
 
 ---
 
@@ -219,8 +219,8 @@ class BaseChannel(ABC):
 
     @property
     @abstractmethod
-    def client_id(self) -> str:
-        """The unique client_id for this channel instance."""
+    def channel_id(self) -> str:
+        """The unique channel_id for this channel instance."""
         ...
 
     @property
@@ -238,18 +238,18 @@ Inspired by nanobot's `ChannelManager`.
 class ChannelManager:
     """Manages channel lifecycle, routes outbound messages, handles retry."""
 
-    channels: dict[str, BaseChannel]    # keyed by client_id
+    channels: dict[str, BaseChannel]    # keyed by channel_id
 
     async def start_all(self) -> None: ...
     async def stop_all(self) -> None: ...
     async def start_channel(self, channel: BaseChannel) -> None: ...
-    async def stop_channel(self, client_id: str) -> None: ...
+    async def stop_channel(self, channel_id: str) -> None: ...
 
     # Outbound routing
     async def dispatch_outbound(self, env: Envelope) -> None:
         """Route an outbound envelope to the correct channel(s).
 
-        Uses env.metadata.routing.client_id to target a specific channel.
+        Uses env.metadata.routing.channel_id to target a specific channel.
         Falls back to chat_id-based routing for broadcast or no-target cases.
         """
 
@@ -268,23 +268,23 @@ class ChannelManager:
 
 Both kinds share the same `BaseChannel` interface. The `capabilities` set determines which methods must function: `inbound` requires `start()`, `outbound` requires `send()`. A duplex channel can be implemented over a single bidirectional transport (WebSocket) or a pair of simplex transports (REST + webhook).
 
-REST POST `/api/actors/{name}/send` is not a channel — it's a direct gateway API call. No session, no client_id, no mailbox binding. The gateway delivers the envelope and returns 202.
+REST POST `/api/actors/{name}/send` is not a channel — it's a direct gateway API call. No session, no channel_id, no mailbox binding. The gateway delivers the envelope and returns 202.
 
-### Channel Identity: `client_id`
+### Channel Identity: `channel_id`
 
-Every channel has a `client_id`, which is its identity on the mail route. This is already the pattern in the current HttpChannel WebSocket handler:
+Every channel has a `channel_id`, which is its identity on the mail route. This is already the pattern in the current HttpChannel WebSocket handler:
 
 ```
-TelegramChannel  → client_id = "telegram:{chat_id}"
-SlackChannel     → client_id = "slack:{channel_id}"
-TUI session      → client_id = "tui-1"  (provided by the client at WS connect)
-SDK client       → client_id = "sdk-abc123"
+TelegramChannel  → channel_id = "telegram:{chat_id}"
+SlackChannel     → channel_id = "slack:{channel_id}"
+TUI session      → channel_id = "tui-1"  (provided by the client at WS connect)
+SDK client       → channel_id = "sdk-abc123"
 ```
 
 Rules:
-- One `client_id` = one active channel instance
-- Duplicate `client_id` on WebSocket → rejected (HTTP 409) unless takeover
-- Channels route outbound messages via `env.metadata.routing.client_id`
+- One `channel_id` = one active channel instance
+- Duplicate `channel_id` on WebSocket → rejected (HTTP 409) unless takeover
+- Channels route outbound messages via `env.metadata.routing.channel_id`
 
 ---
 
@@ -325,14 +325,14 @@ Gateway
 │   ├── GET  /api/actors
 │   ├── POST /api/actors/{name}/send
 │   ├── POST /api/upload-image
-│   └── WS   /ws?client_id={id}&chat_id={id}
+│   └── WS   /ws?channel_id={id}&chat_id={id}
 ├── actor_manager: ActorManager
 │   ├── actors: dict[str, AgentActor]
 │   ├── spawn(name, agent_kind) → AgentActor
 │   ├── stop(name)
 │   └── restart_policy: dict[str, RestartPolicy]
 ├── channel_manager: ChannelManager
-│   ├── channels: dict[str, BaseChannel]  (keyed by client_id)
+│   ├── channels: dict[str, BaseChannel]  (keyed by channel_id)
 │   ├── start_all()
 │   ├── stop_all()
 │   └── dispatch_outbound(env)
@@ -353,7 +353,7 @@ The gateway exposes a stable HTTP/WebSocket API. This is the public contract tha
 | `GET` | `/api/actors` | List named actors with display names and agent kinds |
 | `POST` | `/api/actors/{name}/send` | Fire-and-forget message to a named actor |
 | `POST` | `/api/upload-image` | Upload image, return path-backed image part |
-| `WS` | `/ws?client_id={id}&chat_id={id}` | Bidirectional session to the default actor |
+| `WS` | `/ws?channel_id={id}&chat_id={id}` | Bidirectional session to the default actor |
 
 **WebSocket routing:** The `/ws` endpoint binds to the runtime's default actor. Per-message routing to other actors is done via `@mention` in message content (e.g., `@coder fix this bug`). The gateway inspects content for `@actor_name` patterns and routes accordingly. There is no `?actor=` query parameter — the runtime config already provides the default.
 
@@ -393,8 +393,8 @@ Inbound (REST — fire-and-forget):
     → HTTP 202 returned
 
 Inbound (WebSocket — session):
-  WS /ws?client_id={id}&chat_id={id} handshake completes
-    → Gateway creates a dynamic WSChannel(keyed by client_id)
+  WS /ws?channel_id={id}&chat_id={id} handshake completes
+    → Gateway creates a dynamic WSChannel(keyed by channel_id)
     → WSChannel binds a mailbox on the mail route
     → Each WS message:
         → Gateway inspects content for @mention
@@ -450,7 +450,7 @@ display_name = "Coder"
 [[runtime.channels]]
 name = "TelegramChannel"
 display_name = "Daily Chat"
-client_id = "telegram:main"
+channel_id = "telegram:main"
 target_actor = "main"
 token = "12345:abcdef"
 default_chat_id = "123456789"
@@ -458,7 +458,7 @@ default_chat_id = "123456789"
 [[runtime.channels]]
 name = "TelegramChannel"
 display_name = "Invest Advisor"
-client_id = "telegram:invest"
+channel_id = "telegram:invest"
 target_actor = "main"
 token = "67890:ghijkl"
 default_chat_id = "987654321"
@@ -466,7 +466,7 @@ default_chat_id = "987654321"
 [[runtime.channels]]
 name = "SlackChannel"
 display_name = "Work Desk"
-client_id = "slack:work"
+channel_id = "slack:work"
 target_actor = "main"
 token = "xoxb-..."
 ```
@@ -477,7 +477,7 @@ token = "xoxb-..."
 |-----|------|----------|---------|
 | `name` | `str` | yes | Channel class name registered on `ep_channel` |
 | `display_name` | `str` | no | Human-readable label for UI listing |
-| `client_id` | `str` | yes | Unique channel identity. Must be unique across all channels |
+| `channel_id` | `str` | yes | Unique channel identity. Must be unique across all channels |
 | `target_actor` | `str` | no | Default actor for messages without explicit routing. Falls back to `runtime.agent` |
 | *(extra)* | `any` | varies | Per-channel-adapter configuration passed through to the channel constructor |
 
@@ -516,12 +516,12 @@ token = "xoxb-..."
 
 | Aspect | nanobot | BOS (BEP 7) |
 |--------|---------|-------------|
-| Channel ABC | `BaseChannel`: `start()`, `stop()`, `send()` | Same shape. Adds `client_id`, `target_actor`, `display_name` |
+| Channel ABC | `BaseChannel`: `start()`, `stop()`, `send()` | Same shape. Adds `channel_id`, `target_actor`, `display_name` |
 | Streaming | `send_delta()`, `send_reasoning_delta()`, `send_reasoning_end()` | Same API, same auto-detection via `supports_streaming` |
 | Orchestration | `ChannelManager` — discovery, start_all, dispatch, retry | Same pattern |
 | Message transport | `MessageBus` (publish_inbound / consume_outbound) | MailRoute (mailboxes). Channels are peers, not bus consumers |
 | Gateway concept | No dedicated gateway — ChannelManager is the spine | Gateway is the explicit process root |
-| Channel identity | Implicit (platform adapter keyed by name) | Explicit: `client_id` is the universal channel key |
+| Channel identity | Implicit (platform adapter keyed by name) | Explicit: `channel_id` is the universal channel key |
 | Multi-chat | Not a stated feature | Core feature: channels are views into shared chats |
 
 ### hermes-agent (Nous Research)
@@ -534,17 +534,17 @@ token = "xoxb-..."
 | Inbound routing | `set_message_handler(handler)` callback | MailRoute binding — channels publish to a mailbox, actors consume |
 | Plugin path | `plugin.yaml` + `adapter.py` → `ctx.register_platform()` | `ep_channel` already supports this via extension modules |
 | Streaming | Draft streaming via `send_draft()`, typing indicators | `send_delta()` / `send_reasoning_delta()` — simpler, channel-agnostic |
-| Channel identity | Platform enum + session key | `client_id` — more general, works for both persistent and dynamic channels |
+| Channel identity | Platform enum + session key | `channel_id` — more general, works for both persistent and dynamic channels |
 | Integration surface | 16 touch points for a new platform | 1 touch point: implement `BaseChannel` and register on `ep_channel` |
 
 ### What BOS Does Differently (and Should Keep)
 
 | BOS trait | Why it's better for BOS |
 |-----------|------------------------|
-| `client_id` as channel identity | Already established, works for both persistent (config-driven) and dynamic (WS-driven) channels |
+| `channel_id` as channel identity | Already established, works for both persistent (config-driven) and dynamic (WS-driven) channels |
 | MailRoute for transport | Channels are peers, not bus consumers or callback registrants. Simpler mental model |
 | `ExtensionPoint` registration | One pattern for everything. `ep_channel` is just another EP, consistent with tools, providers, interceptors |
-| Chat portability across channels | `ChatState` with cursor-per-client_id already handles this. No reference project does it well |
+| Chat portability across channels | `ChatState` with cursor-per-channel_id already handles this. No reference project does it well |
 | No 16-point integration checklist | One interface, one registration point. BOS values a small, readable core |
 | Streaming auto-detection | nanobot's `supports_streaming` property (check if `send_delta` is overridden) — no config flag needed |
 
@@ -570,8 +570,8 @@ token = "xoxb-..."
 ### Phase 3: Formalize WS connections as dynamic channels
 
 1. `/ws` handler creates a `WSChannel` (dynamic) per connection.
-2. `WSChannel` is keyed by `client_id` and registers with `ChannelManager`.
-3. Outbound dispatch routes to the correct channel via `client_id`.
+2. `WSChannel` is keyed by `channel_id` and registers with `ChannelManager`.
+3. Outbound dispatch routes to the correct channel via `channel_id`.
 
 ### Phase 4: Gateway owns the event loop
 
