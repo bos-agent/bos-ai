@@ -155,6 +155,19 @@ class Channel(Protocol):
 
 BEP 7 channels are conversational mailbox peers. The BEP does not model inbound-only/outbound-only simplex transports; REST send, SSE, webhook-only, and polling channels belong in future BEPs.
 
+Because channels are the conversational ingress point, they need a narrow gateway-owned runtime context for preflight and semantic routing. This is not a reference to the whole `Gateway`; it is a small service bundle containing only the coordination services a channel needs before sending an envelope to an actor.
+
+```python
+@dataclass(frozen=True)
+class ChannelRuntimeContext:
+    actor_resolver: ActorResolver
+    chat_coordinator: ChatCoordinator
+    mail_route: MailRoute
+    state_changed: Callable[[], Awaitable[None]] | None = None
+```
+
+`ChannelRuntimeContext` belongs to `bos.gateway`, not `bos.core`. The public `Channel` contract remains gateway-agnostic and structural. If a shared `BaseChannel` helper lives in `bos.core`, it must not import gateway classes; otherwise the gateway-aware helper can live under `bos.gateway`.
+
 `channel_conversation_id` is intentionally **not** a `Channel` property. A persistent channel can multiplex many external conversations. Conversation identity is message/cursor-level state represented by `ChannelConversationRef`, not channel-level identity.
 
 ```python
@@ -177,7 +190,7 @@ ChannelConversationRef(channel_id="telegram:daily", channel_conversation_id="tg_
 ChannelConversationRef(channel_id="slack:work", channel_conversation_id="channel:C001/thread:1700000000.000000")
 ```
 
-An optional `BaseChannel` helper may exist for common constructor/settings handling, but it is not the extension contract:
+An optional gateway-aware `BaseChannel` helper may exist for common constructor/settings/runtime-context handling, but it is not the extension contract. If a helper is placed in `bos.core` instead of `bos.gateway`, the `runtime` field must be typed generically to avoid a core → gateway dependency:
 
 ```python
 SettingsT = TypeVar("SettingsT")
@@ -192,11 +205,13 @@ class BaseChannel(Generic[SettingsT]):
         target_actor: str,
         display_name: str | None = None,
         settings: SettingsT,
+        runtime: ChannelRuntimeContext | None = None,
     ) -> None:
         self._channel_id = channel_id
         self._target_actor = target_actor
         self._display_name = display_name
         self._settings = settings
+        self._runtime = runtime
 
     @property
     def channel_id(self) -> str:
@@ -241,6 +256,7 @@ channel = channel_type(
     target_actor=cfg.target_actor,
     display_name=cfg.display_name,
     settings=settings,
+    runtime=channel_runtime_context,
 )
 
 if channel.identity_key:
@@ -248,6 +264,8 @@ if channel.identity_key:
 ```
 
 `SettingsType` is optional and is discovered with `getattr(channel_type, "SettingsType", None)`; when absent, raw `settings` is passed through as a plain dict. This keeps identity validation based on the same normalized settings the channel will use at runtime. Prefer explicit stable identity fields in config (`bot_id`, `app_id`, etc.) over network discovery during validation.
+
+The channel factory supplies `runtime=channel_runtime_context` for both persistent and dynamic channels. Channels use this context to call `ChatCoordinator.prepare_send()` / `hydrate()` / `mark_observed()` and `ActorResolver.resolve()` themselves. This keeps the gateway out of the normal message response path while avoiding globals or actor-side stale checks.
 
 ### `ChannelManager` — Lifecycle Registry
 
@@ -457,8 +475,8 @@ The mail route remains harness-owned. Gateway, actors, and channels bind mailbox
 Package layout target:
 
 ```text
-src/bos/core/              # AgentActor, core actor model, MailRoute/ChatStore contracts, ActorResolver contracts
-src/bos/gateway/           # Gateway, HTTP server, ActorManager, ChannelManager, ChatCoordinator, CoordinatedActor
+src/bos/core/              # AgentActor, core actor model, MailRoute/ChatStore contracts, Channel protocol
+src/bos/gateway/           # Gateway, HTTP server, ActorManager, ChannelManager, ActorResolver, ChatCoordinator, ChannelRuntimeContext, CoordinatedActor
 src/bos/runner/            # bootstrap/process/docker entrypoints only
 ```
 
@@ -517,12 +535,16 @@ Gateway
 │   ├── prepare_send(chat_id, ref, base_revision, content_type)
 │   ├── hydrate(chat_id, from_revision)
 │   └── active_turn_status(chat_id)
+├── channel_runtime_context: ChannelRuntimeContext
+│   └── narrow services passed to channel constructors
 └── harness: AgentHarness
     ├── mail_route
     ├── chat_store
     ├── consolidator
     └── llm_client
 ```
+
+`ChannelRuntimeContext` is how gateway-owned coordination services cross into channel adapters. It is deliberately narrower than `Gateway`: channels receive resolver/coordinator services, not HTTP server internals, actor manager mutation APIs, or gateway shutdown control.
 
 ### HTTP API Contract
 
@@ -582,10 +604,10 @@ Inbound (WebSocket — dynamic channel):
     → WSChannel binds mailbox channel@{id} on the mail route
     → WSChannel creates `ChannelConversationRef(channel_id, "default")`, hydrates the requested chat, and records observed revision
     → Each WS message:
-        → WSChannel asks ChatCoordinator.prepare_send(chat_id, ref, base_revision, content_type)
+        → WSChannel uses ChannelRuntimeContext.chat_coordinator.prepare_send(chat_id, ref, base_revision, content_type)
         → If stale: WSChannel returns missing transcript and asks client to confirm/retry
         → If active turn conflict: WSChannel returns active-turn status or sends interrupt per policy
-        → If OK: WSChannel calls ActorResolver.resolve(content, default_actor)
+        → If OK: WSChannel uses ChannelRuntimeContext.actor_resolver.resolve(content, default_actor)
         → WSChannel sends envelope via MailRoute with metadata.channel + base_revision
         → Actor processes and replies to WSChannel's mailbox, preserving metadata.channel
         → WSChannel reads its mailbox and delivers response/events to the WebSocket client
@@ -594,9 +616,9 @@ Inbound (Persistent Channel — Telegram, Slack, etc.):
   Message arrives via channel's external platform
     → Channel resolves `ChannelConversationRef` for the external chat/thread
     → Channel resolves/creates that ref's BOS chat cursor
-    → Channel asks ChatCoordinator.prepare_send(chat_id, ref, base_revision, content_type)
+    → Channel uses ChannelRuntimeContext.chat_coordinator.prepare_send(chat_id, ref, base_revision, content_type)
     → If stale: channel rehydrates from ChatStore and asks user to confirm/retry
-    → If OK: channel calls ActorResolver.resolve(content, default_actor)
+    → If OK: channel uses ChannelRuntimeContext.actor_resolver.resolve(content, default_actor)
     → Channel sends envelope via MailRoute with metadata.channel + base_revision
     → Actor processes and replies to channel's mailbox, preserving metadata.channel
     → Channel reads its mailbox and delivers response back to the external channel conversation
@@ -1102,10 +1124,11 @@ Write timing:
 
 ### Phase 2: Introduce final Channel contract and ChannelManager
 
-1. Finalize the `Channel` Protocol and optional `BaseChannel` helper in `bos.core`; add `ChannelManager` to `bos.gateway`.
-2. Convert `TelegramChannel` to implement the `Channel` protocol and optionally inherit from `BaseChannel`; implement instance `identity_key`.
-3. Register channels on `ep_channel` and validate unique `channel_id` plus adapter `identity_key`.
-4. `ChannelManager` handles lifecycle, identity, status, duplicate IDs, and takeover policy. It does not dispatch every outbound envelope.
+1. Finalize the core `Channel` Protocol and optional `BaseChannel` helper; add `ChannelManager` to `bos.gateway`.
+2. Add gateway `ChannelRuntimeContext` and pass it to channel constructors from the gateway channel factory.
+3. Convert `TelegramChannel` to implement the `Channel` protocol and optionally inherit from `BaseChannel`; implement instance `identity_key`.
+4. Register channels on `ep_channel` and validate unique `channel_id` plus adapter `identity_key`.
+5. `ChannelManager` handles lifecycle, identity, status, duplicate IDs, and takeover policy. It does not dispatch every outbound envelope.
 
 ### Phase 3: Formalize WS connections as dynamic channels
 
@@ -1143,6 +1166,7 @@ No BEP 7 design blockers remain in this draft. REST agent-send/event-stream APIs
 
 | Date | Change | Intention |
 |------|--------|-----------|
+| 2026-06-02 | Channel runtime context | Add narrow `ChannelRuntimeContext` so channels can perform preflight and actor resolution without making gateway a message proxy |
 | 2026-06-02 | Gateway state/status | Replace `agent.state` channel discovery with compact `.bos/run/gateway.state`; future REST/streaming items remain out of scope |
 | 2026-06-02 | Active turn policy | Choose one active turn per chat, no chat owner, normal-message rejection, and interrupts/aborts from any attached up-to-date channel conversation |
 | 2026-06-02 | Channel contract and conversation mapping | Choose Protocol-first `Channel`, optional `BaseChannel`, instance `identity_key`, and per-ref `channel_conversation_id` mapping |
