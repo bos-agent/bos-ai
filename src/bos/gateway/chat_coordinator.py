@@ -144,6 +144,22 @@ class ChatCoordinator:
             "started_at": active.started_at.isoformat(),
         }
 
+    def active_turns_status(self) -> dict[str, dict[str, Any]]:
+        return {
+            chat_id: status
+            for chat_id in list(self._active_turns)
+            if (status := self.active_turn_status(chat_id)) is not None
+        }
+
+    def clear_active_turns(self, *, actor: str | None = None) -> list[ActiveTurn]:
+        cleared: list[ActiveTurn] = []
+        for chat_id, active in list(self._active_turns.items()):
+            if actor is not None and active.actor != actor:
+                continue
+            cleared.append(active)
+            self._active_turns.pop(chat_id, None)
+        return cleared
+
     async def begin_turn(
         self,
         *,

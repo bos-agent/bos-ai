@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any
 
 from aiohttp import web
 
+from .actor_manager import ActorManager
 from .actor_resolver import ActorDescriptor, ActorResolver
 from .channel_context import ChannelRuntimeContext
 from .channel_manager import ChannelManager
@@ -44,6 +45,12 @@ class Gateway:
         if harness.chat_store is None or harness.mail_route is None:
             raise RuntimeError("Gateway requires an active AgentHarness with chat_store and mail_route services.")
         self.chat_coordinator = ChatCoordinator(harness.chat_store)
+        self.actor_manager = ActorManager(
+            workspace=workspace,
+            harness=harness,
+            chat_coordinator=self.chat_coordinator,
+            state_changed=self._write_state,
+        )
         self.channel_manager = ChannelManager(
             runtime=ChannelRuntimeContext(
                 actor_resolver=self.actor_resolver,
@@ -61,17 +68,7 @@ class Gateway:
             "base_url": f"http://{self.actual_host}:{self.actual_port}",
             "auth": {"type": "api_key", "configured": bool(os.environ.get(self.config.api_key_env))},
         }
-        actors = {
-            name: {
-                "agent": actor.agent,
-                "display_name": actor.display_name,
-                "status": "configured",
-                "address": actor.address,
-                "active_turns": 0,
-                "restart_count": 0,
-            }
-            for name, actor in self.workspace.resolve_gateway_actors().items()
-        }
+        actors = self.actor_manager.status_payload()
         channels = self.channel_manager.status_payload()
         return {
             "runtime": self.workspace.get_runtime_config().kind,
@@ -81,7 +78,7 @@ class Gateway:
             "gateway": gateway,
             "actors": actors,
             "channels": channels,
-            "active_turns": {},
+            "active_turns": self.chat_coordinator.active_turns_status(),
         }
 
     def build_app(self) -> web.Application:
@@ -101,6 +98,7 @@ class Gateway:
         if sockets:
             self.actual_port = sockets[0].getsockname()[1]
         self.actual_host = self.config.host
+        await self.actor_manager.start_all()
         await self.channel_manager.start_all()
         write_gateway_state(GatewayRunDir(self.workspace.bos_dir), self.status_snapshot())
         try:
@@ -109,5 +107,6 @@ class Gateway:
             await asyncio.Event().wait()
         finally:
             await self.channel_manager.stop_all()
+            await self.actor_manager.stop_all()
             write_gateway_state(GatewayRunDir(self.workspace.bos_dir), self.status_snapshot() | {"status": "stopped"})
             await runner.cleanup()
