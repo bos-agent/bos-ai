@@ -2,6 +2,7 @@
 
 from .actor_resolver import ActorDescriptor, ActorResolutionError, ActorResolver, ActorRouteResult
 from .channel_context import ChannelRuntimeContext
+from .channel_manager import ChannelFactoryError, ChannelManager, ChannelStatus, ManagedChannel
 from .chat_coordinator import (
     ActiveTurn,
     ChannelConversationRef,
@@ -17,10 +18,14 @@ __all__ = [
     "ActorResolutionError",
     "ActorResolver",
     "ActorRouteResult",
+    "ChannelFactoryError",
+    "ChannelManager",
     "ChannelConversationRef",
     "ChannelRuntimeContext",
+    "ChannelStatus",
     "Gateway",
     "ChatCoordinationError",
     "ChatCoordinator",
+    "ManagedChannel",
     "PrepareSendResult",
 ]

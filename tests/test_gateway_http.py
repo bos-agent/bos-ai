@@ -3,6 +3,9 @@ import pytest
 from aiohttp import FormData, web
 
 from bos.config.workspace import ResolvedGatewayConfig
+from bos.core import BaseChannel, ep_channel
+from bos.extensions.chat_stores.in_memory import InMemChatStore
+from bos.gateway import Gateway
 from bos.gateway.http import create_gateway_app, require_gateway_api_key
 from bos.gateway.state import GatewayRunDir, read_gateway_state, write_gateway_state
 
@@ -29,6 +32,54 @@ def _app(tmp_path, *, api_key: str = "secret") -> web.Application:
             "active_turns": {},
         },
     )
+
+
+@ep_channel(name="GatewayStatusTestChannel")
+class GatewayStatusTestChannel(BaseChannel[dict]):
+    async def run(self, mailbox):
+        raise AssertionError("not started by status_snapshot")
+
+
+class _FakeMailRoute:
+    def bind(self, address: str):
+        return object()
+
+    async def deliver(self, env):
+        raise AssertionError("not used")
+
+
+class _FakeHarness:
+    chat_store = InMemChatStore()
+    mail_route = _FakeMailRoute()
+
+
+def test_gateway_status_uses_channel_manager_payload(monkeypatch):
+    monkeypatch.setenv("BOS_GATEWAY_API_KEY", "secret")
+    from bos.config import Workspace
+
+    ws = Workspace(
+        ".",
+        ".bos",
+        {
+            "runtime": {
+                "default_actor": "main",
+                "actors": {"main": {"agent": "main"}},
+                "channels": [
+                    {
+                        "type": "GatewayStatusTestChannel",
+                        "channel_id": "demo",
+                        "display_name": "Demo",
+                        "settings": {},
+                    }
+                ],
+            }
+        },
+    )
+
+    snapshot = Gateway(workspace=ws, harness=_FakeHarness()).status_snapshot()
+
+    assert snapshot["channels"]["demo"]["type"] == "GatewayStatusTestChannel"
+    assert snapshot["channels"]["demo"]["address"] == "channel@demo"
 
 
 def test_require_gateway_api_key_fails_when_env_missing():
