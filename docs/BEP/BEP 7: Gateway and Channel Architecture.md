@@ -78,8 +78,10 @@ The reference architecture draws from two prior-art projects: **nanobot** (chann
 │  └──────────────────────────────────────────────────────────┘   │
 │                                                                 │
 │  External:                                                       │
-│    TUI ──WS──▶ HTTP Server ──▶ Actor "main"                      │
-│    SDK ──REST─▶ HTTP Server ──▶ Actor "coder"                    │
+│    TUI ◀──WS──▶ HTTP Server (creates dynamic WSChannel)          │
+│                                         └──▶ MailRoute ◀──▶ Actor "main"     │
+│    SDK ──REST──▶ HTTP Server ──▶ Actor "coder"                   │
+│    SDK ◀──Webhook── HTTP Server (callback)                       │
 │    Telegram ◀──▶ TelegramChannel ◀──▶ MailRoute ◀──▶ Actor      │
 │    Slack   ◀──▶ SlackChannel   ◀──▶ MailRoute ◀──▶ Actor        │
 └─────────────────────────────────────────────────────────────────┘
