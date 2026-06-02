@@ -118,6 +118,40 @@ class ActorConfig(BaseModel):
 
     agent: str
     display_name: str | None = None
+    restart_on_error: bool = True
+    max_restarts: int = 5
+
+
+class GatewayConfig(BaseModel):
+    """Gateway-owned HTTP/control-plane settings."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    host: str = "127.0.0.1"
+    port: int = 5920
+    upload_dir: str = ".bos/uploads/http"
+    max_upload_bytes: int = 20 * 1024 * 1024
+    api_key_env: str = "BOS_GATEWAY_API_KEY"
+
+
+class ActorResolverConfig(BaseModel):
+    """Runtime actor mention resolution settings."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mention_prefix: str = "@"
+
+
+class ChannelConfig(BaseModel):
+    """Persistent channel config for the gateway runtime."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: str
+    channel_id: str
+    display_name: str | None = None
+    target_actor: str | None = None
+    settings: dict[str, Any] = Field(default_factory=dict)
 
 
 class RuntimeConfig(BaseModel):
@@ -125,10 +159,15 @@ class RuntimeConfig(BaseModel):
 
     model_config = ConfigDict(extra="allow")
 
+    # Legacy single-actor field. BEP 7 gateway config should use
+    # ``runtime.default_actor`` plus ``runtime.actors`` instead.
     agent: str = "_default"
     location: str = "process"
     channels: list[dict[str, Any]] = Field(default_factory=list)
     actors: dict[str, ActorConfig] = Field(default_factory=dict)
+    default_actor: str = "main"
+    gateway: GatewayConfig = Field(default_factory=GatewayConfig)
+    actor_resolver: ActorResolverConfig = Field(default_factory=ActorResolverConfig)
 
 
 class AgentSection(BaseModel):
