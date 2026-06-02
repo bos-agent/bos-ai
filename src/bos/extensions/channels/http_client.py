@@ -156,11 +156,11 @@ class HttpChannelClient:
     async def _receive_session_ack(self) -> None:
         msg = await self._ws.receive(timeout=5)
         if msg.type != WSMsgType.TEXT:
-            raise RuntimeError("HttpChannel did not send session acknowledgement.")
+            raise RuntimeError("Gateway did not send session acknowledgement.")
         data = json.loads(msg.data)
         metadata = data.get("metadata") or {}
         if data.get("content_type") != MessageType.SYSTEM or metadata.get("event") != "session":
-            raise RuntimeError("HttpChannel sent an invalid session acknowledgement.")
+            raise RuntimeError("Gateway sent an invalid session acknowledgement.")
         client_id = metadata.get("channel_id") or metadata.get("client_id")
         chat_id = metadata.get("chat_id") or data.get("chat_id")
         if isinstance(client_id, str) and client_id:
@@ -284,7 +284,7 @@ class HttpChannelClient:
 
     async def upload_image(self, path: str | Path) -> dict[str, Any]:
         if self._session is None or self._session.closed:
-            raise RuntimeError("Not connected — connect the HttpChannelClient before uploading images.")
+            raise RuntimeError("Not connected — connect the gateway client before uploading images.")
 
         upload_path = Path(path).expanduser().resolve()
         if not upload_path.is_file():
@@ -306,7 +306,7 @@ class HttpChannelClient:
     async def list_actors(self) -> dict[str, dict[str, Any]]:
         """Fetch the list of available named actors from the server."""
         if self._session is None or self._session.closed:
-            raise RuntimeError("Not connected — connect the HttpChannelClient before listing actors.")
+            raise RuntimeError("Not connected — connect the gateway client before listing actors.")
         async with self._session.get(f"{self._http_base_url}/api/actors") as response:
             payload = await response.json()
         if response.status >= 400:

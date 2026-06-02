@@ -89,7 +89,7 @@ def _build_workspace_for_daemon(ctx, workspace_override: str | None = None) -> W
 
 
 def _get_ws_and_rd(ctx, workspace_override: str | None = None) -> tuple[Workspace, GatewayRunDir]:
-    """Build Workspace + RunDir for daemon commands."""
+    """Build Workspace + GatewayRunDir for daemon commands."""
     ws = _build_workspace_for_daemon(ctx, workspace_override)
     rd = GatewayRunDir(ws.bos_dir)
     return ws, rd
@@ -506,7 +506,7 @@ def start(ctx, foreground: bool, docker: bool, workspace_dir: str | None):
 def stop(ctx):
     """Stop the running gateway."""
     _, rd = _get_ws_and_rd(ctx)
-    from bos.runner.proc import is_running, read_state, stop_agent
+    from bos.runner.proc import is_running, read_state, stop_gateway
 
     if not is_running(rd):
         click.echo("No gateway is running.", err=True)
@@ -517,7 +517,7 @@ def stop(ctx):
     ident = state.get("container_id", "?")[:12] if runtime == "docker" else state.get("pid", "?")
     click.echo(f"Stopping gateway ({runtime} {ident})…")
 
-    stop_agent(rd, signal.SIGTERM)
+    stop_gateway(rd, signal.SIGTERM)
 
     # Wait up to 5s for clean exit
     deadline = time.monotonic() + 5
@@ -528,7 +528,7 @@ def stop(ctx):
     else:
         click.echo("Gateway did not exit cleanly — sending SIGKILL")
         try:
-            stop_agent(rd, signal.SIGKILL)
+            stop_gateway(rd, signal.SIGKILL)
         except Exception:
             pass
 

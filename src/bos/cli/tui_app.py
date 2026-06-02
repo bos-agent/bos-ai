@@ -1,12 +1,12 @@
-"""Textual Chat Application — connects to a running agent via channel.
+"""Textual Chat Application — connects to a running BOS gateway.
 
-This TUI is a pure external client. It communicates with the agent process
-exclusively through ``HttpChannelClient`` over WebSocket. It never imports or
-references the agent, harness, or actor directly.
+This TUI is a pure external client. It communicates with the gateway over
+WebSocket through ``HttpChannelClient``. It never imports or references the
+agent, harness, or actor directly.
 
 Slash commands that need server-side data (``/history``, ``/compact``, etc.)
 send a ``content_type="command"`` envelope and wait for a ``command_result``
-response from the channel server.
+response from the gateway channel.
 """
 
 from __future__ import annotations
@@ -24,9 +24,8 @@ from textual.message import Message
 from textual.widgets import Footer, Header, Input, RichLog, Static
 from textual_autocomplete import AutoComplete, DropdownItem
 
-from bos.extensions.channels.http import WS_TAKEOVER_CLOSE_REASON
 from bos.extensions.channels.http_client import HttpChannelClient
-from bos.protocol import MessageType, TurnEvent
+from bos.protocol import WS_TAKEOVER_CLOSE_REASON, MessageType, TurnEvent
 
 logger = logging.getLogger(__name__)
 
@@ -112,7 +111,7 @@ class SlashAutoComplete(AutoComplete):
 class ChatApp(App):
     """Full-screen agent chat — channel-mode only.
 
-    Communicates with the agent process via ``HttpChannelClient``.
+    Communicates with the gateway via ``HttpChannelClient``.
     """
 
     TITLE = "boscli tui"
@@ -200,7 +199,7 @@ class ChatApp(App):
         super().__init__()
         self._client = client
         if not client.chat_id:
-            raise ValueError("HttpChannelClient must be connected and session-acknowledged before launching ChatApp.")
+            raise ValueError("Gateway client must be connected and session-acknowledged before launching ChatApp.")
         self._chat_id = client.chat_id
         self._busy = False
         self._buffer: list[str] = []
@@ -655,15 +654,15 @@ class ChatApp(App):
 
     def _chat_status_text(self) -> str:
         conn = self._connection_indicator()
-        return f"  {conn}  |  Chat: {self._chat_id}  |  Client: {self._client.client_id}"
+        return f"  {conn}  |  Chat: {self._chat_id}  |  Channel: {self._client.client_id}"
 
     def _header_subtitle(self) -> str:
         conn = "●" if self._conn_status == "connected" else "○ reconnecting"
-        return f"{conn}  HttpChannel | {self._chat_id}"
+        return f"{conn}  Gateway | {self._chat_id}"
 
     def _status_text(self) -> str:
         state = "● thinking" if self._busy else "○ ready"
-        return f"  HttpChannel  ·  {self._chat_id}  ·  {state}"
+        return f"  Gateway  ·  {self._chat_id}  ·  {state}"
 
     def _update_status(self) -> None:
         self.sub_title = self._header_subtitle()
@@ -693,13 +692,13 @@ async def run_chat_tui(
     *,
     local_mode: bool = False,
 ) -> None:
-    """Launch the TUI connected to a running agent via channel.
+    """Launch the TUI connected to a running gateway.
 
     ``client`` must be an ``HttpChannelClient`` that has already called
     ``connect()``.
 
     When ``local_mode`` is True, slash commands and @mention autocomplete
-    are disabled since there is no server-side or named-actor support.
+    are disabled since there is no gateway channel support.
     """
     app = ChatApp(client=client, local_mode=local_mode)
     await app.run_async()

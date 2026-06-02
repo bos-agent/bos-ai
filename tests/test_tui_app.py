@@ -3,8 +3,7 @@ import asyncio
 import pytest
 
 from bos.cli.tui_app import ChatApp, CommandResultEvent, run_chat_tui
-from bos.extensions.channels.http import WS_TAKEOVER_CLOSE_REASON
-from bos.protocol import MessageType
+from bos.protocol import WS_TAKEOVER_CLOSE_REASON, MessageType
 
 
 class FakeClient:
@@ -197,9 +196,9 @@ def test_chat_status_text_uses_current_client_and_chat():
     app = ChatApp(client=client)
 
     assert "Chat: chat-1" in app._chat_status_text()
-    assert "Client: client-1" in app._chat_status_text()
+    assert "Channel: client-1" in app._chat_status_text()
     assert "connected" in app._chat_status_text()
-    assert "HttpChannel | chat-1" in app._header_subtitle()
+    assert "Gateway | chat-1" in app._header_subtitle()
 
 
 @pytest.mark.asyncio

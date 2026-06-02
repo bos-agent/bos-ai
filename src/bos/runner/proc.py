@@ -6,9 +6,6 @@ The final gateway runtime stores lifecycle files through
   gateway.pid   — PID of the local gateway launcher process
   gateway.state — JSON status (runtime, pid/container_id, gateway, actors, channels, …)
   gateway.log   — stdout/stderr of the gateway subprocess
-
-``RunDir`` remains as a small legacy-compatible path manager for older tests and
-non-gateway callers, but all gateway CLI paths should pass ``GatewayRunDir``.
 """
 
 from __future__ import annotations
@@ -17,48 +14,16 @@ import json
 import os
 import signal
 import subprocess
-from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from bos.gateway.state import GatewayRunDir
+
 if TYPE_CHECKING:
     from bos.config.workspace import AgentRuntimeConfig, Workspace
-    from bos.gateway.state import GatewayRunDir
 
 
-@dataclass
-class RunDir:
-    """Path manager for .bos/run/ lifecycle files."""
-
-    bos_dir: Path
-
-    def __post_init__(self) -> None:
-        self.bos_dir = Path(self.bos_dir).expanduser().resolve()
-
-    @property
-    def root(self) -> Path:
-        return self.bos_dir / "run"
-
-    @property
-    def pid_file(self) -> Path:
-        return self.root / "agent.pid"
-
-    @property
-    def state_file(self) -> Path:
-        return self.root / "agent.state"
-
-    @property
-    def log_file(self) -> Path:
-        return self.root / "agent.log"
-
-    def ensure(self) -> None:
-        self.root.mkdir(parents=True, exist_ok=True)
-
-
-if TYPE_CHECKING:
-    LifecycleRunDir = RunDir | GatewayRunDir
-else:
-    LifecycleRunDir = RunDir
+LifecycleRunDir = GatewayRunDir
 
 
 # ── state file ─────────────────────────────────────────────────
@@ -150,7 +115,7 @@ def kill_process(rd: LifecycleRunDir, sig: int = signal.SIGTERM) -> None:
         pass  # already gone
 
 
-def stop_agent(rd: LifecycleRunDir, sig: int = signal.SIGTERM) -> None:
+def stop_gateway(rd: LifecycleRunDir, sig: int = signal.SIGTERM) -> None:
     """Stop the recorded runtime, whether it is a local process or a Docker container."""
     state = read_state(rd)
     if state.get("runtime") == "docker":
@@ -242,9 +207,9 @@ def build_docker_argv(
     *,
     detach: bool,
 ) -> list[str]:
-    """Build the Docker command used to run the BOS agent in a container."""
+    """Build the Docker command used to run the BOS gateway in a container."""
     if not runtime.image:
-        raise RuntimeError("Docker runtime requires `main.runtime.image` in .bos/config.toml.")
+        raise RuntimeError("Docker runtime requires `runtime.image` in .bos/config.toml.")
 
     container_bos_dir = _default_container_bos_dir(workspace, runtime)
     argv = ["docker", "run", "--rm"]
