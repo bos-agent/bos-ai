@@ -9,6 +9,7 @@ from .chat_coordinator import (
     ChatCoordinator,
     PrepareSendResult,
 )
+from .gateway import Gateway
 
 __all__ = [
     "ActiveTurn",
@@ -18,6 +19,7 @@ __all__ = [
     "ActorRouteResult",
     "ChannelConversationRef",
     "ChannelRuntimeContext",
+    "Gateway",
     "ChatCoordinationError",
     "ChatCoordinator",
     "PrepareSendResult",
