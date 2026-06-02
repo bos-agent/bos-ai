@@ -1,4 +1,4 @@
-"""``boscli gateway start/stop/status/restart, ask, tui`` — agent process lifecycle commands."""
+"""``boscli gateway start/stop/status/restart, ask, tui`` — gateway lifecycle commands."""
 
 from __future__ import annotations
 
@@ -21,8 +21,8 @@ from rich.text import Text
 
 from bos.config import ConfigNotFoundError, Workspace, WorkspaceResolutionError, resolve_config_source
 from bos.config.workspace import _resolve_path, presets_dir
+from bos.gateway.state import GatewayRunDir
 from bos.protocol import TurnEvent
-from bos.runner.proc import RunDir
 
 
 def _build_workspace_for_ask(ctx, workspace_override: str | None = None) -> Workspace:
@@ -88,10 +88,10 @@ def _build_workspace_for_daemon(ctx, workspace_override: str | None = None) -> W
         raise click.UsageError(hint) from exc
 
 
-def _get_ws_and_rd(ctx, workspace_override: str | None = None) -> tuple[Workspace, RunDir]:
+def _get_ws_and_rd(ctx, workspace_override: str | None = None) -> tuple[Workspace, GatewayRunDir]:
     """Build Workspace + RunDir for daemon commands."""
     ws = _build_workspace_for_daemon(ctx, workspace_override)
-    rd = RunDir(ws.bos_dir)
+    rd = GatewayRunDir(ws.bos_dir)
     return ws, rd
 
 
@@ -419,7 +419,7 @@ def ask(
 
 @click.group(name="gateway")
 def gateway():
-    """Manage the agent gateway process."""
+    """Manage the BOS gateway process."""
 
 
 # ── boscli gateway start ────────────────────────────────────────
@@ -437,19 +437,19 @@ def gateway():
 )
 @click.pass_context
 def start(ctx, foreground: bool, docker: bool, workspace_dir: str | None):
-    """Start the agent actor and channel server."""
+    """Start the BOS gateway."""
     ws, rd = _get_ws_and_rd(ctx, workspace_dir)
 
     ws.resolve_agents()
     ws.bootstrap_platform()
 
-    from bos.named_actors.runner import start_named_actors
     from bos.runner.proc import is_running, read_state, run_docker_foreground, start_background, start_docker
+    from bos.runner.runner import start as start_gateway
 
     if is_running(rd):
         state = read_state(rd)
         identifier = state.get("container_id") if state.get("runtime") == "docker" else state.get("pid")
-        click.echo(f"Agent is already running ({state.get('runtime', 'process')} {identifier}).", err=True)
+        click.echo(f"Gateway is already running ({state.get('runtime', 'process')} {identifier}).", err=True)
         raise SystemExit(1)
 
     runtime = ws.get_runtime_config(force_kind="docker" if docker else None)
@@ -459,46 +459,43 @@ def start(ctx, foreground: bool, docker: bool, workspace_dir: str | None):
 
     if runtime.kind == "docker":
         if foreground:
-            click.echo("Starting agent in Docker foreground…")
+            click.echo("Starting gateway in Docker foreground…")
             raise SystemExit(run_docker_foreground(ws, runtime))
 
         container_id = start_docker(ws, rd, runtime)
-        click.echo(f"Agent starting in Docker ({container_id[:12]})…")
+        click.echo(f"Gateway starting in Docker ({container_id[:12]})…")
+        pid = None
     elif foreground:
-        click.echo("Starting agent in foreground…")
-        asyncio.run(start_named_actors(ws))
+        click.echo("Starting gateway in foreground…")
+        asyncio.run(start_gateway(ws))
         return
     else:
         argv = [sys.executable, "-m", "bos.runner", "--config", str(ws.config_file)]
         pid = start_background(argv, rd, cwd=ws.workspace)
-        click.echo(f"Agent starting (PID {pid})…")
+        click.echo(f"Gateway starting (PID {pid})…")
+        container_id = None
 
     state = read_state(rd)
-    pid = state.get("pid")
-    container_id = state.get("container_id")
+    pid = state.get("pid") or pid
+    container_id = state.get("container_id") or container_id
 
-    # Poll agent.state until channels are registered (up to 10s)
+    # Poll gateway.state until the HTTP gateway reports its bound endpoint (up to 10s).
     deadline = time.monotonic() + 10
     while time.monotonic() < deadline:
         time.sleep(0.3)
         state = read_state(rd)
-        channels = state.get("channels", [])
-        if channels:
-            for ch in channels:
-                if ch.get("name") == "HttpChannel":
-                    host = ch.get("host", "127.0.0.1")
-                    port = ch.get("port")
-                    if state.get("runtime") == "docker" and host == "0.0.0.0":
-                        host = "127.0.0.1"
-                    ident = container_id[:12] if container_id else pid
-                    click.echo(f"Agent started ({state.get('runtime', 'process')} {ident}) · ws://{host}:{port}/ws")
-                    return
+        gateway_state = state.get("gateway", {})
+        port = gateway_state.get("port")
+        if port:
+            host = gateway_state.get("host", "127.0.0.1")
+            if state.get("runtime") == "docker" and host == "0.0.0.0":
+                host = "127.0.0.1"
             ident = container_id[:12] if container_id else pid
-            click.echo(f"Agent started ({state.get('runtime', 'process')} {ident})")
+            click.echo(f"Gateway started ({state.get('runtime', runtime.kind)} {ident}) · http://{host}:{port}")
             return
 
     ident = container_id[:12] if container_id else pid
-    click.echo(f"Agent started ({runtime.kind} {ident}) — channel info not yet available (check boscli gateway status)")
+    click.echo(f"Gateway started ({runtime.kind} {ident}) — endpoint not yet available (check boscli gateway status)")
 
 
 # ── boscli gateway stop ─────────────────────────────────────────
@@ -507,18 +504,18 @@ def start(ctx, foreground: bool, docker: bool, workspace_dir: str | None):
 @gateway.command()
 @click.pass_context
 def stop(ctx):
-    """Stop the running agent."""
+    """Stop the running gateway."""
     _, rd = _get_ws_and_rd(ctx)
     from bos.runner.proc import is_running, read_state, stop_agent
 
     if not is_running(rd):
-        click.echo("No agent is running.", err=True)
+        click.echo("No gateway is running.", err=True)
         raise SystemExit(1)
 
     state = read_state(rd)
     runtime = state.get("runtime", "process")
     ident = state.get("container_id", "?")[:12] if runtime == "docker" else state.get("pid", "?")
-    click.echo(f"Stopping agent ({runtime} {ident})…")
+    click.echo(f"Stopping gateway ({runtime} {ident})…")
 
     stop_agent(rd, signal.SIGTERM)
 
@@ -529,7 +526,7 @@ def stop(ctx):
         if not is_running(rd):
             break
     else:
-        click.echo("Agent did not exit cleanly — sending SIGKILL")
+        click.echo("Gateway did not exit cleanly — sending SIGKILL")
         try:
             stop_agent(rd, signal.SIGKILL)
         except Exception:
@@ -538,7 +535,7 @@ def stop(ctx):
     # Clean up state files if process left them behind
     rd.pid_file.unlink(missing_ok=True)
     rd.state_file.unlink(missing_ok=True)
-    click.echo("Agent stopped.")
+    click.echo("Gateway stopped.")
 
 
 # ── boscli gateway status ───────────────────────────────────────
@@ -547,7 +544,7 @@ def stop(ctx):
 @gateway.command()
 @click.pass_context
 def status(ctx):
-    """Show agent running status."""
+    """Show gateway running status."""
     _, rd = _get_ws_and_rd(ctx)
     from bos.runner.proc import is_running, read_state
 
@@ -555,7 +552,7 @@ def status(ctx):
     running = is_running(rd)
 
     if not state and not running:
-        click.echo("Agent is not running.")
+        click.echo("Gateway is not running.")
         return
 
     status_str = click.style("● running", fg="green") if running else click.style("○ stopped", fg="red")
@@ -588,14 +585,23 @@ def status(ctx):
     click.echo(f"Last active: {last_active}")
     click.echo(f"Uptime:      {uptime_str}")
 
-    for ch in state.get("channels", []):
-        name = ch.get("name", "?")
-        host = ch.get("host", "?")
-        if runtime == "docker" and host == "0.0.0.0":
-            host = "127.0.0.1"
-        port = ch.get("port", "?")
+    gateway_state = state.get("gateway", {})
+    host = gateway_state.get("host")
+    if runtime == "docker" and host == "0.0.0.0":
+        host = "127.0.0.1"
+    port = gateway_state.get("port")
+    if host and port:
+        click.echo(f"Gateway:     http://{host}:{port}")
+
+    for name, actor in state.get("actors", {}).items():
+        click.echo(f"Actor:       {name} ({actor.get('display_name', '?')}) · {actor.get('status', '?')}")
+
+    for channel_id, ch in state.get("channels", {}).items():
+        kind = ch.get("kind", "?")
+        type_name = ch.get("type", "?")
         addr = ch.get("address", "?")
-        click.echo(f"Channel:     {name} @ {addr} → ws://{host}:{port}/ws")
+        target = ch.get("target_actor", "?")
+        click.echo(f"Channel:     {channel_id} [{kind}/{type_name}] @ {addr} → {target}")
 
 
 # ── boscli gateway restart ──────────────────────────────────────
@@ -604,7 +610,7 @@ def status(ctx):
 @gateway.command()
 @click.pass_context
 def restart(ctx):
-    """Restart the agent (stop then start)."""
+    """Restart the gateway (stop then start)."""
     # Re-invoke stop (ignore failure if not running)
     _, rd = _get_ws_and_rd(ctx)
     from bos.runner.proc import is_running, read_state
@@ -623,24 +629,25 @@ def restart(ctx):
 
 
 @click.command()
-@click.option("--host", default=None, help="Channel host (overrides agent.state).")
-@click.option("--port", default=None, type=int, help="Channel port (overrides agent.state).")
+@click.option("--host", default=None, help="Gateway host (overrides gateway.state).")
+@click.option("--port", default=None, type=int, help="Gateway port (overrides gateway.state).")
 @click.option("--client-id", default=None, help="Stable server-side cursor id (defaults to tui:<username>).")
 @click.pass_context
 def tui(ctx, host: str | None, port: int | None, client_id: str | None):
-    """Connect the TUI to a running agent via the HTTP channel."""
+    """Connect the TUI to a running gateway."""
     _, rd = _get_ws_and_rd(ctx)
     from bos.runner.proc import read_state
 
     def _resolve_endpoint() -> tuple[str, int] | None:
-        """Read agent.state to discover the current HttpChannel host:port."""
+        """Read gateway.state to discover the current gateway host:port."""
         state = read_state(rd)
-        for ch in state.get("channels", []):
-            if ch.get("name") == "HttpChannel":
-                h = ch.get("host", "127.0.0.1")
-                p = ch.get("port")
-                if h and p:
-                    return (h, int(p))
+        gateway_state = state.get("gateway", {})
+        h = gateway_state.get("host")
+        p = gateway_state.get("port")
+        if h == "0.0.0.0":
+            h = "127.0.0.1"
+        if h and p:
+            return (h, int(p))
         return None
 
     # Discover initial endpoint (CLI overrides take precedence)
@@ -652,7 +659,7 @@ def tui(ctx, host: str | None, port: int | None, client_id: str | None):
 
     if not host or not port:
         raise click.UsageError(
-            "Could not determine channel endpoint. Use --host and --port, or make sure the agent is running."
+            "Could not determine gateway endpoint. Use --host and --port, or make sure the gateway is running."
         )
 
     from bos.cli.tui_app import run_chat_tui

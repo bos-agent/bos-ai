@@ -1,9 +1,11 @@
 """Runner module — process lifecycle and orchestration for boscli gateway start/stop/status."""
 
-from bos.named_actors.runner import start_named_actors as start
+from bos.gateway.state import GatewayRunDir
 from bos.runner.proc import RunDir, is_running, kill_process, read_state, start_background, write_state
+from bos.runner.runner import start
 
 __all__ = [
+    "GatewayRunDir",
     "RunDir",
     "is_running",
     "kill_process",

@@ -44,7 +44,8 @@ def read_gateway_state(run_dir: GatewayRunDir) -> dict[str, Any]:
 
 def write_gateway_state(run_dir: GatewayRunDir, snapshot: dict[str, Any]) -> None:
     run_dir.ensure()
-    payload = dict(snapshot)
+    payload = read_gateway_state(run_dir)
+    payload.update(snapshot)
     payload.setdefault("updated_at", datetime.now(timezone.utc).isoformat())
     tmp = run_dir.root / f".gateway.state.{os.getpid()}.tmp"
     try:

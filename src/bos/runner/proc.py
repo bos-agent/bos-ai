@@ -1,9 +1,14 @@
-"""Process lifecycle helpers for boscli gateway start/stop/status.
+"""Process lifecycle helpers for ``boscli gateway start/stop/status``.
 
-Manages the `.bos/run/` directory:
-  agent.pid   — PID of the running actor process
-  agent.state — JSON status (runtime, pid/container_id, started_at, last_active, channels, …)
-  agent.log   — stdout/stderr of the actor subprocess
+The final gateway runtime stores lifecycle files through
+``bos.gateway.state.GatewayRunDir``:
+
+  gateway.pid   — PID of the local gateway launcher process
+  gateway.state — JSON status (runtime, pid/container_id, gateway, actors, channels, …)
+  gateway.log   — stdout/stderr of the gateway subprocess
+
+``RunDir`` remains as a small legacy-compatible path manager for older tests and
+non-gateway callers, but all gateway CLI paths should pass ``GatewayRunDir``.
 """
 
 from __future__ import annotations
@@ -18,6 +23,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from bos.config.workspace import AgentRuntimeConfig, Workspace
+    from bos.gateway.state import GatewayRunDir
 
 
 @dataclass
@@ -49,23 +55,29 @@ class RunDir:
         self.root.mkdir(parents=True, exist_ok=True)
 
 
+if TYPE_CHECKING:
+    LifecycleRunDir = RunDir | GatewayRunDir
+else:
+    LifecycleRunDir = RunDir
+
+
 # ── state file ─────────────────────────────────────────────────
 
 
-def read_state(rd: RunDir) -> dict:
-    """Read agent.state JSON. Returns empty dict if missing or corrupt."""
+def read_state(rd: LifecycleRunDir) -> dict:
+    """Read a lifecycle state JSON file. Returns empty dict if missing/corrupt."""
     try:
         return json.loads(rd.state_file.read_text(encoding="utf-8"))
     except Exception:
         return {}
 
 
-def write_state(rd: RunDir, **fields) -> None:
-    """Atomically update agent.state with the given fields (merge with existing)."""
+def write_state(rd: LifecycleRunDir, **fields) -> None:
+    """Atomically update lifecycle state with the given fields (merge with existing)."""
     rd.ensure()
     current = read_state(rd)
     current.update({k: v for k, v in fields.items() if v is not None})
-    tmp = rd.root / f".agent.state.{os.getpid()}.tmp"
+    tmp = rd.root / f".{rd.state_file.name}.{os.getpid()}.tmp"
     try:
         tmp.write_text(json.dumps(current, default=str), encoding="utf-8")
         tmp.replace(rd.state_file)
@@ -76,7 +88,7 @@ def write_state(rd: RunDir, **fields) -> None:
 # ── process checks ─────────────────────────────────────────────
 
 
-def _read_pid(rd: RunDir) -> int | None:
+def _read_pid(rd: LifecycleRunDir) -> int | None:
     try:
         return int(rd.pid_file.read_text().strip())
     except Exception:
@@ -110,7 +122,7 @@ def _docker_container_is_running(container_id: str) -> bool:
     return proc.stdout.strip().lower() == "true"
 
 
-def is_running(rd: RunDir) -> bool:
+def is_running(rd: LifecycleRunDir) -> bool:
     """Return True if the recorded process or container is alive."""
     state = read_state(rd)
     if state.get("runtime") == "docker":
@@ -127,24 +139,24 @@ def is_running(rd: RunDir) -> bool:
         return False
 
 
-def kill_process(rd: RunDir, sig: int = signal.SIGTERM) -> None:
-    """Send *sig* to the process recorded in agent.pid."""
+def kill_process(rd: LifecycleRunDir, sig: int = signal.SIGTERM) -> None:
+    """Send *sig* to the process recorded in the lifecycle PID file."""
     pid = _read_pid(rd)
     if pid is None:
-        raise RuntimeError("No PID file found — is the agent running?")
+        raise RuntimeError("No PID file found — is the gateway running?")
     try:
         os.kill(pid, sig)
     except ProcessLookupError:
         pass  # already gone
 
 
-def stop_agent(rd: RunDir, sig: int = signal.SIGTERM) -> None:
+def stop_agent(rd: LifecycleRunDir, sig: int = signal.SIGTERM) -> None:
     """Stop the recorded runtime, whether it is a local process or a Docker container."""
     state = read_state(rd)
     if state.get("runtime") == "docker":
         container_id = state.get("container_id")
         if not container_id:
-            raise RuntimeError("No Docker container recorded — is the agent running?")
+            raise RuntimeError("No Docker container recorded — is the gateway running?")
         cmd = ["kill", "--signal", _signal_name(sig), str(container_id)] if sig == signal.SIGKILL else [
             "stop",
             "--signal",
@@ -162,7 +174,12 @@ def stop_agent(rd: RunDir, sig: int = signal.SIGTERM) -> None:
 # ── background launch ──────────────────────────────────────────
 
 
-def start_background(argv: list[str], rd: RunDir, env: dict | None = None, cwd: Path | str | None = None) -> int:
+def start_background(
+    argv: list[str],
+    rd: LifecycleRunDir,
+    env: dict | None = None,
+    cwd: Path | str | None = None,
+) -> int:
     """Launch *argv* as a detached background process.
 
     Stdout/stderr are redirected to the log file. The PID is written to
@@ -255,22 +272,17 @@ def build_docker_argv(
     if env_file := _docker_env_file(workspace):
         argv.extend(["--env-file", str(env_file)])
 
-    published_ports: set[int] = set()
-    for channel_cfg in workspace.resolve_channels(runtime_kind=runtime.kind):
-        if channel_cfg.name != "HttpChannel":
-            continue
-        port = channel_cfg.options.get("port")
-        if isinstance(port, int) and port > 0 and port not in published_ports:
-            argv.extend(["--publish", f"{port}:{port}"])
-            published_ports.add(port)
+    gateway_port = workspace.resolve_gateway_config().port
+    if gateway_port > 0:
+        argv.extend(["--publish", f"{gateway_port}:{gateway_port}"])
 
     container_config = f"{container_bos_dir}/{workspace.config_file.name}"
     argv.extend([runtime.image, "--config", container_config])
     return argv
 
 
-def start_docker(workspace: Workspace, rd: RunDir, runtime: AgentRuntimeConfig) -> str:
-    """Launch the BOS agent in a detached Docker container and record the container metadata."""
+def start_docker(workspace: Workspace, rd: LifecycleRunDir, runtime: AgentRuntimeConfig) -> str:
+    """Launch the BOS gateway in a detached Docker container and record container metadata."""
     rd.ensure()
     proc = subprocess.run(
         build_docker_argv(workspace, runtime, detach=True),
@@ -289,6 +301,6 @@ def start_docker(workspace: Workspace, rd: RunDir, runtime: AgentRuntimeConfig) 
 
 
 def run_docker_foreground(workspace: Workspace, runtime: AgentRuntimeConfig) -> int:
-    """Run the BOS agent in a foreground Docker container."""
+    """Run the BOS gateway in a foreground Docker container."""
     proc = subprocess.run(build_docker_argv(workspace, runtime, detach=False), check=False)
     return proc.returncode
