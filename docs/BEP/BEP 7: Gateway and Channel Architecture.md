@@ -272,14 +272,15 @@ REST POST `/api/actors/{name}/send` is not a channel — it's a direct gateway A
 
 ### Channel Identity: `channel_id`
 
-Every channel has a `channel_id`, which uniquely identifies the transport. Within a channel, `chat_id` identifies the conversation context. One channel can handle multiple chats:
+Every channel has a `channel_id`, which uniquely identifies the transport. For platform channels, it's derived from the platform identity. For connections without a natural platform identity (WebSocket, TUI), it's set explicitly. Within a channel, `chat_id` identifies the conversation context. One channel can handle multiple chats:
 
 ```
-TelegramChannel  → channel_id = "telegram:bot_abc123"   (identifies the bot)
-                    chat within = Telegram chat 123456   (maps to BOS chat_id)
-                    chat within = Telegram chat 789012   (different BOS chat_id)
-SlackChannel     → channel_id = "slack:workspace_x"     (identifies the workspace/app)
-TUI session      → channel_id = "tui-1"                 (one connection = one channel)
+TelegramChannel  → channel_id = "telegram:{bot_id}"     (derived from token)
+                    chats: 123456, 789012…              (one bot, many users)
+SlackChannel     → channel_id = "slack:{app_id}"        (derived from app_id)
+                    chats: C001, C002…                  (one app, many channels)
+FeishuChannel    → channel_id = "feishu:{app_id}"       (derived from app_id)
+TUI session      → channel_id = "tui-1"                 (explicit, no platform identity)
 ```
 
 Rules:
@@ -451,23 +452,24 @@ display_name = "Coder"
 [[runtime.channels]]
 name = "TelegramChannel"
 display_name = "Daily Chat"
-channel_id = "telegram:bot_daily"
 target_actor = "main"
 token = "12345:abcdef"
+# channel_id derived as "telegram:12345" from token
 
 [[runtime.channels]]
 name = "TelegramChannel"
 display_name = "Invest Advisor"
-channel_id = "telegram:bot_invest"
 target_actor = "main"
 token = "67890:ghijkl"
+# channel_id derived as "telegram:67890"
 
 [[runtime.channels]]
 name = "SlackChannel"
 display_name = "Work Desk"
-channel_id = "slack:myworkspace"
 target_actor = "main"
+app_id = "A01234567"
 token = "xoxb-..."
+# channel_id derived as "slack:A01234567"
 ```
 
 ### Channel config fields
@@ -476,7 +478,7 @@ token = "xoxb-..."
 |-----|------|----------|---------|
 | `name` | `str` | yes | Channel class name registered on `ep_channel` |
 | `display_name` | `str` | no | Human-readable label for UI listing |
-| `channel_id` | `str` | yes | Unique transport identity. One channel can handle multiple chats (e.g., a Telegram bot serving many users). `channel_id` identifies the channel instance; `chat_id` identifies the conversation within it. |
+| `channel_id` | `str` | no | Explicit channel identity. When omitted, derived from the platform identity: `"telegram:{bot_id}"`, `"slack:{app_id}"`, `"feishu:{app_id}"`. Set explicitly for transports without a natural platform identity (e.g., `"tui-1"` for a WebSocket connection). |
 | `target_actor` | `str` | no | Default actor for messages without explicit routing. Falls back to `runtime.agent` |
 | *(extra)* | `any` | varies | Per-channel-adapter configuration passed through to the channel constructor |
 
