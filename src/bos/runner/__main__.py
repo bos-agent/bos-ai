@@ -1,4 +1,4 @@
-"""Standalone actor + channel process — launched by ``boscli gateway start``.
+"""Standalone gateway process — launched by ``boscli gateway start``.
 
 Usage (internal, via proc.start_background)::
 
@@ -13,7 +13,6 @@ import logging
 import os
 import signal
 import sys
-from datetime import datetime, timezone
 from typing import TextIO
 
 logger = logging.getLogger(__name__)
@@ -40,14 +39,14 @@ class _TeeStream:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="BOS agent actor process")
+    parser = argparse.ArgumentParser(description="BOS gateway process")
     parser.add_argument("--config", default=None, help="Path to BOS config file")
     args = parser.parse_args()
 
     # Bootstrap workspace
     from bos.config import Workspace, resolve_config_source
-    from bos.named_actors.runner import start_named_actors
-    from bos.runner.proc import RunDir, write_state
+    from bos.gateway.state import GatewayRunDir
+    from bos.runner import start
 
     if args.config:
         config_path, bos_dir, config = resolve_config_source(args.config)
@@ -57,7 +56,7 @@ def main() -> None:
     ws.resolve_agents()
     ws.bootstrap_platform()
 
-    rd = RunDir(ws.bos_dir)
+    rd = GatewayRunDir(ws.bos_dir)
     rd.ensure()
     runtime_kind = os.environ.get("BOS_RUNTIME", "process")
     mirrored_log: TextIO | None = None
@@ -86,31 +85,15 @@ def main() -> None:
     signal.signal(signal.SIGTERM, _on_sigterm)
 
     async def _run() -> None:
-        runtime_kind = os.environ.get("BOS_RUNTIME", "process")
-        container_id = None
-        container_name = None
-        if runtime_kind == "docker":
-            container_id = os.environ.get("BOS_CONTAINER_ID") or os.environ.get("HOSTNAME")
-            container_name = os.environ.get("BOS_CONTAINER_NAME")
-        write_state(
-            rd,
-            runtime=runtime_kind,
-            pid=os.getpid(),
-            selected_agent=ws.config.runtime.agent if ws.config.runtime else "_default",
-            container_id=container_id,
-            container_name=container_name,
-            started_at=datetime.now(timezone.utc).isoformat(),
-            last_active=datetime.now(timezone.utc).isoformat(),
-        )
-        logger.info("Actor process started (PID %d, workspace=%s)", os.getpid(), ws.workspace)
+        logger.info("Gateway process started (PID %d, workspace=%s)", os.getpid(), ws.workspace)
+        rd.pid_file.write_text(str(os.getpid()), encoding="utf-8")
         try:
-            await start_named_actors(ws)
+            await start(ws)
         except asyncio.CancelledError:
-            logger.info("Actor cancelled — exiting cleanly")
+            logger.info("Gateway cancelled — exiting cleanly")
         finally:
             rd.pid_file.unlink(missing_ok=True)
-            rd.state_file.unlink(missing_ok=True)
-            logger.info("Actor process stopped")
+            logger.info("Gateway process stopped")
 
     main_task = loop.create_task(_run())
     try:
