@@ -631,11 +631,11 @@ def restart(ctx):
 @click.command()
 @click.option("--host", default=None, help="Gateway host (overrides gateway.state).")
 @click.option("--port", default=None, type=int, help="Gateway port (overrides gateway.state).")
-@click.option("--client-id", default=None, help="Stable server-side cursor id (defaults to tui:<username>).")
+@click.option("--channel-id", default=None, help="Stable gateway channel id (defaults to tui:<username>).")
 @click.pass_context
-def tui(ctx, host: str | None, port: int | None, client_id: str | None):
+def tui(ctx, host: str | None, port: int | None, channel_id: str | None):
     """Connect the TUI to a running gateway."""
-    _, rd = _get_ws_and_rd(ctx)
+    ws, rd = _get_ws_and_rd(ctx)
     from bos.runner.proc import read_state
 
     def _resolve_endpoint() -> tuple[str, int] | None:
@@ -661,6 +661,10 @@ def tui(ctx, host: str | None, port: int | None, client_id: str | None):
         raise click.UsageError(
             "Could not determine gateway endpoint. Use --host and --port, or make sure the gateway is running."
         )
+    gateway_config = ws.resolve_gateway_config()
+    api_key = os.environ.get(gateway_config.api_key_env)
+    if not api_key:
+        raise click.UsageError(f"Gateway API key environment variable {gateway_config.api_key_env!r} is not set.")
 
     from bos.cli.tui_app import run_chat_tui
     from bos.extensions.channels.http_client import HttpChannelClient
@@ -670,9 +674,10 @@ def tui(ctx, host: str | None, port: int | None, client_id: str | None):
             host=host,
             port=port,
             address="tui",
-            client_id=client_id or _default_tui_client_id(),
+            channel_id=channel_id or _default_tui_client_id(),
             chat_id=None,
             endpoint_resolver=_resolve_endpoint,
+            api_key=api_key,
         )
         await _connect_tui_client(client)
         try:

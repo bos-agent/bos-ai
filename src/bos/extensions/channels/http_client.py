@@ -1,4 +1,4 @@
-"""HttpChannelClient — WebSocket client for connecting to a running HttpChannel.
+"""HttpChannelClient — WebSocket client for connecting to a running BOS gateway.
 
 This module has no extension point registrations — safe to import standalone
 without triggering any server-side or ``ep_channel`` side effects.
@@ -18,8 +18,7 @@ from urllib.parse import urlencode
 
 from aiohttp import WSMsgType
 
-from bos.extensions.channels.http import WS_TAKEOVER_CLOSE_CODE, WS_TAKEOVER_CLOSE_REASON
-from bos.protocol import Envelope, MessageContent, MessageType
+from bos.protocol import WS_TAKEOVER_CLOSE_CODE, WS_TAKEOVER_CLOSE_REASON, Envelope, MessageContent, MessageType
 
 # Type alias for the optional endpoint resolver callback.
 # Returns (host, port) or None if the endpoint cannot be determined.
@@ -42,7 +41,7 @@ def _envelope_to_dict(env: Envelope) -> dict[str, Any]:
 
 
 class HttpChannelClient:
-    """aiohttp WebSocket client for connecting to a running HttpChannel.
+    """aiohttp WebSocket client for connecting to a running BOS gateway.
 
     Used by ``boscli tui`` to send/receive envelopes over WebSocket without
     direct mailbox access or any server-side imports.
@@ -65,16 +64,19 @@ class HttpChannelClient:
         port: int,
         address: str = "tui",
         *,
+        channel_id: str | None = None,
         client_id: str | None = None,
         chat_id: str | None = None,
         endpoint_resolver: EndpointResolver | None = None,
+        api_key: str | None = None,
     ) -> None:
         self._host = host
         self._port = port
         self._endpoint_resolver = endpoint_resolver
         self._rebuild_urls()
         self._address = address
-        self._client_id = (client_id or address or uuid.uuid4().hex).strip()
+        self._channel_id = (channel_id or client_id or address or uuid.uuid4().hex).strip()
+        self._api_key = api_key
         self._chat_id = (
             chat_id.strip() if isinstance(chat_id, str) and chat_id else None
         )
@@ -109,7 +111,11 @@ class HttpChannelClient:
 
     @property
     def client_id(self) -> str:
-        return self._client_id
+        return self._channel_id
+
+    @property
+    def channel_id(self) -> str:
+        return self._channel_id
 
     @property
     def chat_id(self) -> str | None:
@@ -136,8 +142,8 @@ class HttpChannelClient:
         if self._session and not self._session.closed:
             await self._session.close()
 
-        self._session = aiohttp.ClientSession()
-        query: dict[str, str] = {"client_id": self._client_id}
+        self._session = aiohttp.ClientSession(headers=self._auth_headers())
+        query: dict[str, str] = {"channel_id": self._channel_id, "client_id": self._channel_id}
         if self._chat_id:
             query["chat_id"] = self._chat_id
         if takeover:
@@ -155,10 +161,10 @@ class HttpChannelClient:
         metadata = data.get("metadata") or {}
         if data.get("content_type") != MessageType.SYSTEM or metadata.get("event") != "session":
             raise RuntimeError("HttpChannel sent an invalid session acknowledgement.")
-        client_id = metadata.get("client_id")
+        client_id = metadata.get("channel_id") or metadata.get("client_id")
         chat_id = metadata.get("chat_id") or data.get("chat_id")
         if isinstance(client_id, str) and client_id:
-            self._client_id = client_id
+            self._channel_id = client_id
         if isinstance(chat_id, str) and chat_id:
             self._chat_id = chat_id
 
@@ -306,6 +312,9 @@ class HttpChannelClient:
         if response.status >= 400:
             raise RuntimeError(payload.get("error") or f"List actors failed with HTTP {response.status}")
         return payload.get("actors", {})
+
+    def _auth_headers(self) -> dict[str, str]:
+        return {"Authorization": f"Bearer {self._api_key}"} if self._api_key else {}
 
     async def aclose(self) -> None:
         """Close the WebSocket connection and clean up."""
