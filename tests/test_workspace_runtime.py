@@ -102,6 +102,16 @@ def test_gateway_runtime_rejects_http_channel_config():
         ws.resolve_gateway_channels()
 
 
+
+def test_gateway_runtime_rejects_legacy_runtime_agent():
+    with pytest.raises(Exception, match="runtime.agent"):
+        Workspace(".", ".bos", {"runtime": {"agent": "main", "actors": {"main": {"agent": "main"}}}})
+
+
+def test_gateway_runtime_rejects_legacy_main_section():
+    with pytest.raises(Exception, match="\[main\]"):
+        Workspace(".", ".bos", {"main": {"agent": "main"}})
+
 def test_runtime_config_location():
     config = {"runtime": {"location": "docker", "actors": {"main": {"agent": "main"}}}}
     ws = Workspace(".", ".bos", config)

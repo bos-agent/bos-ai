@@ -820,7 +820,7 @@ def test_bootstrap_platform_does_not_require_consolidator_model(tmp_path, monkey
 
     bos_dir = tmp_path / ".bos"
     bos_dir.mkdir(parents=True, exist_ok=True)
-    ws = Workspace(tmp_path, bos_dir, {"runtime": {"agent": "_default", "location": "process"}})
+    ws = Workspace(tmp_path, bos_dir, {"runtime": {"location": "process", "actors": {"main": {"agent": "_default"}}}})
     ws.bootstrap_platform()
 
 

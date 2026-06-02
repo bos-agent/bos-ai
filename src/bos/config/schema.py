@@ -199,6 +199,11 @@ def validate_config(raw: dict[str, Any]) -> RootConfig:
 
     Raises :class:`pydantic.ValidationError` on invalid config.
     """
+    if "main" in raw:
+        raise ValueError("[main] is no longer supported; use [runtime] with [runtime.actors].")
+    runtime = raw.get("runtime")
+    if isinstance(runtime, dict) and "agent" in runtime:
+        raise ValueError("runtime.agent is no longer supported; use runtime.actors and runtime.default_actor.")
     return RootConfig.model_validate(raw)
 
 
