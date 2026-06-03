@@ -7,9 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 from bos.config.workspace import ResolvedActorConfig
 from bos.core import ActorTurnContext, ActorTurnResult, AgentActor, MailBox
-from bos.protocol import Envelope
 
-from .agent import GatewayActorIdentity, GatewayAgent
 from .chat_coordinator import ChannelConversationRef, ChatCoordinationError, ChatCoordinator
 
 if TYPE_CHECKING:
@@ -48,25 +46,6 @@ class CoordinatedActor(AgentActor):
             turn_id=ctx.turn_id,
             committed_revision=result.committed_revision,
         )
-
-    def _turn_metadata(self, reply_recipient: str, inbound_env: Envelope | None = None) -> dict[str, Any]:
-        metadata = super()._turn_metadata(reply_recipient, inbound_env)
-        actor_name = self._actor_name()
-        metadata["assistant_message_metadata"] = {
-            "actor": actor_name,
-            "actor_address": self._address,
-        }
-        if inbound_env is not None:
-            target_actor = inbound_env.metadata.get("target_actor")
-            target_display = inbound_env.metadata.get("target_display")
-            if isinstance(target_actor, str) and target_actor:
-                user_metadata: dict[str, Any] = {"target_actor": target_actor}
-                if isinstance(target_display, str) and target_display:
-                    user_metadata["target_display"] = target_display
-                metadata["user_message_metadata"] = user_metadata
-                if target_actor == actor_name and isinstance(target_display, str) and target_display:
-                    metadata["assistant_message_metadata"]["actor_display"] = target_display
-        return metadata
 
 
 @dataclass
@@ -154,9 +133,7 @@ class ActorManager:
             raise RuntimeError("ActorManager requires an active AgentHarness mail_route service.")
         agent_cfg = dict(record.config.agent_overrides)
         agent_cfg["agent_name"] = record.name
-        agent_cfg["actor_identity"] = _actor_identity(record)
-        agent_cfg["actor_roster"] = [_actor_identity(actor) for actor in self._actors.values()]
-        agent = await self.harness.create_agent(record.config.agent, agent_cfg=agent_cfg, agent_cls=GatewayAgent)
+        agent = await self.harness.create_agent(record.config.agent, agent_cfg=agent_cfg)
         mailbox = self.harness.mail_route.bind(record.config.address)
         record.mailbox = mailbox
         record.actor = CoordinatedActor(agent, mailbox, chat_coordinator=self.chat_coordinator)
@@ -204,11 +181,3 @@ def _ctx_channel_ref(ctx: ActorTurnContext) -> ChannelConversationRef | None:
     if not isinstance(channel_id, str) or not isinstance(conversation_id, str):
         return None
     return ChannelConversationRef(channel_id=channel_id, channel_conversation_id=conversation_id)
-
-
-def _actor_identity(record: ManagedActor) -> GatewayActorIdentity:
-    return GatewayActorIdentity(
-        name=record.name,
-        display_name=record.config.display_name,
-        agent_kind=record.config.agent,
-    )

@@ -110,6 +110,44 @@ class TurnContext:
     def final_response(self) -> str:
         return self.final_content or self.current[-1].llm_message["content"] if self.current else "(no response)"
 
+
+def _attribute_history_message(projected: dict[str, Any], source: Message, *, current_actor: str) -> dict[str, Any]:
+    content = projected.get("content")
+    if not isinstance(content, str):
+        return projected
+    role = projected.get("role")
+    if role == "assistant":
+        source_actor = source.metadata.get("actor")
+        if isinstance(source_actor, str) and source_actor and source_actor != current_actor:
+            label = _history_actor_label(source.metadata)
+            return projected | {
+                "role": "user",
+                "content": f"[assistant {label} said]\n{content}",
+            }
+    label = _history_attribution_label(role, source.metadata)
+    if not label:
+        return projected
+    return projected | {"content": f"{label}\n{content}"}
+
+
+def _history_attribution_label(role: Any, metadata: dict[str, Any]) -> str | None:
+    if role == "assistant":
+        label = _history_actor_label(metadata)
+        if label:
+            return f"[assistant: {label}]"
+    if role == "user":
+        target = metadata.get("target_display") or metadata.get("target_actor")
+        if isinstance(target, str) and target:
+            return f"[user -> {target}]"
+    return None
+
+
+def _history_actor_label(metadata: dict[str, Any]) -> str | None:
+    actor = metadata.get("actor")
+    label = metadata.get("actor_display") or actor
+    return label if isinstance(label, str) and label else None
+
+
 class AbortTurn(Exception):
     pass
 
@@ -620,7 +658,12 @@ class Agent:
 
     def _format_history(self, result: ContextResult) -> list[dict[str, Any]]:
         """Hook for subclasses to customise history projection (e.g. attribution labels)."""
-        return result.messages
+        if len(result.messages) != len(result.source_messages):
+            return result.messages
+        return [
+            _attribute_history_message(projected, source, current_actor=self._name)
+            for projected, source in zip(result.messages, result.source_messages, strict=True)
+        ]
 
     async def _build_system_prompt(self) -> str:
         system_sections = [self._system_prompt]

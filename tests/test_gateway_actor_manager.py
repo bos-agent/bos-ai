@@ -7,7 +7,7 @@ from bos.config import Workspace
 from bos.core import Message
 from bos.extensions.chat_stores.in_memory import InMemChatStore
 from bos.extensions.mailboxes.in_memory import InMemMailRoute
-from bos.gateway import ChannelConversationRef, ChatCoordinator, CoordinatedActor, GatewayAgent
+from bos.gateway import ChannelConversationRef, ChatCoordinator, CoordinatedActor
 from bos.gateway.actor_manager import ActorManager
 from bos.protocol import Envelope, MessageType
 
@@ -115,45 +115,9 @@ async def test_coordinated_actor_rejects_missing_channel_metadata():
 class _FakeHarness:
     def __init__(self) -> None:
         self.mail_route = InMemMailRoute()
-        self.create_calls: list[dict[str, Any]] = []
 
-    async def create_agent(
-        self,
-        kind: str | None = None,
-        agent_cfg: dict[str, Any] | None = None,
-        agent_cls: type | None = None,
-    ):
-        self.create_calls.append({"kind": kind, "agent_cfg": agent_cfg, "agent_cls": agent_cls})
+    async def create_agent(self, kind: str | None = None, agent_cfg: dict[str, Any] | None = None):
         return object()
-
-
-@pytest.mark.asyncio
-async def test_actor_manager_creates_gateway_agents_with_identity_roster():
-    ws = Workspace(
-        ".",
-        ".bos",
-        {
-            "runtime": {
-                "default_actor": "main",
-                "actors": {
-                    "main": {"agent": "_default", "display_name": "Main"},
-                    "libai": {"agent": "poet", "display_name": "Li Bai"},
-                },
-            }
-        },
-    )
-    harness = _FakeHarness()
-    manager = ActorManager(workspace=ws, harness=harness, chat_coordinator=ChatCoordinator(InMemChatStore()))
-
-    await manager.start_all()
-    await manager.stop_all()
-
-    calls = {call["agent_cfg"]["agent_name"]: call for call in harness.create_calls}
-    assert calls["main"]["agent_cls"] is GatewayAgent
-    assert calls["libai"]["agent_cls"] is GatewayAgent
-    assert calls["libai"]["agent_cfg"]["actor_identity"].name == "libai"
-    assert calls["libai"]["agent_cfg"]["actor_identity"].display_name == "Li Bai"
-    assert {actor.name for actor in calls["libai"]["agent_cfg"]["actor_roster"]} == {"main", "libai"}
 
 
 @pytest.mark.asyncio

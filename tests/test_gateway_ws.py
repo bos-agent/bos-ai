@@ -42,7 +42,7 @@ class FakeHarness:
         self.chat_store = InMemChatStore()
         self.mail_route = InMemMailRoute()
 
-    async def create_agent(self, kind=None, agent_cfg=None, agent_cls=None):
+    async def create_agent(self, kind=None, agent_cfg=None):
         return EchoCommitAgent(self.chat_store)
 
 
