@@ -95,6 +95,21 @@ def _get_ws_and_rd(ctx, workspace_override: str | None = None) -> tuple[Workspac
     return ws, rd
 
 
+def _runner_config_arg(ctx, ws: Workspace) -> str:
+    """Return the config argument a runner subprocess should resolve.
+
+    For built-in presets this preserves the preset name (for example
+    ``default``), so the child resolves the same BOS home run directory instead
+    of treating the package preset TOML as an ordinary config file.
+    """
+    config_arg = ctx.obj.get("CONFIG")
+    if config_arg:
+        return str(config_arg)
+    if ws.config_file is None:
+        raise click.UsageError("Could not determine config path for gateway runner.")
+    return str(ws.config_file)
+
+
 async def _connect_tui_client(client) -> None:
     try:
         await client.connect()
@@ -457,12 +472,14 @@ def start(ctx, foreground: bool, docker: bool, workspace_dir: str | None):
     if runtime.kind not in {"process", "docker"}:
         raise click.UsageError(f"Unsupported runtime kind: {runtime.kind!r}")
 
+    runner_config_arg = _runner_config_arg(ctx, ws)
+
     if runtime.kind == "docker":
         if foreground:
             click.echo("Starting gateway in Docker foreground…")
-            raise SystemExit(run_docker_foreground(ws, runtime))
+            raise SystemExit(run_docker_foreground(ws, runtime, config_arg=runner_config_arg))
 
-        container_id = start_docker(ws, rd, runtime)
+        container_id = start_docker(ws, rd, runtime, config_arg=runner_config_arg)
         click.echo(f"Gateway starting in Docker ({container_id[:12]})…")
         pid = None
     elif foreground:
@@ -470,7 +487,7 @@ def start(ctx, foreground: bool, docker: bool, workspace_dir: str | None):
         asyncio.run(start_gateway(ws))
         return
     else:
-        argv = [sys.executable, "-m", "bos.runner", "--config", str(ws.config_file)]
+        argv = [sys.executable, "-m", "bos.runner", "--config", runner_config_arg]
         pid = start_background(argv, rd, cwd=ws.workspace)
         click.echo(f"Gateway starting (PID {pid})…")
         container_id = None

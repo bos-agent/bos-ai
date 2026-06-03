@@ -36,3 +36,31 @@ def test_runner_start_bootstraps_gateway(monkeypatch):
     assert calls[2] == ("gateway_run", None)
     assert calls[3][0] == "harness_exit"
 
+
+def test_gateway_start_preserves_preset_name_for_background_runner(tmp_path, monkeypatch):
+    from click.testing import CliRunner
+
+    from bos.cli.entry import cli
+
+    monkeypatch.setenv("BOS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("BOS_GATEWAY_API_KEY", "secret")
+    monkeypatch.setattr("bos.runner.proc.is_running", lambda rd: False)
+    monkeypatch.setattr(
+        "bos.runner.proc.read_state",
+        lambda rd: {"runtime": "process", "pid": 1234, "gateway": {"host": "127.0.0.1", "port": 5920}},
+    )
+    captured: dict[str, object] = {}
+
+    def fake_start_background(argv, rd, env=None, cwd=None):
+        captured["argv"] = argv
+        captured["run_root"] = rd.root
+        captured["cwd"] = cwd
+        return 1234
+
+    monkeypatch.setattr("bos.runner.proc.start_background", fake_start_background)
+
+    result = CliRunner().invoke(cli, ["-c", "default", "gateway", "start"])
+
+    assert result.exit_code == 0
+    assert captured["argv"][-2:] == ["--config", "default"]
+    assert captured["run_root"] == (tmp_path / "home" / "presets" / "default" / "run").resolve()

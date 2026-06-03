@@ -1,6 +1,6 @@
 import signal
 
-from bos.config.workspace import AgentRuntimeConfig, Workspace
+from bos.config.workspace import AgentRuntimeConfig, Workspace, resolve_config_source
 from bos.gateway.state import GatewayRunDir, read_gateway_state, write_gateway_state
 from bos.runner.proc import build_docker_argv, is_running, stop_gateway, write_state
 
@@ -56,6 +56,18 @@ agent = "main"
     assert "--publish" in argv
     assert "7001:7001" in argv
     assert "HttpChannel" not in " ".join(argv)
+
+
+def test_build_docker_argv_preserves_preset_config_arg(tmp_path, monkeypatch):
+    monkeypatch.setenv("BOS_HOME", str(tmp_path / "home"))
+    config_path, bos_dir, config = resolve_config_source("default")
+    ws = Workspace(tmp_path / "project", bos_dir, config, config_file=config_path)
+    runtime = AgentRuntimeConfig(kind="docker", image="bos:test")
+
+    argv = build_docker_argv(ws, runtime, detach=True, config_arg="default")
+
+    assert "BOS_CONFIG=default" in argv
+    assert argv[-2:] == ["--config", "default"]
 
 
 def test_gateway_state_merge_preserves_container_metadata(tmp_path):

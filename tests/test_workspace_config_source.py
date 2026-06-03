@@ -2,6 +2,17 @@
 from bos.config.workspace import Workspace, resolve_config_source
 
 
+def test_workspace_config_source_uses_preset_bos_home(tmp_path, monkeypatch):
+    monkeypatch.setenv("BOS_HOME", str(tmp_path / "home"))
+
+    config_path, bos_dir, config = resolve_config_source("default")
+    ws = Workspace(str(tmp_path / "project"), bos_dir, config, config_file=config_path)
+
+    assert ws.bos_dir == (tmp_path / "home" / "presets" / "default").resolve()
+    assert ws.bos_dir.is_dir()
+    assert ws.get_main_agent_kind() == "_default"
+
+
 def test_workspace_config_source_loads_from_explicit_file(tmp_path):
     """resolve_config_source + Workspace loads BEP6 config from the given file."""
     workspace_dir = tmp_path / "project"

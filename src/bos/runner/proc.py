@@ -206,12 +206,14 @@ def build_docker_argv(
     runtime: AgentRuntimeConfig,
     *,
     detach: bool,
+    config_arg: str | None = None,
 ) -> list[str]:
     """Build the Docker command used to run the BOS gateway in a container."""
     if not runtime.image:
         raise RuntimeError("Docker runtime requires `runtime.image` in .bos/config.toml.")
 
     container_bos_dir = _default_container_bos_dir(workspace, runtime)
+    runner_config_arg = _docker_runner_config_arg(workspace, container_bos_dir, config_arg)
     argv = ["docker", "run", "--rm"]
     if detach:
         argv.append("--detach")
@@ -227,7 +229,7 @@ def build_docker_argv(
             "--env",
             "BOS_RUNTIME=docker",
             "--env",
-            f"BOS_CONFIG={container_bos_dir}/{workspace.config_file.name}",
+            f"BOS_CONFIG={runner_config_arg}",
         ]
     )
 
@@ -241,16 +243,27 @@ def build_docker_argv(
     if gateway_port > 0:
         argv.extend(["--publish", f"{gateway_port}:{gateway_port}"])
 
-    container_config = f"{container_bos_dir}/{workspace.config_file.name}"
-    argv.extend([runtime.image, "--config", container_config])
+    argv.extend([runtime.image, "--config", runner_config_arg])
     return argv
 
 
-def start_docker(workspace: Workspace, rd: LifecycleRunDir, runtime: AgentRuntimeConfig) -> str:
+def _docker_runner_config_arg(workspace: Workspace, container_bos_dir: str, config_arg: str | None) -> str:
+    if config_arg and not Path(config_arg).expanduser().is_file():
+        return config_arg
+    return f"{container_bos_dir}/{workspace.config_file.name}"
+
+
+def start_docker(
+    workspace: Workspace,
+    rd: LifecycleRunDir,
+    runtime: AgentRuntimeConfig,
+    *,
+    config_arg: str | None = None,
+) -> str:
     """Launch the BOS gateway in a detached Docker container and record container metadata."""
     rd.ensure()
     proc = subprocess.run(
-        build_docker_argv(workspace, runtime, detach=True),
+        build_docker_argv(workspace, runtime, detach=True, config_arg=config_arg),
         check=False,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -265,7 +278,7 @@ def start_docker(workspace: Workspace, rd: LifecycleRunDir, runtime: AgentRuntim
     return container_id
 
 
-def run_docker_foreground(workspace: Workspace, runtime: AgentRuntimeConfig) -> int:
+def run_docker_foreground(workspace: Workspace, runtime: AgentRuntimeConfig, *, config_arg: str | None = None) -> int:
     """Run the BOS gateway in a foreground Docker container."""
-    proc = subprocess.run(build_docker_argv(workspace, runtime, detach=False), check=False)
+    proc = subprocess.run(build_docker_argv(workspace, runtime, detach=False, config_arg=config_arg), check=False)
     return proc.returncode

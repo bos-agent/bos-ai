@@ -124,7 +124,7 @@ def resolve_config_source(config_arg: str) -> tuple[Path, Path, RootConfig]:
 
     * If *config_arg* is an existing file path → ``bos_dir`` is the file's parent.
     * If *config_arg* matches a built-in preset name → ``bos_dir`` is
-      ``~/.bos/agents/<preset>`` (created if necessary).
+      ``~/.bos/presets/<preset>`` (created if necessary).
 
     Returns validated :class:`RootConfig`. Raises :class:`WorkspaceResolutionError`
     if the source cannot be resolved.
@@ -138,7 +138,7 @@ def resolve_config_source(config_arg: str) -> tuple[Path, Path, RootConfig]:
     presets = presets_dir()
     preset = presets / f"{config_arg}.toml"
     if preset.exists():
-        bos_dir = _get_bos_home() / "agents" / config_arg
+        bos_dir = _get_bos_home() / "presets" / config_arg
         bos_dir.mkdir(parents=True, exist_ok=True)
         raw = _load_config(preset)
         return preset, bos_dir, validate_config(raw)
