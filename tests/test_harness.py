@@ -68,6 +68,36 @@ async def test_harness_create_agent_defaults_to_no_capabilities(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_agent_history_formats_actor_attribution_for_shared_chat():
+    store = InMemChatStore()
+    await store.commit_turn(
+        "shared",
+        [
+            Message(
+                llm_message={"role": "user", "content": "hello"},
+                metadata={"target_actor": "libai", "target_display": "Li Bai"},
+            ),
+            Message(
+                llm_message={"role": "assistant", "content": "a poem"},
+                metadata={"actor": "libai", "actor_display": "Li Bai"},
+            ),
+            Message(
+                llm_message={"role": "assistant", "content": "main says hi"},
+                metadata={"actor": "main"},
+            ),
+        ],
+        turn_id="turn-1",
+    )
+    agent = create_test_agent(agent_name="main", chat_store=store)
+
+    history = await agent._load_and_compact_history("shared", budget_model=None)
+
+    assert history[0]["content"] == "[user -> Li Bai]\nhello"
+    assert history[1]["content"] == "[assistant: Li Bai]\na poem"
+    assert history[2]["content"] == "[assistant: main]\nmain says hi"
+
+
+@pytest.mark.asyncio
 async def test_registered_agent_defaults_to_no_capabilities(tmp_path):
     bos_dir = tmp_path / ".bos"
     bos_dir.mkdir()

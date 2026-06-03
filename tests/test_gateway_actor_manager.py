@@ -9,7 +9,7 @@ from bos.extensions.chat_stores.in_memory import InMemChatStore
 from bos.extensions.mailboxes.in_memory import InMemMailRoute
 from bos.gateway import ChannelConversationRef, ChatCoordinator, CoordinatedActor
 from bos.gateway.actor_manager import ActorManager
-from bos.protocol import MessageType
+from bos.protocol import Envelope, MessageType
 
 
 class CommitAgent:
@@ -59,6 +59,36 @@ async def test_coordinated_actor_begins_and_ends_turn_with_revision_commit():
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+
+
+def test_actor_turn_metadata_marks_user_target_and_assistant_actor():
+    class LibaiCommitAgent(CommitAgent):
+        name = "libai"
+
+    store = InMemChatStore()
+    coordinator = ChatCoordinator(store)
+    route = InMemMailRoute()
+    actor = CoordinatedActor(LibaiCommitAgent(store), route.bind("agent@libai"), chat_coordinator=coordinator)
+    inbound = Envelope(
+        sender="channel@demo",
+        recipient="agent@libai",
+        content="hello",
+        chat_id="chat-1",
+        metadata={
+            "target_actor": "libai",
+            "target_display": "Li Bai",
+            "channel": {"channel_id": "demo", "channel_conversation_id": "default"},
+        },
+    )
+
+    metadata = actor._turn_metadata("channel@demo", inbound)
+
+    assert metadata["user_message_metadata"] == {"target_actor": "libai", "target_display": "Li Bai"}
+    assert metadata["assistant_message_metadata"] == {
+        "actor": "libai",
+        "actor_address": "agent@libai",
+        "actor_display": "Li Bai",
+    }
 
 
 @pytest.mark.asyncio
