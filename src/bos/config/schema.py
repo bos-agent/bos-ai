@@ -160,7 +160,7 @@ class RuntimeConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     location: str = "process"
-    channels: list[dict[str, Any]] = Field(default_factory=list)
+    channels: list[ChannelConfig] = Field(default_factory=list)
     actors: dict[str, ActorConfig] = Field(default_factory=dict)
     default_actor: str = "main"
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)

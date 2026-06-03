@@ -56,9 +56,21 @@ class WSChannel(BaseChannel[dict[str, Any]]):
         await self._ws.close(code=WS_TAKEOVER_CLOSE_CODE, message=WS_TAKEOVER_CLOSE_REASON.encode())
 
     async def run(self, mailbox: MailBox) -> None:
+        observed_revision = self._runtime.chat_coordinator.observed_revision(chat_id=self._chat_id, ref=self.ref)
+        if observed_revision is None:
+            observed_revision = 0
+            self._runtime.chat_coordinator.set_cursor(self.ref, self._chat_id, observed_revision=observed_revision)
         current_revision = await self._runtime.chat_coordinator.current_revision(self._chat_id)
-        self._runtime.chat_coordinator.set_cursor(self.ref, self._chat_id, observed_revision=current_revision)
-        await self._send_session_ack(mailbox, current_revision)
+        missing_messages = await self._runtime.chat_coordinator.hydrate(
+            chat_id=self._chat_id,
+            from_revision=observed_revision,
+        )
+        await self._send_session_ack(mailbox, current_revision, observed_revision, missing_messages)
+        self._runtime.chat_coordinator.mark_observed(
+            chat_id=self._chat_id,
+            ref=self.ref,
+            revision=current_revision,
+        )
 
         inbound = asyncio.create_task(self._recv_ws_loop(mailbox), name=f"bos-ws-in:{self.channel_id}")
         outbound = asyncio.create_task(self._send_mail_loop(mailbox), name=f"bos-ws-out:{self.channel_id}")
@@ -78,7 +90,13 @@ class WSChannel(BaseChannel[dict[str, Any]]):
             await asyncio.gather(inbound, outbound, return_exceptions=True)
             raise
 
-    async def _send_session_ack(self, mailbox: MailBox, current_revision: int) -> None:
+    async def _send_session_ack(
+        self,
+        mailbox: MailBox,
+        current_revision: int,
+        observed_revision: int,
+        missing_messages: list[dict[str, Any]],
+    ) -> None:
         await self._ws.send_json(
             _envelope_to_dict(
                 Envelope(
@@ -93,6 +111,8 @@ class WSChannel(BaseChannel[dict[str, Any]]):
                         "channel_conversation_id": self._conversation_id,
                         "chat_id": self._chat_id,
                         "current_revision": current_revision,
+                        "observed_revision": observed_revision,
+                        "missing_messages": missing_messages,
                     },
                 )
             )
@@ -110,21 +130,35 @@ class WSChannel(BaseChannel[dict[str, Any]]):
         while not self._ws.closed:
             env = await mailbox.receive()
             selected_chat_id = _selected_chat_from_command_result(env)
+            out_chat_id = selected_chat_id or env.chat_id or self._chat_id
+            current_revision = await self._runtime.chat_coordinator.current_revision(out_chat_id)
+            payload = _envelope_to_dict(env)
+            metadata = dict(payload.get("metadata") or {})
+            metadata["current_revision"] = current_revision
             if selected_chat_id:
-                current_revision = await self._runtime.chat_coordinator.current_revision(selected_chat_id)
-                self._runtime.chat_coordinator.set_cursor(
-                    self.ref,
-                    selected_chat_id,
-                    observed_revision=current_revision,
+                observed_revision = self._runtime.chat_coordinator.observed_revision(
+                    chat_id=selected_chat_id,
+                    ref=self.ref,
+                )
+                if observed_revision is None:
+                    observed_revision = 0
+                metadata["missing_messages"] = await self._runtime.chat_coordinator.hydrate(
+                    chat_id=selected_chat_id,
+                    from_revision=observed_revision,
                 )
                 self._chat_id = selected_chat_id
-            await self._ws.send_json(_envelope_to_dict(env))
-            revision = await self._runtime.chat_coordinator.current_revision(env.chat_id or self._chat_id)
-            self._runtime.chat_coordinator.mark_observed(
-                chat_id=env.chat_id or self._chat_id,
-                ref=self.ref,
-                revision=revision,
-            )
+                out_chat_id = selected_chat_id
+            payload["metadata"] = metadata
+            payload["chat_id"] = out_chat_id
+            await self._ws.send_json(payload)
+            if selected_chat_id:
+                self._runtime.chat_coordinator.set_cursor(self.ref, out_chat_id, observed_revision=current_revision)
+            else:
+                self._runtime.chat_coordinator.mark_observed(
+                    chat_id=out_chat_id,
+                    ref=self.ref,
+                    revision=current_revision,
+                )
 
     async def _handle_inbound_payload(self, mailbox: MailBox, data: dict[str, Any]) -> None:
         content_type = data.get("content_type") or MessageType.MESSAGE
@@ -132,7 +166,15 @@ class WSChannel(BaseChannel[dict[str, Any]]):
         metadata = dict(data.get("metadata") or {})
         base_revision = _base_revision(data, metadata)
         if base_revision is None:
-            base_revision = await self._runtime.chat_coordinator.current_revision(chat_id)
+            await self._send_system_event(
+                {
+                    "event": "missing_base_revision",
+                    "chat_id": chat_id,
+                    "current_revision": await self._runtime.chat_coordinator.current_revision(chat_id),
+                },
+                chat_id=chat_id,
+            )
+            return
 
         preflight = await self._runtime.chat_coordinator.prepare_send(
             chat_id=chat_id,
@@ -178,8 +220,10 @@ class WSChannel(BaseChannel[dict[str, Any]]):
         if preflight.stale:
             content = {
                 "event": "stale_chat",
+                "error": preflight.error,
                 "chat_id": preflight.chat_id,
-                "base_revision": None,
+                "base_revision": preflight.base_revision,
+                "observed_revision": preflight.observed_revision,
                 "current_revision": preflight.current_revision,
                 "missing_messages": preflight.missing_messages or [],
             }

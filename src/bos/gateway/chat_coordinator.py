@@ -31,6 +31,8 @@ class PrepareSendResult:
     chat_id: str
     ref: ChannelConversationRef
     current_revision: int
+    base_revision: int
+    observed_revision: int | None = None
     stale: bool = False
     active_turn: bool = False
     missing_messages: list[dict[str, Any]] | None = None
@@ -56,6 +58,9 @@ class ChatCoordinator:
         self._cursors[ref] = chat_id
         self.mark_observed(chat_id=chat_id, ref=ref, revision=observed_revision)
 
+    def observed_revision(self, *, chat_id: str, ref: ChannelConversationRef) -> int | None:
+        return self._observed.get((ref, chat_id))
+
     def new_chat(self, ref: ChannelConversationRef) -> str:
         chat_id = uuid.uuid4().hex
         self.set_cursor(ref, chat_id, observed_revision=0)
@@ -70,38 +75,87 @@ class ChatCoordinator:
         content_type: MessageType | str = MessageType.MESSAGE,
     ) -> PrepareSendResult:
         current_revision = await self.current_revision(chat_id)
-        if base_revision < current_revision:
-            return PrepareSendResult(
-                ok=False,
-                chat_id=chat_id,
-                ref=ref,
-                current_revision=current_revision,
-                stale=True,
-                missing_messages=await self.hydrate(chat_id=chat_id, from_revision=base_revision),
-                error="stale_chat",
-            )
+        observed_revision = self.observed_revision(chat_id=chat_id, ref=ref)
+
         if base_revision > current_revision:
             return PrepareSendResult(
                 ok=False,
                 chat_id=chat_id,
                 ref=ref,
                 current_revision=current_revision,
+                base_revision=base_revision,
+                observed_revision=observed_revision,
                 stale=True,
                 error="future_base_revision",
             )
 
+        if observed_revision is None:
+            return PrepareSendResult(
+                ok=False,
+                chat_id=chat_id,
+                ref=ref,
+                current_revision=current_revision,
+                base_revision=base_revision,
+                observed_revision=None,
+                stale=True,
+                missing_messages=await self.hydrate(chat_id=chat_id, from_revision=0),
+                error="unobserved_chat",
+            )
+
+        if base_revision != observed_revision:
+            return PrepareSendResult(
+                ok=False,
+                chat_id=chat_id,
+                ref=ref,
+                current_revision=current_revision,
+                base_revision=base_revision,
+                observed_revision=observed_revision,
+                stale=True,
+                missing_messages=await self.hydrate(chat_id=chat_id, from_revision=base_revision),
+                error="stale_channel_cursor",
+            )
+
+        if base_revision < current_revision:
+            return PrepareSendResult(
+                ok=False,
+                chat_id=chat_id,
+                ref=ref,
+                current_revision=current_revision,
+                base_revision=base_revision,
+                observed_revision=observed_revision,
+                stale=True,
+                missing_messages=await self.hydrate(chat_id=chat_id, from_revision=base_revision),
+                error="stale_chat",
+            )
+
         active = self._active_turns.get(chat_id)
         if active is None:
-            return PrepareSendResult(ok=True, chat_id=chat_id, ref=ref, current_revision=current_revision)
+            return PrepareSendResult(
+                ok=True,
+                chat_id=chat_id,
+                ref=ref,
+                current_revision=current_revision,
+                base_revision=base_revision,
+                observed_revision=observed_revision,
+            )
 
         if self._is_interrupt(content_type) and self._can_interrupt(chat_id, ref, active, base_revision):
-            return PrepareSendResult(ok=True, chat_id=chat_id, ref=ref, current_revision=current_revision)
+            return PrepareSendResult(
+                ok=True,
+                chat_id=chat_id,
+                ref=ref,
+                current_revision=current_revision,
+                base_revision=base_revision,
+                observed_revision=observed_revision,
+            )
 
         return PrepareSendResult(
             ok=False,
             chat_id=chat_id,
             ref=ref,
             current_revision=current_revision,
+            base_revision=base_revision,
+            observed_revision=observed_revision,
             active_turn=True,
             error="active_turn",
         )
@@ -210,7 +264,7 @@ class ChatCoordinator:
         if base_revision != active.base_revision:
             return False
         observed = self._observed.get((ref, chat_id))
-        return observed == base_revision or self._cursors.get(ref) == chat_id
+        return observed == base_revision
 
     @staticmethod
     def _is_interrupt(content_type: MessageType | str) -> bool:

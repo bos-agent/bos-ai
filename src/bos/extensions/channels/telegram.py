@@ -246,11 +246,18 @@ class TelegramChannel(BaseChannel[TelegramSettings]):
                     chat_id = self._runtime.chat_coordinator.get_cursor(ref)
                     if chat_id is None:
                         chat_id = self._runtime.chat_coordinator.new_chat(ref)
-                    current_revision = await self._runtime.chat_coordinator.current_revision(chat_id)
+                    observed_revision = self._runtime.chat_coordinator.observed_revision(chat_id=chat_id, ref=ref)
+                    if observed_revision is None:
+                        observed_revision = 0
+                        self._runtime.chat_coordinator.set_cursor(
+                            ref,
+                            chat_id,
+                            observed_revision=observed_revision,
+                        )
                     preflight = await self._runtime.chat_coordinator.prepare_send(
                         chat_id=chat_id,
                         ref=ref,
-                        base_revision=current_revision,
+                        base_revision=observed_revision,
                         content_type=inbound["content_type"],
                     )
                     if not preflight.ok:
@@ -260,7 +267,7 @@ class TelegramChannel(BaseChannel[TelegramSettings]):
                     self._conversation_to_telegram_chat[ref.channel_conversation_id] = telegram_chat_id
                     self._chat_to_telegram_chat[chat_id] = telegram_chat_id
                     metadata = {
-                        "base_revision": current_revision,
+                        "base_revision": observed_revision,
                         "channel": {
                             "channel_id": self.channel_id,
                             "channel_conversation_id": ref.channel_conversation_id,
@@ -316,6 +323,8 @@ class TelegramChannel(BaseChannel[TelegramSettings]):
                 ref = self._ref_from_env(env)
                 if ref is not None:
                     current_revision = await self._runtime.chat_coordinator.current_revision(selected_chat_id)
+                    # The command result is the channel's handoff point for the selected chat.
+                    # Future normal messages must use the selected chat's delivered revision.
                     self._runtime.chat_coordinator.set_cursor(ref, selected_chat_id, observed_revision=current_revision)
                 if env.chat_id and env.chat_id != selected_chat_id:
                     self._chat_to_telegram_chat.pop(env.chat_id, None)

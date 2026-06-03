@@ -100,15 +100,17 @@ class Gateway:
             return web.json_response({"ok": False, "error": "duplicate_channel_id"}, status=409)
 
         existing = self.channel_manager.channels.get(channel_id)
-        if existing is not None and hasattr(existing.channel, "close_for_takeover"):
+        if existing is not None and not hasattr(existing.channel, "close_for_takeover"):
+            return web.json_response({"ok": False, "error": "duplicate_channel_id"}, status=409)
+        if existing is not None:
             await existing.channel.close_for_takeover()
 
         conversation_id = (request.query.get("channel_conversation_id") or "default").strip() or "default"
         ref = ChannelConversationRef(channel_id=channel_id, channel_conversation_id=conversation_id)
         chat_id = (request.query.get("chat_id") or "").strip()
         if chat_id:
-            current_revision = await self.chat_coordinator.current_revision(chat_id)
-            self.chat_coordinator.set_cursor(ref, chat_id, observed_revision=current_revision)
+            observed_revision = self.chat_coordinator.observed_revision(chat_id=chat_id, ref=ref)
+            self.chat_coordinator.set_cursor(ref, chat_id, observed_revision=observed_revision or 0)
         else:
             chat_id = self.chat_coordinator.get_cursor(ref) or self.chat_coordinator.new_chat(ref)
 
@@ -132,7 +134,10 @@ class Gateway:
             takeover=takeover,
         )
         await self.channel_manager.start_channel(managed)
-        await managed.task
+        try:
+            await managed.task
+        finally:
+            await self.channel_manager.unregister(channel_id, expected=managed, cancel=False)
         return ws
 
     async def _write_state(self) -> None:

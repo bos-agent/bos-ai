@@ -109,8 +109,29 @@ def test_gateway_runtime_rejects_legacy_runtime_agent():
 
 
 def test_gateway_runtime_rejects_legacy_main_section():
-    with pytest.raises(Exception, match="\[main\]"):
+    with pytest.raises(Exception, match=r"\[main\]"):
         Workspace(".", ".bos", {"main": {"agent": "main"}})
+
+
+@pytest.mark.parametrize("legacy_key", ["name", "bind_address", "target_address"])
+def test_gateway_runtime_rejects_legacy_channel_keys(legacy_key):
+    channel = {"type": "TelegramChannel", "channel_id": "telegram:daily", legacy_key: "legacy"}
+    if legacy_key == "name":
+        channel = {"name": "TelegramChannel", "channel_id": "telegram:daily"}
+
+    with pytest.raises(Exception, match=legacy_key):
+        Workspace(
+            ".",
+            ".bos",
+            {
+                "runtime": {
+                    "default_actor": "main",
+                    "actors": {"main": {"agent": "main"}},
+                    "channels": [channel],
+                }
+            },
+        )
+
 
 def test_runtime_config_location():
     config = {"runtime": {"location": "docker", "actors": {"main": {"agent": "main"}}}}

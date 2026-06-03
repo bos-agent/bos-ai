@@ -27,6 +27,26 @@ async def test_prepare_send_rejects_stale_ref_with_missing_messages():
 
 
 @pytest.mark.asyncio
+async def test_prepare_send_rejects_current_revision_spoof_when_channel_observed_old_revision():
+    store = InMemChatStore()
+    coordinator = ChatCoordinator(store)
+    ref = ChannelConversationRef("tui-a", "default")
+    coordinator.set_cursor(ref, "chat-a", observed_revision=0)
+    await store.commit_turn(
+        "chat-a",
+        [Message(llm_message={"role": "assistant", "content": "new elsewhere"})],
+        turn_id="turn-1",
+    )
+
+    result = await coordinator.prepare_send(chat_id="chat-a", ref=ref, base_revision=1)
+
+    assert result.ok is False
+    assert result.stale is True
+    assert result.error == "stale_channel_cursor"
+    assert result.observed_revision == 0
+
+
+@pytest.mark.asyncio
 async def test_begin_turn_is_authoritative_race_guard():
     store = InMemChatStore()
     coordinator = ChatCoordinator(store)

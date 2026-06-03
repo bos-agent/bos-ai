@@ -2,7 +2,7 @@ import asyncio
 
 import pytest
 
-from bos.core import MailBox
+from bos.core import MailBox, Message
 from bos.extensions.channels.telegram import (
     TELEGRAM_MESSAGE_LIMIT,
     TelegramChannel,
@@ -14,7 +14,7 @@ from bos.extensions.channels.telegram import (
     _split_message,
 )
 from bos.extensions.chat_stores.in_memory import InMemChatStore
-from bos.gateway import ActorDescriptor, ActorResolver, ChannelRuntimeContext, ChatCoordinator
+from bos.gateway import ActorDescriptor, ActorResolver, ChannelConversationRef, ChannelRuntimeContext, ChatCoordinator
 from bos.protocol import Envelope, MessageType, TurnEvent
 
 
@@ -251,6 +251,53 @@ async def test_poll_updates_uses_chat_coordinator_cursor_and_channel_metadata():
         "channel_id": "telegram:daily",
         "channel_conversation_id": "tg_chat:42",
     }
+
+
+@pytest.mark.asyncio
+async def test_poll_updates_rejects_stale_telegram_cursor_instead_of_spoofing_current_revision():
+    store = InMemChatStore()
+    channel = _channel(store)
+    channel._bot_username = "BosBot"
+    mailbox = FakeSendMailbox()
+    ref = ChannelConversationRef("telegram:daily", "tg_chat:42")
+    channel._runtime.chat_coordinator.set_cursor(ref, "chat-a", observed_revision=0)
+    await store.commit_turn(
+        "chat-a",
+        [Message(llm_message={"role": "assistant", "content": "new elsewhere"})],
+        turn_id="turn-1",
+    )
+    get_updates_calls = 0
+    send_message_calls: list[dict] = []
+
+    async def fake_api_call(method: str, payload: dict):
+        nonlocal get_updates_calls
+        if method == "getUpdates":
+            get_updates_calls += 1
+            if get_updates_calls == 1:
+                return {
+                    "ok": True,
+                    "result": [
+                        {
+                            "update_id": 1,
+                            "message": {"chat": {"id": 42}, "text": "hello"},
+                        }
+                    ],
+                }
+            raise asyncio.CancelledError()
+        if method == "sendMessage":
+            send_message_calls.append(payload)
+            return {"ok": True, "result": True}
+        raise AssertionError(f"unexpected Telegram method {method}")
+
+    channel._api_call = fake_api_call  # type: ignore[method-assign]
+
+    with pytest.raises(asyncio.CancelledError):
+        await channel._poll_updates(mailbox)
+
+    assert mailbox.sent == []
+    assert send_message_calls
+    assert send_message_calls[0]["chat_id"] == "42"
+    assert "new messages" in send_message_calls[0]["text"]
 
 
 @pytest.mark.asyncio

@@ -157,6 +157,16 @@ class ChannelManager:
             managed.status = "stopped"
         await self._notify_state_changed()
 
+    async def unregister(self, channel_id: str, *, expected: ManagedChannel | None = None, cancel: bool = True) -> None:
+        managed = self._channels.get(channel_id)
+        if managed is None or (expected is not None and managed is not expected):
+            return
+        if cancel and managed.task is not None and not managed.task.done():
+            managed.task.cancel()
+            await asyncio.gather(managed.task, return_exceptions=True)
+        self._drop_registration(managed)
+        await self._notify_state_changed()
+
     def status_payload(self) -> dict[str, dict[str, Any]]:
         return {channel_id: managed.snapshot().to_payload() for channel_id, managed in self._channels.items()}
 
@@ -173,6 +183,10 @@ class ChannelManager:
             logger.exception("Channel %s failed", managed.channel.channel_id)
             await self._notify_state_changed()
             raise
+        else:
+            managed.status = "stopped"
+            managed.task = None
+            await self._notify_state_changed()
 
     def _instantiate_channel(self, cfg: ResolvedGatewayChannelConfig) -> Channel:
         ext = ep_channel.get(cfg.type)

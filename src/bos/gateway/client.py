@@ -79,6 +79,7 @@ class GatewayClient:
         self._chat_id = (
             chat_id.strip() if isinstance(chat_id, str) and chat_id else None
         )
+        self._current_revision = 0
         self._session: Any = None
         self._ws: Any = None
         self._recv_queue: asyncio.Queue[Envelope] = asyncio.Queue()
@@ -119,6 +120,10 @@ class GatewayClient:
     @property
     def chat_id(self) -> str | None:
         return self._chat_id
+
+    @property
+    def current_revision(self) -> int:
+        return self._current_revision
 
     def update_chat_id(self, chat_id: str) -> None:
         if not chat_id:
@@ -166,6 +171,7 @@ class GatewayClient:
             self._channel_id = channel_id
         if isinstance(chat_id, str) and chat_id:
             self._chat_id = chat_id
+        self._ingest_revision(metadata)
 
     async def _reconnect(self) -> None:
         """Reconnect with exponential backoff. Blocks until connected or closed."""
@@ -218,6 +224,7 @@ class GatewayClient:
                                 timestamp=ts,
                                 metadata=data.get("metadata", {}),
                             )
+                            self._ingest_revision(env.metadata)
                             await self._recv_queue.put(env)
                         except Exception as exc:
                             logger.debug("Client reader error: %s", exc)
@@ -257,6 +264,8 @@ class GatewayClient:
                 await asyncio.wait_for(self._connected.wait(), timeout=15)
             except asyncio.TimeoutError:
                 raise RuntimeError("Not connected — reconnect timed out")
+        out_metadata = dict(metadata or {})
+        out_metadata.setdefault("base_revision", self._current_revision)
         await self._ws.send_json(
             _envelope_to_dict(
                 Envelope(
@@ -264,8 +273,8 @@ class GatewayClient:
                     recipient="",
                     content=content,
                     content_type=content_type,
-                    chat_id=chat_id,
-                    metadata=metadata or {},
+                    chat_id=chat_id or self._chat_id,
+                    metadata=out_metadata,
                 )
             )
         )
@@ -315,6 +324,15 @@ class GatewayClient:
     def _auth_headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self._api_key}"} if self._api_key else {}
 
+    def _ingest_revision(self, metadata: dict[str, Any]) -> None:
+        revision = _coerce_revision(metadata.get("current_revision"))
+        if revision is None:
+            payload = metadata.get("payload")
+            if isinstance(payload, dict):
+                revision = _coerce_revision(payload.get("current_revision"))
+        if revision is not None:
+            self._current_revision = revision
+
     async def aclose(self) -> None:
         """Close the WebSocket connection and clean up."""
         self._closed = True
@@ -327,3 +345,11 @@ class GatewayClient:
         if self._session and not self._session.closed:
             await self._session.close()
         logger.debug("GatewayClient disconnected")
+
+
+def _coerce_revision(raw: Any) -> int | None:
+    if isinstance(raw, int):
+        return raw
+    if isinstance(raw, str) and raw.isdigit():
+        return int(raw)
+    return None

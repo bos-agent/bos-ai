@@ -655,35 +655,32 @@ class Workspace:
         seen_channel_ids: set[str] = set()
         channels: list[ResolvedGatewayChannelConfig] = []
 
-        for idx, raw_cfg in enumerate(raw_channels, start=1):
-            if not isinstance(raw_cfg, dict):
-                raise ValueError(f"Channel entry #{idx} must be a table, got {type(raw_cfg).__name__}.")
-            channel_type = str(raw_cfg.get("type") or raw_cfg.get("name") or "").strip()
+        for idx, cfg in enumerate(raw_channels, start=1):
+            channel_type = cfg.type.strip()
             if not channel_type:
                 raise ValueError(f"Channel entry #{idx} must define type.")
             if channel_type == "HttpChannel":
                 raise ValueError("HttpChannel is gateway infrastructure and cannot be configured as a channel.")
-            channel_id = str(raw_cfg.get("channel_id") or "").strip()
+            channel_id = cfg.channel_id.strip()
             if not channel_id:
                 raise ValueError(f"Channel {channel_type!r} must define channel_id.")
             if channel_id in seen_channel_ids:
                 raise ValueError(f"Duplicate channel_id: {channel_id!r}")
             seen_channel_ids.add(channel_id)
 
-            target_actor = str(raw_cfg.get("target_actor") or default_actor).strip()
+            target_actor = (cfg.target_actor or default_actor).strip()
             if target_actor not in actors:
                 raise ValueError(f"Channel {channel_id!r} target_actor {target_actor!r} must exist in runtime.actors.")
-            settings = raw_cfg.get("settings") or {}
+            settings = cfg.settings or {}
             if not isinstance(settings, dict):
                 raise ValueError(f"Channel {channel_id!r} settings must be a table/dict.")
-            display_name = raw_cfg.get("display_name")
             channels.append(
                 ResolvedGatewayChannelConfig(
                     type=channel_type,
                     channel_id=channel_id,
                     address=f"channel@{channel_id}",
                     target_actor=target_actor,
-                    display_name=str(display_name) if display_name is not None else None,
+                    display_name=str(cfg.display_name) if cfg.display_name is not None else None,
                     settings=dict(settings),
                 )
             )
