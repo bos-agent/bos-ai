@@ -88,13 +88,15 @@ async def test_agent_history_formats_actor_attribution_for_shared_chat():
         ],
         turn_id="turn-1",
     )
-    agent = create_test_agent(agent_name="main", chat_store=store)
+    agent = create_test_agent(agent_name="libai", chat_store=store)
 
     history = await agent._load_and_compact_history("shared", budget_model=None)
 
     assert history[0]["content"] == "[user -> Li Bai]\nhello"
     assert history[1]["content"] == "[assistant: Li Bai]\na poem"
-    assert history[2]["content"] == "[assistant: main]\nmain says hi"
+    assert history[1]["role"] == "assistant"
+    assert history[2]["role"] == "user"
+    assert history[2]["content"] == "[assistant main said]\nmain says hi"
 
 
 @pytest.mark.asyncio
