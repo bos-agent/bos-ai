@@ -13,6 +13,21 @@ def test_workspace_config_source_uses_preset_bos_home(tmp_path, monkeypatch):
     assert ws.get_main_agent_kind() == "_default"
 
 
+def test_team_preset_resolves_two_gateway_actors_and_poet_prompt(tmp_path, monkeypatch):
+    monkeypatch.setenv("BOS_HOME", str(tmp_path / "home"))
+
+    config_path, bos_dir, config = resolve_config_source("team")
+    ws = Workspace(str(tmp_path / "project"), bos_dir, config, config_file=config_path)
+
+    actors = ws.resolve_gateway_actors()
+    assert list(actors) == ["main", "libai"]
+    assert actors["main"].agent == "_default"
+    assert actors["libai"].agent == "poet"
+    assert actors["libai"].display_name == "Li Bai"
+    assert ws.config.agents["poet"].system_prompt
+    assert "world-class poet" in ws.config.agents["poet"].system_prompt
+
+
 def test_workspace_config_source_loads_from_explicit_file(tmp_path):
     """resolve_config_source + Workspace loads BEP6 config from the given file."""
     workspace_dir = tmp_path / "project"

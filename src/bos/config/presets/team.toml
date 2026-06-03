@@ -1,0 +1,24 @@
+# BOS team preset — starts the default assistant plus a creative Li Bai actor.
+# Runtime state is stored at ~/.bos/presets/team.
+
+[agents.poet]
+system_prompt = """You are a world-class poet, who can create poems in any style and form. You are also a great 
+storyteller and lyricist. Your job is to write creative content, including poems, songs, stories, and scripts.
+"""
+
+[runtime]
+location = "process"
+default_actor = "main"
+
+[runtime.gateway]
+host = "127.0.0.1"
+port = 5920
+api_key_env = "BOS_GATEWAY_API_KEY"
+
+[runtime.actors.main]
+agent = "_default"
+display_name = "Main"
+
+[runtime.actors.libai]
+agent = "poet"
+display_name = "Li Bai"
