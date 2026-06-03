@@ -193,6 +193,7 @@ class AgentHarness:
         self,
         kind: str | None = None,
         agent_cfg: dict[str, Any] = None,
+        agent_cls: type[Agent] = Agent,
     ) -> Agent:
         if CURRENT_HARNESS.get(None) is None:
             raise RuntimeError("create_agent must be called within an active AgentHarness context.")
@@ -220,7 +221,7 @@ class AgentHarness:
             "chat_compaction_lock": self._get_compaction_lock,
         }
 
-        return _apply(Agent, kwargs)
+        return _apply(agent_cls, kwargs)
 
     async def _bind_plugins_for_agent(
         self,
