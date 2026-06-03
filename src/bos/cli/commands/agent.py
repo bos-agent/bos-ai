@@ -11,6 +11,7 @@ import sys
 import time
 import uuid
 from collections import deque
+from pathlib import Path
 from typing import Any
 
 import click
@@ -61,17 +62,18 @@ def _build_workspace_for_ask(ctx, workspace_override: str | None = None) -> Work
 def _build_workspace_for_daemon(ctx, workspace_override: str | None = None) -> Workspace:
     """Build a Workspace for daemon commands (``boscli gateway start``).
 
-    * ``-c <preset|file>`` → workspace defaults to ``"."`` unless overridden.
-    * No ``-c`` → ancestor discovery (error if not found).
+    * ``-c <preset>`` → workspace defaults to ``~/.bos/presets/<preset>`` unless overridden.
+    * ``-c <file>`` → workspace defaults to ``"."`` unless overridden.
+    * No ``-c`` → ancestor discovery; if not found, fall back to the ``default`` preset.
     """
     config_arg = ctx.obj.get("CONFIG")
-    ws_dir = workspace_override or "."
 
     if config_arg:
         try:
             config_path, bos_dir, config = resolve_config_source(config_arg)
         except WorkspaceResolutionError as exc:
             raise click.UsageError(str(exc)) from exc
+        ws_dir = _daemon_workspace_dir(config_arg, bos_dir, workspace_override)
         return Workspace(ws_dir, bos_dir, config, config_file=config_path)
 
     try:
@@ -79,13 +81,17 @@ def _build_workspace_for_daemon(ctx, workspace_override: str | None = None) -> W
         if workspace_override:
             ws.workspace = _resolve_path(workspace_override)
         return ws
+    except ConfigNotFoundError:
+        pass
     except WorkspaceResolutionError as exc:
-        hint = str(exc)
-        presets = presets_dir()
-        available = sorted(p.stem for p in presets.glob("*.toml")) if presets.exists() else []
-        names = ", ".join(available) or "none"
-        hint += f"\nTip: use -c <preset> to run without a workspace. Available presets: {names}."
-        raise click.UsageError(hint) from exc
+        raise click.UsageError(str(exc)) from exc
+
+    try:
+        config_path, bos_dir, config = resolve_config_source("default")
+    except WorkspaceResolutionError as exc:
+        raise click.UsageError(str(exc)) from exc
+    ws_dir = _daemon_workspace_dir("default", bos_dir, workspace_override)
+    return Workspace(ws_dir, bos_dir, config, config_file=config_path)
 
 
 def _get_ws_and_rd(ctx, workspace_override: str | None = None) -> tuple[Workspace, GatewayRunDir]:
@@ -105,9 +111,31 @@ def _runner_config_arg(ctx, ws: Workspace) -> str:
     config_arg = ctx.obj.get("CONFIG")
     if config_arg:
         return str(config_arg)
+    if preset_name := _builtin_preset_name_for_config_file(ws.config_file):
+        return preset_name
     if ws.config_file is None:
         raise click.UsageError("Could not determine config path for gateway runner.")
     return str(ws.config_file)
+
+
+def _daemon_workspace_dir(config_arg: str, bos_dir, workspace_override: str | None) -> str | os.PathLike[str]:
+    if workspace_override:
+        return workspace_override
+    return bos_dir if _is_builtin_preset_arg(config_arg) else "."
+
+
+def _is_builtin_preset_arg(config_arg: str) -> bool:
+    return not Path(config_arg).expanduser().is_file() and (presets_dir() / f"{config_arg}.toml").is_file()
+
+
+def _builtin_preset_name_for_config_file(config_file) -> str | None:
+    if config_file is None:
+        return None
+    try:
+        config_path = Path(config_file).resolve()
+        return config_path.relative_to(presets_dir().resolve()).stem
+    except ValueError:
+        return None
 
 
 async def _connect_tui_client(client) -> None:

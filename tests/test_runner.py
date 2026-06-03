@@ -64,3 +64,38 @@ def test_gateway_start_preserves_preset_name_for_background_runner(tmp_path, mon
     assert result.exit_code == 0
     assert captured["argv"][-2:] == ["--config", "default"]
     assert captured["run_root"] == (tmp_path / "home" / "presets" / "default" / "run").resolve()
+    assert captured["cwd"] == (tmp_path / "home" / "presets" / "default").resolve()
+
+
+def test_gateway_start_without_workspace_falls_back_to_default_preset(tmp_path, monkeypatch):
+    from click.testing import CliRunner
+
+    from bos.cli.entry import cli
+
+    workspace = tmp_path / "empty"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    monkeypatch.delenv("BOS_CONFIG", raising=False)
+    monkeypatch.setenv("BOS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("BOS_GATEWAY_API_KEY", "secret")
+    monkeypatch.setattr("bos.runner.proc.is_running", lambda rd: False)
+    monkeypatch.setattr(
+        "bos.runner.proc.read_state",
+        lambda rd: {"runtime": "process", "pid": 1234, "gateway": {"host": "127.0.0.1", "port": 5920}},
+    )
+    captured: dict[str, object] = {}
+
+    def fake_start_background(argv, rd, env=None, cwd=None):
+        captured["argv"] = argv
+        captured["run_root"] = rd.root
+        captured["cwd"] = cwd
+        return 1234
+
+    monkeypatch.setattr("bos.runner.proc.start_background", fake_start_background)
+
+    result = CliRunner().invoke(cli, ["gateway", "start"])
+
+    assert result.exit_code == 0
+    assert captured["argv"][-2:] == ["--config", "default"]
+    assert captured["run_root"] == (tmp_path / "home" / "presets" / "default" / "run").resolve()
+    assert captured["cwd"] == (tmp_path / "home" / "presets" / "default").resolve()

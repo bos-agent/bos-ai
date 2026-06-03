@@ -74,13 +74,15 @@ def test_cli_init_git_creates_repo_and_gitignore(tmp_path, monkeypatch):
     assert gitignore.read_text(encoding="utf-8") == ".env\nrun\n"
 
 
-def test_cli_status_fails_cleanly_without_workspace_or_config(tmp_path, monkeypatch):
+def test_cli_status_without_workspace_uses_default_preset(tmp_path, monkeypatch):
     workspace = tmp_path / "project"
     workspace.mkdir()
     monkeypatch.delenv("BOS_CONFIG", raising=False)
+    monkeypatch.setenv("BOS_HOME", str(tmp_path / "home"))
     monkeypatch.chdir(workspace)
 
     result = CliRunner().invoke(cli, ["gateway", "status"])
 
-    assert result.exit_code == 2
-    assert "No BOS workspace found" in result.output
+    assert result.exit_code == 0
+    assert "Gateway is not running." in result.output
+    assert (tmp_path / "home" / "presets" / "default").is_dir()
