@@ -80,6 +80,7 @@ class ActorResolver:
         resolved = self._require_actor(target_actor)
         descriptor = self._actors[resolved]
         out_metadata["target_actor"] = resolved
+        out_metadata["target_agent"] = resolved
         out_metadata["target_address"] = descriptor.address
         if descriptor.display_name:
             out_metadata["target_display"] = descriptor.display_name

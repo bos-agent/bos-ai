@@ -111,15 +111,15 @@ class TurnContext:
         return self.final_content or self.current[-1].llm_message["content"] if self.current else "(no response)"
 
 
-def _attribute_history_message(projected: dict[str, Any], source: Message, *, current_actor: str) -> dict[str, Any]:
+def _attribute_history_message(projected: dict[str, Any], source: Message, *, current_agent: str) -> dict[str, Any]:
     content = projected.get("content")
     if not isinstance(content, str):
         return projected
     role = projected.get("role")
     if role == "assistant":
-        source_actor = source.metadata.get("actor")
-        if isinstance(source_actor, str) and source_actor and source_actor != current_actor:
-            label = _history_actor_label(source.metadata)
+        source_agent = _metadata_str(source.metadata, "agent_name", "actor")
+        if source_agent and source_agent != current_agent:
+            label = _history_agent_label(source.metadata) or source_agent
             return projected | {
                 "role": "user",
                 "content": f"[assistant {label} said]\n{content}",
@@ -132,20 +132,26 @@ def _attribute_history_message(projected: dict[str, Any], source: Message, *, cu
 
 def _history_attribution_label(role: Any, metadata: dict[str, Any]) -> str | None:
     if role == "assistant":
-        label = _history_actor_label(metadata)
+        label = _history_agent_label(metadata)
         if label:
             return f"[assistant: {label}]"
     if role == "user":
-        target = metadata.get("target_display") or metadata.get("target_actor")
-        if isinstance(target, str) and target:
+        target = _metadata_str(metadata, "target_display") or _metadata_str(metadata, "target_agent", "target_actor")
+        if target:
             return f"[user -> {target}]"
     return None
 
 
-def _history_actor_label(metadata: dict[str, Any]) -> str | None:
-    actor = metadata.get("actor")
-    label = metadata.get("actor_display") or actor
-    return label if isinstance(label, str) and label else None
+def _history_agent_label(metadata: dict[str, Any]) -> str | None:
+    return _metadata_str(metadata, "agent_display", "actor_display") or _metadata_str(metadata, "agent_name", "actor")
+
+
+def _metadata_str(metadata: dict[str, Any], *keys: str) -> str | None:
+    for key in keys:
+        value = metadata.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
 
 
 class AbortTurn(Exception):
@@ -250,6 +256,7 @@ class Agent:
         max_iterations: int = 25,
         tool_noise_filter: ToolNoiseFilter | None = None,
         chat_compaction_lock: Callable[[str], AbstractAsyncContextManager] | None = None,
+        history_attribution: bool = False,
     ):
         if system_prompt is not None and not isinstance(system_prompt, str):
             raise TypeError("system_prompt must be a string or None")
@@ -272,6 +279,7 @@ class Agent:
         self._current_context: TurnContext | None = None
         self._tool_noise_filter = tool_noise_filter
         self._compaction_lock = chat_compaction_lock
+        self._history_attribution = history_attribution
 
         # Compose interceptors: plugin interceptors first, then configured harness/workspace interceptors
         plugin_interceptors = [i for plugin in self._plugins for i in plugin.get_interceptors()]
@@ -658,10 +666,12 @@ class Agent:
 
     def _format_history(self, result: ContextResult) -> list[dict[str, Any]]:
         """Hook for subclasses to customise history projection (e.g. attribution labels)."""
+        if not self._history_attribution:
+            return result.messages
         if len(result.messages) != len(result.source_messages):
             return result.messages
         return [
-            _attribute_history_message(projected, source, current_actor=self._name)
+            _attribute_history_message(projected, source, current_agent=self._name)
             for projected, source in zip(result.messages, result.source_messages, strict=True)
         ]
 

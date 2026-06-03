@@ -20,6 +20,7 @@ def test_actor_resolver_uses_default_actor_without_mention():
     assert result.target_address == "agent@main"
     assert result.content == "summarize this"
     assert result.metadata["target_actor"] == "main"
+    assert result.metadata["target_agent"] == "main"
     assert result.metadata["target_address"] == "agent@main"
 
 

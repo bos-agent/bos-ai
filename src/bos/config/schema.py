@@ -69,6 +69,7 @@ class AgentConfig(BaseModel):
     max_tokens: int = 131_072
     max_iterations: int = 60
     tool_noise_filter: ToolNoiseFilter | None = None
+    history_attribution: bool = False
 
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
     plugins: PluginsConfig = Field(default_factory=PluginsConfig)

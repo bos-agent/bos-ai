@@ -375,19 +375,19 @@ class AgentActor:
         metadata: dict[str, Any] = {"sender": reply_recipient, "actor_address": self._address}
         actor_name = self._actor_name()
         metadata["assistant_message_metadata"] = {
-            "actor": actor_name,
+            "agent_name": actor_name,
             "actor_address": self._address,
         }
         if inbound_env is not None:
-            target_actor = inbound_env.metadata.get("target_actor")
+            target_actor = inbound_env.metadata.get("target_agent") or inbound_env.metadata.get("target_actor")
             target_display = inbound_env.metadata.get("target_display")
             if isinstance(target_actor, str) and target_actor:
-                user_metadata: dict[str, Any] = {"target_actor": target_actor}
+                user_metadata: dict[str, Any] = {"target_agent": target_actor}
                 if isinstance(target_display, str) and target_display:
                     user_metadata["target_display"] = target_display
                 metadata["user_message_metadata"] = user_metadata
                 if target_actor == actor_name and isinstance(target_display, str) and target_display:
-                    metadata["assistant_message_metadata"]["actor_display"] = target_display
+                    metadata["assistant_message_metadata"]["agent_display"] = target_display
         return metadata
 
     def _reply_metadata(self, reply_recipient: str, inbound_env: Envelope | None = None) -> dict[str, Any]:

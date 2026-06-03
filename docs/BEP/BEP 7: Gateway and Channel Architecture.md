@@ -330,6 +330,25 @@ Examples:
 - `summarize this` in a channel configured with `target_actor = "main"` resolves to `agent@main`.
 - an unknown mention returns a structured error that the channel can render appropriately.
 
+Route metadata keeps the gateway routing name and the agent-history identity explicit:
+
+```python
+metadata = {
+    "target_actor": "coder",     # gateway routing / compatibility
+    "target_agent": "coder",     # core Agent history attribution
+    "target_address": "agent@coder",
+    "target_display": "Coder",   # when configured
+}
+```
+
+When the gateway runs more than one actor, `ActorManager` enables the core `Agent`'s optional history attribution mode for every managed actor. The core agent then renders shared-chat transcript context as a conversation between named agents:
+
+- user messages targeted at an agent are prefixed with `[user -> <target>]`
+- the current agent's own assistant history remains assistant-role context and may be prefixed with `[assistant: <agent>]`
+- other agents' assistant history is converted to user-role context and prefixed with `[assistant <agent> said]`
+
+Single-agent runtimes leave history attribution disabled so ordinary chats keep their raw transcript shape. Attribution metadata is agent-keyed (`agent_name`, `agent_display`, `target_agent`, `target_display`); gateway-specific actor names are only the source used to set those agent keys.
+
 `ActorResolver` and `MailRoute` are intentionally separate:
 
 | Component | Question answered | Layer |

@@ -83,11 +83,11 @@ def test_actor_turn_metadata_marks_user_target_and_assistant_actor():
 
     metadata = actor._turn_metadata("channel@demo", inbound)
 
-    assert metadata["user_message_metadata"] == {"target_actor": "libai", "target_display": "Li Bai"}
+    assert metadata["user_message_metadata"] == {"target_agent": "libai", "target_display": "Li Bai"}
     assert metadata["assistant_message_metadata"] == {
-        "actor": "libai",
+        "agent_name": "libai",
         "actor_address": "agent@libai",
-        "actor_display": "Li Bai",
+        "agent_display": "Li Bai",
     }
 
 
@@ -115,9 +115,56 @@ async def test_coordinated_actor_rejects_missing_channel_metadata():
 class _FakeHarness:
     def __init__(self) -> None:
         self.mail_route = InMemMailRoute()
+        self.create_calls: list[dict[str, Any]] = []
 
     async def create_agent(self, kind: str | None = None, agent_cfg: dict[str, Any] | None = None):
+        self.create_calls.append({"kind": kind, "agent_cfg": dict(agent_cfg or {})})
         return object()
+
+
+@pytest.mark.asyncio
+async def test_actor_manager_enables_history_attribution_only_for_multi_agent_runtime():
+    multi_ws = Workspace(
+        ".",
+        ".bos",
+        {
+            "runtime": {
+                "default_actor": "main",
+                "actors": {
+                    "main": {"agent": "main"},
+                    "libai": {"agent": "poet"},
+                },
+            }
+        },
+    )
+    multi_harness = _FakeHarness()
+    multi_manager = ActorManager(
+        workspace=multi_ws,
+        harness=multi_harness,
+        chat_coordinator=ChatCoordinator(InMemChatStore()),
+    )
+
+    await multi_manager.start_all()
+    await multi_manager.stop_all()
+
+    assert {call["agent_cfg"]["history_attribution"] for call in multi_harness.create_calls} == {True}
+
+    single_ws = Workspace(
+        ".",
+        ".bos",
+        {"runtime": {"default_actor": "main", "actors": {"main": {"agent": "main"}}}},
+    )
+    single_harness = _FakeHarness()
+    single_manager = ActorManager(
+        workspace=single_ws,
+        harness=single_harness,
+        chat_coordinator=ChatCoordinator(InMemChatStore()),
+    )
+
+    await single_manager.start_all()
+    await single_manager.stop_all()
+
+    assert single_harness.create_calls[0]["agent_cfg"]["history_attribution"] is False
 
 
 @pytest.mark.asyncio

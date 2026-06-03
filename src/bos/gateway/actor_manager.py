@@ -133,6 +133,7 @@ class ActorManager:
             raise RuntimeError("ActorManager requires an active AgentHarness mail_route service.")
         agent_cfg = dict(record.config.agent_overrides)
         agent_cfg["agent_name"] = record.name
+        agent_cfg["history_attribution"] = len(self._actors) > 1
         agent = await self.harness.create_agent(record.config.agent, agent_cfg=agent_cfg)
         mailbox = self.harness.mail_route.bind(record.config.address)
         record.mailbox = mailbox
