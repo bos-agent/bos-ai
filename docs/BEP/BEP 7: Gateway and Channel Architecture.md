@@ -864,6 +864,9 @@ display_name = "Main"
 restart_on_error = true
 max_restarts = 5
 
+[runtime.actors.main.agent_cfg.tools]
+disabled = ["abc"]
+
 [runtime.actors.coder]
 agent = "researcher"
 display_name = "Coder"
@@ -921,13 +924,14 @@ Actor table keys are actor identities. The `agent` field selects the reusable ag
 | `display_name` | `str` | no | Human-readable label for UI and actor listing |
 | `restart_on_error` | `bool` | no | Whether gateway may spawn a fresh actor after an unexpected actor failure |
 | `max_restarts` | `int` | no | Restart cap for unexpected actor failures |
-| *(extra)* | `any` | varies | Agent-specific overrides passed to agent construction |
+| `agent_cfg` | `table` | no | Per-actor agent config overrides; uses the same config-schema shape as `[agent.defaults]` |
 
 Validation:
 
 - actor names must be valid mention names such as `main`, `coder`, `research_bot`
 - actor names do not include the `agent@` prefix
 - forbidden identity/memory fields stay out of actor config; the table key is the identity
+- actor tables reject unknown top-level keys; put agent overrides under `[runtime.actors.<name>.agent_cfg]`
 
 ### Actor resolver config fields
 

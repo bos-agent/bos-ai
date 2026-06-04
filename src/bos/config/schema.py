@@ -112,15 +112,16 @@ class ActorConfig(BaseModel):
 
     The TOML key is the actor's identity and memory scope.
     ``agent`` selects which registered agent kind to use.
-    Extra keys are passed through as agent overrides.
+    ``agent_cfg`` holds explicit per-actor agent config overrides.
     """
 
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="forbid")
 
     agent: str
     display_name: str | None = None
     restart_on_error: bool = True
     max_restarts: int = 5
+    agent_cfg: AgentConfig = Field(default_factory=AgentConfig)
 
 
 class GatewayConfig(BaseModel):
@@ -219,7 +220,7 @@ def validate_agent_config(raw: dict[str, Any]) -> dict[str, Any]:
         validated = AgentConfig.model_validate(raw)
     except ValidationError as exc:
         raise ValueError(str(exc)) from exc
-    return validated.model_dump(exclude_defaults=True)
+    return _agent_config_to_dict(validated)
 
 
 def _agent_config_to_dict(cfg: AgentConfig) -> dict[str, Any]:
@@ -228,4 +229,24 @@ def _agent_config_to_dict(cfg: AgentConfig) -> dict[str, Any]:
     Uses ``exclude_defaults=True`` so only explicitly-set fields appear.
     Nested defaults inside sub-models (e.g. ``tools.enabled``) are also excluded.
     """
-    return cfg.model_dump(exclude_defaults=True)
+    return cfg.model_dump(exclude_defaults=True, by_alias=True)
+
+
+def _agent_config_to_core_kwargs(cfg: AgentConfig) -> dict[str, Any]:
+    """Convert config-shaped agent settings into core ``Agent`` kwargs."""
+    data = _agent_config_to_dict(cfg)
+
+    tools_cfg = data.get("tools")
+    if isinstance(tools_cfg, dict):
+        data.pop("tools", None)
+        enabled = tools_cfg.get("enabled")
+        if enabled is not None:
+            data["tools"] = None if "*" in enabled else list(enabled)
+        disabled = tools_cfg.get("disabled")
+        if disabled is not None:
+            data["exclude_tools"] = list(disabled)
+        usages = tools_cfg.get("usages")
+        if usages is not None:
+            data["tools_usage"] = dict(usages)
+
+    return data

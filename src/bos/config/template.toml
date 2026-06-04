@@ -131,6 +131,10 @@ api_key_env = "BOS_GATEWAY_API_KEY"
 agent = "main"
 display_name = "Main"
 
+# Per-actor agent config overrides use the same shape as [agent.defaults].
+# [runtime.actors.main.agent_cfg.tools]
+# disabled = ["abc"]
+
 # Additional actors can be addressed with @actor-name mentions.
 # [runtime.actors.researcher]
 # agent = "researcher"

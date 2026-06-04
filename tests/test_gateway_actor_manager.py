@@ -168,6 +168,55 @@ async def test_actor_manager_enables_history_attribution_only_for_multi_agent_ru
 
 
 @pytest.mark.asyncio
+async def test_actor_manager_passes_explicit_actor_agent_cfg_to_harness():
+    ws = Workspace(
+        ".",
+        ".bos",
+        {
+            "runtime": {
+                "default_actor": "main",
+                "actors": {
+                    "main": {
+                        "agent": "main",
+                        "agent_cfg": {
+                            "tools": {
+                                "enabled": ["ReadFile"],
+                                "disabled": ["WriteFile"],
+                                "usages": {"ReadFile": "Read only what you need."},
+                            },
+                            "plugin-bindings": {"SubagentPlugin": {"enabled": ["*"]}},
+                        },
+                    }
+                },
+            }
+        },
+    )
+    harness = _FakeHarness()
+    manager = ActorManager(
+        workspace=ws,
+        harness=harness,
+        chat_coordinator=ChatCoordinator(InMemChatStore()),
+    )
+
+    await manager.start_all()
+    await manager.stop_all()
+
+    assert harness.create_calls == [
+        {
+            "kind": "main",
+            "agent_cfg": {
+                "tools": ["ReadFile"],
+                "exclude_tools": ["WriteFile"],
+                "tools_usage": {"ReadFile": "Read only what you need."},
+                "plugin-bindings": {"SubagentPlugin": {"enabled": ["*"]}},
+                "agent_name": "main",
+                "history_attribution": False,
+            },
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_actor_manager_clears_active_turns_on_actor_task_failure(monkeypatch):
     class ExplodingActor:
         def __init__(self, *args, **kwargs):

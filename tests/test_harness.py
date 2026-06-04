@@ -99,6 +99,47 @@ async def test_subagent_plugin_string_star_matches_list_star():
         AgentRegistry._registry.pop(role, None)
 
 
+@pytest.mark.asyncio
+async def test_harness_binds_subagent_plugin_bindings_from_validated_config(tmp_path):
+    role = f"configured_subagent_{uuid.uuid4().hex}"
+    snapshot = dict(AgentRegistry._registry)
+    AgentRegistry._registry.clear()
+    try:
+        ws = Workspace(
+            tmp_path,
+            tmp_path / ".bos",
+            {
+                "agent": {
+                    "defaults": {
+                        "plugin-bindings": {
+                            "SubagentPlugin": {
+                                "enabled": ["*"],
+                            }
+                        }
+                    }
+                },
+                "agents": {
+                    role: {
+                        "system_prompt": "You are a configured helper.",
+                    }
+                },
+            },
+        )
+        ws.bos_dir.mkdir(parents=True, exist_ok=True)
+        ws.bootstrap_platform()
+
+        async with ws.harness() as harness:
+            agent = await harness.create_agent("_default")
+            prompt = await agent._build_system_prompt()
+
+        assert agent._local_tools.get("AskSubagent") is not None
+        assert "<subagent_workflow>" in prompt
+        assert f'<agent role="{role}"></agent>' in prompt
+    finally:
+        AgentRegistry._registry.clear()
+        AgentRegistry._registry.update(snapshot)
+
+
 
 @pytest.mark.asyncio
 async def test_harness_create_agent_defaults_to_no_capabilities(tmp_path):
@@ -217,7 +258,7 @@ async def test_registered_agent_star_capabilities_enable_all(tmp_path):
             name=agent_name,
             description="Open",
             system_prompt="Use everything.",
-            tools="*",
+            tools=None,
         )
 
         async with AgentHarness(
@@ -236,7 +277,7 @@ async def test_registered_agent_star_capabilities_enable_all(tmp_path):
 def test_registered_agent_rejects_unknown_capability_string():
     agent_name = f"bad_caps_{uuid.uuid4().hex}"
 
-    with pytest.raises(TypeError, match="tools must be a dict, list"):
+    with pytest.raises(TypeError, match="tools must be a list or None"):
         AgentRegistry.register(name=agent_name, tools="all")
 
 

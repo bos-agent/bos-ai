@@ -13,6 +13,7 @@ from typing import Any, Literal
 from bos.config.schema import (
     AgentConfig,
     RootConfig,
+    _agent_config_to_core_kwargs,
     validate_agent_config,
     validate_config,
 )
@@ -561,16 +562,17 @@ class Workspace:
         # 4. Agent registration
         agent_defaults: dict[str, Any] = {}
         if self.config.agent and self.config.agent.defaults:
-            agent_defaults = self.config.agent.defaults.model_dump(exclude_defaults=True)
+            agent_defaults = _agent_config_to_core_kwargs(self.config.agent.defaults)
 
         for name, agent_config in (self.config.agents or {}).items():
-            cfg = agent_config.model_dump(exclude_defaults=True)
+            cfg = _agent_config_to_core_kwargs(agent_config)
             merged = _deep_merge(dict(agent_defaults), cfg)
             merged.pop("name", None)  # name is the registration key, not a kwarg
             AgentRegistry.register(name, **merged)
 
         if not AgentRegistry.has_registered("_default"):
-            merged = _deep_merge(dict(agent_defaults), dict(default_agent_spec))
+            default_spec = _agent_config_to_core_kwargs(AgentConfig.model_validate(default_agent_spec))
+            merged = _deep_merge(dict(agent_defaults), default_spec)
             merged.pop("name", None)
             AgentRegistry.register("_default", **merged)
 
@@ -622,12 +624,7 @@ class Workspace:
         actors: dict[str, ResolvedActorConfig] = {}
         for name, cfg in actors_cfg.items():
             self._validate_actor_name(name)
-            raw = cfg.model_dump()
-            agent_overrides = {
-                key: value
-                for key, value in raw.items()
-                if key not in {"agent", "display_name", "restart_on_error", "max_restarts"}
-            }
+            agent_overrides = _agent_config_to_core_kwargs(cfg.agent_cfg)
             actors[name] = ResolvedActorConfig(
                 name=name,
                 agent=cfg.agent,

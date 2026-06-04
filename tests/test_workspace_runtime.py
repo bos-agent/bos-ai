@@ -22,7 +22,14 @@ def test_gateway_runtime_resolves_final_config_shape():
                     "display_name": "Main",
                     "restart_on_error": True,
                     "max_restarts": 3,
-                    "tools": ["ReadFile"],
+                    "agent_cfg": {
+                        "tools": {
+                            "enabled": ["ReadFile"],
+                            "disabled": ["WriteFile"],
+                            "usages": {"ReadFile": "Read only what you need."},
+                        },
+                        "plugin-bindings": {"SubagentPlugin": {"enabled": ["*"]}},
+                    },
                 },
                 "coder": {"agent": "researcher", "display_name": "Coder"},
             },
@@ -49,7 +56,12 @@ def test_gateway_runtime_resolves_final_config_shape():
     assert ws.resolve_default_actor() == "main"
     assert ws.get_main_agent_kind() == "assistant"
     assert actors["main"].address == "agent@main"
-    assert actors["main"].agent_overrides == {"tools": ["ReadFile"]}
+    assert actors["main"].agent_overrides == {
+        "tools": ["ReadFile"],
+        "exclude_tools": ["WriteFile"],
+        "tools_usage": {"ReadFile": "Read only what you need."},
+        "plugin-bindings": {"SubagentPlugin": {"enabled": ["*"]}},
+    }
     assert channels[0].type == "TelegramChannel"
     assert channels[0].channel_id == "telegram:daily"
     assert channels[0].address == "channel@telegram:daily"
@@ -69,6 +81,25 @@ def test_gateway_runtime_rejects_invalid_default_actor():
 
     with pytest.raises(ValueError, match="runtime.default_actor"):
         ws.resolve_default_actor()
+
+
+def test_gateway_runtime_rejects_actor_overflow_agent_overrides():
+    with pytest.raises(Exception, match="Extra inputs are not permitted"):
+        Workspace(
+            ".",
+            ".bos",
+            {
+                "runtime": {
+                    "default_actor": "main",
+                    "actors": {
+                        "main": {
+                            "agent": "main",
+                            "tools": {"enabled": ["ReadFile"]},
+                        }
+                    },
+                }
+            },
+        )
 
 
 def test_gateway_runtime_rejects_duplicate_channel_ids():
