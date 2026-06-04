@@ -21,7 +21,7 @@ from bos.core.contract import ep_consolidator, ep_tool
 from bos.core.registry import ToolRegistry
 from bos.plugins.memory import MemoryAgentPlugin
 from bos.plugins.skills import SkillMeta, SkillsAgentPlugin
-from bos.plugins.subagent import SubagentAgentPlugin
+from bos.plugins.subagent import SubagentAgentPlugin, SubagentHarnessPlugin
 from bos.plugins.task import TaskAgentPlugin
 
 
@@ -32,10 +32,16 @@ class _MockSubagentRuntime:
 
 def test_react_agent_local_tools_describe_ask_subagent(caplog):
     local_tools = ToolRegistry("test tools")
-    subagent = SubagentAgentPlugin(_MockSubagentRuntime(), enabled=None, disabled=[])
+    role = f"ask_subagent_tool_{uuid.uuid4().hex}"
 
-    with caplog.at_level(logging.WARNING):
-        agent = create_test_agent(local_tools=local_tools, plugins=[subagent])
+    try:
+        AgentRegistry.register(name=role, description="Available subagent", tools=[])
+        subagent = SubagentAgentPlugin(_MockSubagentRuntime(), enabled=None, disabled=[])
+
+        with caplog.at_level(logging.WARNING):
+            agent = create_test_agent(local_tools=local_tools, plugins=[subagent])
+    finally:
+        AgentRegistry._registry.pop(role, None)
 
     assert local_tools.get("AskSubagent") is not None
     ask_subagent = agent._local_tools.get("AskSubagent")
@@ -50,6 +56,47 @@ def test_react_agent_local_tools_describe_ask_subagent(caplog):
     assert agent._local_tools.metadata_for("AskSubagent")["parallel_safe"] is True
     assert agent._local_tools.get("ListAgents") is None
     assert agent._local_tools.get("SearchSkills") is None
+
+
+@pytest.mark.asyncio
+async def test_subagent_plugin_hides_prompt_and_tool_when_no_subagents():
+    snapshot = dict(AgentRegistry._registry)
+    AgentRegistry._registry.clear()
+    try:
+        AgentRegistry.register(name="_default", description="Default agent", tools=[])
+        local_tools = ToolRegistry("test tools")
+        subagent = SubagentAgentPlugin(_MockSubagentRuntime(), enabled=None, disabled=[])
+
+        agent = create_test_agent(local_tools=local_tools, plugins=[subagent])
+
+        assert agent._local_tools.get("AskSubagent") is None
+        assert await subagent.get_system_prompt_section(None) is None
+        assert "AskSubagent" not in await agent._prompt_section_tools()
+        assert "<subagent_workflow>" not in await agent._build_system_prompt()
+    finally:
+        AgentRegistry._registry.clear()
+        AgentRegistry._registry.update(snapshot)
+
+
+@pytest.mark.asyncio
+async def test_subagent_plugin_string_star_matches_list_star():
+    role = f"string_star_subagent_{uuid.uuid4().hex}"
+    provider = SubagentHarnessPlugin()
+    provider._runtime = _MockSubagentRuntime()
+
+    try:
+        AgentRegistry.register(name=role, description="String star subagent", tools=[])
+        provider.validate_config({"enabled": "*"})
+        plugin = provider.bind({"enabled": "*"})
+        agent = create_test_agent(plugins=[plugin])
+
+        assert agent._local_tools.get("AskSubagent") is not None
+        prompt_section = await plugin.get_system_prompt_section(None)
+        assert prompt_section is not None
+        assert "<subagent_workflow>" in prompt_section
+        assert f'<agent role="{role}">String star subagent</agent>' in prompt_section
+    finally:
+        AgentRegistry._registry.pop(role, None)
 
 
 

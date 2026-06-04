@@ -8,7 +8,7 @@ from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 from xml.sax.saxutils import escape
 
-from bos.core._utils import _allowed, _pick_collection, _xml_attr
+from bos.core._utils import _pick_collection, _xml_attr
 from bos.core.contract import (
     AgentPlugin,
     PluginServices,
@@ -41,23 +41,21 @@ class SubagentHarnessPlugin:
         enabled = config.get("enabled")
         if enabled is not None and not isinstance(enabled, (str, list)):
             raise TypeError("SubagentPlugin: 'enabled' must be a list, '*', or None")
+        if isinstance(enabled, str) and enabled != "*":
+            raise ValueError("SubagentPlugin: 'enabled' string value must be '*'")
+        if isinstance(enabled, list) and not all(isinstance(item, str) for item in enabled):
+            raise TypeError("SubagentPlugin: 'enabled' list entries must be strings")
         disabled = config.get("disabled")
         if disabled is not None and not isinstance(disabled, list):
             raise TypeError("SubagentPlugin: 'disabled' must be a list or None")
+        if isinstance(disabled, list) and not all(isinstance(item, str) for item in disabled):
+            raise TypeError("SubagentPlugin: 'disabled' list entries must be strings")
 
     def bind(self, config: Mapping[str, Any]) -> AgentPlugin:
-        enabled = config.get("enabled", [])
+        enabled = _normalize_enabled(config.get("enabled", []))
         disabled = config.get("disabled", [])
-        if not isinstance(enabled, list):
-            enabled = []
         if not isinstance(disabled, list):
             disabled = []
-        # Map to internal _allowed / _pick_collection conventions:
-        # None = all allowed, [] = none allowed
-        if "*" in enabled:
-            enabled = None  # wildcard: all subagents allowed
-        elif not enabled:
-            enabled = []  # empty: nothing allowed
         return SubagentAgentPlugin(self._runtime, enabled, disabled, task_template=config.get("task_template"))
 
     async def teardown(self) -> None:
@@ -95,6 +93,16 @@ Use subagents for broad exploration, independent research, planning, review, or 
 </subagent_workflow>"""
 
 
+def _normalize_enabled(value: Any) -> list[str] | None:
+    if value == "*":
+        return None
+    if isinstance(value, list):
+        if "*" in value:
+            return None
+        return list(value)
+    return []
+
+
 class SubagentAgentPlugin:
     def __init__(
         self,
@@ -114,9 +122,10 @@ class SubagentAgentPlugin:
         return "SubagentPlugin"
 
     def register_tools(self, registry: ToolRegistry) -> None:
+        if not self._available_subagents():
+            return
+
         runtime = self._runtime
-        enabled = self._enabled
-        disabled = self._disabled
         task_template = self._task_template
 
         @registry(
@@ -144,7 +153,7 @@ class SubagentAgentPlugin:
             from bos.core import AgentRegistry
             from bos.core._utils import _safe_format
 
-            if not _allowed(role, enabled, disabled):
+            if role not in self._available_subagents():
                 return f"Error: Agent '{role}' is not an enabled subagent."
             if not AgentRegistry.has_registered(role):
                 return f"Error: Agent '{role}' not found."
@@ -159,12 +168,7 @@ class SubagentAgentPlugin:
             return await runtime.ask(role, task, parent=context)
 
     async def get_system_prompt_section(self, context: TurnContext) -> str | None:
-        from bos.core import AgentRegistry
-
-        available = dict(AgentRegistry.describe())
-        available.pop("_default", None)
-
-        available = _pick_collection(available, self._enabled, self._disabled)
+        available = self._available_subagents()
         if not available:
             return None
         sections = [_SUBAGENT_PROMPT_SECTION]
@@ -187,6 +191,13 @@ class SubagentAgentPlugin:
         available_subagents += "\n</available_subagents>"
         sections.append(available_subagents)
         return "\n\n".join(sections)
+
+    def _available_subagents(self) -> dict[str, str]:
+        from bos.core import AgentRegistry
+
+        available = dict(AgentRegistry.describe())
+        available.pop("_default", None)
+        return _pick_collection(available, self._enabled, self._disabled)
 
     def get_interceptors(self) -> Sequence[TurnInterceptor]:
         return []
