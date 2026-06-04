@@ -21,7 +21,7 @@ from bos.core.contract import ep_consolidator, ep_tool
 from bos.core.registry import ToolRegistry
 from bos.plugins.memory import MemoryAgentPlugin
 from bos.plugins.skills import SkillMeta, SkillsAgentPlugin
-from bos.plugins.subagent import SubagentAgentPlugin
+from bos.plugins.subagent import SubagentAgentPlugin, SubagentHarnessPlugin
 from bos.plugins.task import TaskAgentPlugin
 
 
@@ -32,10 +32,16 @@ class _MockSubagentRuntime:
 
 def test_react_agent_local_tools_describe_ask_subagent(caplog):
     local_tools = ToolRegistry("test tools")
-    subagent = SubagentAgentPlugin(_MockSubagentRuntime(), enabled=None, disabled=[])
+    role = f"ask_subagent_tool_{uuid.uuid4().hex}"
 
-    with caplog.at_level(logging.WARNING):
-        agent = create_test_agent(local_tools=local_tools, plugins=[subagent])
+    try:
+        AgentRegistry.register(name=role, description="Available subagent", tools=[])
+        subagent = SubagentAgentPlugin(_MockSubagentRuntime(), enabled=None, disabled=[])
+
+        with caplog.at_level(logging.WARNING):
+            agent = create_test_agent(local_tools=local_tools, plugins=[subagent])
+    finally:
+        AgentRegistry._registry.pop(role, None)
 
     assert local_tools.get("AskSubagent") is not None
     ask_subagent = agent._local_tools.get("AskSubagent")
@@ -52,6 +58,88 @@ def test_react_agent_local_tools_describe_ask_subagent(caplog):
     assert agent._local_tools.get("SearchSkills") is None
 
 
+@pytest.mark.asyncio
+async def test_subagent_plugin_hides_prompt_and_tool_when_no_subagents():
+    snapshot = dict(AgentRegistry._registry)
+    AgentRegistry._registry.clear()
+    try:
+        AgentRegistry.register(name="_default", description="Default agent", tools=[])
+        local_tools = ToolRegistry("test tools")
+        subagent = SubagentAgentPlugin(_MockSubagentRuntime(), enabled=None, disabled=[])
+
+        agent = create_test_agent(local_tools=local_tools, plugins=[subagent])
+
+        assert agent._local_tools.get("AskSubagent") is None
+        assert await subagent.get_system_prompt_section(None) is None
+        assert "AskSubagent" not in await agent._prompt_section_tools()
+        assert "<subagent_workflow>" not in await agent._build_system_prompt()
+    finally:
+        AgentRegistry._registry.clear()
+        AgentRegistry._registry.update(snapshot)
+
+
+@pytest.mark.asyncio
+async def test_subagent_plugin_string_star_matches_list_star():
+    role = f"string_star_subagent_{uuid.uuid4().hex}"
+    provider = SubagentHarnessPlugin()
+    provider._runtime = _MockSubagentRuntime()
+
+    try:
+        AgentRegistry.register(name=role, description="String star subagent", tools=[])
+        provider.validate_config({"enabled": "*"})
+        plugin = provider.bind({"enabled": "*"})
+        agent = create_test_agent(plugins=[plugin])
+
+        assert agent._local_tools.get("AskSubagent") is not None
+        prompt_section = await plugin.get_system_prompt_section(None)
+        assert prompt_section is not None
+        assert "<subagent_workflow>" in prompt_section
+        assert f'<agent role="{role}">String star subagent</agent>' in prompt_section
+    finally:
+        AgentRegistry._registry.pop(role, None)
+
+
+@pytest.mark.asyncio
+async def test_harness_binds_subagent_plugin_bindings_from_validated_config(tmp_path):
+    role = f"configured_subagent_{uuid.uuid4().hex}"
+    snapshot = dict(AgentRegistry._registry)
+    AgentRegistry._registry.clear()
+    try:
+        ws = Workspace(
+            tmp_path,
+            tmp_path / ".bos",
+            {
+                "agent": {
+                    "defaults": {
+                        "plugin-bindings": {
+                            "SubagentPlugin": {
+                                "enabled": ["*"],
+                            }
+                        }
+                    }
+                },
+                "agents": {
+                    role: {
+                        "system_prompt": "You are a configured helper.",
+                    }
+                },
+            },
+        )
+        ws.bos_dir.mkdir(parents=True, exist_ok=True)
+        ws.bootstrap_platform()
+
+        async with ws.harness() as harness:
+            agent = await harness.create_agent("_default")
+            prompt = await agent._build_system_prompt()
+
+        assert agent._local_tools.get("AskSubagent") is not None
+        assert "<subagent_workflow>" in prompt
+        assert f'<agent role="{role}"></agent>' in prompt
+    finally:
+        AgentRegistry._registry.clear()
+        AgentRegistry._registry.update(snapshot)
+
+
 
 @pytest.mark.asyncio
 async def test_harness_create_agent_defaults_to_no_capabilities(tmp_path):
@@ -65,6 +153,78 @@ async def test_harness_create_agent_defaults_to_no_capabilities(tmp_path):
 
         assert agent._tools == []
         assert agent._get_tool_defs() == []
+
+
+@pytest.mark.asyncio
+async def test_agent_history_attribution_is_disabled_by_default():
+    store = InMemChatStore()
+    await store.commit_turn(
+        "shared",
+        [
+            Message(
+                llm_message={"role": "assistant", "content": "main says hi"},
+                metadata={"agent_name": "main"},
+            ),
+        ],
+        turn_id="turn-1",
+    )
+    agent = create_test_agent(agent_name="libai", chat_store=store)
+
+    history = await agent._load_and_compact_history("shared", budget_model=None)
+
+    assert history == [{"role": "assistant", "content": "main says hi"}]
+
+
+@pytest.mark.asyncio
+async def test_agent_history_formats_agent_attribution_when_enabled():
+    store = InMemChatStore()
+    await store.commit_turn(
+        "shared",
+        [
+            Message(
+                llm_message={"role": "user", "content": "hello"},
+                metadata={"target_agent": "libai", "target_display": "Li Bai"},
+            ),
+            Message(
+                llm_message={"role": "assistant", "content": "a poem"},
+                metadata={"agent_name": "libai", "agent_display": "Li Bai"},
+            ),
+            Message(
+                llm_message={"role": "assistant", "content": "main says hi"},
+                metadata={"agent_name": "main"},
+            ),
+        ],
+        turn_id="turn-1",
+    )
+    agent = create_test_agent(agent_name="libai", chat_store=store, history_attribution=True)
+
+    history = await agent._load_and_compact_history("shared", budget_model=None)
+
+    assert history[0]["content"] == "[user -> Li Bai]\nhello"
+    assert history[1]["content"] == "[assistant: Li Bai]\na poem"
+    assert history[1]["role"] == "assistant"
+    assert history[2]["role"] == "user"
+    assert history[2]["content"] == "[assistant main said]\nmain says hi"
+
+
+@pytest.mark.asyncio
+async def test_agent_history_attribution_reads_legacy_actor_metadata():
+    store = InMemChatStore()
+    await store.commit_turn(
+        "shared",
+        [
+            Message(
+                llm_message={"role": "assistant", "content": "legacy"},
+                metadata={"actor": "main"},
+            ),
+        ],
+        turn_id="turn-1",
+    )
+    agent = create_test_agent(agent_name="libai", chat_store=store, history_attribution=True)
+
+    history = await agent._load_and_compact_history("shared", budget_model=None)
+
+    assert history == [{"role": "user", "content": "[assistant main said]\nlegacy"}]
 
 
 @pytest.mark.asyncio
@@ -98,7 +258,7 @@ async def test_registered_agent_star_capabilities_enable_all(tmp_path):
             name=agent_name,
             description="Open",
             system_prompt="Use everything.",
-            tools="*",
+            tools=None,
         )
 
         async with AgentHarness(
@@ -117,7 +277,7 @@ async def test_registered_agent_star_capabilities_enable_all(tmp_path):
 def test_registered_agent_rejects_unknown_capability_string():
     agent_name = f"bad_caps_{uuid.uuid4().hex}"
 
-    with pytest.raises(TypeError, match="tools must be a dict, list"):
+    with pytest.raises(TypeError, match="tools must be a list or None"):
         AgentRegistry.register(name=agent_name, tools="all")
 
 
@@ -820,7 +980,7 @@ def test_bootstrap_platform_does_not_require_consolidator_model(tmp_path, monkey
 
     bos_dir = tmp_path / ".bos"
     bos_dir.mkdir(parents=True, exist_ok=True)
-    ws = Workspace(tmp_path, bos_dir, {"runtime": {"agent": "_default", "location": "process"}})
+    ws = Workspace(tmp_path, bos_dir, {"runtime": {"location": "process", "actors": {"main": {"agent": "_default"}}}})
     ws.bootstrap_platform()
 
 
@@ -882,9 +1042,10 @@ async def test_agent_auto_compaction_passes_message_objects(monkeypatch):
 
     store = InMemChatStore()
     consolidator = MessageOnlyConsolidator()
-    await store.save_turn(
+    await store.commit_turn(
         "compact-chat",
         [Message(llm_message={"role": "user", "content": "large history"})],
+        turn_id="seed-turn",
     )
 
     real_get_context = store.get_context

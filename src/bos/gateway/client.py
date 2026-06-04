@@ -1,4 +1,4 @@
-"""HttpChannelClient — WebSocket client for connecting to a running HttpChannel.
+"""GatewayClient — WebSocket client for connecting to a running BOS gateway.
 
 This module has no extension point registrations — safe to import standalone
 without triggering any server-side or ``ep_channel`` side effects.
@@ -18,8 +18,7 @@ from urllib.parse import urlencode
 
 from aiohttp import WSMsgType
 
-from bos.extensions.channels.http import WS_TAKEOVER_CLOSE_CODE, WS_TAKEOVER_CLOSE_REASON
-from bos.protocol import Envelope, MessageContent, MessageType
+from bos.protocol import WS_TAKEOVER_CLOSE_CODE, WS_TAKEOVER_CLOSE_REASON, Envelope, MessageContent, MessageType
 
 # Type alias for the optional endpoint resolver callback.
 # Returns (host, port) or None if the endpoint cannot be determined.
@@ -41,8 +40,8 @@ def _envelope_to_dict(env: Envelope) -> dict[str, Any]:
     return d
 
 
-class HttpChannelClient:
-    """aiohttp WebSocket client for connecting to a running HttpChannel.
+class GatewayClient:
+    """aiohttp WebSocket client for connecting to a running BOS gateway.
 
     Used by ``boscli tui`` to send/receive envelopes over WebSocket without
     direct mailbox access or any server-side imports.
@@ -52,7 +51,7 @@ class HttpChannelClient:
 
     Example::
 
-        client = HttpChannelClient(host="127.0.0.1", port=5920, address="tui")
+        client = GatewayClient(host="127.0.0.1", port=5920, address="tui")
         await client.connect()
         await client.send("hello")
         reply = await client.receive()
@@ -65,19 +64,22 @@ class HttpChannelClient:
         port: int,
         address: str = "tui",
         *,
-        client_id: str | None = None,
+        channel_id: str | None = None,
         chat_id: str | None = None,
         endpoint_resolver: EndpointResolver | None = None,
+        api_key: str | None = None,
     ) -> None:
         self._host = host
         self._port = port
         self._endpoint_resolver = endpoint_resolver
         self._rebuild_urls()
         self._address = address
-        self._client_id = (client_id or address or uuid.uuid4().hex).strip()
+        self._channel_id = (channel_id or address or uuid.uuid4().hex).strip()
+        self._api_key = api_key
         self._chat_id = (
             chat_id.strip() if isinstance(chat_id, str) and chat_id else None
         )
+        self._current_revision = 0
         self._session: Any = None
         self._ws: Any = None
         self._recv_queue: asyncio.Queue[Envelope] = asyncio.Queue()
@@ -109,11 +111,19 @@ class HttpChannelClient:
 
     @property
     def client_id(self) -> str:
-        return self._client_id
+        return self._channel_id
+
+    @property
+    def channel_id(self) -> str:
+        return self._channel_id
 
     @property
     def chat_id(self) -> str | None:
         return self._chat_id
+
+    @property
+    def current_revision(self) -> int:
+        return self._current_revision
 
     def update_chat_id(self, chat_id: str) -> None:
         if not chat_id:
@@ -124,7 +134,7 @@ class HttpChannelClient:
         """Open the WebSocket connection and start the background reader."""
         await self._do_connect(takeover=takeover)
         self._reader_task = asyncio.create_task(self._reader_loop())
-        logger.debug("HttpChannelClient connected to %s (address=%r)", self._url, self._address)
+        logger.debug("GatewayClient connected to %s (address=%r)", self._url, self._address)
 
     async def _do_connect(self, *, takeover: bool = False) -> None:
         """Low-level connect (or reconnect). Creates session + WS."""
@@ -136,8 +146,8 @@ class HttpChannelClient:
         if self._session and not self._session.closed:
             await self._session.close()
 
-        self._session = aiohttp.ClientSession()
-        query: dict[str, str] = {"client_id": self._client_id}
+        self._session = aiohttp.ClientSession(headers=self._auth_headers())
+        query: dict[str, str] = {"channel_id": self._channel_id}
         if self._chat_id:
             query["chat_id"] = self._chat_id
         if takeover:
@@ -150,17 +160,18 @@ class HttpChannelClient:
     async def _receive_session_ack(self) -> None:
         msg = await self._ws.receive(timeout=5)
         if msg.type != WSMsgType.TEXT:
-            raise RuntimeError("HttpChannel did not send session acknowledgement.")
+            raise RuntimeError("Gateway did not send session acknowledgement.")
         data = json.loads(msg.data)
         metadata = data.get("metadata") or {}
         if data.get("content_type") != MessageType.SYSTEM or metadata.get("event") != "session":
-            raise RuntimeError("HttpChannel sent an invalid session acknowledgement.")
-        client_id = metadata.get("client_id")
+            raise RuntimeError("Gateway sent an invalid session acknowledgement.")
+        channel_id = metadata.get("channel_id")
         chat_id = metadata.get("chat_id") or data.get("chat_id")
-        if isinstance(client_id, str) and client_id:
-            self._client_id = client_id
+        if isinstance(channel_id, str) and channel_id:
+            self._channel_id = channel_id
         if isinstance(chat_id, str) and chat_id:
             self._chat_id = chat_id
+        self._ingest_revision(metadata)
 
     async def _reconnect(self) -> None:
         """Reconnect with exponential backoff. Blocks until connected or closed."""
@@ -213,6 +224,7 @@ class HttpChannelClient:
                                 timestamp=ts,
                                 metadata=data.get("metadata", {}),
                             )
+                            self._ingest_revision(env.metadata)
                             await self._recv_queue.put(env)
                         except Exception as exc:
                             logger.debug("Client reader error: %s", exc)
@@ -252,6 +264,8 @@ class HttpChannelClient:
                 await asyncio.wait_for(self._connected.wait(), timeout=15)
             except asyncio.TimeoutError:
                 raise RuntimeError("Not connected — reconnect timed out")
+        out_metadata = dict(metadata or {})
+        out_metadata.setdefault("base_revision", self._current_revision)
         await self._ws.send_json(
             _envelope_to_dict(
                 Envelope(
@@ -259,8 +273,8 @@ class HttpChannelClient:
                     recipient="",
                     content=content,
                     content_type=content_type,
-                    chat_id=chat_id,
-                    metadata=metadata or {},
+                    chat_id=chat_id or self._chat_id,
+                    metadata=out_metadata,
                 )
             )
         )
@@ -278,7 +292,7 @@ class HttpChannelClient:
 
     async def upload_image(self, path: str | Path) -> dict[str, Any]:
         if self._session is None or self._session.closed:
-            raise RuntimeError("Not connected — connect the HttpChannelClient before uploading images.")
+            raise RuntimeError("Not connected — connect the gateway client before uploading images.")
 
         upload_path = Path(path).expanduser().resolve()
         if not upload_path.is_file():
@@ -298,14 +312,26 @@ class HttpChannelClient:
         return payload["part"]
 
     async def list_actors(self) -> dict[str, dict[str, Any]]:
-        """Fetch the list of available named actors from the server."""
+        """Fetch the list of available actors from the gateway."""
         if self._session is None or self._session.closed:
-            raise RuntimeError("Not connected — connect the HttpChannelClient before listing actors.")
+            raise RuntimeError("Not connected — connect the gateway client before listing actors.")
         async with self._session.get(f"{self._http_base_url}/api/actors") as response:
             payload = await response.json()
         if response.status >= 400:
             raise RuntimeError(payload.get("error") or f"List actors failed with HTTP {response.status}")
         return payload.get("actors", {})
+
+    def _auth_headers(self) -> dict[str, str]:
+        return {"Authorization": f"Bearer {self._api_key}"} if self._api_key else {}
+
+    def _ingest_revision(self, metadata: dict[str, Any]) -> None:
+        revision = _coerce_revision(metadata.get("current_revision"))
+        if revision is None:
+            payload = metadata.get("payload")
+            if isinstance(payload, dict):
+                revision = _coerce_revision(payload.get("current_revision"))
+        if revision is not None:
+            self._current_revision = revision
 
     async def aclose(self) -> None:
         """Close the WebSocket connection and clean up."""
@@ -318,4 +344,12 @@ class HttpChannelClient:
             await self._ws.close()
         if self._session and not self._session.closed:
             await self._session.close()
-        logger.debug("HttpChannelClient disconnected")
+        logger.debug("GatewayClient disconnected")
+
+
+def _coerce_revision(raw: Any) -> int | None:
+    if isinstance(raw, int):
+        return raw
+    if isinstance(raw, str) and raw.isdigit():
+        return int(raw)
+    return None

@@ -34,18 +34,47 @@ class SessionState:
     interrupts: list[Envelope] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class ActorTurnContext:
+    chat_id: str
+    actor_name: str
+    actor_address: str
+    turn_id: str
+    reply_recipient: str
+    inbound_env: Envelope | None = None
+    base_revision: int | None = None
+    channel_ref: Any | None = None
+
+
+@dataclass(frozen=True)
+class ActorTurnResult:
+    status: str
+    committed_revision: int | None = None
+    error: BaseException | None = None
+
+
 class _RouteAwareMailboxEventSink(MailboxEventSink):
-    def __init__(self, mailbox: MailBox, recipient: str, chat_id: str | None) -> None:
+    def __init__(
+        self,
+        mailbox: MailBox,
+        recipient: str,
+        chat_id: str | None,
+        channel_metadata: dict[str, Any] | None = None,
+    ) -> None:
         super().__init__(mailbox, recipient)
         self._chat_id = chat_id
+        self._channel_metadata = dict(channel_metadata or {})
 
     async def emit(self, event: TurnEvent) -> None:
+        metadata = {"turn_id": event.turn_id, "event_type": event.event_type}
+        if self._channel_metadata:
+            metadata["channel"] = self._channel_metadata
         await self._mailbox.send(
             self._recipient,
             json.dumps(event.to_payload(), default=str),
             content_type=MessageType.TURN_EVENT,
             chat_id=self._chat_id,
-            metadata={"turn_id": event.turn_id, "event_type": event.event_type},
+            metadata=metadata,
         )
 
 
@@ -114,10 +143,12 @@ class AgentActor:
                         session.execution.reply_recipient = env.sender
                         session.execution.reply_chat_id = env.chat_id
                         generation = session.execution.generation
+                        turn_id = uuid.uuid4().hex
                         session.execution.task = asyncio.create_task(
                             self._run_ask(
                                 chat_id=chat_id,
                                 generation=generation,
+                                turn_id=turn_id,
                                 reply_recipient=env.sender,
                                 reply_chat_id=env.chat_id,
                                 content=env.content,
@@ -243,27 +274,80 @@ class AgentActor:
         *,
         chat_id: str,
         generation: int,
+        turn_id: str,
         reply_recipient: str,
         reply_chat_id: str | None,
         content: MessageContent,
         inbound_env: Envelope | None = None,
     ) -> None:
         token: contextvars.Token | None = None
+        committed_revision: int | None = None
+        turn_ctx = ActorTurnContext(
+            chat_id=chat_id,
+            actor_name=self._actor_name(),
+            actor_address=self._address,
+            turn_id=turn_id,
+            reply_recipient=reply_recipient,
+            inbound_env=inbound_env,
+            base_revision=self._base_revision(inbound_env),
+            channel_ref=self._channel_ref(inbound_env),
+        )
+
+        try:
+            await self._on_turn_started(turn_ctx)
+        except Exception as exc:
+            await self._mailbox.send(
+                reply_recipient,
+                f"(error: {exc})",
+                content_type=MessageType.SYSTEM,
+                chat_id=reply_chat_id,
+                metadata=self._reply_metadata(reply_recipient, inbound_env),
+            )
+            return
+
         try:
             token = CURRENT_MAILBOX.set(self._mailbox)
-            event_sink = _RouteAwareMailboxEventSink(self._mailbox, reply_recipient, reply_chat_id)
+            event_sink = _RouteAwareMailboxEventSink(
+                self._mailbox,
+                reply_recipient,
+                reply_chat_id,
+                self._channel_metadata(inbound_env),
+            )
+
+            def _observe_commit(commit: Any) -> None:
+                nonlocal committed_revision
+                committed_revision = getattr(commit, "revision", None)
+
             response = await self._agent.ask(
                 chat_id,
                 content,
+                turn_id=turn_id,
                 interrupt=self._make_interrupt(chat_id, generation),
                 ctx_metadata=self._turn_metadata(reply_recipient, inbound_env),
                 event_sink=event_sink,
+                commit_observer=_observe_commit,
             )
+        except asyncio.CancelledError as exc:
+            await self._on_turn_finished(
+                turn_ctx,
+                ActorTurnResult(status="aborted", committed_revision=committed_revision, error=exc),
+            )
+            raise
+        except Exception as exc:
+            await self._on_turn_finished(
+                turn_ctx,
+                ActorTurnResult(status="error", committed_revision=committed_revision, error=exc),
+            )
+            raise
         finally:
             if token is not None:
                 CURRENT_MAILBOX.reset(token)
 
         if not self._execution_is_current(chat_id, generation):
+            await self._on_turn_finished(
+                turn_ctx,
+                ActorTurnResult(status="stale", committed_revision=committed_revision),
+            )
             return
 
         metadata = self._reply_metadata(reply_recipient, inbound_env)
@@ -276,12 +360,66 @@ class AgentActor:
             response,
             **send_kwargs,
         )
+        await self._on_turn_finished(
+            turn_ctx,
+            ActorTurnResult(status="completed", committed_revision=committed_revision),
+        )
+
+    async def _on_turn_started(self, ctx: ActorTurnContext) -> None:
+        pass
+
+    async def _on_turn_finished(self, ctx: ActorTurnContext, result: ActorTurnResult) -> None:
+        pass
 
     def _turn_metadata(self, reply_recipient: str, inbound_env: Envelope | None = None) -> dict[str, Any]:
-        return {"sender": reply_recipient, "actor_address": self._address}
+        metadata: dict[str, Any] = {"sender": reply_recipient, "actor_address": self._address}
+        actor_name = self._actor_name()
+        metadata["assistant_message_metadata"] = {
+            "agent_name": actor_name,
+            "actor_address": self._address,
+        }
+        if inbound_env is not None:
+            target_actor = inbound_env.metadata.get("target_agent") or inbound_env.metadata.get("target_actor")
+            target_display = inbound_env.metadata.get("target_display")
+            if isinstance(target_actor, str) and target_actor:
+                user_metadata: dict[str, Any] = {"target_agent": target_actor}
+                if isinstance(target_display, str) and target_display:
+                    user_metadata["target_display"] = target_display
+                metadata["user_message_metadata"] = user_metadata
+                if target_actor == actor_name and isinstance(target_display, str) and target_display:
+                    metadata["assistant_message_metadata"]["agent_display"] = target_display
+        return metadata
 
     def _reply_metadata(self, reply_recipient: str, inbound_env: Envelope | None = None) -> dict[str, Any]:
-        return {}
+        channel = self._channel_metadata(inbound_env)
+        return {"channel": channel} if channel else {}
+
+    @staticmethod
+    def _channel_metadata(inbound_env: Envelope | None = None) -> dict[str, Any]:
+        if inbound_env is None:
+            return {}
+        channel = inbound_env.metadata.get("channel")
+        return dict(channel) if isinstance(channel, dict) else {}
+
+    @staticmethod
+    def _base_revision(inbound_env: Envelope | None = None) -> int | None:
+        if inbound_env is None:
+            return None
+        raw = inbound_env.metadata.get("base_revision")
+        if isinstance(raw, int):
+            return raw
+        if isinstance(raw, str) and raw.isdigit():
+            return int(raw)
+        return None
+
+    @staticmethod
+    def _channel_ref(inbound_env: Envelope | None = None) -> dict[str, Any] | None:
+        channel = AgentActor._channel_metadata(inbound_env)
+        return channel or None
+
+    def _actor_name(self) -> str:
+        name = getattr(self._agent, "name", None)
+        return str(name) if name is not None else self._address.removeprefix("agent@")
 
     async def _handle_command(self, env: Envelope) -> None:
         command_content = self._command_content(env)
@@ -318,10 +456,14 @@ class AgentActor:
 
     @staticmethod
     def _command_result_metadata(env: Envelope) -> dict[str, Any]:
+        metadata: dict[str, Any] = {}
         routing = env.metadata.get("routing")
         if isinstance(routing, dict) and routing:
-            return {"routing": routing}
-        return {}
+            metadata["routing"] = routing
+        channel = env.metadata.get("channel")
+        if isinstance(channel, dict) and channel:
+            metadata["channel"] = dict(channel)
+        return metadata
 
     @staticmethod
     def _command_content(env: Envelope) -> str | None:

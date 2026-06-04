@@ -53,7 +53,11 @@ def test_agent_defaults_merged_into_agents(tmp_path):
 
 def test_default_agent_registered_from_python_spec(tmp_path):
     """_default agent is registered from Python default_agent_spec when no TOML override."""
-    ws = Workspace(tmp_path, tmp_path / ".bos", {"runtime": {"agent": "_default", "location": "process"}})
+    ws = Workspace(
+        tmp_path,
+        tmp_path / ".bos",
+        {"runtime": {"location": "process", "actors": {"main": {"agent": "_default"}}}},
+    )
     ws.bootstrap_platform()
     assert AgentRegistry.has_registered("_default")
     defaults = AgentRegistry.get_defaults("_default")
@@ -227,7 +231,7 @@ def test_bootstrap_registers_both_inline_and_external_agents(tmp_path):
     config = {
         "platform": {"agent_dirs": ["./agents"]},
         "agents": {"main": {"system_prompt": "Main"}},
-        "runtime": {"agent": "main", "location": "process"},
+        "runtime": {"location": "process", "actors": {"main": {"agent": "main"}}},
     }
     ws = Workspace(tmp_path, bos_dir, config)
     ws.resolve_agents()

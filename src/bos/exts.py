@@ -33,7 +33,6 @@ import bos.core.defaults  # noqa: F401
 import bos.extensions.actor_commands.system_cmd  # noqa: F401
 
 # Channels
-import bos.extensions.channels.http  # noqa: F401
 import bos.extensions.channels.telegram  # noqa: F401
 
 # Chat stores

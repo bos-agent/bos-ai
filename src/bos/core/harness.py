@@ -38,28 +38,19 @@ class AgentRegistry:
 
     @classmethod
     def register(cls, name: str, description: str | None = None, **kwargs):
-        def _resolve_tools(value):
-            if isinstance(value, dict):
-                # BEP6 structured format: {enabled, disabled, usages}
-                enabled = value.get("enabled", [])
-                return None if "*" in enabled else enabled
-            if isinstance(value, list):
-                return value
-            if value is None:
-                return []
-            if value == "*":
-                return None  # fully open the capability
-            raise TypeError(f"tools must be a dict, list, '*', or None, got {type(value).__name__}")
+        if "tools" not in kwargs:
+            kwargs["tools"] = []
+        elif (tools := kwargs["tools"]) is not None and not isinstance(tools, list):
+            raise TypeError(f"tools must be a list or None, got {type(tools).__name__}")
 
-        def _resolve_plugins(value):
-            if isinstance(value, dict):
-                return value
-            if value is None:
-                return {"enabled": [], "disabled": [], "prompts": {}}
-            raise TypeError(f"plugins must be a dict or None, got {type(value).__name__}")
+        plugins = kwargs.get("plugins")
+        if plugins is None:
+            kwargs["plugins"] = {"enabled": [], "disabled": [], "prompts": {}}
+        elif not isinstance(plugins, dict):
+            raise TypeError(f"plugins must be a dict or None, got {type(plugins).__name__}")
 
-        kwargs["tools"] = _resolve_tools(kwargs.get("tools"))
-        kwargs["plugins"] = _resolve_plugins(kwargs.get("plugins"))
+        kwargs.setdefault("tools", [])
+        kwargs.setdefault("plugins", {"enabled": [], "disabled": [], "prompts": {}})
         kwargs["kind"] = name
         cls._registry[name] = {
             "defaults": kwargs,

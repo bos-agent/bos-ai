@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import os
@@ -110,6 +111,49 @@ class TurnContext:
         return self.final_content or self.current[-1].llm_message["content"] if self.current else "(no response)"
 
 
+def _attribute_history_message(projected: dict[str, Any], source: Message, *, current_agent: str) -> dict[str, Any]:
+    content = projected.get("content")
+    if not isinstance(content, str):
+        return projected
+    role = projected.get("role")
+    if role == "assistant":
+        source_agent = _metadata_str(source.metadata, "agent_name", "actor")
+        if source_agent and source_agent != current_agent:
+            label = _history_agent_label(source.metadata) or source_agent
+            return projected | {
+                "role": "user",
+                "content": f"[assistant {label} said]\n{content}",
+            }
+    label = _history_attribution_label(role, source.metadata)
+    if not label:
+        return projected
+    return projected | {"content": f"{label}\n{content}"}
+
+
+def _history_attribution_label(role: Any, metadata: dict[str, Any]) -> str | None:
+    if role == "assistant":
+        label = _history_agent_label(metadata)
+        if label:
+            return f"[assistant: {label}]"
+    if role == "user":
+        target = _metadata_str(metadata, "target_display") or _metadata_str(metadata, "target_agent", "target_actor")
+        if target:
+            return f"[user -> {target}]"
+    return None
+
+
+def _history_agent_label(metadata: dict[str, Any]) -> str | None:
+    return _metadata_str(metadata, "agent_display", "actor_display") or _metadata_str(metadata, "agent_name", "actor")
+
+
+def _metadata_str(metadata: dict[str, Any], *keys: str) -> str | None:
+    for key in keys:
+        value = metadata.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
 class AbortTurn(Exception):
     pass
 
@@ -212,6 +256,7 @@ class Agent:
         max_iterations: int = 25,
         tool_noise_filter: ToolNoiseFilter | None = None,
         chat_compaction_lock: Callable[[str], AbstractAsyncContextManager] | None = None,
+        history_attribution: bool = False,
     ):
         if system_prompt is not None and not isinstance(system_prompt, str):
             raise TypeError("system_prompt must be a string or None")
@@ -234,6 +279,7 @@ class Agent:
         self._current_context: TurnContext | None = None
         self._tool_noise_filter = tool_noise_filter
         self._compaction_lock = chat_compaction_lock
+        self._history_attribution = history_attribution
 
         # Compose interceptors: plugin interceptors first, then configured harness/workspace interceptors
         plugin_interceptors = [i for plugin in self._plugins for i in plugin.get_interceptors()]
@@ -258,6 +304,8 @@ class Agent:
         ctx_metadata: dict[str, Any] | None = None,
         llm_args: dict[str, Any] | None = None,
         event_sink: EventSink | None = None,
+        turn_id: str | None = None,
+        commit_observer: Callable[[Any], Any | Awaitable[Any]] | None = None,
     ) -> str:
         llm_params = {
             "model": self._model,
@@ -268,7 +316,7 @@ class Agent:
         ctx = TurnContext(
             agent_name=self._name,
             chat_id=chat_id,
-            turn_id=uuid.uuid4().hex,
+            turn_id=turn_id or uuid.uuid4().hex,
             history=await self._load_and_compact_history(chat_id, budget_model=budget_model),
             tool_defs=self._get_tool_defs(),
             event_sink=event_sink,
@@ -286,9 +334,16 @@ class Agent:
 
         cache_index = 0
 
+        def _message_metadata(message: dict[str, Any], metadata: dict[str, Any] | None = None) -> dict[str, Any] | None:
+            if metadata is not None:
+                return metadata
+            if message.get("role") == "assistant" and isinstance(ctx.metadata.get("assistant_message_metadata"), dict):
+                return ctx.metadata["assistant_message_metadata"]
+            return None
+
         def _add_message(message: dict[str, Any], metadata: dict[str, Any] | None = None) -> None:
             nonlocal cache_index
-            ctx.add_message(_compact(message), **(metadata or {}))
+            ctx.add_message(_compact(message), **(_message_metadata(message, metadata) or {}))
             cache_index -= 1
 
         def _cache_control_injection_points() -> list[dict[str, Any]]:
@@ -334,7 +389,11 @@ class Agent:
             else:
                 messages = ctx.current
             if messages:
-                await self._chat_store.save_turn(chat_id, messages, turn_id=ctx.turn_id)
+                commit = await self._chat_store.commit_turn(chat_id, messages, turn_id=ctx.turn_id)
+                if commit_observer is not None:
+                    result = commit_observer(commit)
+                    if inspect.isawaitable(result):
+                        await result
 
         async def _run_interceptor(stage: str):
             try:
@@ -607,7 +666,14 @@ class Agent:
 
     def _format_history(self, result: ContextResult) -> list[dict[str, Any]]:
         """Hook for subclasses to customise history projection (e.g. attribution labels)."""
-        return result.messages
+        if not self._history_attribution:
+            return result.messages
+        if len(result.messages) != len(result.source_messages):
+            return result.messages
+        return [
+            _attribute_history_message(projected, source, current_agent=self._name)
+            for projected, source in zip(result.messages, result.source_messages, strict=True)
+        ]
 
     async def _build_system_prompt(self) -> str:
         system_sections = [self._system_prompt]

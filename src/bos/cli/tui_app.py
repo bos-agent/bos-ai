@@ -1,12 +1,12 @@
-"""Textual Chat Application — connects to a running agent via channel.
+"""Textual Chat Application — connects to a running BOS gateway.
 
-This TUI is a pure external client. It communicates with the agent process
-exclusively through ``HttpChannelClient`` over WebSocket. It never imports or
-references the agent, harness, or actor directly.
+This TUI is a pure external client. It communicates with the gateway over
+WebSocket through ``GatewayClient``. It never imports or references the
+agent, harness, or actor directly.
 
 Slash commands that need server-side data (``/history``, ``/compact``, etc.)
 send a ``content_type="command"`` envelope and wait for a ``command_result``
-response from the channel server.
+response from the gateway channel.
 """
 
 from __future__ import annotations
@@ -24,9 +24,8 @@ from textual.message import Message
 from textual.widgets import Footer, Header, Input, RichLog, Static
 from textual_autocomplete import AutoComplete, DropdownItem
 
-from bos.extensions.channels.http import WS_TAKEOVER_CLOSE_REASON
-from bos.extensions.channels.http_client import HttpChannelClient
-from bos.protocol import MessageType, TurnEvent
+from bos.gateway.client import GatewayClient
+from bos.protocol import WS_TAKEOVER_CLOSE_REASON, MessageType, TurnEvent
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +40,7 @@ def _turn_event_label(event: TurnEvent) -> str:
 
 
 class TurnEventMessage(Message):
-    """Structured runtime event forwarded from the agent process via the channel."""
+    """Structured runtime event forwarded from the gateway channel."""
 
     def __init__(self, event: TurnEvent) -> None:
         super().__init__()
@@ -112,7 +111,7 @@ class SlashAutoComplete(AutoComplete):
 class ChatApp(App):
     """Full-screen agent chat — channel-mode only.
 
-    Communicates with the agent process via ``HttpChannelClient``.
+    Communicates with the gateway via ``GatewayClient``.
     """
 
     TITLE = "boscli tui"
@@ -193,14 +192,14 @@ class ChatApp(App):
 
     def __init__(
         self,
-        client: HttpChannelClient,
+        client: GatewayClient,
         *,
         local_mode: bool = False,
     ) -> None:
         super().__init__()
         self._client = client
         if not client.chat_id:
-            raise ValueError("HttpChannelClient must be connected and session-acknowledged before launching ChatApp.")
+            raise ValueError("Gateway client must be connected and session-acknowledged before launching ChatApp.")
         self._chat_id = client.chat_id
         self._busy = False
         self._buffer: list[str] = []
@@ -353,7 +352,7 @@ class ChatApp(App):
             self._write_system(f"[yellow]⚠ Send failed — reconnecting: {exc}[/]")
 
     async def on_turn_event_message(self, message: TurnEventMessage) -> None:
-        """Handle structured runtime events from the agent process."""
+        """Handle structured runtime events from the gateway channel."""
         event = message.event
         log = self.query_one("#chat", RichLog)
         label = _turn_event_label(event)
@@ -478,7 +477,7 @@ class ChatApp(App):
                 "  /tokens   — rough token estimate\n"
                 "  /chats    — list all chats\n"
                 "  /clear    — clear the log\n"
-                "  /restart  — restart the agent process\n"
+                "  /restart  — restart the gateway\n"
                 "\n"
                 "[bold]Hot keys:[/]\n"
                 "  Escape      — abort the current turn\n"
@@ -486,7 +485,7 @@ class ChatApp(App):
                 "  Ctrl+C      — quit\n"
                 "  Ctrl+L      — clear the log\n"
                 "  Ctrl+N      — start a new chat\n"
-                "  Ctrl+R      — restart the agent process"
+                "  Ctrl+R      — restart the gateway"
             )
 
         elif normalized_cmd == "/new":
@@ -546,7 +545,7 @@ class ChatApp(App):
 
     async def action_restart_bos(self) -> None:
         """Restart the background BOS agent."""
-        self._write_system("[yellow]↻ Restarting agent process…[/]")
+        self._write_system("[yellow]↻ Restarting gateway…[/]")
         import sys
         try:
             process = await asyncio.create_subprocess_exec(
@@ -655,15 +654,15 @@ class ChatApp(App):
 
     def _chat_status_text(self) -> str:
         conn = self._connection_indicator()
-        return f"  {conn}  |  Chat: {self._chat_id}  |  Client: {self._client.client_id}"
+        return f"  {conn}  |  Chat: {self._chat_id}  |  Channel: {self._client.client_id}"
 
     def _header_subtitle(self) -> str:
         conn = "●" if self._conn_status == "connected" else "○ reconnecting"
-        return f"{conn}  HttpChannel | {self._chat_id}"
+        return f"{conn}  Gateway | {self._chat_id}"
 
     def _status_text(self) -> str:
         state = "● thinking" if self._busy else "○ ready"
-        return f"  HttpChannel  ·  {self._chat_id}  ·  {state}"
+        return f"  Gateway  ·  {self._chat_id}  ·  {state}"
 
     def _update_status(self) -> None:
         self.sub_title = self._header_subtitle()
@@ -689,17 +688,17 @@ class ChatApp(App):
 
 
 async def run_chat_tui(
-    client: HttpChannelClient,
+    client: GatewayClient,
     *,
     local_mode: bool = False,
 ) -> None:
-    """Launch the TUI connected to a running agent via channel.
+    """Launch the TUI connected to a running gateway.
 
-    ``client`` must be an ``HttpChannelClient`` that has already called
+    ``client`` must be an ``GatewayClient`` that has already called
     ``connect()``.
 
     When ``local_mode`` is True, slash commands and @mention autocomplete
-    are disabled since there is no server-side or named-actor support.
+    are disabled since there is no gateway channel support.
     """
     app = ChatApp(client=client, local_mode=local_mode)
     await app.run_async()

@@ -1,0 +1,39 @@
+# BOS team preset — starts the default assistant plus a creative Li Bai actor.
+# Runtime state is stored at ~/.bos/presets/team.
+
+[agents.poet]
+description = "The poet"
+system_prompt = """You are a world-class poet, who can create poems in any style and form. You are also a great
+storyteller and lyricist. Your job is to write creative content, including poems, songs, stories, and scripts.
+"""
+
+[agents.forex]
+description = "The forex analyst"
+system_prompt = """You are a senior foreign exchange analyst. Your primary objective is to analyze the forex
+market and deliver concise, actionable insights to users. You possess deep expertise in macroeconomics,
+trading strategies, and geopolitical factors affecting currency pairs.
+Your analysis should be objective, data-driven, and clearly articulated. You must identify key support and
+resistance levels, potential trend continuations or reversals, and risk considerations.
+Always present your findings in a structured format, summarizing the outlook for major currency pairs and
+official recommendations. Do not engage in idle conversation; focus strictly on providing high-quality
+forex market analysis.
+"""
+
+[runtime]
+location = "process"
+default_actor = "main"
+
+[runtime.gateway]
+host = "127.0.0.1"
+port = 5920
+api_key_env = "BOS_GATEWAY_API_KEY"
+
+[runtime.actors.main]
+agent = "_default"
+display_name = "Main"
+[runtime.actors.main.agent_cfg.plugin-bindings.SubagentPlugin]
+enabled = ["forex"]
+
+[runtime.actors.libai]
+agent = "poet"
+display_name = "Li Bai"

@@ -1,22 +1,19 @@
-"""TelegramChannel — Telegram Bot API bridge backed by a bound mailbox.
-
-Uses Bot API long polling via ``getUpdates`` and routes each Telegram chat to a
-stable BOS ``chat_id`` so replies can be delivered back to the correct
-chat when the actor responds on the shared channel address.
-"""
+"""TelegramChannel — Telegram Bot API bridge backed by a bound mailbox."""
 
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
+import os
 from collections.abc import Iterable
+from dataclasses import dataclass
 from typing import Any
 
 from aiohttp import ClientSession
 
-from bos.core import MailBox, ep_channel
-from bos.core.chat_state import ChatState
+from bos.core import BaseChannel, MailBox, ep_channel
+from bos.gateway import ChannelConversationRef, ChannelRuntimeContext
 from bos.protocol import Envelope, MessageType, TurnEvent
 
 logger = logging.getLogger(__name__)
@@ -24,8 +21,19 @@ logger = logging.getLogger(__name__)
 TELEGRAM_MESSAGE_LIMIT = 4096
 
 
-def _client_id_for_telegram_chat(telegram_chat_id: int | str) -> str:
-    return f"telegram:{telegram_chat_id}"
+@dataclass(frozen=True)
+class TelegramSettings:
+    token: str | None = None
+    token_env: str | None = None
+    bot_id: str | None = None
+    poll_timeout: int = 30
+    api_base: str = "https://api.telegram.org"
+    allowed_chat_ids: Iterable[int | str] | None = None
+    default_chat_id: int | str | None = None
+
+
+def _conversation_id_for_telegram_chat(telegram_chat_id: int | str) -> str:
+    return f"tg_chat:{telegram_chat_id}"
 
 
 def _normalize_command(text: str, bot_username: str | None = None) -> str:
@@ -75,10 +83,9 @@ def _extract_inbound_message(update: dict[str, Any], *, bot_username: str | None
         return None
 
     normalized = _normalize_command(text, bot_username)
-    client_id = _client_id_for_telegram_chat(telegram_chat_id)
     return {
-        "chat_id": telegram_chat_id,
-        "client_id": client_id,
+        "telegram_chat_id": str(telegram_chat_id),
+        "channel_conversation_id": _conversation_id_for_telegram_chat(telegram_chat_id),
         "text": normalized,
         "content_type": MessageType.COMMAND if normalized.startswith("/") else MessageType.MESSAGE,
     }
@@ -130,49 +137,57 @@ def _render_turn_event(event: TurnEvent) -> str | None:
 
 
 @ep_channel(name="TelegramChannel")
-class TelegramChannel:
+class TelegramChannel(BaseChannel[TelegramSettings]):
     """Telegram Bot API channel using long polling."""
+
+    SettingsType = TelegramSettings
 
     def __init__(
         self,
-        token: str,
-        target_address: str | None = None,
-        poll_timeout: int = 30,
-        api_base: str = "https://api.telegram.org",
-        allowed_chat_ids: Iterable[int | str] | None = None,
-        default_chat_id: int | str | None = None,
-        bos_dir: str | None = None,
-        chat_state_path: str | None = None,
+        *,
+        channel_id: str,
+        target_actor: str,
+        settings: TelegramSettings,
+        runtime: ChannelRuntimeContext,
+        display_name: str | None = None,
     ) -> None:
-        self._token = token
-        self._poll_timeout = int(poll_timeout)
-        self._api_base = api_base.rstrip("/")
-        self._allowed_chat_ids = {str(v) for v in (allowed_chat_ids or [])}
-        self._default_chat_id = str(default_chat_id or "").strip()
-        self.target_address = target_address
-        self._chat_state = ChatState(bos_dir=bos_dir, path=chat_state_path)
+        super().__init__(
+            channel_id=channel_id,
+            target_actor=target_actor,
+            display_name=display_name,
+            settings=settings,
+            runtime=runtime,
+        )
+        self._token = settings.token or (os.environ.get(settings.token_env or "") if settings.token_env else None)
+        self._poll_timeout = int(settings.poll_timeout)
+        self._api_base = settings.api_base.rstrip("/")
+        self._allowed_chat_ids = {str(v) for v in (settings.allowed_chat_ids or [])}
+        self._default_chat_id = str(settings.default_chat_id or "").strip()
+        self._bot_id = str(settings.bot_id or "").strip()
 
         self._session: ClientSession | None = None
         self._chat_to_telegram_chat: dict[str, str] = {}
-        self._client_to_telegram_chat: dict[str, str] = {}
+        self._conversation_to_telegram_chat: dict[str, str] = {}
         self._chat_to_status_message_id: dict[str, int] = {}
         self._chat_to_status_text: dict[str, str] = {}
         self._offset: int = 0
         self._bot_username: str | None = None
 
+    @property
+    def identity_key(self) -> str | None:
+        return f"telegram:bot:{self._bot_id}" if self._bot_id else None
+
     async def run(self, mailbox: MailBox) -> None:
         if not self._token:
-            raise ValueError("Telegram bot token is required.")
+            raise ValueError("Telegram bot token is required; set settings.token or settings.token_env.")
 
-        address = mailbox.address
-        target = self.target_address or address
         async with ClientSession(base_url=f"{self._api_base}/bot{self._token}/", raise_for_status=True) as session:
             self._session = session
             self._bot_username = await self._get_bot_username()
-            logger.info("TelegramChannel polling started for address=%r", address)
+            logger.info("TelegramChannel polling started for channel_id=%r", self.channel_id)
             try:
                 async with asyncio.TaskGroup() as tg:
-                    tg.create_task(self._poll_updates(mailbox, target), name="telegram:poll")
+                    tg.create_task(self._poll_updates(mailbox), name="telegram:poll")
                     tg.create_task(self._forward_replies(mailbox), name="telegram:send")
             except* asyncio.CancelledError:
                 logger.info("TelegramChannel stopped")
@@ -202,7 +217,7 @@ class TelegramChannel:
         username = result.get("username")
         return username if isinstance(username, str) else None
 
-    async def _poll_updates(self, mailbox: MailBox, target: str) -> None:
+    async def _poll_updates(self, mailbox: MailBox) -> None:
         while True:
             try:
                 data = await self._api_call(
@@ -222,27 +237,79 @@ class TelegramChannel:
                     inbound = _extract_inbound_message(update, bot_username=self._bot_username)
                     if inbound is None:
                         continue
-                    if self._allowed_chat_ids and str(inbound["chat_id"]) not in self._allowed_chat_ids:
-                        logger.info("Ignoring Telegram update from unauthorized chat_id=%s", inbound["chat_id"])
+                    telegram_chat_id = inbound["telegram_chat_id"]
+                    if self._allowed_chat_ids and telegram_chat_id not in self._allowed_chat_ids:
+                        logger.info("Ignoring Telegram update from unauthorized chat_id=%s", telegram_chat_id)
                         continue
 
-                    client_id = inbound["client_id"]
-                    chat_id = self._chat_state.resolve_for_client(client_id)
-                    telegram_chat_id = str(inbound["chat_id"])
-                    self._client_to_telegram_chat[client_id] = telegram_chat_id
+                    ref = ChannelConversationRef(self.channel_id, inbound["channel_conversation_id"])
+                    chat_id = self._runtime.chat_coordinator.get_cursor(ref)
+                    if chat_id is None:
+                        chat_id = self._runtime.chat_coordinator.new_chat(ref)
+                    observed_revision = self._runtime.chat_coordinator.observed_revision(chat_id=chat_id, ref=ref)
+                    if observed_revision is None:
+                        observed_revision = 0
+                        self._runtime.chat_coordinator.set_cursor(
+                            ref,
+                            chat_id,
+                            observed_revision=observed_revision,
+                        )
+                    preflight = await self._runtime.chat_coordinator.prepare_send(
+                        chat_id=chat_id,
+                        ref=ref,
+                        base_revision=observed_revision,
+                        content_type=inbound["content_type"],
+                    )
+                    if not preflight.ok:
+                        await self._send_preflight_rejection(telegram_chat_id, preflight)
+                        continue
+
+                    self._conversation_to_telegram_chat[ref.channel_conversation_id] = telegram_chat_id
                     self._chat_to_telegram_chat[chat_id] = telegram_chat_id
+                    metadata = {
+                        "base_revision": observed_revision,
+                        "channel": {
+                            "channel_id": self.channel_id,
+                            "channel_conversation_id": ref.channel_conversation_id,
+                        },
+                    }
+                    content = inbound["text"]
+                    target_address = f"agent@{self.target_actor}"
+                    if inbound["content_type"] == MessageType.MESSAGE:
+                        try:
+                            route = self._runtime.actor_resolver.resolve(
+                                content,
+                                default_actor=self.target_actor,
+                                metadata=metadata,
+                            )
+                        except Exception as exc:
+                            await self._api_call("sendMessage", {"chat_id": telegram_chat_id, "text": str(exc)})
+                            continue
+                        target_address = route.target_address
+                        content = route.content
+                        metadata = route.metadata
                     await mailbox.send(
-                        target,
-                        inbound["text"],
+                        target_address,
+                        content,
                         content_type=inbound["content_type"],
                         chat_id=chat_id,
-                        metadata={"routing": {"client_id": client_id, "chat_id": chat_id}},
+                        metadata=metadata,
                     )
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 logger.warning("Telegram polling error: %s", exc)
                 await asyncio.sleep(2)
+
+    async def _send_preflight_rejection(self, telegram_chat_id: str, preflight) -> None:
+        if preflight.stale:
+            text = (
+                "This chat has new messages. "
+                f"Please retry after refreshing to revision {preflight.current_revision}."
+            )
+        else:
+            text = "A response is already in progress for this chat."
+        await self._api_call("sendMessage", {"chat_id": telegram_chat_id, "text": text})
 
     async def _forward_replies(self, mailbox: MailBox) -> None:
         while True:
@@ -253,10 +320,12 @@ class TelegramChannel:
                 continue
             selected_chat_id = _selected_chat_from_command_result(env)
             if selected_chat_id:
-                client_id = self._client_id_from_env(env)
-                if client_id:
-                    self._chat_state.set_cursor(client_id, selected_chat_id)
-                    self._client_to_telegram_chat[client_id] = telegram_chat_id
+                ref = self._ref_from_env(env)
+                if ref is not None:
+                    current_revision = await self._runtime.chat_coordinator.current_revision(selected_chat_id)
+                    # The command result is the channel's handoff point for the selected chat.
+                    # Future normal messages must use the selected chat's delivered revision.
+                    self._runtime.chat_coordinator.set_cursor(ref, selected_chat_id, observed_revision=current_revision)
                 if env.chat_id and env.chat_id != selected_chat_id:
                     self._chat_to_telegram_chat.pop(env.chat_id, None)
                 self._chat_to_telegram_chat[selected_chat_id] = telegram_chat_id
@@ -273,8 +342,12 @@ class TelegramChannel:
                 await self._set_status_message(telegram_chat_id, env.chat_id, content)
                 continue
             else:
-                content = env.content
+                content = str(env.content)
                 await self._clear_status_message(telegram_chat_id, env.chat_id)
+                if env.chat_id:
+                    revision = await self._runtime.chat_coordinator.current_revision(env.chat_id)
+                    if (ref := self._ref_from_env(env)) is not None:
+                        self._runtime.chat_coordinator.mark_observed(chat_id=env.chat_id, ref=ref, revision=revision)
 
             for part in _split_message(content):
                 try:
@@ -286,22 +359,23 @@ class TelegramChannel:
                     break
 
     def _resolve_telegram_chat_id(self, env: Envelope) -> str | None:
-        client_id = self._client_id_from_env(env)
-        if client_id and client_id in self._client_to_telegram_chat:
-            return self._client_to_telegram_chat[client_id]
+        if (ref := self._ref_from_env(env)) is not None:
+            mapped = self._conversation_to_telegram_chat.get(ref.channel_conversation_id)
+            if mapped:
+                return mapped
         if env.chat_id and env.chat_id in self._chat_to_telegram_chat:
             return self._chat_to_telegram_chat[env.chat_id]
-        if env.chat_id and env.chat_id.startswith("telegram:"):
-            return env.chat_id.split(":", 1)[1]
         return self._default_chat_id or None
 
-    @staticmethod
-    def _client_id_from_env(env: Envelope) -> str | None:
-        routing = env.metadata.get("routing")
-        if not isinstance(routing, dict):
+    def _ref_from_env(self, env: Envelope) -> ChannelConversationRef | None:
+        channel = env.metadata.get("channel")
+        if not isinstance(channel, dict):
             return None
-        client_id = routing.get("client_id")
-        return client_id if isinstance(client_id, str) and client_id else None
+        channel_id = channel.get("channel_id")
+        conversation_id = channel.get("channel_conversation_id")
+        if channel_id != self.channel_id or not isinstance(conversation_id, str):
+            return None
+        return ChannelConversationRef(channel_id=self.channel_id, channel_conversation_id=conversation_id)
 
     async def _set_status_message(self, telegram_chat_id: str, chat_id: str | None, text: str) -> None:
         if not chat_id:

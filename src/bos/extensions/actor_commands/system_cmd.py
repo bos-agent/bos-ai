@@ -14,10 +14,17 @@ if TYPE_CHECKING:
 
 def _client_id(env: Envelope) -> str | None:
     routing = env.metadata.get("routing")
-    if not isinstance(routing, dict):
-        return None
-    client_id = routing.get("client_id")
-    return client_id.strip() if isinstance(client_id, str) and client_id.strip() else None
+    if isinstance(routing, dict):
+        client_id = routing.get("client_id")
+        if isinstance(client_id, str) and client_id.strip():
+            return client_id.strip()
+    channel = env.metadata.get("channel")
+    if isinstance(channel, dict):
+        channel_id = channel.get("channel_id")
+        conversation_id = channel.get("channel_conversation_id")
+        if isinstance(channel_id, str) and channel_id.strip() and isinstance(conversation_id, str) and conversation_id:
+            return f"{channel_id}:{conversation_id}"
+    return None
 
 
 def _command_payload(name: str, *, ok: bool, result=None, error: str | None = None, **extra) -> dict:
@@ -112,7 +119,7 @@ async def resume_chat(input: str, env: Envelope, actor: AgentActor) -> dict:
     """Resume a chat by alias or id for the current client."""
     client_id = _client_id(env)
     if not client_id:
-        return _command_payload("resume", ok=False, error="Cannot resume without client_id routing metadata.")
+        return _command_payload("resume", ok=False, error="Cannot resume without channel metadata.")
     if not input.strip():
         return _command_payload("resume", ok=False, error="Usage: /resume <alias-or-chat-id>")
     try:

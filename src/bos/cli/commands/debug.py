@@ -34,11 +34,23 @@ def prompt(ctx, agent_kind: str | None, workspace_dir: str | None):
     ws = _build_workspace_for_ask(ctx, workspace_dir)
     ws.resolve_agents()
     ws.bootstrap_platform()
-    selected = agent_kind or ws.get_main_agent_kind()
+    agent_cfg = None
+    if agent_kind:
+        selected = agent_kind
+    elif not ws.config.runtime or not ws.config.runtime.actors:
+        selected = ws.get_main_agent_kind()
+    else:
+        actors = ws.resolve_gateway_actors()
+        default_actor = ws.resolve_default_actor()
+        actor = actors[default_actor]
+        selected = actor.agent
+        agent_cfg = dict(actor.agent_overrides)
+        agent_cfg["agent_name"] = actor.name
+        agent_cfg["history_attribution"] = len(actors) > 1
 
     async def _run() -> str:
         async with ws.harness() as harness:
-            agent = await harness.create_agent(selected)
+            agent = await harness.create_agent(selected, agent_cfg=agent_cfg)
             return await agent._build_system_prompt()
 
     click.echo(asyncio.run(_run()))

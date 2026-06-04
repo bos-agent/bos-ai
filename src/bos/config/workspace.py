@@ -13,6 +13,7 @@ from typing import Any, Literal
 from bos.config.schema import (
     AgentConfig,
     RootConfig,
+    _agent_config_to_core_kwargs,
     validate_agent_config,
     validate_config,
 )
@@ -124,7 +125,7 @@ def resolve_config_source(config_arg: str) -> tuple[Path, Path, RootConfig]:
 
     * If *config_arg* is an existing file path → ``bos_dir`` is the file's parent.
     * If *config_arg* matches a built-in preset name → ``bos_dir`` is
-      ``~/.bos/agents/<preset>`` (created if necessary).
+      ``~/.bos/presets/<preset>`` (created if necessary).
 
     Returns validated :class:`RootConfig`. Raises :class:`WorkspaceResolutionError`
     if the source cannot be resolved.
@@ -138,7 +139,7 @@ def resolve_config_source(config_arg: str) -> tuple[Path, Path, RootConfig]:
     presets = presets_dir()
     preset = presets / f"{config_arg}.toml"
     if preset.exists():
-        bos_dir = _get_bos_home() / "agents" / config_arg
+        bos_dir = _get_bos_home() / "presets" / config_arg
         bos_dir.mkdir(parents=True, exist_ok=True)
         raw = _load_config(preset)
         return preset, bos_dir, validate_config(raw)
@@ -378,14 +379,42 @@ class AgentRuntimeConfig:
 
 
 @dataclass(frozen=True)
-class ResolvedChannelConfig:
+class ResolvedGatewayConfig:
+    host: str = "127.0.0.1"
+    port: int = 5920
+    upload_dir: str = ".bos/uploads/http"
+    max_upload_bytes: int = 20 * 1024 * 1024
+    api_key_env: str = "BOS_GATEWAY_API_KEY"
+
+
+@dataclass(frozen=True)
+class ResolvedActorConfig:
     name: str
-    bind_address: str
-    target_address: str
-    options: dict[str, Any] = field(default_factory=dict)
+    agent: str
+    address: str
+    display_name: str | None = None
+    restart_on_error: bool = True
+    max_restarts: int = 5
+    agent_overrides: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ResolvedGatewayChannelConfig:
+    type: str
+    channel_id: str
+    address: str
+    target_actor: str
+    display_name: str | None = None
+    settings: dict[str, Any] = field(default_factory=dict)
 
     def extension_config(self) -> dict[str, Any]:
-        return {"name": self.name, "target_address": self.target_address} | self.options
+        return {
+            "name": self.type,
+            "channel_id": self.channel_id,
+            "target_actor": self.target_actor,
+            "display_name": self.display_name,
+            "settings": self.settings,
+        }
 
 
 class Workspace:
@@ -533,16 +562,17 @@ class Workspace:
         # 4. Agent registration
         agent_defaults: dict[str, Any] = {}
         if self.config.agent and self.config.agent.defaults:
-            agent_defaults = self.config.agent.defaults.model_dump(exclude_defaults=True)
+            agent_defaults = _agent_config_to_core_kwargs(self.config.agent.defaults)
 
         for name, agent_config in (self.config.agents or {}).items():
-            cfg = agent_config.model_dump(exclude_defaults=True)
+            cfg = _agent_config_to_core_kwargs(agent_config)
             merged = _deep_merge(dict(agent_defaults), cfg)
             merged.pop("name", None)  # name is the registration key, not a kwarg
             AgentRegistry.register(name, **merged)
 
         if not AgentRegistry.has_registered("_default"):
-            merged = _deep_merge(dict(agent_defaults), dict(default_agent_spec))
+            default_spec = _agent_config_to_core_kwargs(AgentConfig.model_validate(default_agent_spec))
+            merged = _deep_merge(dict(agent_defaults), default_spec)
             merged.pop("name", None)
             AgentRegistry.register("_default", **merged)
 
@@ -565,10 +595,93 @@ class Workspace:
 
     def get_main_agent_kind(self) -> str:
         runtime = self.config.runtime
-        return runtime.agent if runtime else "_default"
+        if not runtime or not runtime.actors:
+            return "_default"
+        default_actor = runtime.default_actor
+        actor = runtime.actors.get(default_actor)
+        if actor is None:
+            raise ValueError(f"runtime.default_actor {default_actor!r} must exist in runtime.actors.")
+        return actor.agent
 
-    def get_main_agent_address(self) -> str:
-        return "agent@main"
+    def resolve_gateway_config(self) -> ResolvedGatewayConfig:
+        gateway = self.config.runtime.gateway if self.config.runtime else None
+        if gateway is None:
+            return ResolvedGatewayConfig()
+        return ResolvedGatewayConfig(
+            host=gateway.host,
+            port=gateway.port,
+            upload_dir=gateway.upload_dir,
+            max_upload_bytes=gateway.max_upload_bytes,
+            api_key_env=gateway.api_key_env,
+        )
+
+    def resolve_gateway_actors(self) -> dict[str, ResolvedActorConfig]:
+        runtime = self.config.runtime
+        actors_cfg = runtime.actors if runtime else {}
+        if not actors_cfg:
+            raise ValueError("runtime.actors must define at least one actor for the gateway runtime.")
+
+        actors: dict[str, ResolvedActorConfig] = {}
+        for name, cfg in actors_cfg.items():
+            self._validate_actor_name(name)
+            agent_overrides = _agent_config_to_core_kwargs(cfg.agent_cfg)
+            actors[name] = ResolvedActorConfig(
+                name=name,
+                agent=cfg.agent,
+                address=f"agent@{name}",
+                display_name=cfg.display_name,
+                restart_on_error=cfg.restart_on_error,
+                max_restarts=cfg.max_restarts,
+                agent_overrides=agent_overrides,
+            )
+        return actors
+
+    def resolve_default_actor(self) -> str:
+        runtime = self.config.runtime
+        default_actor = runtime.default_actor if runtime else "main"
+        actors = self.resolve_gateway_actors()
+        if default_actor not in actors:
+            raise ValueError(f"runtime.default_actor {default_actor!r} must exist in runtime.actors.")
+        return default_actor
+
+    def resolve_gateway_channels(self) -> list[ResolvedGatewayChannelConfig]:
+        runtime = self.config.runtime
+        raw_channels = runtime.channels if runtime else []
+        actors = self.resolve_gateway_actors()
+        default_actor = self.resolve_default_actor()
+        seen_channel_ids: set[str] = set()
+        channels: list[ResolvedGatewayChannelConfig] = []
+
+        for idx, cfg in enumerate(raw_channels, start=1):
+            channel_type = cfg.type.strip()
+            if not channel_type:
+                raise ValueError(f"Channel entry #{idx} must define type.")
+            if channel_type == "HttpChannel":
+                raise ValueError("HttpChannel is gateway infrastructure and cannot be configured as a channel.")
+            channel_id = cfg.channel_id.strip()
+            if not channel_id:
+                raise ValueError(f"Channel {channel_type!r} must define channel_id.")
+            if channel_id in seen_channel_ids:
+                raise ValueError(f"Duplicate channel_id: {channel_id!r}")
+            seen_channel_ids.add(channel_id)
+
+            target_actor = (cfg.target_actor or default_actor).strip()
+            if target_actor not in actors:
+                raise ValueError(f"Channel {channel_id!r} target_actor {target_actor!r} must exist in runtime.actors.")
+            settings = cfg.settings or {}
+            if not isinstance(settings, dict):
+                raise ValueError(f"Channel {channel_id!r} settings must be a table/dict.")
+            channels.append(
+                ResolvedGatewayChannelConfig(
+                    type=channel_type,
+                    channel_id=channel_id,
+                    address=f"channel@{channel_id}",
+                    target_actor=target_actor,
+                    display_name=str(cfg.display_name) if cfg.display_name is not None else None,
+                    settings=dict(settings),
+                )
+            )
+        return channels
 
     def get_runtime_config(self, *, force_kind: str | None = None) -> AgentRuntimeConfig:
         runtime = self.config.runtime
@@ -576,7 +689,11 @@ class Workspace:
         runtime_extra: dict[str, Any] = {}
         if runtime:
             extra = runtime.model_dump()
-            runtime_extra = {k: v for k, v in extra.items() if k not in {"agent", "location", "channels", "actors"}}
+            runtime_extra = {
+                k: v
+                for k, v in extra.items()
+                if k not in {"location", "channels", "actors", "default_actor", "gateway", "actor_resolver"}
+            }
 
         workspace_dir = runtime_extra.get("workspace_dir") or "/workspace"
         bos_dir = runtime_extra.get("bos_dir")
@@ -602,96 +719,12 @@ class Workspace:
             return None
         return (self.bos_dir / Path(platform.envfile).expanduser()).resolve()
 
-    def resolve_channels(self, *, runtime_kind: str = "process") -> list[ResolvedChannelConfig]:
-        actor_address = self.get_main_agent_address()
-        runtime = self.config.runtime
-        raw_channels = runtime.channels if runtime else []
-        if not raw_channels:
-            raw_channels = [
-                {
-                    "name": "HttpChannel",
-                    "bind_address": "channel@http",
-                    "target_address": actor_address,
-                }
-            ]
-        channels: list[ResolvedChannelConfig] = []
-        seen_bind_addresses: set[str] = set()
-
-        for idx, raw_cfg in enumerate(raw_channels, start=1):
-            if not isinstance(raw_cfg, dict):
-                raise ValueError(f"Channel entry #{idx} must be a table, got {type(raw_cfg).__name__}.")
-
-            name = str(raw_cfg.get("name") or "_default")
-            bind_address = str(raw_cfg.get("bind_address") or "").strip()
-            if not bind_address:
-                raise ValueError(f"Channel {name!r} must define bind_address.")
-            if not bind_address.startswith("channel@"):
-                raise ValueError(f"Channel {name!r} bind_address must start with 'channel@': {bind_address!r}")
-            if bind_address in seen_bind_addresses:
-                raise ValueError(f"Duplicate channel bind_address: {bind_address!r}")
-            seen_bind_addresses.add(bind_address)
-
-            target_address = str(raw_cfg.get("target_address") or actor_address).strip()
-            options = self._normalize_channel_options(
-                {key: value for key, value in raw_cfg.items() if key not in {"name", "target_address"}},
-                name=name,
-                runtime_kind=runtime_kind,
-            ) | {
-                "bind_address": bind_address,
-                "bos_dir": str(self.bos_dir),
-                "workspace_dir": str(self.workspace),
-            }
-            channels.append(
-                ResolvedChannelConfig(
-                    name=name,
-                    bind_address=bind_address,
-                    target_address=target_address,
-                    options=options,
-                )
-            )
-
-        self._validate_channel_topology(channels, actor_address=actor_address)
-        return channels
 
     @staticmethod
-    def _normalize_channel_options(
-        options: dict[str, Any],
-        *,
-        name: str,
-        runtime_kind: str,
-    ) -> dict[str, Any]:
-        normalized = dict(options)
-        if runtime_kind == "docker" and name == "HttpChannel":
-            host = normalized.get("host")
-            if host in (None, "", "127.0.0.1", "localhost"):
-                normalized["host"] = "0.0.0.0"
-        return normalized
+    def _validate_actor_name(name: str) -> None:
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]*", name):
+            raise ValueError(f"Invalid actor name {name!r}; expected a mention-safe actor identity.")
 
-    @staticmethod
-    def _validate_channel_topology(channels: list[ResolvedChannelConfig], *, actor_address: str) -> None:
-        channel_names_by_address = {channel.bind_address: channel.name for channel in channels}
-        for channel in channels:
-            if channel.name == "BroadcastChannel":
-                raise ValueError("BroadcastChannel is no longer supported; configure channels to target agent@main.")
-            if channel.target_address == channel.bind_address:
-                raise ValueError(f"Channel {channel.bind_address!r} cannot target itself.")
-
-            if channel.target_address.startswith("agent@"):
-                continue
-
-            if not channel.target_address.startswith("channel@"):
-                raise ValueError(
-                    f"Channel {channel.bind_address!r} target_address must start with 'agent@' or 'channel@'."
-                )
-
-            if channel.target_address not in channel_names_by_address:
-                raise ValueError(
-                    f"Channel {channel.bind_address!r} targets unknown channel address {channel.target_address!r}."
-                )
-            raise ValueError(
-                f"Channel {channel.bind_address!r} must target the actor address {actor_address!r}; "
-                f"channel-to-channel routing is no longer supported."
-            )
 
     def _resolve_platform_agents(
         self,
