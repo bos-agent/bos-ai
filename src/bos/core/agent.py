@@ -473,6 +473,25 @@ class Agent:
                 )
                 cache_index = -1
                 await _run_interceptor("after_llm")
+
+                # Emit reasoning / thinking content so the TUI can show what
+                # the model is thinking on each iteration.
+                if response.reasoning_content:
+                    await _emit_event(
+                        "llm", "start", stage="after_llm", detail="reasoning",
+                        content=response.reasoning_content,
+                    )
+                elif response.thinking_blocks:
+                    for block in response.thinking_blocks:
+                        thinking = block.get("thinking") if isinstance(block, dict) else None
+                        signature = block.get("signature") if isinstance(block, dict) else None
+                        if thinking:
+                            await _emit_event(
+                                "llm", "start", stage="after_llm", detail="thinking_content",
+                                content=thinking,
+                                metadata={"signature": signature} if signature else {},
+                            )
+
                 await _emit_event(
                     "llm",
                     "finish",

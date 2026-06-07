@@ -257,6 +257,10 @@ class _TaskProgressDisplay:
         if event.event_type == "llm" and event.detail == "thinking":
             return "italic dim", f"🤔 {label} thinking…"
 
+        if event.event_type == "llm" and event.detail in ("reasoning", "thinking_content"):
+            preview = (event.content or "")[:200].replace("\n", " ")
+            return "italic dim", f"💭 {label}: {preview}"
+
         if event.event_type == "llm" and event.detail == "tool_calls":
             calls = []
             for tc in event.tool_calls or []:

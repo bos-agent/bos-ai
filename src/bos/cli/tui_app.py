@@ -360,6 +360,16 @@ class ChatApp(App):
         if event.event_type == "llm" and event.detail == "thinking":
             log.write(f"[dim italic]  🤔 {label} thinking…[/]")
 
+        elif event.event_type == "llm" and event.detail == "reasoning":
+            content = event.content or ""
+            preview = content[:300].replace("\n", " ")
+            log.write(f"[dim italic]  💭 {label}: {preview}[/]")
+
+        elif event.event_type == "llm" and event.detail == "thinking_content":
+            content = event.content or ""
+            preview = content[:300].replace("\n", " ")
+            log.write(f"[dim italic]  💭 {label}: {preview}[/]")
+
         elif event.event_type == "llm" and event.detail == "tool_calls":
             for tc in event.tool_calls or []:
                 args_str = ", ".join(f"{k}={v!r}" for k, v in tc["arguments"].items())
