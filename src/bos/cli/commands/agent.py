@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import getpass
+import json
 import os
 import re
 import signal
@@ -164,11 +165,6 @@ def _default_tui_client_id() -> str:
     return f"tui:{safe or 'local'}"
 
 
-def _turn_event_label(event: TurnEvent) -> str:
-    if event.parent_agent_name and event.agent_name and event.agent_name != event.parent_agent_name:
-        return f"{event.parent_agent_name} -> {event.agent_name}"
-    return event.agent_name or "agent"
-
 
 def _preview(value: Any, limit: int = 120) -> str:
     text = str(value or "").replace("\n", " ").strip()
@@ -190,6 +186,7 @@ class _TaskProgressDisplay:
         self._live: Live | None = None
         self._rows: deque[tuple[str, str]] = deque(maxlen=max_rows)
         self._task_board: str = ""
+        self._pending_tool_calls: list[tuple[str, str]] = []
 
     def __enter__(self) -> "_TaskProgressDisplay":
         if self._enabled:
@@ -249,42 +246,53 @@ class _TaskProgressDisplay:
         return "\n".join(lines)
 
     def _format_event(self, event: TurnEvent) -> tuple[str, str]:
-        label = _turn_event_label(event)
-
         if event.event_type == "turn" and event.phase == "start":
-            return "dim", f"▶ {label} started"
+            return "dim", "● started"
 
         if event.event_type == "llm" and event.detail == "thinking":
-            return "italic dim", f"🤔 {label} thinking…"
+            meta = event.metadata or {}
+            iteration = meta.get("iteration")
+            max_iter = meta.get("max_iterations")
+            if iteration and max_iter:
+                return "", ""  # iteration shown in status bar / header
+            return "", ""
 
         if event.event_type == "llm" and event.detail in ("reasoning", "thinking_content"):
             preview = (event.content or "")[:200].replace("\n", " ")
-            return "italic dim", f"💭 {label}: {preview}"
+            return "italic dim", f"● {preview}"
 
         if event.event_type == "llm" and event.detail == "tool_calls":
-            calls = []
-            for tc in event.tool_calls or []:
-                args = tc.get("arguments") or {}
-                args_str = ", ".join(f"{key}={value!r}" for key, value in args.items())
-                calls.append(f"{tc.get('name', '?')}({args_str})")
-            return "cyan", f"⚡ {label}: " + ("; ".join(calls) if calls else "tool call")
+            # Rendered individually via tool/tool_call + tool/tool_result pairing.
+            return "", ""
 
         if event.event_type == "tool" and event.detail == "tool_call":
-            return "cyan", f"⚙ {label}: {event.tool_name or '?'} running…"
+            name = event.tool_name or "?"
+            args_str = ""
+            if event.content:
+                try:
+                    args = json.loads(event.content) if isinstance(event.content, str) else event.content
+                    if isinstance(args, dict):
+                        args_str = ", ".join(f"{k}={v!r}" for k, v in args.items())
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            self._pending_tool_calls.append((name, args_str))
+            return "", ""
 
         if event.event_type == "tool" and event.detail == "tool_result":
             preview = _preview(event.content, 80)
-            suffix = f" → {preview}" if preview else ""
-            return "green", f"↳ {label}: {event.tool_name or '?'} done{suffix}"
+            if self._pending_tool_calls:
+                call_name, call_args = self._pending_tool_calls.pop(0)
+                return "", f"  {call_name}({call_args})  ->  {preview}"
+            return "", f"  {event.tool_name or '?'}: {preview}"
 
         if event.event_type == "response" and event.detail == "final":
-            return "bold green", "✓ final response ready"
+            return "bold green", "[x] final response ready"
 
         if event.detail == "max_iteration":
-            return "yellow", f"⚠ {label} max iterations reached"
+            return "yellow", "  max iterations reached"
 
         if event.detail == "error":
-            return "red", f"⚠ {label} error: {event.content or 'unknown error'}"
+            return "red", f"  error: {event.content or 'unknown error'}"
 
         return "", ""
 

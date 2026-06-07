@@ -463,7 +463,10 @@ class Agent:
                 await _interrupt()
                 ctx.set_system_prompt(await self._build_system_prompt())
                 await _run_interceptor("before_llm")
-                await _emit_event("llm", "start", stage="before_llm", detail="thinking")
+                await _emit_event(
+                    "llm", "start", stage="before_llm", detail="thinking",
+                    metadata={"iteration": iteration, "max_iterations": self._max_iterations},
+                )
 
                 ctx.current_llm_response = response = await self._llm.complete(
                     ctx.get_llm_messages(),

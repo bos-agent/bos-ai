@@ -30,12 +30,6 @@ from bos.protocol import WS_TAKEOVER_CLOSE_REASON, MessageType, TurnEvent
 logger = logging.getLogger(__name__)
 
 
-def _turn_event_label(event: TurnEvent) -> str:
-    if event.parent_agent_name and event.agent_name and event.agent_name != event.parent_agent_name:
-        return f"{event.parent_agent_name} -> {event.agent_name}"
-    return event.agent_name or "agent"
-
-
 # ── Textual messages ───────────────────────────────────────────
 
 
@@ -116,10 +110,6 @@ class ChatApp(App):
 
     TITLE = "boscli tui"
     CSS = """
-    Screen {
-        background: $surface;
-    }
-
     #main-container {
         height: 1fr;
     }
@@ -204,6 +194,9 @@ class ChatApp(App):
         self._busy = False
         self._buffer: list[str] = []
         self._conn_status: str = "connected"
+        self._current_iteration: int = 0
+        self._max_iterations: int = 0
+        self._pending_tool_calls: list[tuple[str, str]] = []
         self._known_actors: list[str] = []
         self._local_mode = local_mode
 
@@ -216,7 +209,7 @@ class ChatApp(App):
         with Horizontal(id="main-container"):
             yield RichLog(
                 id="chat",
-                highlight=True,
+                highlight=False,
                 markup=True,
                 wrap=True,
                 auto_scroll=True,
@@ -348,6 +341,9 @@ class ChatApp(App):
             await self._client.send(text, chat_id=self._chat_id)
         except Exception as exc:
             self._busy = False
+            self._current_iteration = 0
+            self._max_iterations = 0
+            self._pending_tool_calls.clear()
             self._update_status()
             self._write_system(f"[yellow]⚠ Send failed — reconnecting: {exc}[/]")
 
@@ -355,39 +351,55 @@ class ChatApp(App):
         """Handle structured runtime events from the gateway channel."""
         event = message.event
         log = self.query_one("#chat", RichLog)
-        label = _turn_event_label(event)
 
         if event.event_type == "llm" and event.detail == "thinking":
-            log.write(f"[dim italic]  🤔 {label} thinking…[/]")
+            meta = event.metadata or {}
+            iteration = meta.get("iteration")
+            max_iter = meta.get("max_iterations")
+            if iteration and max_iter:
+                self._current_iteration = iteration
+                self._max_iterations = max_iter
+                self._update_status()
 
-        elif event.event_type == "llm" and event.detail == "reasoning":
+        elif event.event_type == "llm" and event.detail in ("reasoning", "thinking_content"):
             content = event.content or ""
-            preview = content[:300].replace("\n", " ")
-            log.write(f"[dim italic]  💭 {label}: {preview}[/]")
-
-        elif event.event_type == "llm" and event.detail == "thinking_content":
-            content = event.content or ""
-            preview = content[:300].replace("\n", " ")
-            log.write(f"[dim italic]  💭 {label}: {preview}[/]")
+            preview = content[:240].replace("\n", " ")
+            log.write(f"\n[dim italic]● {preview}[/]")
 
         elif event.event_type == "llm" and event.detail == "tool_calls":
-            for tc in event.tool_calls or []:
-                args_str = ", ".join(f"{k}={v!r}" for k, v in tc["arguments"].items())
-                prefix = f"{label}: " if label else ""
-                log.write(f"[dim]  ⚡ {prefix}[bold]{tc['name']}[/bold]({args_str})[/]")
+            # Tool calls are rendered individually as they execute via
+            # tool/tool_call + tool/tool_result pairing below.
+            pass
+
+        elif event.event_type == "tool" and event.detail == "tool_call":
+            name = event.tool_name or "?"
+            args_str = ""
+            if event.content:
+                try:
+                    args = json.loads(event.content) if isinstance(event.content, str) else event.content
+                    if isinstance(args, dict):
+                        args_str = ", ".join(f"{k}={v!r}" for k, v in args.items())
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            self._pending_tool_calls.append((name, args_str))
 
         elif event.event_type == "tool" and event.detail == "tool_result":
             name = event.tool_name or "?"
-            preview = str(event.content or "")[:120].replace("\n", " ")
-            log.write(f"[dim]  ↳ {label}: {name} → {preview}[/]")
+            preview = str(event.content or "")[:240].replace("\n", " ")
+            if self._pending_tool_calls:
+                call_name, call_args = self._pending_tool_calls.pop(0)
+                log.write(f"  [bold]{call_name}[/]({call_args})")
+                log.write(f"   └ [dim]{preview}[/]")
+            else:
+                log.write(f"  {name}: [dim]{preview}[/]")
 
         elif event.event_type == "task" and event.detail == "task_state":
             tasks = (event.metadata or {}).get("tasks", [])
             panel = self.query_one("#task-panel", Static)
             if tasks:
-                lines = ["[bold]■ Tasks[/]"]
+                lines = ["[bold]Tasks[/]"]
                 for t in tasks:
-                    marker = {"pending": "⬜", "in_progress": "🔄", "completed": "✅"}.get(t.get("status"), "  ")
+                    marker = {"pending": "[ ]", "in_progress": "[>]", "completed": "[x]"}.get(t.get("status"), "[ ]")
                     blocked = f" [dim](blocked: {', '.join(t.get('blocked_by', []))})[/]" if t.get("blocked_by") else ""
                     lines.append(f"  {marker} [{t.get('id')}] {t.get('subject')}{blocked}")
                 panel.update("\n".join(lines))
@@ -396,10 +408,10 @@ class ChatApp(App):
                 panel.display = False
 
         elif event.detail == "max_iteration":
-            log.write(f"[yellow]  ⚠ {label} max iterations reached[/]")
+            log.write("[yellow]  max iterations reached[/]")
 
         elif event.detail == "error":
-            log.write(f"[red]  ⚠ {label} error: {event.content or 'unknown error'}[/]")
+            log.write(f"[red]  error: {event.content or 'unknown error'}[/]")
 
     async def on_agent_reply_event(self, event: AgentReplyEvent) -> None:
         """Handle the final reply from the actor."""
@@ -429,6 +441,9 @@ class ChatApp(App):
             self._busy = True
         else:
             self._busy = False
+            self._current_iteration = 0
+            self._max_iterations = 0
+            self._pending_tool_calls.clear()
 
         self._update_status()
         self.query_one("#prompt", Input).focus()
@@ -589,6 +604,8 @@ class ChatApp(App):
         sidebar.clear()
         sidebar.display = False
         self._busy = False
+        self._current_iteration = 0
+        self._max_iterations = 0
         self._update_status()
         self._write_system("[yellow]⏹ Turn interrupt requested.[/]")
         self.query_one("#prompt", Input).focus()
@@ -671,7 +688,12 @@ class ChatApp(App):
         return f"{conn}  Gateway | {self._chat_id}"
 
     def _status_text(self) -> str:
-        state = "● thinking" if self._busy else "○ ready"
+        if self._busy and self._current_iteration and self._max_iterations:
+            state = f"[bold cyan][main][/] {self._current_iteration}/{self._max_iterations}"
+        elif self._busy:
+            state = "● thinking"
+        else:
+            state = "○ ready"
         return f"  Gateway  ·  {self._chat_id}  ·  {state}"
 
     def _update_status(self) -> None:

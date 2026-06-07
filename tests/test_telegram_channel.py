@@ -141,7 +141,7 @@ def test_render_turn_event_suppresses_thinking():
         detail="thinking",
     )
 
-    assert _render_turn_event(event) == "main is thinking…"
+    assert _render_turn_event(event) == "[main] thinking"
 
 
 def test_render_turn_event_formats_tool_result():
@@ -173,7 +173,7 @@ async def test_forward_replies_uses_transient_status_message_then_final_reply():
 
     async def fake_api_call(method: str, payload: dict):
         calls.append((method, payload))
-        if method == "sendMessage" and payload["text"] == "main is thinking…":
+        if method == "sendMessage" and payload["text"] == "[main] thinking":
             return {"ok": True, "result": {"message_id": 99}}
         return {"ok": True, "result": True}
 
@@ -207,7 +207,7 @@ async def test_forward_replies_uses_transient_status_message_then_final_reply():
     await asyncio.gather(task, return_exceptions=True)
 
     assert calls == [
-        ("sendMessage", {"chat_id": "42", "text": "main is thinking…"}),
+        ("sendMessage", {"chat_id": "42", "text": "[main] thinking"}),
         ("deleteMessage", {"chat_id": "42", "message_id": 99}),
         ("sendMessage", {"chat_id": "42", "text": "final answer"}),
     ]
