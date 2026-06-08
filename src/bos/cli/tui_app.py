@@ -132,15 +132,6 @@ class ChatApp(App):
         padding: 0 2;
     }
 
-    #task-panel {
-        height: auto;
-        max-height: 10;
-        dock: top;
-        border-bottom: solid $primary-background;
-        padding: 0 1;
-        display: none;
-    }
-
     #status-bar {
         height: 1;
         dock: bottom;
@@ -172,6 +163,8 @@ class ChatApp(App):
         Binding("ctrl+r", "restart_bos", "Restart", show=True),
     ]
 
+    _TASK_TOOL_NAMES = {"TaskCreate", "TaskUpdate", "TaskList", "TaskGet"}
+
     def __init__(
         self,
         client: GatewayClient,
@@ -195,7 +188,6 @@ class ChatApp(App):
     def compose(self) -> ComposeResult:
         yield Header()
         yield Static(self._chat_status_text(), id="chat-status")
-        yield Static(id="task-panel")
         with Horizontal(id="main-container"):
             yield RichLog(
                 id="chat",
@@ -343,18 +335,17 @@ class ChatApp(App):
         if event.event_type == "llm" and event.detail == "thinking":
             pass
 
-        elif event.event_type == "llm" and event.detail in ("reasoning", "thinking_content"):
+        elif event.event_type == "llm" and event.detail in ("tool_calls", "response_ready"):
+            # Unified LLM response event — show thinking content if present
             content = event.content or ""
-            preview = content[:240].replace("\n", " ")
-            log.write(f"\n[dim italic]● {preview}[/]")
-
-        elif event.event_type == "llm" and event.detail == "tool_calls":
-            # Tool calls are rendered individually as they execute via
-            # tool/tool_call + tool/tool_result pairing below.
-            pass
+            if content:
+                preview = content[:240].replace("\n", " ")
+                log.write(f"\n[dim italic]● {preview}[/]")
 
         elif event.event_type == "tool" and event.detail == "tool_call":
             name = event.tool_name or "?"
+            if name in self._TASK_TOOL_NAMES:
+                return
             args_str = ""
             if event.content:
                 try:
@@ -367,6 +358,8 @@ class ChatApp(App):
 
         elif event.event_type == "tool" and event.detail == "tool_result":
             name = event.tool_name or "?"
+            if name in self._TASK_TOOL_NAMES:
+                return
             preview = str(event.content or "")[:240].replace("\n", " ")
             if self._pending_tool_calls:
                 call_name, call_args = self._pending_tool_calls.pop(0)
@@ -377,17 +370,20 @@ class ChatApp(App):
 
         elif event.event_type == "task" and event.detail == "task_state":
             tasks = (event.metadata or {}).get("tasks", [])
-            panel = self.query_one("#task-panel", Static)
             if tasks:
-                lines = ["[bold]Tasks[/]"]
-                for t in tasks:
-                    marker = {"pending": "[ ]", "in_progress": "[>]", "completed": "[x]"}.get(t.get("status"), "[ ]")
-                    blocked = f" [dim](blocked: {', '.join(t.get('blocked_by', []))})[/]" if t.get("blocked_by") else ""
-                    lines.append(f"  {marker} [{t.get('id')}] {t.get('subject')}{blocked}")
-                panel.update("\n".join(lines))
-                panel.display = True
-            else:
-                panel.display = False
+                order = {"completed": 0, "in_progress": 1, "pending": 2}
+                ordered = sorted(tasks, key=lambda t: order.get(t.get("status"), 3))
+                lines = ["[bold]• Tasks[/]"]
+                for i, t in enumerate(ordered):
+                    prefix = "└" if i == 0 else " "
+                    subject = t.get("subject", "")
+                    if t.get("status") == "completed":
+                        lines.append(f"  {prefix} [dim][s]✔ {subject}[/s][/dim]")
+                    elif t.get("status") == "in_progress":
+                        lines.append(f"  {prefix} [bold]■ {subject}[/]")
+                    else:
+                        lines.append(f"  {prefix} □ {subject}")
+                log.write("\n" + "\n".join(lines))
 
         elif event.detail == "max_iteration":
             log.write("[yellow]  max iterations reached[/]")
@@ -527,11 +523,6 @@ class ChatApp(App):
 
     def action_clear_log(self) -> None:
         self.query_one("#chat", RichLog).clear()
-        try:
-            panel = self.query_one("#task-panel", Static)
-            panel.display = False
-        except Exception:
-            pass
 
     def action_reset_chat(self) -> None:
         asyncio.create_task(self._send_command("/new"))
@@ -634,11 +625,6 @@ class ChatApp(App):
         self._chat_id = chat_id
         self._client.update_chat_id(chat_id)
         self._update_status()
-        try:
-            panel = self.query_one("#task-panel", Static)
-            panel.display = False
-        except Exception:
-            pass  # DOM not mounted yet (tests, early lifecycle)
 
     def _connection_indicator(self) -> str:
         if self._conn_status == "connected":

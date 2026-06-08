@@ -154,6 +154,23 @@ def _metadata_str(metadata: dict[str, Any], *keys: str) -> str | None:
     return None
 
 
+def _resolve_thinking(response: Any) -> str | None:
+    """Extract the best available thinking content from an LLM response."""
+    if getattr(response, "reasoning_content", None):
+        return response.reasoning_content
+    blocks = getattr(response, "thinking_blocks", None)
+    if blocks:
+        parts = []
+        for block in blocks:
+            if isinstance(block, dict) and block.get("thinking"):
+                parts.append(block["thinking"])
+        if parts:
+            return "\n".join(parts)
+    if getattr(response, "content", None) and getattr(response, "tool_calls", None):
+        return response.content
+    return None
+
+
 class AbortTurn(Exception):
     pass
 
@@ -477,29 +494,15 @@ class Agent:
                 cache_index = -1
                 await _run_interceptor("after_llm")
 
-                # Emit reasoning / thinking content so the TUI can show what
-                # the model is thinking on each iteration.
-                if response.reasoning_content:
-                    await _emit_event(
-                        "llm", "start", stage="after_llm", detail="reasoning",
-                        content=response.reasoning_content,
-                    )
-                elif response.thinking_blocks:
-                    for block in response.thinking_blocks:
-                        thinking = block.get("thinking") if isinstance(block, dict) else None
-                        signature = block.get("signature") if isinstance(block, dict) else None
-                        if thinking:
-                            await _emit_event(
-                                "llm", "start", stage="after_llm", detail="thinking_content",
-                                content=thinking,
-                                metadata={"signature": signature} if signature else {},
-                            )
-
+                # Emit one unified LLM response event carrying both the
+                # model's thinking content and any tool calls.
+                thinking = _resolve_thinking(response)
                 await _emit_event(
                     "llm",
                     "finish",
                     stage="after_llm",
                     detail="tool_calls" if response.tool_calls else "response_ready",
+                    content=thinking,
                     tool_calls=(
                         [{"name": tc.name, "arguments": tc.arguments} for tc in response.tool_calls]
                         if response.tool_calls
