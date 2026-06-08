@@ -29,29 +29,6 @@ def test_supplied_chat_updates_cursor(tmp_path):
     assert state.get_cursor("tui:host") == "chat-a"
 
 
-def test_aliases_normalize_resolve_and_delete(tmp_path):
-    state = ChatState(path=tmp_path / "chats.json")
-
-    alias = state.set_alias(" Project X ", "chat-a")
-
-    assert alias == "project-x"
-    assert state.resolve_alias_or_id("project-x") == "chat-a"
-    assert state.list_aliases() == {"project-x": "chat-a"}
-    assert state.delete_alias("project x") is True
-    assert state.list_aliases() == {}
-
-
-def test_alias_overwrite_requires_force(tmp_path):
-    state = ChatState(path=tmp_path / "chats.json")
-    state.set_alias("project", "chat-a")
-
-    with pytest.raises(ChatStateError):
-        state.set_alias("project", "chat-b")
-
-    state.set_alias("project", "chat-b", force=True)
-    assert state.resolve_alias_or_id("project") == "chat-b"
-
-
 def test_invalid_aliases_are_rejected():
     with pytest.raises(ChatStateError):
         normalize_alias("")
@@ -74,7 +51,6 @@ def test_state_file_shape_is_normalized(tmp_path):
     state = ChatState(path=path)
 
     assert state.get_cursor("a") == "chat-a"
-    assert state.list_aliases() == {}
 
 
 def test_separate_instances_do_not_clobber_each_other(tmp_path):
@@ -83,9 +59,9 @@ def test_separate_instances_do_not_clobber_each_other(tmp_path):
     actor_state = ChatState(path=path)
 
     channel_state.set_cursor("tui:a", "chat-a")
-    actor_state.set_alias("project", "chat-a")
+    actor_state.set_cursor("tui:b", "chat-x")
     channel_state.set_cursor("tui:a", "chat-b")
 
     recovered = ChatState(path=path)
     assert recovered.get_cursor("tui:a") == "chat-b"
-    assert recovered.resolve_alias_or_id("project") == "chat-a"
+    assert recovered.get_cursor("tui:b") == "chat-x"

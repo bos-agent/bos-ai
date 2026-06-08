@@ -37,51 +37,6 @@ def _command_payload(name: str, *, ok: bool, result=None, error: str | None = No
     return payload
 
 
-@ep_actor_command(name="history")
-async def history(input: str, env: Envelope, actor: AgentActor) -> dict:
-    """Show chat history."""
-    chat_id = actor.current_chat_id(env, input)
-    agent = actor._agent
-    if not chat_id:
-        return {"name": "history", "ok": False, "error": "(no chat found)", "result": []}
-    messages = await agent._chat_store.get_messages(chat_id, active_only=True)
-    result = [m.llm_message for m in messages]
-    return {"name": "history", "ok": True, "result": result}
-
-
-@ep_actor_command(name="compact")
-async def compact(input: str, env: Envelope, actor: AgentActor) -> dict:
-    """Compact a chat by summarising it."""
-    chat_id = actor.current_chat_id(env, input)
-    agent = actor._agent
-    if not chat_id:
-        return {"name": "compact", "ok": False, "error": "(no chat found)", "result": "(no chat found)"}
-    messages = await agent._chat_store.get_compaction_messages(chat_id)
-    summary = await agent._consolidator.consolidate(messages)
-    await agent._chat_store.save_summary(chat_id, summary)
-    return {"name": "compact", "ok": True, "result": f"Chat {chat_id} compacted."}
-
-
-@ep_actor_command(name="tokens")
-async def tokens(input: str, env: Envelope, actor: AgentActor) -> dict:
-    """Estimate token usage for a chat."""
-    chat_id = actor.current_chat_id(env, input)
-    agent = actor._agent
-    if not chat_id:
-        return {"name": "tokens", "ok": False, "error": "(no chat found)", "result": "(no chat found)"}
-    budget_model = getattr(agent, "_model", None)
-    estimate = await agent._chat_store.estimate_tokens(chat_id, tokenizer_model=budget_model)
-    result = f"Estimated tokens: {estimate.count} ({estimate.source}, model={estimate.tokenizer_model or 'unknown'})"
-    return {
-        "name": "tokens",
-        "ok": True,
-        "result": result,
-        "estimated_tokens": estimate.count,
-        "model": estimate.tokenizer_model,
-        "source": estimate.source,
-    }
-
-
 @ep_actor_command(name="chats")
 async def chats(actor: AgentActor) -> dict:
     """List all chats."""
@@ -116,12 +71,12 @@ async def new_chat(env: Envelope, actor: AgentActor) -> dict:
 
 @ep_actor_command(name="resume")
 async def resume_chat(input: str, env: Envelope, actor: AgentActor) -> dict:
-    """Resume a chat by alias or id for the current client."""
+    """Resume a chat by id for the current client."""
     client_id = _client_id(env)
     if not client_id:
         return _command_payload("resume", ok=False, error="Cannot resume without channel metadata.")
     if not input.strip():
-        return _command_payload("resume", ok=False, error="Usage: /resume <alias-or-chat-id>")
+        return _command_payload("resume", ok=False, error="Usage: /resume <chat-id>")
     try:
         chat_id = actor._chat_state.resolve_alias_or_id(input.strip())
         actor._chat_state.set_cursor(client_id, chat_id)
@@ -135,31 +90,3 @@ async def resume_chat(input: str, env: Envelope, actor: AgentActor) -> dict:
         result=f"resumed {chat_id}",
         chat_id=chat_id,
     )
-
-
-@ep_actor_command(name="alias")
-async def alias_chat(input: str, env: Envelope, actor: AgentActor) -> dict:
-    """Assign an alias to the current chat."""
-    if not env.chat_id:
-        return _command_payload("alias", ok=False, error="No current chat.")
-    try:
-        alias = actor._chat_state.set_alias(input.strip(), env.chat_id)
-    except ChatStateError as exc:
-        return _command_payload("alias", ok=False, error=str(exc))
-    return _command_payload("alias", ok=True, result=f"{alias} -> {env.chat_id}", alias=alias)
-
-
-@ep_actor_command(name="aliases")
-async def aliases(actor: AgentActor) -> dict:
-    """List chat aliases."""
-    return _command_payload("aliases", ok=True, result=actor._chat_state.list_aliases())
-
-
-@ep_actor_command(name="unalias")
-async def unalias_chat(input: str, actor: AgentActor) -> dict:
-    """Remove a chat alias."""
-    try:
-        removed = actor._chat_state.delete_alias(input.strip())
-    except ChatStateError as exc:
-        return _command_payload("unalias", ok=False, error=str(exc))
-    return _command_payload("unalias", ok=True, result="alias removed" if removed else "alias not found")

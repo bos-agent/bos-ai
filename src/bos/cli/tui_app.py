@@ -4,7 +4,7 @@ This TUI is a pure external client. It communicates with the gateway over
 WebSocket through ``GatewayClient``. It never imports or references the
 agent, harness, or actor directly.
 
-Slash commands that need server-side data (``/history``, ``/compact``, etc.)
+Slash commands that need server-side data (``/chats``, ``/resume``, etc.)
 send a ``content_type="command"`` envelope and wait for a ``command_result``
 response from the gateway channel.
 """
@@ -72,12 +72,6 @@ SLASH_COMMANDS = [
     "/help",
     "/new",
     "/resume",
-    "/alias",
-    "/aliases",
-    "/unalias",
-    "/history",
-    "/compact",
-    "/tokens",
     "/chats",
     "/clear",
     "/restart",
@@ -178,8 +172,6 @@ class ChatApp(App):
         Binding("ctrl+r", "restart_bos", "Restart", show=True),
     ]
 
-    theme = "tokyo-night"
-
     def __init__(
         self,
         client: GatewayClient,
@@ -194,8 +186,6 @@ class ChatApp(App):
         self._busy = False
         self._buffer: list[str] = []
         self._conn_status: str = "connected"
-        self._current_iteration: int = 0
-        self._max_iterations: int = 0
         self._pending_tool_calls: list[tuple[str, str]] = []
         self._known_actors: list[str] = []
         self._local_mode = local_mode
@@ -341,8 +331,6 @@ class ChatApp(App):
             await self._client.send(text, chat_id=self._chat_id)
         except Exception as exc:
             self._busy = False
-            self._current_iteration = 0
-            self._max_iterations = 0
             self._pending_tool_calls.clear()
             self._update_status()
             self._write_system(f"[yellow]⚠ Send failed — reconnecting: {exc}[/]")
@@ -353,13 +341,7 @@ class ChatApp(App):
         log = self.query_one("#chat", RichLog)
 
         if event.event_type == "llm" and event.detail == "thinking":
-            meta = event.metadata or {}
-            iteration = meta.get("iteration")
-            max_iter = meta.get("max_iterations")
-            if iteration and max_iter:
-                self._current_iteration = iteration
-                self._max_iterations = max_iter
-                self._update_status()
+            pass
 
         elif event.event_type == "llm" and event.detail in ("reasoning", "thinking_content"):
             content = event.content or ""
@@ -441,8 +423,6 @@ class ChatApp(App):
             self._busy = True
         else:
             self._busy = False
-            self._current_iteration = 0
-            self._max_iterations = 0
             self._pending_tool_calls.clear()
 
         self._update_status()
@@ -493,13 +473,7 @@ class ChatApp(App):
                 "[bold]Commands:[/]\n"
                 "  /help     — show this help\n"
                 "  /new      — start a new chat\n"
-                "  /resume   — resume a chat by id or alias\n"
-                "  /alias    — give the current chat an alias\n"
-                "  /aliases  — list chat aliases\n"
-                "  /unalias  — remove a chat alias\n"
-                "  /history  — show chat history\n"
-                "  /compact  — compact chat\n"
-                "  /tokens   — rough token estimate\n"
+                "  /resume   — resume a chat by id\n"
                 "  /chats    — list all chats\n"
                 "  /clear    — clear the log\n"
                 "  /restart  — restart the gateway\n"
@@ -527,12 +501,6 @@ class ChatApp(App):
 
         elif normalized_cmd in (
             "/resume",
-            "/alias",
-            "/aliases",
-            "/unalias",
-            "/history",
-            "/compact",
-            "/tokens",
             "/chats",
         ):
             # Delegate to the server via a command envelope
@@ -604,8 +572,6 @@ class ChatApp(App):
         sidebar.clear()
         sidebar.display = False
         self._busy = False
-        self._current_iteration = 0
-        self._max_iterations = 0
         self._update_status()
         self._write_system("[yellow]⏹ Turn interrupt requested.[/]")
         self.query_one("#prompt", Input).focus()
@@ -688,9 +654,7 @@ class ChatApp(App):
         return f"{conn}  Gateway | {self._chat_id}"
 
     def _status_text(self) -> str:
-        if self._busy and self._current_iteration and self._max_iterations:
-            state = f"[bold cyan][main][/] {self._current_iteration}/{self._max_iterations}"
-        elif self._busy:
+        if self._busy:
             state = "● thinking"
         else:
             state = "○ ready"
