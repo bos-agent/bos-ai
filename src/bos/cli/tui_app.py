@@ -17,10 +17,11 @@ import logging
 from typing import Any
 
 from rich.markdown import Markdown
+from rich.text import Text
 from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.containers import Vertical
 from textual.message import Message
 from textual.screen import ModalScreen
 from textual.widgets import Footer, Header, Input, RichLog, Static, TextArea
@@ -233,10 +234,6 @@ class ChatApp(App):
 
     TITLE = "boscli tui"
     CSS = """
-    #main-container {
-        height: 1fr;
-    }
-
     #chat {
         width: 1fr;
         height: 1fr;
@@ -244,12 +241,12 @@ class ChatApp(App):
         scrollbar-size: 1 1;
     }
 
-    #sidebar {
-        width: 35;
-        height: 1fr;
-        dock: right;
-        border-left: solid $primary-background;
-        padding: 0 1;
+    #queued {
+        height: auto;
+        max-height: 8;
+        padding: 0 2;
+        background: $boost;
+        color: $text-muted;
         display: none;
     }
 
@@ -284,6 +281,7 @@ class ChatApp(App):
         Binding("escape", "interrupt_turn", "Interrupt", show=True, priority=True),
         Binding("ctrl+underscore", "interrupt_message", "Interject", show=True, priority=True, key_display="ctrl+/"),
         Binding("ctrl+slash", "interrupt_message", "Interject", show=False, priority=True),
+        Binding("ctrl+g", "cancel_queued", "Drop queued", show=True, priority=True),
         Binding("ctrl+c", "quit", "Quit", show=True, priority=True),
         Binding("ctrl+l", "clear_log", "Clear", show=True),
         Binding("ctrl+n", "reset_chat", "New Chat", show=True),
@@ -312,22 +310,15 @@ class ChatApp(App):
     def compose(self) -> ComposeResult:
         yield Header()
         yield Static(self._chat_status_text(), id="chat-status")
-        with Horizontal(id="main-container"):
-            yield RichLog(
-                id="chat",
-                highlight=False,
-                markup=True,
-                wrap=True,
-                auto_scroll=True,
-            )
-            yield RichLog(
-                id="sidebar",
-                highlight=True,
-                markup=True,
-                wrap=False,
-                auto_scroll=True,
-            )
+        yield RichLog(
+            id="chat",
+            highlight=False,
+            markup=True,
+            wrap=True,
+            auto_scroll=True,
+        )
         yield Static(self._status_text(), id="status-bar")
+        yield Static(id="queued")
         yield PromptInput(
             placeholder="Send a message… (Enter to send, Ctrl+J for newline)",
             id="prompt",
@@ -400,10 +391,12 @@ class ChatApp(App):
 
     # ── event handlers ────────────────────────────────────────
 
-    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool:
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
         """Disable app-level interrupt hotkeys while a modal dialog is open."""
         if action in ("interrupt_turn", "interrupt_message") and isinstance(self.screen, ModalScreen):
             return False
+        if action == "cancel_queued" and not self._buffer:
+            return None  # hide from the footer while nothing is queued
         return True
 
     def on_key(self, event: events.Key) -> None:
@@ -430,16 +423,11 @@ class ChatApp(App):
             return
 
         if self._busy:
+            # Queue locally; the gateway rejects messages while a turn is in
+            # flight, so the queue is flushed when the reply arrives.
             self._buffer.append(text)
-            sidebar = self.query_one("#sidebar", RichLog)
-            sidebar.display = True
-            sidebar.write("\n[bold cyan]❯ You (buffered)[/]")
-            sidebar.write(_indent(text))
-
-            try:
-                await self._client.send(text, chat_id=self._chat_id)
-            except Exception as exc:
-                self._write_system(f"[yellow]⚠ Send failed — reconnecting: {exc}[/]")
+            self._refresh_queued()
+            self._update_status()
             return
 
         # Write user message
@@ -538,16 +526,21 @@ class ChatApp(App):
             log.write(f"  {content}")
 
         if self._buffer:
-            log.write("\n[bold cyan]❯ You (buffered)[/]")
-            for txt in self._buffer:
-                log.write(_indent(txt))
-
-            sidebar = self.query_one("#sidebar", RichLog)
-            sidebar.clear()
-            sidebar.display = False
+            # Flush the queued messages as the next turn.
+            merged = "\n\n".join(self._buffer)
             self._buffer.clear()
+            self._refresh_queued()
+            self._pending_tool_calls.clear()
+
+            log.write("\n[bold cyan]❯ You[/]")
+            log.write(_indent(merged))
 
             self._busy = True
+            try:
+                await self._client.send(merged, chat_id=self._chat_id)
+            except Exception as exc:
+                self._busy = False
+                self._write_system(f"[yellow]⚠ Send failed — reconnecting: {exc}[/]")
         else:
             self._busy = False
             self._pending_tool_calls.clear()
@@ -609,6 +602,7 @@ class ChatApp(App):
                 "  Escape      — abort the current turn\n"
                 "  Ctrl+J / Ctrl+Shift+J — insert a newline in the prompt\n"
                 "  Ctrl+/      — inject a message into the current turn\n"
+                "  Ctrl+G      — drop queued messages without sending\n"
                 "  Ctrl+C      — quit\n"
                 "  Ctrl+L      — clear the log\n"
                 "  Ctrl+N      — start a new chat\n"
@@ -687,13 +681,22 @@ class ChatApp(App):
             return
 
         self._buffer.clear()
-        sidebar = self.query_one("#sidebar", RichLog)
-        sidebar.clear()
-        sidebar.display = False
+        self._refresh_queued()
         self._busy = False
         self._update_status()
         self._write_system("[yellow]⏹ Turn interrupt requested.[/]")
         self.query_one("#prompt", PromptInput).focus()
+
+    def action_cancel_queued(self) -> None:
+        """Drop queued messages without sending them."""
+        if not self._buffer:
+            return
+        count = len(self._buffer)
+        self._buffer.clear()
+        self._refresh_queued()
+        self._update_status()
+        plural = "s" if count > 1 else ""
+        self._write_system(f"[yellow]✗ Dropped {count} queued message{plural}.[/]")
 
     def action_interrupt_message(self) -> None:
         """Open a modal dialog to compose an interrupt message for the ongoing turn."""
@@ -750,6 +753,17 @@ class ChatApp(App):
     def _write_system(self, text: str) -> None:
         self.query_one("#chat", RichLog).write(text)
 
+    def _refresh_queued(self) -> None:
+        """Render queued messages stacked above the prompt input."""
+        queued = self.query_one("#queued", Static)
+        if not self._buffer:
+            queued.update("")
+            queued.display = False
+        else:
+            queued.update(Text("\n".join(self._buffer)))
+            queued.display = True
+        self.refresh_bindings()
+
     def _set_chat_id(self, chat_id: str) -> None:
         self._chat_id = chat_id
         self._client.update_chat_id(chat_id)
@@ -771,6 +785,8 @@ class ChatApp(App):
     def _status_text(self) -> str:
         if self._busy:
             state = "● thinking"
+            if self._buffer:
+                state += f"  ·  {len(self._buffer)} queued"
         else:
             state = "○ ready"
         return f"  Gateway  ·  {self._chat_id}  ·  {state}"

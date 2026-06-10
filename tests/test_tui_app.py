@@ -71,6 +71,51 @@ async def test_ctrl_n_uses_same_reset_chat_path(monkeypatch):
     assert client.calls == [{"content": "/new"}]
 
 
+class FakeQueued:
+    def __init__(self) -> None:
+        self.display = False
+        self.content = None
+
+    def update(self, content):
+        self.content = content
+
+
+class FakePrompt:
+    def __init__(self, focused: list[bool]) -> None:
+        self._focused = focused
+
+    def focus(self):
+        self._focused.append(True)
+
+
+class FakeLog:
+    def __init__(self) -> None:
+        self.lines: list = []
+
+    def write(self, content):
+        self.lines.append(content)
+
+
+def _fake_widgets(app, monkeypatch):
+    """Patch query_one/refresh_bindings with fakes; return (queued, log, focused)."""
+    queued = FakeQueued()
+    log = FakeLog()
+    focused: list[bool] = []
+
+    def fake_query_one(selector, *args, **kwargs):
+        if selector == "#queued":
+            return queued
+        if selector == "#prompt":
+            return FakePrompt(focused)
+        if selector == "#chat":
+            return log
+        raise AssertionError(selector)
+
+    monkeypatch.setattr(app, "query_one", fake_query_one)
+    monkeypatch.setattr(app, "refresh_bindings", lambda: None)
+    return queued, log, focused
+
+
 @pytest.mark.asyncio
 async def test_interrupt_turn_hotkey_sends_interrupt_abort(monkeypatch):
     client = FakeClient()
@@ -79,28 +124,9 @@ async def test_interrupt_turn_hotkey_sends_interrupt_abort(monkeypatch):
     app._buffer.append("queued")
     outputs: list[str] = []
     updates: list[bool] = []
-    focused: list[bool] = []
 
-    class FakeSidebar:
-        display = True
-
-        def clear(self):
-            self.display = False
-
-    class FakePrompt:
-        def focus(self):
-            focused.append(True)
-
-    sidebar = FakeSidebar()
-
-    def fake_query_one(selector, *args, **kwargs):
-        if selector == "#sidebar":
-            return sidebar
-        if selector == "#prompt":
-            return FakePrompt()
-        raise AssertionError(selector)
-
-    monkeypatch.setattr(app, "query_one", fake_query_one)
+    queued, _log, focused = _fake_widgets(app, monkeypatch)
+    queued.display = True
     monkeypatch.setattr(app, "_write_system", outputs.append)
     monkeypatch.setattr(app, "_update_status", lambda: updates.append(app._busy))
 
@@ -116,10 +142,109 @@ async def test_interrupt_turn_hotkey_sends_interrupt_abort(monkeypatch):
     ]
     assert app._busy is False
     assert app._buffer == []
-    assert sidebar.display is False
+    assert queued.display is False
     assert updates == [False]
     assert outputs == ["[yellow]⏹ Turn interrupt requested.[/]"]
     assert focused == [True]
+
+
+@pytest.mark.asyncio
+async def test_submit_while_busy_queues_locally_without_sending(monkeypatch):
+    client = FakeClient()
+    app = ChatApp(client=client)
+    app._busy = True
+
+    queued, _log, _focused = _fake_widgets(app, monkeypatch)
+    monkeypatch.setattr(app, "_update_status", lambda: None)
+
+    class FakeEvent:
+        value = "later message"
+
+        class prompt_input:
+            @staticmethod
+            def clear():
+                pass
+
+    await app.on_prompt_input_submitted(FakeEvent())
+
+    assert client.calls == []
+    assert app._buffer == ["later message"]
+    assert queued.display is True
+
+
+@pytest.mark.asyncio
+async def test_agent_reply_flushes_queued_messages_as_next_turn(monkeypatch):
+    client = FakeClient()
+    app = ChatApp(client=client)
+    app._busy = True
+    app._buffer.extend(["first", "second"])
+
+    queued, log, focused = _fake_widgets(app, monkeypatch)
+    queued.display = True
+    monkeypatch.setattr(app, "_update_status", lambda: None)
+
+    from bos.cli.tui_app import AgentReplyEvent
+
+    await app.on_agent_reply_event(AgentReplyEvent("done", chat_id="chat-1"))
+
+    assert client.calls == [{"content": "first\n\nsecond", "chat_id": "chat-1"}]
+    assert app._buffer == []
+    assert queued.display is False
+    assert app._busy is True
+    assert focused == [True]
+
+
+@pytest.mark.asyncio
+async def test_agent_reply_without_queue_clears_busy(monkeypatch):
+    client = FakeClient()
+    app = ChatApp(client=client)
+    app._busy = True
+
+    _queued, _log, _focused = _fake_widgets(app, monkeypatch)
+    monkeypatch.setattr(app, "_update_status", lambda: None)
+
+    from bos.cli.tui_app import AgentReplyEvent
+
+    await app.on_agent_reply_event(AgentReplyEvent("done", chat_id="chat-1"))
+
+    assert client.calls == []
+    assert app._busy is False
+
+
+@pytest.mark.asyncio
+async def test_cancel_queued_drops_buffer_without_sending(monkeypatch):
+    client = FakeClient()
+    app = ChatApp(client=client)
+    app._busy = True
+    app._buffer.extend(["first", "second"])
+    outputs: list[str] = []
+
+    queued, _log, _focused = _fake_widgets(app, monkeypatch)
+    queued.display = True
+    monkeypatch.setattr(app, "_write_system", outputs.append)
+    monkeypatch.setattr(app, "_update_status", lambda: None)
+
+    app.action_cancel_queued()
+
+    assert client.calls == []
+    assert app._buffer == []
+    assert queued.display is False
+    assert app._busy is True
+    assert outputs == ["[yellow]✗ Dropped 2 queued messages.[/]"]
+
+
+def test_cancel_queued_is_noop_when_empty(monkeypatch):
+    client = FakeClient()
+    app = ChatApp(client=client)
+    outputs: list[str] = []
+    monkeypatch.setattr(app, "_write_system", outputs.append)
+
+    app.action_cancel_queued()
+
+    assert outputs == []
+    assert app.check_action("cancel_queued", ()) is None
+    app._buffer.append("x")
+    assert app.check_action("cancel_queued", ()) is True
 
 
 @pytest.mark.asyncio
