@@ -17,12 +17,14 @@ import logging
 from typing import Any
 
 from rich.markdown import Markdown
+from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal
+from textual.containers import Horizontal, Vertical
 from textual.message import Message
-from textual.widgets import Footer, Header, Input, RichLog, Static
-from textual_autocomplete import AutoComplete, DropdownItem
+from textual.screen import ModalScreen
+from textual.widgets import Footer, Header, Input, RichLog, Static, TextArea
+from textual_autocomplete import AutoComplete, DropdownItem, TargetState
 
 from bos.gateway.client import GatewayClient
 from bos.protocol import WS_TAKEOVER_CLOSE_REASON, MessageType, TurnEvent
@@ -78,19 +80,146 @@ SLASH_COMMANDS = [
 ]
 
 
+def _indent(text: str) -> str:
+    """Indent every line of a (possibly multiline) message for log display."""
+    return "\n".join(f"  {line}" for line in text.splitlines()) or "  "
+
+
+class PromptInput(TextArea):
+    """Multiline prompt: Enter submits, Ctrl+J inserts a newline."""
+
+    MAX_VISIBLE_LINES = 8
+
+    class Submitted(Message):
+        def __init__(self, prompt_input: PromptInput, value: str) -> None:
+            super().__init__()
+            self.prompt_input = prompt_input
+            self.value = value
+
+    async def _on_key(self, event: events.Key) -> None:
+        if event.key == "enter":
+            event.stop()
+            event.prevent_default()
+            # With the autocomplete dropdown open, Enter completes instead of
+            # submitting (AutoComplete sees the key via the message signal,
+            # which fires after this dispatch even for stopped events).
+            if not self._autocomplete_open():
+                self.post_message(self.Submitted(self, self.text))
+            return
+        # Ctrl+J works on every terminal (legacy ones transmit it as \n).
+        # Ctrl+Shift+J is distinguishable only on kitty-protocol terminals;
+        # legacy ones drop shift and deliver plain ctrl+j, same action.
+        if event.key in ("ctrl+j", "ctrl+shift+j"):
+            event.stop()
+            event.prevent_default()
+            self.insert("\n")
+            return
+        await super()._on_key(event)
+
+    def _autocomplete_open(self) -> bool:
+        for ac in self.screen.query(AutoComplete):
+            try:
+                if ac.display and ac.option_list.option_count:
+                    return True
+            except Exception:
+                continue
+        return False
+
+    def _on_text_area_changed(self, event: TextArea.Changed) -> None:
+        self._fit_height()
+
+    def _fit_height(self) -> None:
+        """Grow with content up to MAX_VISIBLE_LINES, accounting for soft wrap."""
+        try:
+            height = self.wrapped_document.height
+        except Exception:
+            height = self.document.line_count
+        self.styles.height = max(1, min(height, self.MAX_VISIBLE_LINES))
+
+
 class SlashAutoComplete(AutoComplete):
-    """AutoComplete that activates for slash commands and @mentions."""
+    """AutoComplete adapted to a TextArea target; activates for slash commands and @mentions."""
+
+    @property
+    def target(self) -> PromptInput:  # type: ignore[override]
+        if isinstance(self._target, PromptInput):
+            return self._target
+        target = self.screen.query_one(self._target)
+        assert isinstance(target, PromptInput)
+        return target
+
+    def _get_target_state(self) -> TargetState:
+        target = self.target
+        return TargetState(
+            text=target.text,
+            cursor_position=target.document.get_index_from_location(target.cursor_location),
+        )
+
+    def _listen_to_messages(self, event: events.Event) -> None:
+        super()._listen_to_messages(event)
+        if isinstance(event, TextArea.Changed):
+            self._handle_target_update()
 
     def should_show_dropdown(self, search_string: str) -> bool:
         if not (search_string.startswith("/") or search_string.startswith("@")):
             return False
         return super().should_show_dropdown(search_string)
 
-    def apply_completion(self, value: str, state: Any) -> None:
-        """Apply the completion, appending a space after @mentions for routing."""
+    def apply_completion(self, value: str, state: TargetState) -> None:
+        """Replace the prompt content with the completion (TextArea-aware)."""
         if value.startswith("@"):
             value = value + " "
-        super().apply_completion(value, state)
+        target = self.target
+        with self.prevent(TextArea.Changed):
+            target.text = value
+            target.move_cursor(target.document.end)
+        target._fit_height()
+        new_state = self._get_target_state()
+        self._rebuild_options(new_state, self.get_search_string(new_state))
+
+
+class InterruptModal(ModalScreen[str | None]):
+    """Modal prompt for an interrupt message: Enter submits, Escape cancels."""
+
+    DEFAULT_CSS = """
+    InterruptModal {
+        align: center middle;
+    }
+
+    #interrupt-dialog {
+        width: 60%;
+        max-width: 80;
+        height: auto;
+        border: round $primary;
+        background: $surface;
+        padding: 1 2;
+    }
+
+    #interrupt-title {
+        color: $text-muted;
+        padding-bottom: 1;
+    }
+    """
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel", show=False),
+    ]
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="interrupt-dialog"):
+            yield Static("Interrupt message — Enter to send, Esc to cancel", id="interrupt-title")
+            yield Input(placeholder="Inject a message into the current turn…", id="interrupt-input")
+
+    def on_mount(self) -> None:
+        self.query_one("#interrupt-input", Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        text = event.value.strip()
+        if text:
+            self.dismiss(text)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
 
 
 # ── ChatApp ────────────────────────────────────────────────────
@@ -134,29 +263,27 @@ class ChatApp(App):
 
     #status-bar {
         height: 1;
-        dock: bottom;
         background: $primary-background;
         color: $text-muted;
         padding: 0 2;
     }
 
     #prompt {
-        dock: bottom;
+        height: 1;
         padding: 0 1;
-    }
-
-    Input {
         border: none;
+        background: transparent;
     }
 
-    Input:focus {
+    #prompt:focus {
         border: none;
     }
     """
 
     BINDINGS = [
         Binding("escape", "interrupt_turn", "Interrupt", show=True, priority=True),
-        Binding("ctrl+enter", "interrupt_message", "Interject", show=True, priority=True),
+        Binding("ctrl+underscore", "interrupt_message", "Interject", show=True, priority=True, key_display="ctrl+/"),
+        Binding("ctrl+slash", "interrupt_message", "Interject", show=False, priority=True),
         Binding("ctrl+c", "quit", "Quit", show=True, priority=True),
         Binding("ctrl+l", "clear_log", "Clear", show=True),
         Binding("ctrl+n", "reset_chat", "New Chat", show=True),
@@ -204,7 +331,12 @@ class ChatApp(App):
                 auto_scroll=True,
             )
         yield Static(self._status_text(), id="status-bar")
-        yield Input(placeholder="Send a message…", id="prompt")
+        yield PromptInput(
+            placeholder="Send a message… (Enter to send, Ctrl+J for newline)",
+            id="prompt",
+            show_line_numbers=False,
+            compact=True,
+        )
         if not self._local_mode:
             yield SlashAutoComplete("#prompt", candidates=self._get_candidates)
         yield Footer()
@@ -222,9 +354,12 @@ class ChatApp(App):
         log = self.query_one("#chat", RichLog)
         log.write("[bold $primary]Agent CLI ready.[/]")
         if self._local_mode:
-            log.write("[dim]Escape to abort · Ctrl+Enter to interject · Ctrl+C to quit[/]\n")
+            log.write("[dim]Escape to abort · Ctrl+J for newline · Ctrl+/ to interject · Ctrl+C to quit[/]\n")
         else:
-            log.write("[dim]Type /help for commands · Escape to abort · Ctrl+Enter to interject · Ctrl+C to quit[/]\n")
+            log.write(
+                "[dim]Type /help for commands · Escape to abort · Ctrl+J for newline"
+                " · Ctrl+/ to interject · Ctrl+C to quit[/]\n"
+            )
 
         # Fetch actor list for @mention autocomplete
         if not self._local_mode:
@@ -234,7 +369,7 @@ class ChatApp(App):
             except Exception:
                 logger.debug("Failed to fetch actor list", exc_info=True)
 
-        self.query_one("#prompt", Input).focus()
+        self.query_one("#prompt", PromptInput).focus()
 
     async def _poll_replies(self) -> None:
         """Background task: await envelopes from the channel."""
@@ -273,25 +408,29 @@ class ChatApp(App):
 
     # ── event handlers ────────────────────────────────────────
 
-    def on_key(self, event: Input.Changed | Any) -> None:
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool:
+        """Disable app-level interrupt hotkeys while a modal dialog is open."""
+        if action in ("interrupt_turn", "interrupt_message") and isinstance(self.screen, ModalScreen):
+            return False
+        return True
+
+    def on_key(self, event: events.Key) -> None:
         """Redirect keystrokes to the prompt unless it already has focus."""
-        prompt = self.query_one("#prompt", Input)
+        if isinstance(self.screen, ModalScreen):
+            return
+        prompt = self.query_one("#prompt", PromptInput)
         if self.focused is not prompt:
             prompt.focus()
             # Forward printable characters into the input
             if event.character and event.is_printable:
-                prompt.value += event.character
-                # Defer cursor move so it isn't reset by the focus change
-                self.call_after_refresh(
-                    setattr, prompt, "cursor_position", len(prompt.value)
-                )
+                prompt.insert(event.character)
                 event.prevent_default()
 
-    async def on_input_submitted(self, event: Input.Submitted) -> None:
+    async def on_prompt_input_submitted(self, event: PromptInput.Submitted) -> None:
         text = event.value.strip()
         if not text:
             return
-        event.input.clear()
+        event.prompt_input.clear()
 
         # Handle slash commands
         if text.startswith("/"):
@@ -303,7 +442,7 @@ class ChatApp(App):
             sidebar = self.query_one("#sidebar", RichLog)
             sidebar.display = True
             sidebar.write("\n[bold cyan]❯ You (buffered)[/]")
-            sidebar.write(f"  {text}")
+            sidebar.write(_indent(text))
 
             try:
                 await self._client.send(text, chat_id=self._chat_id)
@@ -314,7 +453,7 @@ class ChatApp(App):
         # Write user message
         log = self.query_one("#chat", RichLog)
         log.write("\n[bold cyan]❯ You[/]")
-        log.write(f"  {text}")
+        log.write(_indent(text))
 
         # Send to actor
         self._busy = True
@@ -409,7 +548,7 @@ class ChatApp(App):
         if self._buffer:
             log.write("\n[bold cyan]❯ You (buffered)[/]")
             for txt in self._buffer:
-                log.write(f"  {txt}")
+                log.write(_indent(txt))
 
             sidebar = self.query_one("#sidebar", RichLog)
             sidebar.clear()
@@ -422,7 +561,7 @@ class ChatApp(App):
             self._pending_tool_calls.clear()
 
         self._update_status()
-        self.query_one("#prompt", Input).focus()
+        self.query_one("#prompt", PromptInput).focus()
 
     async def on_command_result_event(self, event: CommandResultEvent) -> None:
         """Handle a slash command result from the server."""
@@ -476,7 +615,8 @@ class ChatApp(App):
                 "\n"
                 "[bold]Hot keys:[/]\n"
                 "  Escape      — abort the current turn\n"
-                "  Ctrl+Enter  — inject a message into the current turn\n"
+                "  Ctrl+J / Ctrl+Shift+J — insert a newline in the prompt\n"
+                "  Ctrl+/      — inject a message into the current turn\n"
                 "  Ctrl+C      — quit\n"
                 "  Ctrl+L      — clear the log\n"
                 "  Ctrl+N      — start a new chat\n"
@@ -531,11 +671,10 @@ class ChatApp(App):
         """Restart the background BOS agent."""
         self._write_system("[yellow]↻ Restarting gateway…[/]")
         import sys
+
         try:
             process = await asyncio.create_subprocess_exec(
-                sys.argv[0], "restart",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
+                sys.argv[0], "restart", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
             )
             asyncio.create_task(process.wait())
         except Exception as exc:
@@ -565,16 +704,19 @@ class ChatApp(App):
         self._busy = False
         self._update_status()
         self._write_system("[yellow]⏹ Turn interrupt requested.[/]")
-        self.query_one("#prompt", Input).focus()
+        self.query_one("#prompt", PromptInput).focus()
 
-    async def action_interrupt_message(self) -> None:
-        """Send the current input as an interrupt message (inject into the ongoing turn)."""
-        prompt = self.query_one("#prompt", Input)
-        text = prompt.value.strip()
-        if not text:
-            return
-        prompt.clear()
+    def action_interrupt_message(self) -> None:
+        """Open a modal dialog to compose an interrupt message for the ongoing turn."""
 
+        def _on_dismiss(text: str | None) -> None:
+            if text:
+                asyncio.create_task(self._send_interrupt_message(text))
+
+        self.push_screen(InterruptModal(), callback=_on_dismiss)
+
+    async def _send_interrupt_message(self, text: str) -> None:
+        """Inject a message into the ongoing turn (or send normally when idle)."""
         log = self.query_one("#chat", RichLog)
 
         if self._busy:
@@ -589,11 +731,11 @@ class ChatApp(App):
                 return
 
             log.write("\n[bold yellow]❯ You (interrupt)[/]")
-            log.write(f"  {text}")
+            log.write(_indent(text))
             self._write_system("[yellow]⏎ Interrupt message sent.[/]")
         else:
             log.write("\n[bold cyan]❯ You[/]")
-            log.write(f"  {text}")
+            log.write(_indent(text))
             self._busy = True
             self._update_status()
             try:
