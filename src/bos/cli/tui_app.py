@@ -295,8 +295,6 @@ class ChatApp(App):
     def __init__(
         self,
         client: GatewayClient,
-        *,
-        local_mode: bool = False,
     ) -> None:
         super().__init__()
         self._client = client
@@ -308,7 +306,6 @@ class ChatApp(App):
         self._conn_status: str = "connected"
         self._pending_tool_calls: list[tuple[str, str]] = []
         self._known_actors: list[str] = []
-        self._local_mode = local_mode
 
     # ── compose ────────────────────────────────────────────────
 
@@ -337,8 +334,7 @@ class ChatApp(App):
             show_line_numbers=False,
             compact=True,
         )
-        if not self._local_mode:
-            yield SlashAutoComplete("#prompt", candidates=self._get_candidates)
+        yield SlashAutoComplete("#prompt", candidates=self._get_candidates)
         yield Footer()
 
     # ── lifecycle ──────────────────────────────────────────────
@@ -353,21 +349,17 @@ class ChatApp(App):
         # Welcome
         log = self.query_one("#chat", RichLog)
         log.write("[bold $primary]Agent CLI ready.[/]")
-        if self._local_mode:
-            log.write("[dim]Escape to abort · Ctrl+J for newline · Ctrl+/ to interject · Ctrl+C to quit[/]\n")
-        else:
-            log.write(
-                "[dim]Type /help for commands · Escape to abort · Ctrl+J for newline"
-                " · Ctrl+/ to interject · Ctrl+C to quit[/]\n"
-            )
+        log.write(
+            "[dim]Type /help for commands · Escape to abort · Ctrl+J for newline"
+            " · Ctrl+/ to interject · Ctrl+C to quit[/]\n"
+        )
 
         # Fetch actor list for @mention autocomplete
-        if not self._local_mode:
-            try:
-                actors = await self._client.list_actors()
-                self._known_actors = list(actors.keys())
-            except Exception:
-                logger.debug("Failed to fetch actor list", exc_info=True)
+        try:
+            actors = await self._client.list_actors()
+            self._known_actors = list(actors.keys())
+        except Exception:
+            logger.debug("Failed to fetch actor list", exc_info=True)
 
         self.query_one("#prompt", PromptInput).focus()
 
@@ -630,10 +622,7 @@ class ChatApp(App):
             self.query_one("#chat", RichLog).clear()
 
         elif normalized_cmd == "/restart":
-            if self._local_mode:
-                self._write_system("[yellow]/restart is not available in local mode — use Ctrl+C to quit.[/]")
-            else:
-                await self.action_restart_bos()
+            await self.action_restart_bos()
 
         elif normalized_cmd in (
             "/resume",
@@ -749,8 +738,6 @@ class ChatApp(App):
 
     def _get_candidates(self, state: Any) -> list[str]:
         """Return candidate completions based on the current input prefix."""
-        if self._local_mode:
-            return []
         text = state.text[: state.cursor_position]
         if text.startswith("/"):
             return [DropdownItem(cmd) for cmd in SLASH_COMMANDS]
@@ -811,18 +798,11 @@ class ChatApp(App):
 # ── entrypoint ─────────────────────────────────────────────────
 
 
-async def run_chat_tui(
-    client: GatewayClient,
-    *,
-    local_mode: bool = False,
-) -> None:
+async def run_chat_tui(client: GatewayClient) -> None:
     """Launch the TUI connected to a running gateway.
 
     ``client`` must be an ``GatewayClient`` that has already called
     ``connect()``.
-
-    When ``local_mode`` is True, slash commands and @mention autocomplete
-    are disabled since there is no gateway channel support.
     """
-    app = ChatApp(client=client, local_mode=local_mode)
+    app = ChatApp(client=client)
     await app.run_async()
