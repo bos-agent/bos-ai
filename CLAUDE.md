@@ -44,7 +44,6 @@ The framework is built around named `ExtensionPoint` registries (defined in `src
 | `ep_consolidator` | `Consolidator` protocol | Chat history summarization |
 | `ep_skills_loader` | `SkillsLoader` protocol | Skill discovery and loading |
 | `ep_turn_interceptor` | `TurnInterceptor` protocol | Turn lifecycle hooks |
-| `ep_actor_command` | async fn → str\|dict | Actor-level slash commands |
 
 Extensions register via decorator (e.g., `@ep_tool(name="...", description="...", parameters={...})`) or via TOML config in `[platform.extensions]`.
 

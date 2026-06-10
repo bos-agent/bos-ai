@@ -8,7 +8,6 @@ from conftest import InMemChatStore, InMemMailRoute, InMemMemoryExtension, Messa
 from bos.core.actor import AgentActor
 from bos.core.chat_state import ChatState
 from bos.core.contract import Message
-from bos.extensions.actor_commands import system_cmd  # noqa: F401
 from bos.protocol import Envelope, MessageType
 
 

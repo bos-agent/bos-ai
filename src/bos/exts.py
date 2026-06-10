@@ -29,9 +29,6 @@ such as ``@ep_tool``::
 # Core defaults (consolidator, litellm provider, etc.)
 import bos.core.defaults  # noqa: F401
 
-# Actor commands
-import bos.extensions.actor_commands.system_cmd  # noqa: F401
-
 # Channels
 import bos.extensions.channels.telegram  # noqa: F401
 

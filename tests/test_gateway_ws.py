@@ -6,7 +6,6 @@ import aiohttp
 import pytest
 from aiohttp import web
 
-import bos.extensions.actor_commands.system_cmd  # noqa: F401
 from bos.config import Workspace
 from bos.core import Message
 from bos.extensions.chat_stores.in_memory import InMemChatStore
