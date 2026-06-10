@@ -47,3 +47,29 @@ def test_actor_resolver_rejects_unknown_mention_with_renderable_event():
 def test_display_name_is_not_routing_key():
     with pytest.raises(ActorResolutionError):
         _resolver().resolve("@Primary do work")
+
+
+def _resolver_with_workdir() -> ActorResolver:
+    return ActorResolver(
+        {"main": ActorDescriptor("main", "agent@main", is_default=True)},
+        default_actor="main",
+        workdir="/srv/agent-workspace",
+    )
+
+
+def test_actor_resolver_stamps_gateway_workdir():
+    result = _resolver_with_workdir().resolve("summarize this")
+
+    assert result.metadata["workdir"] == "/srv/agent-workspace"
+
+
+def test_actor_resolver_keeps_client_supplied_workdir():
+    result = _resolver_with_workdir().resolve("summarize this", metadata={"workdir": "/home/user/proj"})
+
+    assert result.metadata["workdir"] == "/home/user/proj"
+
+
+def test_actor_resolver_omits_workdir_when_unconfigured():
+    result = _resolver().resolve("summarize this")
+
+    assert "workdir" not in result.metadata

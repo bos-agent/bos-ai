@@ -42,6 +42,7 @@ class Gateway:
             },
             default_actor=workspace.resolve_default_actor(),
             mention_prefix=workspace.config.runtime.actor_resolver.mention_prefix if workspace.config.runtime else "@",
+            workdir=str(workspace.workspace),
         )
         if harness.chat_store is None or harness.mail_route is None:
             raise RuntimeError("Gateway requires an active AgentHarness with chat_store and mail_route services.")

@@ -254,3 +254,43 @@ async def test_gateway_ws_new_command_updates_channel_cursor(tmp_path, monkeypat
         await gateway.actor_manager.stop_all()
         await gateway.channel_manager.stop_all()
         await runner.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_gateway_client_send_stamps_workdir():
+    client = GatewayClient("127.0.0.1", 1, channel_id="ask-1", workdir="/home/user/proj")
+    sent: list[dict] = []
+
+    class _FakeWS:
+        closed = False
+
+        async def send_json(self, payload):
+            sent.append(payload)
+
+    client._ws = _FakeWS()
+    client._connected.set()
+
+    await client.send("hello")
+    await client.send("explicit", metadata={"workdir": "/elsewhere"})
+
+    assert sent[0]["metadata"]["workdir"] == "/home/user/proj"
+    assert sent[1]["metadata"]["workdir"] == "/elsewhere"
+
+
+@pytest.mark.asyncio
+async def test_gateway_client_send_omits_workdir_when_unset():
+    client = GatewayClient("127.0.0.1", 1, channel_id="ask-1")
+    sent: list[dict] = []
+
+    class _FakeWS:
+        closed = False
+
+        async def send_json(self, payload):
+            sent.append(payload)
+
+    client._ws = _FakeWS()
+    client._connected.set()
+
+    await client.send("hello")
+
+    assert "workdir" not in sent[0]["metadata"]

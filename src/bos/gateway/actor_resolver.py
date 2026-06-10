@@ -44,11 +44,13 @@ class ActorResolver:
         *,
         default_actor: str,
         mention_prefix: str = "@",
+        workdir: str | None = None,
     ) -> None:
         self._actors = dict(actors)
         self._actors_lower = {name.lower(): name for name in actors}
         self._default_actor = default_actor
         self._mention_prefix = mention_prefix
+        self._workdir = workdir
         escaped = re.escape(mention_prefix)
         self._mention_re = re.compile(rf"{escaped}([\w][\w-]*)(?:\s+|$)", re.IGNORECASE)
         self._require_actor(default_actor)
@@ -84,6 +86,9 @@ class ActorResolver:
         out_metadata["target_address"] = descriptor.address
         if descriptor.display_name:
             out_metadata["target_display"] = descriptor.display_name
+        if self._workdir:
+            # Clients may send their own workdir; the gateway workspace is the fallback.
+            out_metadata.setdefault("workdir", self._workdir)
         return ActorRouteResult(
             target_actor=resolved,
             target_address=descriptor.address,

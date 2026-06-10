@@ -381,13 +381,18 @@ class AgentActor:
         if inbound_env is not None:
             target_actor = inbound_env.metadata.get("target_agent") or inbound_env.metadata.get("target_actor")
             target_display = inbound_env.metadata.get("target_display")
+            workdir = inbound_env.metadata.get("workdir")
+            user_metadata: dict[str, Any] = {}
             if isinstance(target_actor, str) and target_actor:
-                user_metadata: dict[str, Any] = {"target_agent": target_actor}
+                user_metadata["target_agent"] = target_actor
                 if isinstance(target_display, str) and target_display:
                     user_metadata["target_display"] = target_display
-                metadata["user_message_metadata"] = user_metadata
                 if target_actor == actor_name and isinstance(target_display, str) and target_display:
                     metadata["assistant_message_metadata"]["agent_display"] = target_display
+            if isinstance(workdir, str) and workdir:
+                user_metadata["workdir"] = workdir
+            if user_metadata:
+                metadata["user_message_metadata"] = user_metadata
         return metadata
 
     def _reply_metadata(self, reply_recipient: str, inbound_env: Envelope | None = None) -> dict[str, Any]:

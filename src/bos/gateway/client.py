@@ -68,6 +68,7 @@ class GatewayClient:
         chat_id: str | None = None,
         endpoint_resolver: EndpointResolver | None = None,
         api_key: str | None = None,
+        workdir: str | None = None,
     ) -> None:
         self._host = host
         self._port = port
@@ -76,6 +77,7 @@ class GatewayClient:
         self._address = address
         self._channel_id = (channel_id or address or uuid.uuid4().hex).strip()
         self._api_key = api_key
+        self._workdir = workdir or None
         self._chat_id = (
             chat_id.strip() if isinstance(chat_id, str) and chat_id else None
         )
@@ -266,6 +268,10 @@ class GatewayClient:
                 raise RuntimeError("Not connected — reconnect timed out")
         out_metadata = dict(metadata or {})
         out_metadata.setdefault("base_revision", self._current_revision)
+        if self._workdir:
+            # The client's working directory; the gateway keeps it if present,
+            # otherwise it stamps its own workspace as the fallback.
+            out_metadata.setdefault("workdir", self._workdir)
         await self._ws.send_json(
             _envelope_to_dict(
                 Envelope(

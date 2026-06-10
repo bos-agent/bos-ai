@@ -77,18 +77,44 @@ def test_actor_turn_metadata_marks_user_target_and_assistant_actor():
         metadata={
             "target_actor": "libai",
             "target_display": "Li Bai",
+            "workdir": "/home/user/proj",
             "channel": {"channel_id": "demo", "channel_conversation_id": "default"},
         },
     )
 
     metadata = actor._turn_metadata("channel@demo", inbound)
 
-    assert metadata["user_message_metadata"] == {"target_agent": "libai", "target_display": "Li Bai"}
+    assert metadata["user_message_metadata"] == {
+        "target_agent": "libai",
+        "target_display": "Li Bai",
+        "workdir": "/home/user/proj",
+    }
     assert metadata["assistant_message_metadata"] == {
         "agent_name": "libai",
         "actor_address": "agent@libai",
         "agent_display": "Li Bai",
     }
+
+
+def test_actor_turn_metadata_keeps_workdir_without_target():
+    store = InMemChatStore()
+    coordinator = ChatCoordinator(store)
+    route = InMemMailRoute()
+    actor = CoordinatedActor(CommitAgent(store), route.bind("agent@main"), chat_coordinator=coordinator)
+    inbound = Envelope(
+        sender="channel@demo",
+        recipient="agent@main",
+        content="hello",
+        chat_id="chat-1",
+        metadata={
+            "workdir": "/home/user/proj",
+            "channel": {"channel_id": "demo", "channel_conversation_id": "default"},
+        },
+    )
+
+    metadata = actor._turn_metadata("channel@demo", inbound)
+
+    assert metadata["user_message_metadata"] == {"workdir": "/home/user/proj"}
 
 
 @pytest.mark.asyncio
