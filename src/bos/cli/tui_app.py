@@ -252,14 +252,6 @@ class ChatApp(App):
         display: none;
     }
 
-    #chat-status {
-        height: 1;
-        dock: top;
-        background: $primary-background;
-        color: $text-muted;
-        padding: 0 2;
-    }
-
     #status-bar {
         height: 1;
         background: $primary-background;
@@ -311,7 +303,6 @@ class ChatApp(App):
 
     def compose(self) -> ComposeResult:
         yield Header()
-        yield Static(self._chat_status_text(), id="chat-status")
         yield RichLog(
             id="chat",
             highlight=False,
@@ -804,26 +795,22 @@ class ChatApp(App):
             return "[green]●[/] connected"
         return "[yellow]○[/] reconnecting…"
 
-    def _chat_status_text(self) -> str:
-        conn = self._connection_indicator()
-        return f"  {conn}  |  Chat: {self._chat_id}  |  Channel: {self._client.client_id}"
-
     def _header_subtitle(self) -> str:
         conn = "●" if self._conn_status == "connected" else "○ reconnecting"
         return f"{conn}  Gateway | {self._chat_id}"
 
     def _status_text(self) -> str:
+        conn = self._connection_indicator()
         if self._busy:
             state = "● thinking"
             if self._buffer:
                 state += f"  ·  {len(self._buffer)} queued"
         else:
             state = "○ ready"
-        return f"  Gateway  ·  {self._chat_id}  ·  {state}"
+        return f"  {conn}  ·  Chat: {self._chat_id}  ·  Channel: {self._client.client_id}  ·  {state}"
 
     def _update_status(self) -> None:
         self.sub_title = self._header_subtitle()
-        self.query_one("#chat-status", Static).update(self._chat_status_text())
         self.query_one("#status-bar", Static).update(self._status_text())
 
     async def _poll_connection_status(self) -> None:

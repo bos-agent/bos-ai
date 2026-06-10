@@ -357,14 +357,20 @@ async def test_command_result_event_for_resume_updates_displayed_chat(monkeypatc
     assert updates == ["resumed-chat"]
 
 
-def test_chat_status_text_uses_current_client_and_chat():
+def test_status_text_uses_current_client_and_chat():
     client = FakeClient()
     app = ChatApp(client=client)
 
-    assert "Chat: chat-1" in app._chat_status_text()
-    assert "Channel: client-1" in app._chat_status_text()
-    assert "connected" in app._chat_status_text()
+    assert "Chat: chat-1" in app._status_text()
+    assert "Channel: client-1" in app._status_text()
+    assert "connected" in app._status_text()
+    assert "○ ready" in app._status_text()
     assert "Gateway | chat-1" in app._header_subtitle()
+
+    app._busy = True
+    app._buffer.append("x")
+    assert "● thinking" in app._status_text()
+    assert "1 queued" in app._status_text()
 
 
 @pytest.mark.asyncio
