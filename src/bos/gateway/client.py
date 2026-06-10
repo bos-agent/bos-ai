@@ -132,6 +132,17 @@ class GatewayClient:
             raise ValueError("chat_id must be non-empty.")
         self._chat_id = chat_id
 
+    @property
+    def workdir(self) -> str | None:
+        return self._workdir
+
+    def update_workdir(self, workdir: str | None) -> None:
+        """Set or clear the workdir stamped on outgoing message metadata.
+
+        When cleared, the gateway stamps its own workspace as the fallback.
+        """
+        self._workdir = (workdir or "").strip() or None
+
     async def connect(self, *, takeover: bool = False) -> None:
         """Open the WebSocket connection and start the background reader."""
         await self._do_connect(takeover=takeover)

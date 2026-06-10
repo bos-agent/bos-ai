@@ -12,12 +12,16 @@ class FakeClient:
         self.client_id = "client-1"
         self.chat_id = "chat-1"
         self.connected = True
+        self.workdir: str | None = None
 
     async def send(self, content, **kwargs):
         self.calls.append({"content": content, **kwargs})
 
     def update_chat_id(self, chat_id: str) -> None:
         self.chat_id = chat_id
+
+    def update_workdir(self, workdir: str | None) -> None:
+        self.workdir = workdir or None
 
 
 @pytest.mark.asyncio
@@ -231,6 +235,43 @@ async def test_cancel_queued_drops_buffer_without_sending(monkeypatch):
     assert queued.display is False
     assert app._busy is True
     assert outputs == ["[yellow]✗ Dropped 2 queued messages.[/]"]
+
+
+@pytest.mark.asyncio
+async def test_workdir_command_set_show_unset(monkeypatch, tmp_path):
+    client = FakeClient()
+    app = ChatApp(client=client)
+    outputs: list[str] = []
+    monkeypatch.setattr(app, "_write_system", outputs.append)
+
+    await app._handle_slash_command(f"/workdir {tmp_path}")
+    assert client.workdir == str(tmp_path.resolve())
+    assert str(tmp_path.resolve()) in outputs[-1]
+
+    await app._handle_slash_command("/workdir")
+    assert str(tmp_path.resolve()) in outputs[-1]
+
+    await app._handle_slash_command("/workdir unset")
+    assert client.workdir is None
+
+    await app._handle_slash_command("/workdir")
+    assert "unset" in outputs[-1]
+
+    # purely client-side: nothing is sent to the gateway
+    assert client.calls == []
+
+
+@pytest.mark.asyncio
+async def test_workdir_command_accepts_missing_path_with_warning(monkeypatch):
+    client = FakeClient()
+    app = ChatApp(client=client)
+    outputs: list[str] = []
+    monkeypatch.setattr(app, "_write_system", outputs.append)
+
+    await app._handle_slash_command("/workdir /no/such/dir")
+
+    assert client.workdir == "/no/such/dir"
+    assert "not found" in outputs[-1]
 
 
 def test_cancel_queued_is_noop_when_empty(monkeypatch):

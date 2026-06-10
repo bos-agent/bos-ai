@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from pathlib import Path
 from typing import Any
 
 from rich.markdown import Markdown
@@ -78,6 +79,7 @@ SLASH_COMMANDS = [
     "/chats",
     "/clear",
     "/restart",
+    "/workdir",
 ]
 
 
@@ -597,6 +599,8 @@ class ChatApp(App):
                 "  /chats    — list all chats\n"
                 "  /clear    — clear the log\n"
                 "  /restart  — restart the gateway\n"
+                "  /workdir  — show, set (/workdir <path>), or unset (/workdir unset)\n"
+                "              the working directory stamped on outgoing messages\n"
                 "\n"
                 "[bold]Hot keys:[/]\n"
                 "  Escape      — abort the current turn\n"
@@ -618,6 +622,9 @@ class ChatApp(App):
         elif normalized_cmd == "/restart":
             await self.action_restart_bos()
 
+        elif normalized_cmd == "/workdir":
+            self._handle_workdir_command(rest.strip())
+
         elif normalized_cmd in (
             "/resume",
             "/chats",
@@ -627,6 +634,29 @@ class ChatApp(App):
 
         else:
             self._write_system(f"[yellow]Unknown command: {normalized_cmd}[/]")
+
+    def _handle_workdir_command(self, arg: str) -> None:
+        """Show, set, or unset the workdir stamped on outgoing messages."""
+        if not arg:
+            current = self._client.workdir
+            if current:
+                self._write_system(f"[dim]workdir: {current}[/]")
+            else:
+                self._write_system("[dim]workdir: (unset — the gateway workspace is used)[/]")
+            return
+        if arg.lower() in ("unset", "none", "off"):
+            self._client.update_workdir(None)
+            self._write_system("[dim]workdir unset — the gateway workspace is used.[/]")
+            return
+        path = Path(arg).expanduser()
+        if path.is_dir():
+            resolved = str(path.resolve())
+            self._client.update_workdir(resolved)
+            self._write_system(f"[dim]workdir set: {resolved}[/]")
+        else:
+            # The gateway may run on another filesystem (e.g. Docker); set anyway.
+            self._client.update_workdir(str(path))
+            self._write_system(f"[yellow]workdir set: {path} (not found on this machine)[/]")
 
     async def _send_command(self, command_text: str) -> None:
         """Send a slash command to the channel server for execution."""
