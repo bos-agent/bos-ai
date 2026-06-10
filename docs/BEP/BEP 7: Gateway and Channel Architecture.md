@@ -453,7 +453,8 @@ Gateway HTTP/WS access starts with a simple API-key model.
 
 Rules:
 
-- all gateway HTTP endpoints require authentication unless explicitly documented as local-only health probes
+- the API key is optional: when the env variable named by `[runtime.gateway].api_key_env` is unset or empty, the gateway runs without authentication (a hosting layer may enforce its own auth in front of it)
+- when a key is configured, all gateway HTTP endpoints require authentication unless explicitly documented as local-only health probes
 - WebSocket handshakes require the same authentication as HTTP endpoints
 - preferred form: `Authorization: Bearer <api_key>`
 - query-string tokens should be avoided; if a constrained client cannot set headers, a fallback must be explicitly documented and treated as less safe

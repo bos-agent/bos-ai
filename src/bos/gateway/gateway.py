@@ -11,7 +11,7 @@ from .actor_resolver import ActorDescriptor, ActorResolver
 from .channel_context import ChannelRuntimeContext
 from .channel_manager import ChannelManager
 from .chat_coordinator import ChannelConversationRef, ChatCoordinator
-from .http import create_gateway_app, require_gateway_api_key
+from .http import create_gateway_app, resolve_gateway_api_key
 from .state import GatewayRunDir, write_gateway_state
 from .ws_channel import WSChannel
 
@@ -83,7 +83,7 @@ class Gateway:
         }
 
     def build_app(self) -> web.Application:
-        api_key = require_gateway_api_key(self.config)
+        api_key = resolve_gateway_api_key(self.config)
         return create_gateway_app(
             config=self.config,
             api_key=api_key,
