@@ -119,6 +119,7 @@ def _attribute_history_message(
     *,
     current_agent: str,
     actor_attribution: bool = True,
+    include_workdir: bool = True,
 ) -> dict[str, Any]:
     content = projected.get("content")
     if not isinstance(content, str):
@@ -132,13 +133,21 @@ def _attribute_history_message(
                 "role": "user",
                 "content": f"[assistant {label} said]\n{content}",
             }
-    label = _history_attribution_label(role, source.metadata, actor_attribution=actor_attribution)
+    label = _history_attribution_label(
+        role, source.metadata, actor_attribution=actor_attribution, include_workdir=include_workdir
+    )
     if not label:
         return projected
     return projected | {"content": f"{label}\n{content}"}
 
 
-def _history_attribution_label(role: Any, metadata: dict[str, Any], *, actor_attribution: bool = True) -> str | None:
+def _history_attribution_label(
+    role: Any,
+    metadata: dict[str, Any],
+    *,
+    actor_attribution: bool = True,
+    include_workdir: bool = True,
+) -> str | None:
     if role == "assistant":
         if actor_attribution:
             label = _history_agent_label(metadata)
@@ -153,9 +162,10 @@ def _history_attribution_label(role: Any, metadata: dict[str, Any], *, actor_att
             )
             if target:
                 parts.append(f"user -> {target}")
-        workdir = _metadata_str(metadata, "workdir")
-        if workdir:
-            parts.append(f"workdir: {workdir}")
+        if include_workdir:
+            workdir = _metadata_str(metadata, "workdir")
+            if workdir:
+                parts.append(f"workdir: {workdir}")
         if parts:
             return f"[{' | '.join(parts)}]"
     return None
@@ -714,10 +724,11 @@ class Agent:
     def _project_current_message(self, message: Message) -> dict[str, Any]:
         """Render attribution labels on current-turn user messages sent to the LLM.
 
-        Mirrors the history projection so the first turn sees the same
-        ``[user -> X | workdir: ...]`` label that later turns get from
-        :meth:`_format_history`. Stored content stays raw; the label is
-        re-derived from metadata on every projection.
+        Mirrors the history projection, except the workdir label always
+        renders here so the latest message carries the active workdir even
+        when history suppresses repeats (:meth:`_format_history`). Stored
+        content stays raw; the label is re-derived from metadata on every
+        projection.
         """
         llm_message = message.llm_message
         if llm_message.get("role") != "user" or not isinstance(llm_message.get("content"), str):
@@ -731,20 +742,31 @@ class Agent:
         """Hook for subclasses to customise history projection (e.g. attribution labels).
 
         Actor labels (``[user -> X]``, ``[assistant: X]``) render only when
-        ``history_attribution`` is enabled; workdir labels render whenever the
-        message metadata carries a ``workdir``.
+        ``history_attribution`` is enabled. Workdir labels render only when the
+        workdir changes between user messages — repeating an unchanged workdir
+        on every message is noise; the current-turn projection always carries
+        the active workdir (see :meth:`_project_current_message`).
         """
         if len(result.messages) != len(result.source_messages):
             return result.messages
-        return [
-            _attribute_history_message(
-                projected,
-                source,
-                current_agent=self._name,
-                actor_attribution=self._history_attribution,
+        formatted: list[dict[str, Any]] = []
+        last_workdir: str | None = None
+        for projected, source in zip(result.messages, result.source_messages, strict=True):
+            include_workdir = False
+            if projected.get("role") == "user":
+                workdir = _metadata_str(source.metadata, "workdir")
+                include_workdir = workdir is not None and workdir != last_workdir
+                last_workdir = workdir
+            formatted.append(
+                _attribute_history_message(
+                    projected,
+                    source,
+                    current_agent=self._name,
+                    actor_attribution=self._history_attribution,
+                    include_workdir=include_workdir,
+                )
             )
-            for projected, source in zip(result.messages, result.source_messages, strict=True)
-        ]
+        return formatted
 
     async def _build_system_prompt(self) -> str:
         system_sections = [self._system_prompt]

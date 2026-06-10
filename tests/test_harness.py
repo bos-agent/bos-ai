@@ -273,6 +273,43 @@ async def test_agent_history_combines_target_and_workdir_labels():
     assert history[0]["content"] == "[user -> Li Bai | workdir: /home/user/proj]\nhello"
 
 
+@pytest.mark.asyncio
+async def test_agent_history_renders_workdir_only_when_it_changes():
+    store = InMemChatStore()
+    await store.commit_turn(
+        "chat",
+        [
+            Message(llm_message={"role": "user", "content": "one"}, metadata={"workdir": "/proj/a"}),
+            Message(llm_message={"role": "assistant", "content": "ok"}, metadata={"agent_name": "main"}),
+        ],
+        turn_id="turn-1",
+    )
+    await store.commit_turn(
+        "chat",
+        [
+            Message(llm_message={"role": "user", "content": "two"}, metadata={"workdir": "/proj/a"}),
+            Message(llm_message={"role": "assistant", "content": "ok"}, metadata={"agent_name": "main"}),
+        ],
+        turn_id="turn-2",
+    )
+    await store.commit_turn(
+        "chat",
+        [
+            Message(llm_message={"role": "user", "content": "three"}, metadata={"workdir": "/proj/b"}),
+            Message(llm_message={"role": "assistant", "content": "ok"}, metadata={"agent_name": "main"}),
+        ],
+        turn_id="turn-3",
+    )
+    agent = create_test_agent(agent_name="main", chat_store=store)
+
+    history = await agent._load_and_compact_history("chat", budget_model=None)
+
+    # first occurrence renders, the unchanged repeat is suppressed, the change renders
+    assert history[0]["content"] == "[workdir: /proj/a]\none"
+    assert history[2]["content"] == "two"
+    assert history[4]["content"] == "[workdir: /proj/b]\nthree"
+
+
 def test_current_turn_user_message_projection_renders_workdir():
     agent = create_test_agent(agent_name="main")
     message = Message(
