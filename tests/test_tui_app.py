@@ -5,10 +5,12 @@ import pytest
 from bos.cli.tui_app import (
     ChatApp,
     CommandResultEvent,
+    PlanModal,
     PromptHistory,
     PromptInput,
     SystemEvent,
     TurnEventMessage,
+    _render_plan_text,
     run_chat_tui,
 )
 from bos.protocol import WS_TAKEOVER_CLOSE_REASON, MessageType, TurnEvent
@@ -765,3 +767,166 @@ async def test_takeover_system_event_exits_tui(monkeypatch):
 
     assert outputs == [f"[yellow]{WS_TAKEOVER_CLOSE_REASON} Exiting.[/]"]
     assert exited == [True]
+
+
+@pytest.mark.asyncio
+async def test_turn_aborted_system_event_resets_busy_state(monkeypatch):
+    client = FakeClient()
+    app = ChatApp(client=client)
+    outputs: list[str] = []
+    app._busy = True
+    app._pending_tool_calls.append(("Tool", ""))
+    monkeypatch.setattr(app, "_write_system", outputs.append)
+    monkeypatch.setattr(app, "_update_status", lambda: None)
+
+    await app.on_system_event(SystemEvent("Turn aborted.", "chat-1", {"event": "turn_aborted"}))
+
+    assert app._busy is False
+    assert app._pending_tool_calls == []
+    assert any("Turn aborted" in line for line in outputs)
+
+
+@pytest.mark.asyncio
+async def test_turn_error_system_event_resets_busy_and_shows_error(monkeypatch):
+    client = FakeClient()
+    app = ChatApp(client=client)
+    outputs: list[str] = []
+    app._busy = True
+    app._pending_tool_calls.append(("Tool", ""))
+    monkeypatch.setattr(app, "_write_system", outputs.append)
+    monkeypatch.setattr(app, "_update_status", lambda: None)
+
+    await app.on_system_event(
+        SystemEvent("Turn failed: provider exploded", "chat-1", {"event": "turn_error"})
+    )
+
+    assert app._busy is False
+    assert app._pending_tool_calls == []
+    assert any("provider exploded" in line for line in outputs)
+
+
+def _plan_event(plan, chat_id: str = "chat-1") -> TurnEventMessage:
+    return TurnEventMessage(
+        TurnEvent(
+            event_type="plan",
+            phase="update",
+            chat_id=chat_id,
+            turn_id="turn-1",
+            detail="plan_state",
+            metadata={"plan": plan},
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_plan_state_event_caches_plan_and_writes_card(monkeypatch):
+    client = FakeClient()
+    app = ChatApp(client=client)
+    _queued, log, _focused = _fake_widgets(app, monkeypatch)
+
+    plan = {
+        "status": "needs_input",
+        "objective": "Ship the feature",
+        "breakdown": ["Write code", "Write tests"],
+        "open_questions": ["Which DB?"],
+    }
+    await app.on_turn_event_message(_plan_event(plan))
+
+    assert app._plan_by_chat["chat-1"] == plan
+    card = str(log.lines[-1])
+    assert "◆ Plan" in card
+    assert "needs_input" in card
+    assert "Ship the feature" in card
+    assert "Write code" in card
+    assert "Which DB?" in card
+
+
+@pytest.mark.asyncio
+async def test_plan_card_hides_breakdown_once_in_progress(monkeypatch):
+    client = FakeClient()
+    app = ChatApp(client=client)
+    _queued, log, _focused = _fake_widgets(app, monkeypatch)
+
+    plan = {"status": "in_progress", "objective": "Ship it", "breakdown": ["Step one"]}
+    await app.on_turn_event_message(_plan_event(plan))
+
+    card = str(log.lines[-1])
+    assert "Ship it" in card
+    assert "Step one" not in card
+
+
+@pytest.mark.asyncio
+async def test_plan_state_event_with_none_clears_cached_plan(monkeypatch):
+    client = FakeClient()
+    app = ChatApp(client=client)
+    _queued, log, _focused = _fake_widgets(app, monkeypatch)
+
+    await app.on_turn_event_message(_plan_event({"status": "approved", "objective": "Ship it"}))
+    assert "chat-1" in app._plan_by_chat
+
+    await app.on_turn_event_message(_plan_event(None))
+    assert "chat-1" not in app._plan_by_chat
+    assert "cleared" in str(log.lines[-1])
+
+
+@pytest.mark.asyncio
+async def test_plan_state_event_for_other_chat_caches_without_writing(monkeypatch):
+    client = FakeClient()
+    app = ChatApp(client=client)
+    _queued, log, _focused = _fake_widgets(app, monkeypatch)
+
+    await app.on_turn_event_message(_plan_event({"status": "draft", "objective": "Elsewhere"}, chat_id="other-chat"))
+
+    assert app._plan_by_chat["other-chat"]["objective"] == "Elsewhere"
+    assert log.lines == []
+
+
+@pytest.mark.asyncio
+async def test_show_plan_action_opens_modal_or_reports_missing(monkeypatch):
+    client = FakeClient()
+    app = ChatApp(client=client)
+    outputs: list[str] = []
+    pushed: list = []
+    monkeypatch.setattr(app, "_write_system", outputs.append)
+    monkeypatch.setattr(app, "push_screen", lambda screen: pushed.append(screen))
+
+    app.action_show_plan()
+    assert pushed == []
+    assert "No plan" in outputs[0]
+
+    app._plan_by_chat["chat-1"] = {"status": "approved", "objective": "Ship it"}
+    app.action_show_plan()
+    assert len(pushed) == 1
+    assert isinstance(pushed[0], PlanModal)
+
+
+@pytest.mark.asyncio
+async def test_plan_slash_command_routes_to_show_plan(monkeypatch):
+    client = FakeClient()
+    app = ChatApp(client=client)
+    shown: list[bool] = []
+    monkeypatch.setattr(app, "action_show_plan", lambda: shown.append(True))
+
+    await app._handle_slash_command("/plan")
+
+    assert shown == [True]
+
+
+def test_render_plan_text_includes_populated_sections_only():
+    text = _render_plan_text(
+        {
+            "status": "approved",
+            "objective": "Ship the feature",
+            "user_value": "Users see plans",
+            "breakdown": ["Step one"],
+            "open_questions": [],
+        }
+    ).plain
+
+    assert "Objective" in text
+    assert "Ship the feature" in text
+    assert "User value" in text
+    assert "Breakdown" in text
+    assert "Step one" in text
+    assert "Open questions" not in text
+    assert "Risks" not in text
