@@ -64,7 +64,8 @@ class WSChannel(BaseChannel[dict[str, Any]]):
         # Full transcript, not just unobserved messages: clients replace their
         # viewport with the session ack payload on connect and reconnect.
         missing_messages = await self._runtime.chat_coordinator.hydrate(chat_id=self._chat_id)
-        await self._send_session_ack(mailbox, current_revision, observed_revision, missing_messages)
+        active_turn = self._runtime.chat_coordinator.active_turn_status(self._chat_id)
+        await self._send_session_ack(mailbox, current_revision, observed_revision, missing_messages, active_turn)
         self._runtime.chat_coordinator.mark_observed(
             chat_id=self._chat_id,
             ref=self.ref,
@@ -95,6 +96,7 @@ class WSChannel(BaseChannel[dict[str, Any]]):
         current_revision: int,
         observed_revision: int,
         missing_messages: list[dict[str, Any]],
+        active_turn: dict[str, Any] | None = None,
     ) -> None:
         await self._ws.send_json(
             _envelope_to_dict(
@@ -112,6 +114,7 @@ class WSChannel(BaseChannel[dict[str, Any]]):
                         "current_revision": current_revision,
                         "observed_revision": observed_revision,
                         "missing_messages": missing_messages,
+                        "active_turn": active_turn,
                     },
                 )
             )

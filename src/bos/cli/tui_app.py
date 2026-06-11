@@ -945,6 +945,14 @@ class ChatApp(App):
         self._render_history(event.metadata.get("missing_messages") or [])
         if self._session_count > 1:
             self._write_system("\n[green]↻ Reconnected — transcript refreshed.[/]")
+        # Adopt the server's view of the in-flight turn so a freshly started
+        # client can interrupt a turn it did not send (e.g. after Ctrl+C).
+        self._busy = bool(event.metadata.get("active_turn"))
+        if self._busy:
+            self._write_system("\n[dim]⏳ A turn is in progress — Esc to abort.[/]")
+        else:
+            self._pending_tool_calls.clear()
+        self._update_status()
 
     @staticmethod
     def _write_banner(log: RichLog) -> None:

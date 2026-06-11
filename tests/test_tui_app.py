@@ -770,6 +770,47 @@ async def test_takeover_system_event_exits_tui(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_session_event_adopts_server_active_turn(monkeypatch):
+    client = FakeClient()
+    app = ChatApp(client=client)
+    _, log, _ = _fake_widgets(app, monkeypatch)
+    monkeypatch.setattr(app, "_update_status", lambda: None)
+
+    await app.on_system_event(
+        SystemEvent(
+            "connected",
+            "chat-1",
+            {
+                "event": "session",
+                "missing_messages": [],
+                "active_turn": {"chat_id": "chat-1", "turn_id": "t1", "actor": "main"},
+            },
+        )
+    )
+
+    assert app._busy is True
+    assert any("turn is in progress" in str(line) for line in log.lines)
+
+
+@pytest.mark.asyncio
+async def test_session_event_without_active_turn_clears_busy(monkeypatch):
+    client = FakeClient()
+    app = ChatApp(client=client)
+    _fake_widgets(app, monkeypatch)
+    monkeypatch.setattr(app, "_update_status", lambda: None)
+    # The turn finished while this client was disconnected.
+    app._busy = True
+    app._pending_tool_calls.append(("Tool", ""))
+
+    await app.on_system_event(
+        SystemEvent("connected", "chat-1", {"event": "session", "missing_messages": [], "active_turn": None})
+    )
+
+    assert app._busy is False
+    assert app._pending_tool_calls == []
+
+
+@pytest.mark.asyncio
 async def test_turn_aborted_system_event_resets_busy_state(monkeypatch):
     client = FakeClient()
     app = ChatApp(client=client)

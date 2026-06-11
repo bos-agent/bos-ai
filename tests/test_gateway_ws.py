@@ -82,6 +82,8 @@ async def test_gateway_ws_dynamic_channel_sends_message_to_actor(tmp_path, monke
             ack = await ws.receive_json()
             assert ack["metadata"]["event"] == "session"
             assert ack["metadata"]["current_revision"] == 0
+            # No turn in flight: clients adopt this to gate interrupt hotkeys.
+            assert ack["metadata"]["active_turn"] is None
 
             await ws.send_json({"content": "hello", "content_type": MessageType.MESSAGE, "base_revision": 0})
             response = await ws.receive_json(timeout=2)
