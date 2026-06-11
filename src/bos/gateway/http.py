@@ -19,21 +19,23 @@ APP_STATUS_PROVIDER = web.AppKey("status_provider", object)
 APP_WS_HANDLER = web.AppKey("ws_handler", object)
 
 
-def require_gateway_api_key(config: ResolvedGatewayConfig, environ: dict[str, str] | None = None) -> str:
+def resolve_gateway_api_key(config: ResolvedGatewayConfig, environ: dict[str, str] | None = None) -> str | None:
+    """Return the configured gateway API key, or ``None`` when auth is disabled.
+
+    The key is optional: when the environment variable is unset or empty the
+    gateway runs without authentication (a hosting layer may enforce its own).
+    """
     import os
 
     env = os.environ if environ is None else environ
-    api_key = env.get(config.api_key_env, "")
-    if not api_key.strip():
-        raise RuntimeError(f"Gateway API key environment variable {config.api_key_env!r} is not set.")
-    return api_key
+    api_key = env.get(config.api_key_env, "").strip()
+    return api_key or None
 
 
 @web.middleware
 async def api_key_middleware(request: web.Request, handler: Callable[[web.Request], Awaitable[web.StreamResponse]]):
     api_key: str = request.app[APP_API_KEY]
-    expected = f"Bearer {api_key}"
-    if request.headers.get("Authorization") != expected:
+    if api_key and request.headers.get("Authorization") != f"Bearer {api_key}":
         return web.json_response({"ok": False, "error": "unauthorized"}, status=401)
     return await handler(request)
 
@@ -41,12 +43,12 @@ async def api_key_middleware(request: web.Request, handler: Callable[[web.Reques
 def create_gateway_app(
     *,
     config: ResolvedGatewayConfig,
-    api_key: str,
+    api_key: str | None,
     status_provider: StatusProvider,
     ws_handler: WSHandler | None = None,
 ) -> web.Application:
     app = web.Application(client_max_size=config.max_upload_bytes, middlewares=[api_key_middleware])
-    app[APP_API_KEY] = api_key
+    app[APP_API_KEY] = api_key or ""
     app[APP_GATEWAY_CONFIG] = config
     app[APP_STATUS_PROVIDER] = status_provider
     if ws_handler is not None:

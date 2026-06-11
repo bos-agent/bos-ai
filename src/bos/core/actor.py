@@ -11,10 +11,10 @@ from typing import Any
 from bos.protocol import Envelope, MessageContent, MessageType, TurnEvent
 
 from .agent import AbortTurn, Agent
-from .chat_state import ChatState
-from .contract import MailBox, ep_actor_command
+from .chat_state import ChatState, ChatStateError
+from .contract import MailBox
 from .events import MailboxEventSink
-from .harness import CURRENT_HARNESS, CURRENT_MAILBOX
+from .harness import CURRENT_MAILBOX
 
 logger = logging.getLogger(__name__)
 
@@ -381,13 +381,18 @@ class AgentActor:
         if inbound_env is not None:
             target_actor = inbound_env.metadata.get("target_agent") or inbound_env.metadata.get("target_actor")
             target_display = inbound_env.metadata.get("target_display")
+            workdir = inbound_env.metadata.get("workdir")
+            user_metadata: dict[str, Any] = {}
             if isinstance(target_actor, str) and target_actor:
-                user_metadata: dict[str, Any] = {"target_agent": target_actor}
+                user_metadata["target_agent"] = target_actor
                 if isinstance(target_display, str) and target_display:
                     user_metadata["target_display"] = target_display
-                metadata["user_message_metadata"] = user_metadata
                 if target_actor == actor_name and isinstance(target_display, str) and target_display:
                     metadata["assistant_message_metadata"]["agent_display"] = target_display
+            if isinstance(workdir, str) and workdir:
+                user_metadata["workdir"] = workdir
+            if user_metadata:
+                metadata["user_message_metadata"] = user_metadata
         return metadata
 
     def _reply_metadata(self, reply_recipient: str, inbound_env: Envelope | None = None) -> dict[str, Any]:
@@ -430,13 +435,12 @@ class AgentActor:
         parts = command_content.split(None, 1)
         cmd_name, input = parts[0].lstrip("/"), "" if len(parts) == 1 else parts[1]
 
-        if not ep_actor_command.has(cmd_name):
+        handler = self._COMMANDS.get(cmd_name)
+        if handler is None:
             result: str | dict[str, Any] = f"Invalid command `{cmd_name}`"
         else:
             try:
-                result = await ep_actor_command.invoke_async(
-                    cmd_name, {"input": input, "env": env, "actor": self, "harness": CURRENT_HARNESS.get(None)}
-                )
+                result = await handler(self, input, env)
             except Exception as exc:
                 result = {"name": cmd_name, "ok": False, "error": str(exc), "result": str(exc)}
 
@@ -453,6 +457,82 @@ class AgentActor:
             chat_id=env.chat_id,
             metadata=self._command_result_metadata(env),
         )
+
+    @staticmethod
+    def _command_client_id(env: Envelope) -> str | None:
+        routing = env.metadata.get("routing")
+        if isinstance(routing, dict):
+            client_id = routing.get("client_id")
+            if isinstance(client_id, str) and client_id.strip():
+                return client_id.strip()
+        channel = env.metadata.get("channel")
+        if isinstance(channel, dict):
+            channel_id = channel.get("channel_id")
+            conversation_id = channel.get("channel_conversation_id")
+            if (
+                isinstance(channel_id, str)
+                and channel_id.strip()
+                and isinstance(conversation_id, str)
+                and conversation_id
+            ):
+                return f"{channel_id}:{conversation_id}"
+        return None
+
+    async def _cmd_chats(self, input: str, env: Envelope) -> dict[str, Any]:
+        """List all chats, most recently active first."""
+        chats = await self._agent._chat_store.list_chats()
+        metas = sorted(
+            chats.values(),
+            key=lambda m: (m.last_activity is not None, m.last_activity),
+            reverse=True,
+        )
+        result = [
+            {
+                "chat_id": m.chat_id,
+                "message_count": m.message_count,
+                "last_activity": m.last_activity.isoformat() if m.last_activity else None,
+                "description": m.description,
+            }
+            for m in metas
+        ]
+        return {"name": "chats", "ok": True, "result": result}
+
+    async def _cmd_prompt(self, input: str, env: Envelope) -> dict[str, Any]:
+        """Show the current agent system prompt."""
+        return {"name": "prompt", "ok": True, "result": await self._agent._build_system_prompt()}
+
+    async def _cmd_new(self, input: str, env: Envelope) -> dict[str, Any]:
+        """Start a new chat for the current client."""
+        client_id = self._command_client_id(env)
+        if client_id:
+            chat_id = self._chat_state.new_chat_for_client(client_id)
+        else:
+            chat_id = await self.reset_chat(env)
+        await self.retire_session(env.chat_id)
+        return {"name": "new", "ok": True, "result": "chat reset", "chat_id": chat_id}
+
+    async def _cmd_resume(self, input: str, env: Envelope) -> dict[str, Any]:
+        """Resume a chat by id for the current client."""
+        client_id = self._command_client_id(env)
+        if not client_id:
+            return {"name": "resume", "ok": False, "error": "Cannot resume without channel metadata."}
+        if not input.strip():
+            return {"name": "resume", "ok": False, "error": "Usage: /resume <chat-id>"}
+        try:
+            chat_id = self._chat_state.resolve_alias_or_id(input.strip())
+            self._chat_state.set_cursor(client_id, chat_id)
+        except ChatStateError as exc:
+            return {"name": "resume", "ok": False, "error": str(exc)}
+        if env.chat_id != chat_id:
+            await self.retire_session(env.chat_id)
+        return {"name": "resume", "ok": True, "result": f"resumed {chat_id}", "chat_id": chat_id}
+
+    _COMMANDS = {
+        "chats": _cmd_chats,
+        "prompt": _cmd_prompt,
+        "new": _cmd_new,
+        "resume": _cmd_resume,
+    }
 
     @staticmethod
     def _command_result_metadata(env: Envelope) -> dict[str, Any]:

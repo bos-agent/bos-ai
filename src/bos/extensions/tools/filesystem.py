@@ -1,4 +1,5 @@
 import asyncio
+import fnmatch
 import os
 import re
 from pathlib import Path
@@ -7,6 +8,12 @@ from bos.core import ep_tool
 
 _IGNORE_DIRS = {".git", ".pycache", "__pycache__", "node_modules", "venv", ".venv", ".uv", "dist", "build"}
 _READ_FILES: set[Path] = set()
+
+# GrepSearch output limits — prevent context-window poisoning from
+# minified bundles, giant JSON tokenizer files, or broad pattern matches.
+_MAX_GREP_LINES = 100
+_MAX_GREP_BYTES = 100_000
+_MAX_LINE_BYTES = 4_000
 
 
 @ep_tool(
@@ -249,6 +256,15 @@ def _sync_tool_glob_search(pattern: str, cwd: str = ".") -> str:
         },
         "required": ["query"],
     },
+    defaults={
+        # Patterns to skip during search — directory names (".venv") and
+        # file globs ("*.min.js") are both supported.  The ep_tool
+        # defaults supply the standard set; config overrides flow through
+        # update_defaults at invocation time.
+        # Override in [exts.ep_tool.GrepSearch._default]:
+        #   exclude = [".venv", ".git", "*.min.js"]
+        "exclude": sorted(_IGNORE_DIRS),
+    },
     usage="""Search file contents by string or regex.
 
 Use for symbols, call sites, configuration keys, error messages, and behavior discovery. Search
@@ -260,26 +276,39 @@ Guidelines:
 - Treat no matches as evidence to refine the query, not proof that the concept does not exist.
 """,
 )
-async def tool_grep_search(query: str, cwd: str = ".") -> str:
+async def tool_grep_search(query: str, cwd: str = ".", exclude: list[str] | None = None) -> str:
+    # Resolve exclude: parameter > module-level constant.
+    # The ep_tool defaults supply the standard set; config overrides flow
+    # through update_defaults, merging into ext.defaults at invocation time.
+    exclude_patterns: list[str] = exclude if exclude is not None else sorted(_IGNORE_DIRS)
+
     # Attempt to use 'rg' first, then 'grep'.
     cmd = None
     if os.system("command -v rg > /dev/null 2>&1") == 0:
-        cmd = ["rg", "-n", "--heading", query, cwd]
+        # rg -g handles both directory and file glob patterns.
+        ignore_globs: list[str] = []
+        for pat in exclude_patterns:
+            ignore_globs.extend(["-g", f"!{pat}" if not pat.startswith("!") else pat])
+        # -M caps per-match output bytes so a single giant line (minified JS,
+        # tokenizer JSON) cannot poison the context window.
+        cmd = ["rg", "-n", "--heading", "-M", str(_MAX_LINE_BYTES), *ignore_globs, query, cwd]
     elif os.system("command -v grep > /dev/null 2>&1") == 0:
-        cmd = ["grep", "-rnE", query, cwd]
+        cmd = ["grep", "-rnE"]
+        for pat in exclude_patterns:
+            if _is_file_glob(pat):
+                cmd.extend(["--exclude", pat])
+            else:
+                cmd.extend(["--exclude-dir", pat])
+        cmd.extend([query, cwd])
 
     if cmd:
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
             )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+            stdout, _stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
             text = stdout.decode("utf-8", errors="replace")
-            # Truncate at 100 matches to protect context sizes
-            lines = text.split("\n")
-            if len(lines) > 100:
-                lines = lines[:100] + [f"... truncated ({len(lines) - 100} more lines)"]
-            return "\n".join(lines).strip() or "No matches found."
+            return _truncate_grep_output(text)
         except asyncio.TimeoutError:
             return "Error: Grep command timed out."
         except Exception as e:
@@ -293,21 +322,85 @@ async def tool_grep_search(query: str, cwd: str = ".") -> str:
 
         def _fallback_search() -> str:
             matches = []
+            # Separate exclude list into dir names and file globs.
+            exclude_dirs: set[str] = set()
+            exclude_globs: list[str] = []
+            for pat in exclude_patterns:
+                if _is_file_glob(pat):
+                    exclude_globs.append(pat)
+                else:
+                    exclude_dirs.add(pat)
+
             for p in Path(cwd).rglob("*"):
                 if not p.is_file():
                     continue
-                if any(part in _IGNORE_DIRS for part in p.parts):
+                if any(part in exclude_dirs for part in p.parts):
+                    continue
+                if any(fnmatch.fnmatch(p.name, g) for g in exclude_globs):
                     continue
                 try:
                     content = p.read_text(encoding="utf-8")
                     for i, line in enumerate(content.splitlines(), start=1):
                         if compiled.search(line):
-                            matches.append(f"{p}:{i}:{line.strip()}")
-                            if len(matches) > 100:
+                            stripped = line.strip()
+                            matches.append(f"{p}:{i}:{stripped}")
+                            if len(matches) > _MAX_GREP_LINES:
                                 matches.append("... truncated (max 100 matches).")
                                 return "\n".join(matches)
                 except Exception:
                     pass  # skip binary or unreadable files
-            return "\n".join(matches) or "No matches found."
+            return _truncate_grep_output("\n".join(matches)) or "No matches found."
 
         return await asyncio.to_thread(_fallback_search)
+
+
+def _is_file_glob(pattern: str) -> bool:
+    """Return True when *pattern* looks like a file-name glob, not a dir name.
+
+    Heuristic: the pattern contains a glob meta-character (``*``, ``?``, ``[``)
+    or a ``.`` extension separator (``*.js``, ``*.py``).  Plain names like
+    ``.venv`` or ``node_modules`` are assumed to be directory names.
+    """
+    return any(c in pattern for c in "*?[") or (pattern.startswith("*.") or ".?" in pattern)
+
+
+def _truncate_grep_output(text: str) -> str:
+    """Truncate GrepSearch output to protect context windows.
+
+    Guards against two failure modes:
+    1. Too many lines (truncated at _MAX_GREP_LINES).
+    2. Too many total bytes (truncated at _MAX_GREP_BYTES), with
+       individual lines capped at _MAX_LINE_BYTES to handle minified
+       JS / single-line JSON dumps that the shell tool cannot split.
+    """
+    lines = text.split("\n")
+    truncated = False
+
+    # Per-line cap (handles shell rg/grep paths where -M may be unavailable).
+    capped_lines: list[str] = []
+    for line in lines:
+        if len(line) > _MAX_LINE_BYTES:
+            capped_lines.append(line[:_MAX_LINE_BYTES] + "...")
+        else:
+            capped_lines.append(line)
+
+    # Line-count cap.
+    if len(capped_lines) > _MAX_GREP_LINES:
+        capped_lines = capped_lines[:_MAX_GREP_LINES]
+        capped_lines.append(f"... truncated ({len(lines) - _MAX_GREP_LINES} more lines)")
+        truncated = True
+
+    # Byte-count cap.  Walk backward to keep the truncation guard visible.
+    output = "\n".join(capped_lines)
+    if len(output) > _MAX_GREP_BYTES:
+        encoded = output.encode("utf-8", errors="replace")
+        if len(encoded) > _MAX_GREP_BYTES:
+            # Chop at a valid UTF-8 boundary.
+            encoded = encoded[:_MAX_GREP_BYTES]
+            output = encoded.decode("utf-8", errors="replace")
+            if not truncated:
+                output += "\n... truncated (output exceeded size limit)"
+        else:
+            output = encoded.decode("utf-8", errors="replace")
+
+    return output.strip()

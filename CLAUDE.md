@@ -44,7 +44,6 @@ The framework is built around named `ExtensionPoint` registries (defined in `src
 | `ep_consolidator` | `Consolidator` protocol | Chat history summarization |
 | `ep_skills_loader` | `SkillsLoader` protocol | Skill discovery and loading |
 | `ep_turn_interceptor` | `TurnInterceptor` protocol | Turn lifecycle hooks |
-| `ep_actor_command` | async fn → str\|dict | Actor-level slash commands |
 
 Extensions register via decorator (e.g., `@ep_tool(name="...", description="...", parameters={...})`) or via TOML config in `[platform.extensions]`.
 
@@ -90,6 +89,14 @@ Channels target `agent@main` directly. Channel-to-channel routing is not support
 - Pull request titles must follow semantic/conventional format (`feat(config): ...`, `fix(runner): ...`).
 - `uv run ruff check src tests` is a useful signal but the repo may contain pre-existing lint findings.
 - `src/bos/core/__init__.py` is the public API surface. Internal helpers with `_` prefix are exported for use by extensions but are not considered stable.
+
+## BEP Process
+
+- BOS Enhancement Proposals live in `docs/BEP/` and capture accepted design direction before broad architectural changes.
+- When reviewing a BEP, first clarify scope, responsibility boundaries, source-of-truth decisions, and explicit non-goals. Resolve ambiguous ownership before implementation planning.
+- Keep BEPs aligned with the intended end design, not transitional compatibility, unless compatibility is explicitly required.
+- After discussion, update the BEP with concrete decisions, config/API shapes, lifecycle rules, and remaining open issues. Remove stale or contradictory text instead of leaving historical alternatives in place.
+- Before implementing a BEP, make a short implementation plan and re-check it against the BEP so implementation agents do not infer behavior from outdated wording.
 
 
 ## Code Search

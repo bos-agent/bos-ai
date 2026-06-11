@@ -6,7 +6,7 @@ from bos.config.workspace import ResolvedGatewayConfig
 from bos.core import BaseChannel, ep_channel
 from bos.extensions.chat_stores.in_memory import InMemChatStore
 from bos.gateway import Gateway
-from bos.gateway.http import create_gateway_app, require_gateway_api_key
+from bos.gateway.http import create_gateway_app, resolve_gateway_api_key
 from bos.gateway.state import GatewayRunDir, read_gateway_state, write_gateway_state
 
 
@@ -82,11 +82,31 @@ def test_gateway_status_uses_channel_manager_payload(monkeypatch):
     assert snapshot["channels"]["demo"]["address"] == "channel@demo"
 
 
-def test_require_gateway_api_key_fails_when_env_missing():
+def test_resolve_gateway_api_key_returns_none_when_env_missing():
     config = ResolvedGatewayConfig(api_key_env="MISSING_KEY")
 
-    with pytest.raises(RuntimeError, match="MISSING_KEY"):
-        require_gateway_api_key(config, environ={})
+    assert resolve_gateway_api_key(config, environ={}) is None
+    assert resolve_gateway_api_key(config, environ={"MISSING_KEY": "  "}) is None
+
+
+def test_resolve_gateway_api_key_returns_value_when_set():
+    config = ResolvedGatewayConfig(api_key_env="SOME_KEY")
+
+    assert resolve_gateway_api_key(config, environ={"SOME_KEY": "secret"}) == "secret"
+
+
+@pytest.mark.asyncio
+async def test_gateway_allows_unauthenticated_requests_when_key_unset(tmp_path):
+    runner, base_url = await _start_app(_app(tmp_path, api_key=""))
+    try:
+        async with aiohttp.ClientSession() as session:
+            no_auth = await session.get(f"{base_url}/api/status")
+            with_auth = await session.get(f"{base_url}/api/status", headers={"Authorization": "Bearer anything"})
+
+            assert no_auth.status == 200
+            assert with_auth.status == 200
+    finally:
+        await runner.cleanup()
 
 
 @pytest.mark.asyncio

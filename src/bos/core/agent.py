@@ -74,6 +74,7 @@ class TurnContext:
     final_content: str | None = None
     event_sink: EventSink | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    current_message_projector: Callable[[Message], dict[str, Any]] | None = None
 
     def set_system_prompt(self, content: MessageContent) -> None:
         self.system = [{"role": "system", "content": content}]
@@ -86,10 +87,11 @@ class TurnContext:
             self.current.append(Message(llm_message=llm_message, turn_id=self.turn_id, metadata=kwargs))
 
     def get_llm_messages(self) -> list[dict[str, Any]]:
+        project = self.current_message_projector or (lambda m: m.llm_message)
         return (
             self.system
             + self.history
-            + [m.llm_message for m in self.current]
+            + [project(m) for m in self.current]
             + [{k: v for k, v in message.items() if not k.startswith("_")} for message in self.ephemeral]
         )
 
@@ -111,12 +113,19 @@ class TurnContext:
         return self.final_content or self.current[-1].llm_message["content"] if self.current else "(no response)"
 
 
-def _attribute_history_message(projected: dict[str, Any], source: Message, *, current_agent: str) -> dict[str, Any]:
+def _attribute_history_message(
+    projected: dict[str, Any],
+    source: Message,
+    *,
+    current_agent: str,
+    actor_attribution: bool = True,
+    include_workdir: bool = True,
+) -> dict[str, Any]:
     content = projected.get("content")
     if not isinstance(content, str):
         return projected
     role = projected.get("role")
-    if role == "assistant":
+    if role == "assistant" and actor_attribution:
         source_agent = _metadata_str(source.metadata, "agent_name", "actor")
         if source_agent and source_agent != current_agent:
             label = _history_agent_label(source.metadata) or source_agent
@@ -124,21 +133,41 @@ def _attribute_history_message(projected: dict[str, Any], source: Message, *, cu
                 "role": "user",
                 "content": f"[assistant {label} said]\n{content}",
             }
-    label = _history_attribution_label(role, source.metadata)
+    label = _history_attribution_label(
+        role, source.metadata, actor_attribution=actor_attribution, include_workdir=include_workdir
+    )
     if not label:
         return projected
     return projected | {"content": f"{label}\n{content}"}
 
 
-def _history_attribution_label(role: Any, metadata: dict[str, Any]) -> str | None:
+def _history_attribution_label(
+    role: Any,
+    metadata: dict[str, Any],
+    *,
+    actor_attribution: bool = True,
+    include_workdir: bool = True,
+) -> str | None:
     if role == "assistant":
-        label = _history_agent_label(metadata)
-        if label:
-            return f"[assistant: {label}]"
+        if actor_attribution:
+            label = _history_agent_label(metadata)
+            if label:
+                return f"[assistant: {label}]"
+        return None
     if role == "user":
-        target = _metadata_str(metadata, "target_display") or _metadata_str(metadata, "target_agent", "target_actor")
-        if target:
-            return f"[user -> {target}]"
+        parts: list[str] = []
+        if actor_attribution:
+            target = _metadata_str(metadata, "target_display") or _metadata_str(
+                metadata, "target_agent", "target_actor"
+            )
+            if target:
+                parts.append(f"user -> {target}")
+        if include_workdir:
+            workdir = _metadata_str(metadata, "workdir")
+            if workdir:
+                parts.append(f"workdir: {workdir}")
+        if parts:
+            return f"[{' | '.join(parts)}]"
     return None
 
 
@@ -151,6 +180,23 @@ def _metadata_str(metadata: dict[str, Any], *keys: str) -> str | None:
         value = metadata.get(key)
         if isinstance(value, str) and value:
             return value
+    return None
+
+
+def _resolve_thinking(response: Any) -> str | None:
+    """Extract the best available thinking content from an LLM response."""
+    if getattr(response, "reasoning_content", None):
+        return response.reasoning_content
+    blocks = getattr(response, "thinking_blocks", None)
+    if blocks:
+        parts = []
+        for block in blocks:
+            if isinstance(block, dict) and block.get("thinking"):
+                parts.append(block["thinking"])
+        if parts:
+            return "\n".join(parts)
+    if getattr(response, "content", None) and getattr(response, "tool_calls", None):
+        return response.content
     return None
 
 
@@ -257,6 +303,7 @@ class Agent:
         tool_noise_filter: ToolNoiseFilter | None = None,
         chat_compaction_lock: Callable[[str], AbstractAsyncContextManager] | None = None,
         history_attribution: bool = False,
+        workspace: str | os.PathLike[str] | None = None,
     ):
         if system_prompt is not None and not isinstance(system_prompt, str):
             raise TypeError("system_prompt must be a string or None")
@@ -280,6 +327,7 @@ class Agent:
         self._tool_noise_filter = tool_noise_filter
         self._compaction_lock = chat_compaction_lock
         self._history_attribution = history_attribution
+        self._workspace = str(workspace) if workspace else None
 
         # Compose interceptors: plugin interceptors first, then configured harness/workspace interceptors
         plugin_interceptors = [i for plugin in self._plugins for i in plugin.get_interceptors()]
@@ -321,6 +369,7 @@ class Agent:
             tool_defs=self._get_tool_defs(),
             event_sink=event_sink,
             metadata=(ctx_metadata or {}).copy(),
+            current_message_projector=self._project_current_message,
         )
         self._current_context = ctx
         ctx.set_system_prompt(await self._build_system_prompt())
@@ -463,7 +512,10 @@ class Agent:
                 await _interrupt()
                 ctx.set_system_prompt(await self._build_system_prompt())
                 await _run_interceptor("before_llm")
-                await _emit_event("llm", "start", stage="before_llm", detail="thinking")
+                await _emit_event(
+                    "llm", "start", stage="before_llm", detail="thinking",
+                    metadata={"iteration": iteration, "max_iterations": self._max_iterations},
+                )
 
                 ctx.current_llm_response = response = await self._llm.complete(
                     ctx.get_llm_messages(),
@@ -473,17 +525,26 @@ class Agent:
                 )
                 cache_index = -1
                 await _run_interceptor("after_llm")
+
+                # Emit one unified LLM response event carrying both the
+                # model's thinking content and any tool calls.
+                thinking = _resolve_thinking(response)
                 await _emit_event(
                     "llm",
                     "finish",
                     stage="after_llm",
                     detail="tool_calls" if response.tool_calls else "response_ready",
+                    content=thinking,
                     tool_calls=(
                         [{"name": tc.name, "arguments": tc.arguments} for tc in response.tool_calls]
                         if response.tool_calls
                         else None
                     ),
-                    metadata={"finish_reason": response.finish_reason},
+                    metadata=(
+                        {"finish_reason": response.finish_reason, "usage": response.usage}
+                        if response.usage
+                        else {"finish_reason": response.finish_reason}
+                    ),
                 )
                 if not response.tool_calls:
                     # finalize the response if there is no tool call required
@@ -664,16 +725,52 @@ class Agent:
                     )
         return self._format_history(result)
 
+    def _project_current_message(self, message: Message) -> dict[str, Any]:
+        """Render attribution labels on current-turn user messages sent to the LLM.
+
+        Mirrors the history projection, except the workdir label always
+        renders here so the latest message carries the active workdir even
+        when history suppresses repeats (:meth:`_format_history`). Stored
+        content stays raw; the label is re-derived from metadata on every
+        projection.
+        """
+        llm_message = message.llm_message
+        if llm_message.get("role") != "user" or not isinstance(llm_message.get("content"), str):
+            return llm_message
+        label = _history_attribution_label("user", message.metadata, actor_attribution=self._history_attribution)
+        if not label:
+            return llm_message
+        return llm_message | {"content": f"{label}\n{llm_message['content']}"}
+
     def _format_history(self, result: ContextResult) -> list[dict[str, Any]]:
-        """Hook for subclasses to customise history projection (e.g. attribution labels)."""
-        if not self._history_attribution:
-            return result.messages
+        """Hook for subclasses to customise history projection (e.g. attribution labels).
+
+        Actor labels (``[user -> X]``, ``[assistant: X]``) render only when
+        ``history_attribution`` is enabled. Workdir labels render only when the
+        workdir changes between user messages — repeating an unchanged workdir
+        on every message is noise; the current-turn projection always carries
+        the active workdir (see :meth:`_project_current_message`).
+        """
         if len(result.messages) != len(result.source_messages):
             return result.messages
-        return [
-            _attribute_history_message(projected, source, current_agent=self._name)
-            for projected, source in zip(result.messages, result.source_messages, strict=True)
-        ]
+        formatted: list[dict[str, Any]] = []
+        last_workdir: str | None = None
+        for projected, source in zip(result.messages, result.source_messages, strict=True):
+            include_workdir = False
+            if projected.get("role") == "user":
+                workdir = _metadata_str(source.metadata, "workdir")
+                include_workdir = workdir is not None and workdir != last_workdir
+                last_workdir = workdir
+            formatted.append(
+                _attribute_history_message(
+                    projected,
+                    source,
+                    current_agent=self._name,
+                    actor_attribution=self._history_attribution,
+                    include_workdir=include_workdir,
+                )
+            )
+        return formatted
 
     async def _build_system_prompt(self) -> str:
         system_sections = [self._system_prompt]
@@ -715,10 +812,12 @@ class Agent:
         return section
 
     def _prompt_section_system_info(self) -> str:
+        workspace_line = f"<workspace>{escape(self._workspace)}</workspace>\n" if self._workspace else ""
         return (
             "<system_info>\n"
             f"<platform>{platform.system()}</platform>\n"
             f"<date>{datetime.now().strftime('%A, %B %d, %Y')}</date>\n"
+            f"{workspace_line}"
             "</system_info>"
         )
 

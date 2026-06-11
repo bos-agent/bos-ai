@@ -4,26 +4,25 @@ from __future__ import annotations
 
 import asyncio
 import getpass
+import json
 import os
 import re
 import signal
 import sys
 import time
 import uuid
-from collections import deque
 from pathlib import Path
 from typing import Any
 
 import click
 from rich.console import Console
-from rich.live import Live
-from rich.panel import Panel
+from rich.markup import escape
 from rich.text import Text
 
 from bos.config import ConfigNotFoundError, Workspace, WorkspaceResolutionError, resolve_config_source
 from bos.config.workspace import _resolve_path, presets_dir
 from bos.gateway.state import GatewayRunDir
-from bos.protocol import TurnEvent
+from bos.protocol import MessageType, TurnEvent
 
 
 def _build_workspace_for_ask(ctx, workspace_override: str | None = None) -> Workspace:
@@ -155,19 +154,59 @@ async def _connect_tui_client(client) -> None:
     await client.connect(takeover=True)
 
 
-def _default_tui_client_id() -> str:
+def _safe_username() -> str:
     try:
         username = getpass.getuser()
     except Exception:
         username = os.environ.get("USERNAME") or os.environ.get("USER") or ""
     safe = re.sub(r"[^a-z0-9_.-]+", "-", username.strip().lower()).strip("-")
-    return f"tui:{safe or 'local'}"
+    return safe or "local"
 
 
-def _turn_event_label(event: TurnEvent) -> str:
-    if event.parent_agent_name and event.agent_name and event.agent_name != event.parent_agent_name:
-        return f"{event.parent_agent_name} -> {event.agent_name}"
-    return event.agent_name or "agent"
+def _default_tui_client_id() -> str:
+    return f"tui:{_safe_username()}"
+
+
+def _read_gateway_endpoint(rd: GatewayRunDir) -> tuple[str, int] | None:
+    """Read gateway.state to discover the current gateway host:port."""
+    from bos.runner.proc import read_state
+
+    state = read_state(rd)
+    gateway_state = state.get("gateway", {})
+    host = gateway_state.get("host")
+    port = gateway_state.get("port")
+    if host == "0.0.0.0":
+        host = "127.0.0.1"
+    if host and port:
+        return host, int(port)
+    return None
+
+
+def _ensure_gateway_endpoint(ctx, rd: GatewayRunDir, workspace_dir: str | None) -> tuple[str, int]:
+    """Return the running gateway endpoint, starting the gateway if needed.
+
+    A gateway started here is left running after the command finishes.
+    """
+    from bos.runner.proc import is_running
+
+    if not is_running(rd):
+        click.echo("No gateway running — starting one in the background (it stays running).", err=True)
+        try:
+            ctx.invoke(start, foreground=False, docker=False, workspace_dir=workspace_dir)
+        except SystemExit:
+            # Lost a start race to another process — fine as long as a gateway is up now.
+            if not is_running(rd):
+                raise
+
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        if (endpoint := _read_gateway_endpoint(rd)) is not None:
+            return endpoint
+        time.sleep(0.3)
+    raise click.ClickException(
+        "Gateway endpoint did not become available — check `boscli gateway status` and the gateway log."
+    )
+
 
 
 def _preview(value: Any, limit: int = 120) -> str:
@@ -178,169 +217,108 @@ def _preview(value: Any, limit: int = 120) -> str:
 
 
 class _TaskProgressDisplay:
-    """Live renderer for oneshot task turn events.
+    """Streams oneshot turn events to the console, formatted like the TUI chat log.
 
-    Task state is rendered as a fixed board at the top; other events
-    scroll in the area below.
+    Lines print to stderr as they arrive (when stderr is a terminal), so the
+    final reply on stdout stays clean for piping.
     """
 
-    def __init__(self, *, max_rows: int = 10) -> None:
+    _TASK_TOOL_NAMES = {"TaskCreate", "TaskUpdate", "TaskList", "TaskGet"}
+
+    def __init__(self) -> None:
         self._console = Console(stderr=True)
         self._enabled = self._console.is_terminal
-        self._live: Live | None = None
-        self._rows: deque[tuple[str, str]] = deque(maxlen=max_rows)
-        self._task_board: str = ""
-
-    def __enter__(self) -> "_TaskProgressDisplay":
-        if self._enabled:
-            self._append("dim", "starting task…")
-            self._live = Live(
-                self._render(),
-                console=self._console,
-                refresh_per_second=8,
-                transient=True,
-                vertical_overflow="crop",
-            )
-            self._live.start()
-        return self
-
-    def __exit__(self, *exc: object) -> None:
-        if self._live is not None:
-            self._live.stop()
-            self._live = None
+        self._pending_tool_calls: list[tuple[str, str]] = []
 
     async def emit(self, event: TurnEvent) -> None:
         if not self._enabled:
             return
         if event.event_type == "task" and event.detail == "task_state":
-            self._task_board = self._format_task_board(event)
+            lines = self._format_task_board(event)
+            if lines:
+                self._console.print()
         else:
-            style, message = self._format_event(event)
-            if message:
-                self._append(style, message)
-        if self._live is not None:
-            self._live.update(self._render())
-
-    def _append(self, style: str, message: str) -> None:
-        self._rows.append((style, _preview(message, 160)))
-
-    def _render(self) -> Panel:
-        body = Text()
-        if self._task_board:
-            body.append(self._task_board, style="bold")
-            body.append("\n")
-            body.append("─" * 40, style="dim")
-        for idx, (style, message) in enumerate(self._rows):
-            if idx or self._task_board:
-                body.append("\n")
-            body.append(message, style=style)
-        return Panel(body, title="boscli ask", border_style="cyan", padding=(0, 1))
+            lines = self._format_event(event)
+        for line in lines:
+            self._console.print(Text.from_markup(line))
 
     @staticmethod
-    def _format_task_board(event: TurnEvent) -> str:
+    def _format_task_board(event: TurnEvent) -> list[str]:
         tasks = (event.metadata or {}).get("tasks", [])
         if not tasks:
-            return ""
-        lines = ["■ Tasks"]
-        for t in tasks:
-            marker = {"pending": "⬜", "in_progress": "🔄", "completed": "✅"}.get(t.get("status"), "  ")
-            blocked = f" (blocked: {', '.join(t.get('blocked_by', []))})" if t.get("blocked_by") else ""
-            lines.append(f"  {marker} [{t.get('id')}] {t.get('subject')}{blocked}")
-        return "\n".join(lines)
+            return []
+        order = {"completed": 0, "in_progress": 1, "pending": 2}
+        ordered = sorted(tasks, key=lambda t: order.get(t.get("status"), 3))
+        lines = ["[bold]• Tasks[/]"]
+        for i, t in enumerate(ordered):
+            prefix = "└" if i == 0 else " "
+            subject = escape(str(t.get("subject", "")))
+            if t.get("status") == "completed":
+                lines.append(f"  {prefix} [dim][s]✔ {subject}[/s][/dim]")
+            elif t.get("status") == "in_progress":
+                lines.append(f"  {prefix} [bold]■ {subject}[/]")
+            else:
+                lines.append(f"  {prefix} □ {subject}")
+        return lines
 
-    def _format_event(self, event: TurnEvent) -> tuple[str, str]:
-        label = _turn_event_label(event)
-
-        if event.event_type == "turn" and event.phase == "start":
-            return "dim", f"▶ {label} started"
-
-        if event.event_type == "llm" and event.detail == "thinking":
-            return "italic dim", f"🤔 {label} thinking…"
-
-        if event.event_type == "llm" and event.detail == "tool_calls":
-            calls = []
-            for tc in event.tool_calls or []:
-                args = tc.get("arguments") or {}
-                args_str = ", ".join(f"{key}={value!r}" for key, value in args.items())
-                calls.append(f"{tc.get('name', '?')}({args_str})")
-            return "cyan", f"⚡ {label}: " + ("; ".join(calls) if calls else "tool call")
+    def _format_event(self, event: TurnEvent) -> list[str]:
+        if event.event_type == "llm" and event.detail in ("tool_calls", "response_ready"):
+            # Unified LLM response event — show thinking content if present
+            preview = escape(_preview(event.content, 240))
+            return [f"\n[dim italic]● {preview}[/]"] if preview else []
 
         if event.event_type == "tool" and event.detail == "tool_call":
-            return "cyan", f"⚙ {label}: {event.tool_name or '?'} running…"
+            name = event.tool_name or "?"
+            if name in self._TASK_TOOL_NAMES:
+                return []
+            args_str = ""
+            if event.content:
+                try:
+                    args = json.loads(event.content) if isinstance(event.content, str) else event.content
+                    if isinstance(args, dict):
+                        args_str = ", ".join(f"{k}={v!r}" for k, v in args.items())
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            self._pending_tool_calls.append((name, args_str))
+            return []
 
         if event.event_type == "tool" and event.detail == "tool_result":
-            preview = _preview(event.content, 80)
-            suffix = f" → {preview}" if preview else ""
-            return "green", f"↳ {label}: {event.tool_name or '?'} done{suffix}"
-
-        if event.event_type == "response" and event.detail == "final":
-            return "bold green", "✓ final response ready"
+            name = event.tool_name or "?"
+            if name in self._TASK_TOOL_NAMES:
+                return []
+            preview = escape(_preview(event.content, 240))
+            if self._pending_tool_calls:
+                call_name, call_args = self._pending_tool_calls.pop(0)
+                return [
+                    f"  [bold]{escape(call_name)}[/]({escape(_preview(call_args, 160))})",
+                    f"   └ [dim]{preview}[/]",
+                ]
+            return [f"  {escape(name)}: [dim]{preview}[/]"]
 
         if event.detail == "max_iteration":
-            return "yellow", f"⚠ {label} max iterations reached"
+            return ["[yellow]  max iterations reached[/]"]
 
         if event.detail == "error":
-            return "red", f"⚠ {label} error: {event.content or 'unknown error'}"
+            return [f"[red]  error: {escape(str(event.content or 'unknown error'))}[/]"]
 
-        return "", ""
+        return []
 
 
-async def _run_interactive(
-    ws: "Workspace",
-    agent_kind: str,
-    agent_cfg: dict | None,
-    *,
-    initial_message: str | None = None,
-) -> None:
-    """Run the agent in interactive mode with an in-process TUI."""
-    import asyncio
-    import getpass
-    import os
-    import re
-
-    from bos.cli.local_client import LocalClient
-    from bos.core.actor import AgentActor
-    from bos.core.chat_state import ChatState
-
-    async with ws.harness() as harness:
-        agent = await harness.create_agent(agent_kind, agent_cfg=agent_cfg)
-        actor_mbox = harness.mail_route.bind("agent@main")
-        client_mbox = harness.mail_route.bind("client@local")
-
-        try:
-            username = getpass.getuser()
-        except Exception:
-            username = os.environ.get("USERNAME") or os.environ.get("USER") or ""
-        safe = re.sub(r"[^a-z0-9_.-]+", "-", username.strip().lower()).strip("-")
-        client_id = f"local:{safe or 'local'}-{uuid.uuid4().hex[:8]}"
-
-        chat_state = ChatState()
-        actor = AgentActor(agent, actor_mbox, chat_state=chat_state)
-        client = LocalClient(
-            client_id=client_id,
-            client_mbox=client_mbox,
-            chat_state=chat_state,
-        )
-
-        await client.connect()
-
-        from bos.cli.tui_app import run_chat_tui
-
-        actor_task = asyncio.create_task(actor.run())
-
-        # If an initial message is provided, send it first
-        if initial_message:
-            await client.send(initial_message, chat_id=client.chat_id)
-
-        try:
-            await run_chat_tui(client, local_mode=True)
-        finally:
-            actor_task.cancel()
+async def _run_oneshot_exchange(client, message: str, progress: _TaskProgressDisplay | None) -> str:
+    """Send *message* over the gateway client and consume envelopes until the final reply."""
+    await client.send(message)
+    while True:
+        env = await client.receive()
+        if env.content_type == MessageType.TURN_EVENT:
             try:
-                await actor_task
-            except asyncio.CancelledError:
-                pass
-            await client.aclose()
+                data = json.loads(env.content) if isinstance(env.content, str) else {}
+            except json.JSONDecodeError:
+                data = {}
+            if data and progress is not None:
+                await progress.emit(TurnEvent.from_payload(data))
+        elif env.content_type == MessageType.MESSAGE:
+            return str(env.content or "")
+        # SYSTEM / ECHO / COMMAND_RESULT envelopes are not part of the oneshot exchange.
 
 
 # ── boscli ask ──────────────────────────────────────────────────
@@ -349,37 +327,11 @@ async def _run_interactive(
 @click.command()
 @click.argument("message", required=False)
 @click.option(
-    "--agent",
-    "agent_kind",
-    default=None,
-    help="Agent kind to use (defaults to the configured main agent).",
-)
-@click.option(
-    "--default-model",
-    "default_model",
-    default=None,
-    help="Set the default model for all components (agent, consolidator, subagents).",
-)
-@click.option(
     "--stdin",
     "use_stdin",
     is_flag=True,
     default=False,
     help="Read task content from stdin (appended after MESSAGE if both given).",
-)
-@click.option(
-    "--max-iterations",
-    "max_iterations",
-    type=int,
-    default=None,
-    help="Override the maximum number of ReAct iterations.",
-)
-@click.option(
-    "-i",
-    "--interactive",
-    is_flag=True,
-    default=False,
-    help="Start an interactive chat session (in-process TUI, no background daemon).",
 )
 @click.option(
     "-w",
@@ -392,69 +344,71 @@ async def _run_interactive(
 def ask(
     ctx,
     message: str | None,
-    agent_kind: str | None,
-    default_model: str | None,
     use_stdin: bool,
-    max_iterations: int | None,
-    interactive: bool,
     workspace_dir: str | None,
 ):
-    """Run a oneshot agent task or start an interactive chat session.
+    """Run a oneshot agent task against the gateway.
+
+    Connects to the running gateway (starting one in the background if
+    needed — it is left running) and prints the agent's final reply.
 
     \b
     Examples:
         boscli ask "refactor the auth module"
-        boscli ask -i
-        boscli ask -w /path/to/project -i
-        boscli -c coding ask -i
-        boscli ask --default-model gpt-4o "explain this"
+        boscli -c coding ask "explain this"
         cat spec.md | boscli ask --stdin
     """
     if use_stdin and not sys.stdin.isatty():
         stdin_content = sys.stdin.read()
         message = ((message or "") + "\n" + stdin_content).strip() if message else stdin_content.strip()
 
-    if not interactive and not message:
-        raise click.UsageError("Provide a task message, use --stdin, or use -i for interactive mode.")
+    if not message:
+        raise click.UsageError("Provide a task message or use --stdin.")
 
-    ws = _build_workspace_for_ask(ctx, workspace_dir)
-    ws.resolve_agents()
-    ws.bootstrap_platform()
-    selected_agent = agent_kind or ws.get_main_agent_kind()
+    ws, rd = _get_ws_and_rd(ctx, workspace_dir)
+    gateway_config = ws.resolve_gateway_config()
+    api_key = os.environ.get(gateway_config.api_key_env, "").strip() or None
 
-    if default_model:
-        os.environ["BOS_MODEL"] = default_model
+    host, port = _ensure_gateway_endpoint(ctx, rd, workspace_dir)
 
-    if interactive:
-        agent_cfg: dict = {"agent_name": "main"}
-        if max_iterations is not None:
-            agent_cfg["max_iterations"] = max_iterations
+    from bos.gateway.client import GatewayClient
+
+    # Stamp the invocation directory (or -w override) on each message so the
+    # agent knows where the user is working, not just the gateway workspace.
+    client_workdir = str(_resolve_path(workspace_dir)) if workspace_dir else os.getcwd()
+
+    async def _run() -> str:
+        # A unique channel id per invocation gives the task a fresh chat.
+        client = GatewayClient(
+            host=host,
+            port=port,
+            address="ask",
+            channel_id=f"ask:{_safe_username()}-{uuid.uuid4().hex[:8]}",
+            chat_id=None,
+            endpoint_resolver=lambda: _read_gateway_endpoint(rd),
+            api_key=api_key,
+            workdir=client_workdir,
+        )
+        await client.connect()
         try:
-            asyncio.run(_run_interactive(ws, selected_agent, agent_cfg, initial_message=message))
-        except ValueError as exc:
-            raise click.UsageError(str(exc)) from exc
-        return
+            return await _run_oneshot_exchange(client, message, _TaskProgressDisplay())
+        finally:
+            await client.aclose()
 
-    # One-shot mode
-    async def _run(event_sink: _TaskProgressDisplay | None = None) -> str:
-        agent_cfg: dict = {"agent_name": "main"}
-        if max_iterations is not None:
-            agent_cfg["max_iterations"] = max_iterations
-        async with ws.harness() as harness:
-            agent = await harness.create_agent(selected_agent, agent_cfg=agent_cfg)
-            return await agent.ask(
-                uuid.uuid4().hex,
-                message,
-                event_sink=event_sink,
-            )
+    result = asyncio.run(_run())
 
-    try:
-        with _TaskProgressDisplay() as progress:
-            result = asyncio.run(_run(progress))
-    except ValueError as exc:
-        raise click.UsageError(str(exc)) from exc
+    if sys.stdout.isatty():
+        from rich.markdown import Markdown
 
-    click.echo(result)
+        console = Console()
+        console.print()
+        console.rule(style="dim")
+        try:
+            console.print(Markdown(result or "(no response)"))
+        except Exception:
+            click.echo(result)
+    else:
+        click.echo(result)
 
 
 # ── boscli gateway ──────────────────────────────────────────────
@@ -679,37 +633,20 @@ def restart(ctx):
 @click.option("--channel-id", default=None, help="Stable gateway channel id (defaults to tui:<username>).")
 @click.pass_context
 def tui(ctx, host: str | None, port: int | None, channel_id: str | None):
-    """Connect the TUI to a running gateway."""
+    """Connect the TUI to the gateway, starting one in the background if needed."""
     ws, rd = _get_ws_and_rd(ctx)
-    from bos.runner.proc import read_state
 
     def _resolve_endpoint() -> tuple[str, int] | None:
-        """Read gateway.state to discover the current gateway host:port."""
-        state = read_state(rd)
-        gateway_state = state.get("gateway", {})
-        h = gateway_state.get("host")
-        p = gateway_state.get("port")
-        if h == "0.0.0.0":
-            h = "127.0.0.1"
-        if h and p:
-            return (h, int(p))
-        return None
+        return _read_gateway_endpoint(rd)
 
-    # Discover initial endpoint (CLI overrides take precedence)
+    # Discover the endpoint, starting the gateway if none is running.
+    # Explicit --host/--port overrides take precedence and never auto-start.
     if not (host and port):
-        resolved = _resolve_endpoint()
-        if resolved:
-            host = host or resolved[0]
-            port = port or resolved[1]
-
-    if not host or not port:
-        raise click.UsageError(
-            "Could not determine gateway endpoint. Use --host and --port, or make sure the gateway is running."
-        )
+        resolved_host, resolved_port = _ensure_gateway_endpoint(ctx, rd, None)
+        host = host or resolved_host
+        port = port or resolved_port
     gateway_config = ws.resolve_gateway_config()
-    api_key = os.environ.get(gateway_config.api_key_env)
-    if not api_key:
-        raise click.UsageError(f"Gateway API key environment variable {gateway_config.api_key_env!r} is not set.")
+    api_key = os.environ.get(gateway_config.api_key_env, "").strip() or None
 
     from bos.cli.tui_app import run_chat_tui
     from bos.gateway.client import GatewayClient
@@ -723,6 +660,7 @@ def tui(ctx, host: str | None, port: int | None, channel_id: str | None):
             chat_id=None,
             endpoint_resolver=_resolve_endpoint,
             api_key=api_key,
+            workdir=os.getcwd(),
         )
         await _connect_tui_client(client)
         try:

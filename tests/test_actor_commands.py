@@ -8,7 +8,6 @@ from conftest import InMemChatStore, InMemMailRoute, InMemMemoryExtension, Messa
 from bos.core.actor import AgentActor
 from bos.core.chat_state import ChatState
 from bos.core.contract import Message
-from bos.extensions.actor_commands import system_cmd  # noqa: F401
 from bos.protocol import Envelope, MessageType
 
 
@@ -170,7 +169,7 @@ async def test_command_result_preserves_channel_metadata():
         Envelope(
             sender="channel@telegram:daily",
             recipient="agent@main",
-            content="/aliases",
+            content="/chats",
             content_type=MessageType.COMMAND,
             chat_id="chat-a",
             metadata={"channel": channel_metadata},
@@ -181,17 +180,53 @@ async def test_command_result_preserves_channel_metadata():
 
 
 @pytest.mark.asyncio
+async def test_chats_command_returns_serializable_list_sorted_by_recency():
+    from datetime import datetime
+
+    mailbox = FakeMailbox("agent@main")
+    agent = StubAgent()
+    actor = AgentActor(agent, mailbox)
+    await agent._chat_store.commit_turn(
+        "chat-old",
+        [Message(llm_message={"role": "user", "content": "older chat"}, created_at=datetime(2026, 1, 1))],
+        turn_id="t1",
+    )
+    await agent._chat_store.commit_turn(
+        "chat-new",
+        [Message(llm_message={"role": "user", "content": "newer chat"}, created_at=datetime(2026, 2, 1))],
+        turn_id="t2",
+    )
+
+    await actor._handle_command(
+        Envelope(
+            sender="channel@tui",
+            recipient="agent@main",
+            content="/chats",
+            content_type=MessageType.COMMAND,
+            chat_id="chat-new",
+        )
+    )
+
+    payload = json.loads(mailbox.sent[-1].content)
+    assert payload["ok"] is True
+    chats = payload["result"]
+    assert [c["chat_id"] for c in chats] == ["chat-new", "chat-old"]
+    assert chats[0]["description"] == "newer chat"
+    assert chats[0]["message_count"] == 1
+    assert chats[0]["last_activity"] == "2026-02-01T00:00:00"
+
+
+@pytest.mark.asyncio
 async def test_resume_uses_channel_metadata_as_cursor_identity():
     mailbox = FakeMailbox("agent@main")
     actor = AgentActor(StubAgent(), mailbox)
-    actor._chat_state.set_alias("work", "chat-b")
     channel_metadata = {"channel_id": "tui-a", "channel_conversation_id": "default"}
 
     await actor._handle_command(
         Envelope(
             sender="channel@tui-a",
             recipient="agent@main",
-            content="/resume work",
+            content="/resume chat-b",
             content_type=MessageType.COMMAND,
             chat_id="chat-a",
             metadata={"channel": channel_metadata},
@@ -234,18 +269,8 @@ async def test_new_command_pops_old_session_and_returns_fresh_id():
     assert old_chat_id not in actor._sessions
 
     # Old messages should still be retrievable from the store
-    history_env = Envelope(
-        sender="channel@http",
-        recipient="agent@main",
-        content=f"/history {old_chat_id}",
-        content_type=MessageType.COMMAND,
-        chat_id=old_chat_id,
-        metadata={"routing": {"client_id": "client-1", "chat_id": "old-chat"}},
-    )
-    await actor._handle_command(history_env)
-
-    history_payload = json.loads(mailbox.sent[-1].content)
-    assert history_payload["result"][0]["content"] == "old message"
+    old_messages = await agent._chat_store.get_messages(old_chat_id, active_only=True)
+    assert old_messages[0].llm_message["content"] == "old message"
 
 
 @pytest.mark.asyncio
@@ -275,15 +300,14 @@ async def test_new_command_updates_client_cursor():
 
 
 @pytest.mark.asyncio
-async def test_resume_alias_updates_client_cursor():
+async def test_resume_updates_client_cursor():
     mailbox = FakeMailbox("agent@main")
     state = ChatState()
-    state.set_alias("Project X", "chat-a")
     actor = AgentActor(StubAgent(), mailbox, chat_state=state)
     env = Envelope(
         sender="channel@http",
         recipient="agent@main",
-        content="/resume project-x",
+        content="/resume chat-a",
         content_type=MessageType.COMMAND,
         chat_id="chat-old",
         metadata={"routing": {"client_id": "tui:a", "chat_id": "chat-old"}},
@@ -296,148 +320,6 @@ async def test_resume_alias_updates_client_cursor():
     assert payload["ok"] is True
     assert payload["chat_id"] == "chat-a"
     assert state.get_cursor("tui:a") == "chat-a"
-
-
-@pytest.mark.asyncio
-async def test_alias_and_unalias_commands_manage_current_chat():
-    mailbox = FakeMailbox("agent@main")
-    state = ChatState()
-    actor = AgentActor(StubAgent(), mailbox, chat_state=state)
-
-    await actor._handle_command(
-        Envelope(
-            sender="channel@http",
-            recipient="agent@main",
-            content="/alias Project X",
-            content_type=MessageType.COMMAND,
-            chat_id="chat-a",
-            metadata={"routing": {"client_id": "tui:a", "chat_id": "chat-a"}},
-        )
-    )
-    await actor._handle_command(
-        Envelope(
-            sender="channel@http",
-            recipient="agent@main",
-            content="/aliases",
-            content_type=MessageType.COMMAND,
-            chat_id="chat-a",
-            metadata={"routing": {"client_id": "tui:a", "chat_id": "chat-a"}},
-        )
-    )
-    await actor._handle_command(
-        Envelope(
-            sender="channel@http",
-            recipient="agent@main",
-            content="/unalias project-x",
-            content_type=MessageType.COMMAND,
-            chat_id="chat-a",
-            metadata={"routing": {"client_id": "tui:a", "chat_id": "chat-a"}},
-        )
-    )
-
-    alias_payload = json.loads(mailbox.sent[-3].content)
-    aliases_payload = json.loads(mailbox.sent[-2].content)
-    unalias_payload = json.loads(mailbox.sent[-1].content)
-    assert alias_payload["ok"] is True
-    assert aliases_payload["result"] == {"project-x": "chat-a"}
-    assert unalias_payload["result"] == "alias removed"
-    assert state.list_aliases() == {}
-
-
-@pytest.mark.asyncio
-async def test_history_command_uses_envelope_chat_id():
-    mailbox = FakeMailbox("agent@main")
-    agent = StubAgent()
-    actor = AgentActor(agent, mailbox)
-    chat_id = "telegram:42"
-
-    await agent._chat_store.commit_turn(
-        chat_id,
-        [Message(llm_message={"role": "user", "content": "saved under chat"})],
-        turn_id="seed-turn",
-    )
-
-    history_env = Envelope(
-        sender="channel@telegram",
-        recipient="agent@main",
-        content="/history",
-        content_type=MessageType.COMMAND,
-        chat_id=chat_id,
-    )
-    await actor._handle_command(history_env)
-
-    payload = json.loads(mailbox.sent[-1].content)
-    assert payload["name"] == "history"
-    assert payload["result"][0]["content"] == "saved under chat"
-
-
-@pytest.mark.asyncio
-async def test_compact_command_passes_message_objects_and_saves_summary():
-    mailbox = FakeMailbox("agent@main")
-    agent = StubAgent()
-    actor = AgentActor(agent, mailbox)
-    chat_id = "compact-chat"
-    await agent._chat_store.commit_turn(
-        chat_id,
-        [Message(llm_message={"role": "user", "content": "history"})],
-        turn_id="seed-turn",
-    )
-
-    await actor._handle_command(
-        Envelope(
-            sender="channel@http",
-            recipient="agent@main",
-            content="/compact",
-            content_type=MessageType.COMMAND,
-            chat_id=chat_id,
-        )
-    )
-
-    payload = json.loads(mailbox.sent[-1].content)
-    messages = await agent._chat_store.get_messages(chat_id, active_only=True)
-    assert payload["name"] == "compact"
-    assert payload["ok"] is True
-    assert agent._consolidator.calls
-    assert all(isinstance(message, Message) for message in agent._consolidator.calls[0][0])
-    assert messages[-1].is_summary is True
-    assert messages[-1].llm_message["content"] == "Chat summary:\nrecorded summary"
-
-
-@pytest.mark.asyncio
-async def test_tokens_command_returns_estimate_metadata(monkeypatch):
-    from bos.core.contract import TokenEstimate
-
-    mailbox = FakeMailbox("agent@main")
-    agent = StubAgent()
-    actor = AgentActor(agent, mailbox)
-    chat_id = "tokens-chat"
-    await agent._chat_store.commit_turn(
-        chat_id,
-        [Message(llm_message={"role": "user", "content": "history"})],
-        turn_id="seed-turn",
-    )
-
-    async def fake_estimate(chat_id, *, tokenizer_model=None, filter_mode=None):
-        return TokenEstimate(count=123, tokenizer_model=tokenizer_model, source="fallback")
-
-    monkeypatch.setattr(agent._chat_store, "estimate_tokens", fake_estimate)
-    await actor._handle_command(
-        Envelope(
-            sender="channel@http",
-            recipient="agent@main",
-            content="/tokens",
-            content_type=MessageType.COMMAND,
-            chat_id=chat_id,
-        )
-    )
-
-    payload = json.loads(mailbox.sent[-1].content)
-    assert payload["name"] == "tokens"
-    assert payload["ok"] is True
-    assert payload["estimated_tokens"] == 123
-    assert payload["model"] == "test/model"
-    assert payload["source"] == "fallback"
-    assert "Estimated tokens: 123" in payload["result"]
 
 
 @pytest.mark.asyncio

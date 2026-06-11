@@ -228,6 +228,129 @@ async def test_agent_history_attribution_reads_legacy_actor_metadata():
 
 
 @pytest.mark.asyncio
+async def test_agent_history_renders_workdir_even_without_actor_attribution():
+    store = InMemChatStore()
+    await store.commit_turn(
+        "chat",
+        [
+            Message(
+                llm_message={"role": "user", "content": "hello"},
+                metadata={"target_agent": "main", "workdir": "/home/user/proj"},
+            ),
+            Message(
+                llm_message={"role": "assistant", "content": "hi"},
+                metadata={"agent_name": "main"},
+            ),
+        ],
+        turn_id="turn-1",
+    )
+    agent = create_test_agent(agent_name="main", chat_store=store)
+
+    history = await agent._load_and_compact_history("chat", budget_model=None)
+
+    # workdir renders; actor labels stay suppressed when attribution is off
+    assert history[0]["content"] == "[workdir: /home/user/proj]\nhello"
+    assert history[1] == {"role": "assistant", "content": "hi"}
+
+
+@pytest.mark.asyncio
+async def test_agent_history_combines_target_and_workdir_labels():
+    store = InMemChatStore()
+    await store.commit_turn(
+        "chat",
+        [
+            Message(
+                llm_message={"role": "user", "content": "hello"},
+                metadata={"target_agent": "libai", "target_display": "Li Bai", "workdir": "/home/user/proj"},
+            ),
+        ],
+        turn_id="turn-1",
+    )
+    agent = create_test_agent(agent_name="libai", chat_store=store, history_attribution=True)
+
+    history = await agent._load_and_compact_history("chat", budget_model=None)
+
+    assert history[0]["content"] == "[user -> Li Bai | workdir: /home/user/proj]\nhello"
+
+
+@pytest.mark.asyncio
+async def test_agent_history_renders_workdir_only_when_it_changes():
+    store = InMemChatStore()
+    await store.commit_turn(
+        "chat",
+        [
+            Message(llm_message={"role": "user", "content": "one"}, metadata={"workdir": "/proj/a"}),
+            Message(llm_message={"role": "assistant", "content": "ok"}, metadata={"agent_name": "main"}),
+        ],
+        turn_id="turn-1",
+    )
+    await store.commit_turn(
+        "chat",
+        [
+            Message(llm_message={"role": "user", "content": "two"}, metadata={"workdir": "/proj/a"}),
+            Message(llm_message={"role": "assistant", "content": "ok"}, metadata={"agent_name": "main"}),
+        ],
+        turn_id="turn-2",
+    )
+    await store.commit_turn(
+        "chat",
+        [
+            Message(llm_message={"role": "user", "content": "three"}, metadata={"workdir": "/proj/b"}),
+            Message(llm_message={"role": "assistant", "content": "ok"}, metadata={"agent_name": "main"}),
+        ],
+        turn_id="turn-3",
+    )
+    agent = create_test_agent(agent_name="main", chat_store=store)
+
+    history = await agent._load_and_compact_history("chat", budget_model=None)
+
+    # first occurrence renders, the unchanged repeat is suppressed, the change renders
+    assert history[0]["content"] == "[workdir: /proj/a]\none"
+    assert history[2]["content"] == "two"
+    assert history[4]["content"] == "[workdir: /proj/b]\nthree"
+
+
+def test_current_turn_user_message_projection_renders_workdir():
+    agent = create_test_agent(agent_name="main")
+    message = Message(
+        llm_message={"role": "user", "content": "hello"},
+        metadata={"target_agent": "main", "workdir": "/home/user/proj"},
+    )
+
+    projected = agent._project_current_message(message)
+
+    assert projected["content"] == "[workdir: /home/user/proj]\nhello"
+    # stored message stays raw; the label is derived at projection time only
+    assert message.llm_message["content"] == "hello"
+
+
+def test_current_turn_projection_leaves_assistant_and_plain_messages_untouched():
+    agent = create_test_agent(agent_name="main", history_attribution=True)
+
+    assistant = Message(llm_message={"role": "assistant", "content": "hi"}, metadata={"agent_name": "main"})
+    plain_user = Message(llm_message={"role": "user", "content": "hi"})
+
+    assert agent._project_current_message(assistant) == assistant.llm_message
+    assert agent._project_current_message(plain_user) == plain_user.llm_message
+
+
+def test_agent_system_info_includes_workspace():
+    agent = create_test_agent(workspace="/srv/agent-workspace")
+
+    section = agent._prompt_section_system_info()
+
+    assert "<workspace>/srv/agent-workspace</workspace>" in section
+
+
+def test_agent_system_info_omits_workspace_when_unset():
+    agent = create_test_agent()
+
+    section = agent._prompt_section_system_info()
+
+    assert "<workspace>" not in section
+
+
+@pytest.mark.asyncio
 async def test_registered_agent_defaults_to_no_capabilities(tmp_path):
     bos_dir = tmp_path / ".bos"
     bos_dir.mkdir()

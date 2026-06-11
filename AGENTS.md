@@ -33,6 +33,14 @@ This `AGENTS.md` applies to the entire repository.
 - `uv run ruff check src tests` is a useful signal, but the repo may already contain unrelated lint findings. Do not assume a lint failure came from your change without checking the reported files.
 - Pull request titles must follow semantic/conventional format, for example `feat(config): ...` or `fix(runner): ...`, because GitHub Actions validate the PR title.
 
+## BEP Process
+
+- BOS Enhancement Proposals live in `docs/BEP/` and capture accepted design direction before broad architectural changes.
+- When reviewing a BEP, first clarify scope, responsibility boundaries, source-of-truth decisions, and explicit non-goals. Resolve ambiguous ownership before implementation planning.
+- Keep BEPs aligned with the intended end design, not transitional compatibility, unless compatibility is explicitly required.
+- After discussion, update the BEP with concrete decisions, config/API shapes, lifecycle rules, and remaining open issues. Remove stale or contradictory text instead of leaving historical alternatives in place.
+- Before implementing a BEP, make a short implementation plan and re-check it against the BEP so implementation agents do not infer behavior from outdated wording.
+
 
 ## Code Search
 

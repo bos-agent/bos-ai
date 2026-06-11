@@ -116,9 +116,16 @@ def _render_turn_event(event: TurnEvent) -> str | None:
     label = _turn_event_label(event)
 
     if event.event_type == "llm" and event.detail == "thinking":
-        return f"{label} is thinking…"
+        meta = event.metadata or {}
+        iteration = meta.get("iteration")
+        max_iter = meta.get("max_iterations")
+        if iteration and max_iter:
+            return f"[{label}] {iteration}/{max_iter}"
+        return f"[{label}] thinking"
 
-    if event.event_type == "llm" and event.detail == "tool_calls" and event.tool_calls:
+    if event.event_type == "llm" and event.detail in ("reasoning", "thinking_content"):
+        preview = (event.content or "")[:200].replace("\n", " ")
+        return f"[{label}] {preview}"
         tool_names = ", ".join(tc["name"] for tc in event.tool_calls)
         return f"{label} is using: {tool_names}"
 

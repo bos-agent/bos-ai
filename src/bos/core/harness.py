@@ -209,6 +209,7 @@ class AgentHarness:
             "interceptor": self.interceptor,
             "plugins": await self._bind_plugins_for_agent(merged_cfg),
             "chat_compaction_lock": self._get_compaction_lock,
+            "workspace": str(self._workspace),
         }
 
         return _apply(Agent, kwargs)

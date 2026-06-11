@@ -54,26 +54,6 @@ class ChatState:
         self.set_cursor(client_id, chat_id)
         return chat_id
 
-    def set_alias(self, alias: str, chat_id: str, *, force: bool = False) -> str:
-        normalized = normalize_alias(alias)
-        chat_id = self._require_nonempty("chat_id", chat_id)
-        data = self._read()
-        existing = data["aliases"].get(normalized)
-        if existing and existing != chat_id and not force:
-            raise ChatStateError(f"Alias {normalized!r} already points to chat {existing!r}.")
-        data["aliases"][normalized] = chat_id
-        self._write()
-        return normalized
-
-    def delete_alias(self, alias: str) -> bool:
-        normalized = normalize_alias(alias)
-        data = self._read()
-        existed = normalized in data["aliases"]
-        data["aliases"].pop(normalized, None)
-        if existed:
-            self._write()
-        return existed
-
     def resolve_alias_or_id(self, value: str) -> str:
         value = self._require_nonempty("chat_id", value)
         data = self._read()
@@ -82,9 +62,6 @@ class ChatState:
         except ChatStateError:
             alias = ""
         return data["aliases"].get(alias, value)
-
-    def list_aliases(self) -> dict[str, str]:
-        return dict(self._read()["aliases"])
 
     @staticmethod
     def _require_nonempty(name: str, value: str) -> str:

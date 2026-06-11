@@ -11,7 +11,7 @@ from .actor_resolver import ActorDescriptor, ActorResolver
 from .channel_context import ChannelRuntimeContext
 from .channel_manager import ChannelManager
 from .chat_coordinator import ChannelConversationRef, ChatCoordinator
-from .http import create_gateway_app, require_gateway_api_key
+from .http import create_gateway_app, resolve_gateway_api_key
 from .state import GatewayRunDir, write_gateway_state
 from .ws_channel import WSChannel
 
@@ -42,6 +42,7 @@ class Gateway:
             },
             default_actor=workspace.resolve_default_actor(),
             mention_prefix=workspace.config.runtime.actor_resolver.mention_prefix if workspace.config.runtime else "@",
+            workdir=str(workspace.workspace),
         )
         if harness.chat_store is None or harness.mail_route is None:
             raise RuntimeError("Gateway requires an active AgentHarness with chat_store and mail_route services.")
@@ -83,7 +84,7 @@ class Gateway:
         }
 
     def build_app(self) -> web.Application:
-        api_key = require_gateway_api_key(self.config)
+        api_key = resolve_gateway_api_key(self.config)
         return create_gateway_app(
             config=self.config,
             api_key=api_key,

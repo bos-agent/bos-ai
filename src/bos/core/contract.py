@@ -299,23 +299,6 @@ class BaseChannel(Generic[SettingsT]):
         return None
 
 
-ep_actor_command = ExtensionPoint(
-    description="""Actor command handler. An async function with injectable arguments: input, env, actor, harness.
-    If the command returns None, it will be treated as '(done)'.
-
-    For example:
-
-    @ep_actor_command(name="echo")
-    async def echo(input: str) -> str:
-        return input
-
-    @ep_actor_command(name="tools")
-    async def tools(actor: Any) -> dict:
-        return actor._agent._get_tool_defs()
-    """
-)
-
-
 # ── BEP 4: Plugin Architecture ─────────────────────────────────────────────
 
 ep_plugin = ExtensionPoint(description="Harness plugin. A class or factory implementing HarnessPlugin.")

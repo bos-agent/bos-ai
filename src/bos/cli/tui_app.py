@@ -4,7 +4,7 @@ This TUI is a pure external client. It communicates with the gateway over
 WebSocket through ``GatewayClient``. It never imports or references the
 agent, harness, or actor directly.
 
-Slash commands that need server-side data (``/history``, ``/compact``, etc.)
+Slash commands that need server-side data (``/chats``, ``/resume``, etc.)
 send a ``content_type="command"`` envelope and wait for a ``command_result``
 response from the gateway channel.
 """
@@ -14,26 +14,26 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from rich.markdown import Markdown
+from rich.text import Text
+from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal
+from textual.containers import Vertical
 from textual.message import Message
-from textual.widgets import Footer, Header, Input, RichLog, Static
-from textual_autocomplete import AutoComplete, DropdownItem
+from textual.screen import ModalScreen
+from textual.widgets import Footer, Input, OptionList, RichLog, Static, TextArea
+from textual.widgets.option_list import Option
+from textual_autocomplete import AutoComplete, DropdownItem, TargetState
 
 from bos.gateway.client import GatewayClient
 from bos.protocol import WS_TAKEOVER_CLOSE_REASON, MessageType, TurnEvent
 
 logger = logging.getLogger(__name__)
-
-
-def _turn_event_label(event: TurnEvent) -> str:
-    if event.parent_agent_name and event.agent_name and event.agent_name != event.parent_agent_name:
-        return f"{event.parent_agent_name} -> {event.agent_name}"
-    return event.agent_name or "agent"
 
 
 # ── Textual messages ───────────────────────────────────────────
@@ -59,50 +59,348 @@ class AgentReplyEvent(Message):
 class CommandResultEvent(Message):
     """Result of a slash command executed on the server side."""
 
-    def __init__(self, name: str, data: Any) -> None:
+    def __init__(self, name: str, data: Any, metadata: dict[str, Any] | None = None) -> None:
         super().__init__()
         self.name = name
         self.data = data
+        self.metadata = metadata or {}
 
 
 class SystemEvent(Message):
     """System event emitted by the channel infrastructure."""
 
-    def __init__(self, content: str, chat_id: str | None = None) -> None:
+    def __init__(self, content: str, chat_id: str | None = None, metadata: dict[str, Any] | None = None) -> None:
         super().__init__()
         self.content = content
         self.chat_id = chat_id
+        self.metadata = metadata or {}
 
 
 SLASH_COMMANDS = [
     "/help",
     "/new",
     "/resume",
-    "/alias",
-    "/aliases",
-    "/unalias",
-    "/history",
-    "/compact",
-    "/tokens",
-    "/chats",
     "/clear",
-    "/restart",
+    "/workdir",
 ]
 
 
+def _indent(text: str) -> str:
+    """Indent every line of a (possibly multiline) message for log display."""
+    return "\n".join(f"  {line}" for line in text.splitlines()) or "  "
+
+
+def _fmt_tokens(count: int) -> str:
+    """Format a token count compactly (842, 12.4k, 1.2M)."""
+    if count < 1000:
+        return str(count)
+    if count < 1_000_000:
+        return f"{count / 1000:.1f}k"
+    return f"{count / 1_000_000:.1f}M"
+
+
+def _message_text(content: Any) -> str:
+    """Extract display text from an LLM message content (string or parts list)."""
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        parts = [p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text"]
+        return "\n".join(p for p in parts if p).strip()
+    return ""
+
+
+def _relative_time(iso: str | None) -> str:
+    """Render an ISO timestamp as a short relative age (e.g. '3h ago')."""
+    if not iso:
+        return ""
+    try:
+        dt = datetime.fromisoformat(iso)
+    except (TypeError, ValueError):
+        return ""
+    seconds = (datetime.now(dt.tzinfo) - dt).total_seconds()
+    if seconds < 60:
+        return "just now"
+    if seconds < 3600:
+        return f"{int(seconds // 60)}m ago"
+    if seconds < 86400:
+        return f"{int(seconds // 3600)}h ago"
+    return f"{int(seconds // 86400)}d ago"
+
+
+class PromptHistory:
+    """In-memory prompt history for a single TUI session (not persisted)."""
+
+    def __init__(self) -> None:
+        self._items: list[str] = []
+        self._pos: int | None = None
+        self._draft = ""
+
+    def record(self, text: str) -> None:
+        """Store a submitted prompt and reset the navigation cursor."""
+        text = text.strip()
+        if text and (not self._items or self._items[-1] != text):
+            self._items.append(text)
+        self._pos = None
+        self._draft = ""
+
+    def previous(self, current: str) -> str | None:
+        """Step back in history; saves *current* as the draft on first step."""
+        if not self._items:
+            return None
+        if self._pos is None:
+            self._draft = current
+            self._pos = len(self._items) - 1
+        elif self._pos > 0:
+            self._pos -= 1
+        return self._items[self._pos]
+
+    def next(self) -> str | None:
+        """Step forward; returns the saved draft when stepping past the end."""
+        if self._pos is None:
+            return None
+        if self._pos < len(self._items) - 1:
+            self._pos += 1
+            return self._items[self._pos]
+        self._pos = None
+        return self._draft
+
+
+class PromptInput(TextArea):
+    """Multiline prompt: Enter submits, Ctrl+J inserts a newline."""
+
+    MAX_VISIBLE_LINES = 8
+
+    class Submitted(Message):
+        def __init__(self, prompt_input: PromptInput, value: str) -> None:
+            super().__init__()
+            self.prompt_input = prompt_input
+            self.value = value
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        # Not named `history`: TextArea already owns an undo/redo EditHistory
+        # under that attribute.
+        self.prompt_history = PromptHistory()
+
+    async def _on_key(self, event: events.Key) -> None:
+        if event.key == "enter":
+            event.stop()
+            event.prevent_default()
+            # With the autocomplete dropdown open, Enter completes instead of
+            # submitting (AutoComplete sees the key via the message signal,
+            # which fires after this dispatch even for stopped events).
+            if not self._autocomplete_open():
+                self.prompt_history.record(self.text)
+                self.post_message(self.Submitted(self, self.text))
+            return
+        # Ctrl+J works on every terminal (legacy ones transmit it as \n).
+        # Ctrl+Shift+J is distinguishable only on kitty-protocol terminals;
+        # legacy ones drop shift and deliver plain ctrl+j, same action.
+        if event.key in ("ctrl+j", "ctrl+shift+j"):
+            event.stop()
+            event.prevent_default()
+            self.insert("\n")
+            return
+        # Up/Down on the edge lines cycle prompt history; inside a multiline
+        # draft they keep their normal cursor-movement behavior.
+        if event.key == "up" and not self._autocomplete_open() and self.cursor_location[0] == 0:
+            if (recalled := self.prompt_history.previous(self.text)) is not None:
+                event.stop()
+                event.prevent_default()
+                self._replace_text(recalled)
+                return
+        if (
+            event.key == "down"
+            and not self._autocomplete_open()
+            and self.cursor_location[0] == self.document.line_count - 1
+        ):
+            if (recalled := self.prompt_history.next()) is not None:
+                event.stop()
+                event.prevent_default()
+                self._replace_text(recalled)
+                return
+        await super()._on_key(event)
+
+    def _replace_text(self, text: str) -> None:
+        self.text = text
+        self.move_cursor(self.document.end)
+        self._fit_height()
+
+    def _autocomplete_open(self) -> bool:
+        for ac in self.screen.query(AutoComplete):
+            try:
+                if ac.display and ac.option_list.option_count:
+                    return True
+            except Exception:
+                continue
+        return False
+
+    def _on_text_area_changed(self, event: TextArea.Changed) -> None:
+        self._fit_height()
+
+    def _fit_height(self) -> None:
+        """Grow with content up to MAX_VISIBLE_LINES, accounting for soft wrap."""
+        try:
+            height = self.wrapped_document.height
+        except Exception:
+            height = self.document.line_count
+        self.styles.height = max(1, min(height, self.MAX_VISIBLE_LINES))
+
+
 class SlashAutoComplete(AutoComplete):
-    """AutoComplete that activates for slash commands and @mentions."""
+    """AutoComplete adapted to a TextArea target; activates for slash commands and @mentions."""
+
+    @property
+    def target(self) -> PromptInput:  # type: ignore[override]
+        if isinstance(self._target, PromptInput):
+            return self._target
+        target = self.screen.query_one(self._target)
+        assert isinstance(target, PromptInput)
+        return target
+
+    def _get_target_state(self) -> TargetState:
+        target = self.target
+        return TargetState(
+            text=target.text,
+            cursor_position=target.document.get_index_from_location(target.cursor_location),
+        )
+
+    def _listen_to_messages(self, event: events.Event) -> None:
+        super()._listen_to_messages(event)
+        if isinstance(event, TextArea.Changed):
+            self._handle_target_update()
 
     def should_show_dropdown(self, search_string: str) -> bool:
         if not (search_string.startswith("/") or search_string.startswith("@")):
             return False
         return super().should_show_dropdown(search_string)
 
-    def apply_completion(self, value: str, state: Any) -> None:
-        """Apply the completion, appending a space after @mentions for routing."""
+    def apply_completion(self, value: str, state: TargetState) -> None:
+        """Replace the prompt content with the completion (TextArea-aware)."""
         if value.startswith("@"):
             value = value + " "
-        super().apply_completion(value, state)
+        target = self.target
+        with self.prevent(TextArea.Changed):
+            target.text = value
+            target.move_cursor(target.document.end)
+        target._fit_height()
+        new_state = self._get_target_state()
+        self._rebuild_options(new_state, self.get_search_string(new_state))
+
+
+class InterruptModal(ModalScreen[str | None]):
+    """Modal prompt for an interrupt message: Enter submits, Escape cancels."""
+
+    DEFAULT_CSS = """
+    InterruptModal {
+        align: center middle;
+    }
+
+    #interrupt-dialog {
+        width: 60%;
+        max-width: 80;
+        height: auto;
+        border: round $primary;
+        background: $surface;
+        padding: 1 2;
+    }
+
+    #interrupt-title {
+        color: $text-muted;
+        padding-bottom: 1;
+    }
+    """
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel", show=False),
+    ]
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="interrupt-dialog"):
+            yield Static("Interrupt message — Enter to send, Esc to cancel", id="interrupt-title")
+            yield Input(placeholder="Inject a message into the current turn…", id="interrupt-input")
+
+    def on_mount(self) -> None:
+        self.query_one("#interrupt-input", Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        text = event.value.strip()
+        if text:
+            self.dismiss(text)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class ChatPickerModal(ModalScreen[str | None]):
+    """Modal chat list for /resume: Enter selects, Escape cancels."""
+
+    DEFAULT_CSS = """
+    ChatPickerModal {
+        align: center middle;
+    }
+
+    #chat-picker {
+        width: 90%;
+        max-width: 120;
+        height: auto;
+        max-height: 80%;
+        border: round $primary;
+        background: $surface;
+        padding: 1 2;
+    }
+
+    #chat-picker-title {
+        color: $text-muted;
+        padding-bottom: 1;
+    }
+
+    #chat-picker-list {
+        height: auto;
+        max-height: 20;
+        border: none;
+        background: transparent;
+    }
+    """
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel", show=False),
+    ]
+
+    def __init__(self, chats: list[dict[str, Any]], current_chat_id: str | None = None) -> None:
+        super().__init__()
+        self._chats = chats
+        self._current_chat_id = current_chat_id
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="chat-picker"):
+            yield Static("Resume a chat — Enter to select, Esc to cancel", id="chat-picker-title")
+            yield OptionList(
+                *[Option(self._render_chat(chat), id=chat.get("chat_id")) for chat in self._chats],
+                id="chat-picker-list",
+            )
+
+    def _render_chat(self, chat: dict[str, Any]) -> Text:
+        age = _relative_time(chat.get("last_activity"))
+        description = str(chat.get("description") or "").replace("\n", " ").strip() or "(empty chat)"
+        count = chat.get("message_count")
+        row = Text()
+        row.append(f"{age:>10}  ", style="dim")
+        row.append(description)
+        if count:
+            row.append(f"  · {count} msg", style="dim")
+        if chat.get("chat_id") == self._current_chat_id:
+            row.append("  (current)", style="dim italic")
+        return row
+
+    def on_mount(self) -> None:
+        self.query_one("#chat-picker-list", OptionList).focus()
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        self.dismiss(event.option.id)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
 
 
 # ── ChatApp ────────────────────────────────────────────────────
@@ -116,14 +414,6 @@ class ChatApp(App):
 
     TITLE = "boscli tui"
     CSS = """
-    Screen {
-        background: $surface;
-    }
-
-    #main-container {
-        height: 1fr;
-    }
-
     #chat {
         width: 1fr;
         height: 1fr;
@@ -131,70 +421,50 @@ class ChatApp(App):
         scrollbar-size: 1 1;
     }
 
-    #sidebar {
-        width: 35;
-        height: 1fr;
-        dock: right;
-        border-left: solid $primary-background;
-        padding: 0 1;
-        display: none;
-    }
-
-    #chat-status {
-        height: 1;
-        dock: top;
-        background: $primary-background;
-        color: $text-muted;
-        padding: 0 2;
-    }
-
-    #task-panel {
+    #queued {
         height: auto;
-        max-height: 10;
-        dock: top;
-        border-bottom: solid $primary-background;
-        padding: 0 1;
+        max-height: 8;
+        padding: 0 2;
+        background: $boost;
+        color: $text-muted;
         display: none;
     }
 
     #status-bar {
         height: 1;
-        dock: bottom;
         background: $primary-background;
         color: $text-muted;
         padding: 0 2;
     }
 
     #prompt {
-        dock: bottom;
+        height: 1;
         padding: 0 1;
-    }
-
-    Input {
         border: none;
+        background: transparent;
     }
 
-    Input:focus {
+    #prompt:focus {
         border: none;
     }
     """
 
     BINDINGS = [
         Binding("escape", "interrupt_turn", "Interrupt", show=True, priority=True),
-        Binding("ctrl+enter", "interrupt_message", "Interject", show=True, priority=True),
+        Binding("ctrl+underscore", "interrupt_message", "Interject", show=True, priority=True, key_display="ctrl+/"),
+        Binding("ctrl+slash", "interrupt_message", "Interject", show=False, priority=True),
+        Binding("ctrl+g", "cancel_queued", "Drop queued", show=True, priority=True),
         Binding("ctrl+c", "quit", "Quit", show=True, priority=True),
         Binding("ctrl+l", "clear_log", "Clear", show=True),
         Binding("ctrl+n", "reset_chat", "New Chat", show=True),
-        Binding("ctrl+r", "restart_bos", "Restart", show=True),
+        Binding("ctrl+r", "resume_chat", "Resume", show=True),
     ]
 
-    theme = "tokyo-night"
+    _TASK_TOOL_NAMES = {"TaskCreate", "TaskUpdate", "TaskList", "TaskGet"}
 
     def __init__(
         self,
         client: GatewayClient,
-        *,
-        local_mode: bool = False,
     ) -> None:
         super().__init__()
         self._client = client
@@ -204,34 +474,33 @@ class ChatApp(App):
         self._busy = False
         self._buffer: list[str] = []
         self._conn_status: str = "connected"
+        self._pending_tool_calls: list[tuple[str, str]] = []
         self._known_actors: list[str] = []
-        self._local_mode = local_mode
+        self._awaiting_chat_list = False
+        self._session_count = 0
+        self._last_sent_text = ""
+        self._context_tokens = 0
+        self._session_tokens = 0
 
     # ── compose ────────────────────────────────────────────────
 
     def compose(self) -> ComposeResult:
-        yield Header()
-        yield Static(self._chat_status_text(), id="chat-status")
-        yield Static(id="task-panel")
-        with Horizontal(id="main-container"):
-            yield RichLog(
-                id="chat",
-                highlight=True,
-                markup=True,
-                wrap=True,
-                auto_scroll=True,
-            )
-            yield RichLog(
-                id="sidebar",
-                highlight=True,
-                markup=True,
-                wrap=False,
-                auto_scroll=True,
-            )
+        yield RichLog(
+            id="chat",
+            highlight=False,
+            markup=True,
+            wrap=True,
+            auto_scroll=True,
+        )
         yield Static(self._status_text(), id="status-bar")
-        yield Input(placeholder="Send a message…", id="prompt")
-        if not self._local_mode:
-            yield SlashAutoComplete("#prompt", candidates=self._get_candidates)
+        yield Static(id="queued")
+        yield PromptInput(
+            placeholder="Send a message… (Enter to send, Ctrl+J for newline)",
+            id="prompt",
+            show_line_numbers=False,
+            compact=True,
+        )
+        yield SlashAutoComplete("#prompt", candidates=self._get_candidates)
         yield Footer()
 
     # ── lifecycle ──────────────────────────────────────────────
@@ -239,27 +508,19 @@ class ChatApp(App):
     async def on_mount(self) -> None:
         self._update_status()
 
-        # Start reply polling worker
+        # Start reply polling worker; the queued session ack envelope writes
+        # the welcome banner and hydrates the transcript.
         self._poll_task = asyncio.create_task(self._poll_replies())
         self._conn_poll_task = asyncio.create_task(self._poll_connection_status())
 
-        # Welcome
-        log = self.query_one("#chat", RichLog)
-        log.write("[bold $primary]Agent CLI ready.[/]")
-        if self._local_mode:
-            log.write("[dim]Escape to abort · Ctrl+Enter to interject · Ctrl+C to quit[/]\n")
-        else:
-            log.write("[dim]Type /help for commands · Escape to abort · Ctrl+Enter to interject · Ctrl+C to quit[/]\n")
-
         # Fetch actor list for @mention autocomplete
-        if not self._local_mode:
-            try:
-                actors = await self._client.list_actors()
-                self._known_actors = list(actors.keys())
-            except Exception:
-                logger.debug("Failed to fetch actor list", exc_info=True)
+        try:
+            actors = await self._client.list_actors()
+            self._known_actors = list(actors.keys())
+        except Exception:
+            logger.debug("Failed to fetch actor list", exc_info=True)
 
-        self.query_one("#prompt", Input).focus()
+        self.query_one("#prompt", PromptInput).focus()
 
     async def _poll_replies(self) -> None:
         """Background task: await envelopes from the channel."""
@@ -273,7 +534,7 @@ class ChatApp(App):
                     except json.JSONDecodeError:
                         data = env.content
                     cmd_name = data.get("name", "?") if isinstance(data, dict) else "?"
-                    self.post_message(CommandResultEvent(cmd_name, data))
+                    self.post_message(CommandResultEvent(cmd_name, data, env.metadata))
                 elif env.content_type == MessageType.TURN_EVENT:
                     try:
                         data = json.loads(env.content) if isinstance(env.content, str) else {}
@@ -287,7 +548,7 @@ class ChatApp(App):
                     log.write(f"\n[bold dim cyan]❯ User ({env.sender})[/]")
                     log.write(f"  {env.content}")
                 elif env.content_type == MessageType.SYSTEM:
-                    self.post_message(SystemEvent(env.content, env.chat_id))
+                    self.post_message(SystemEvent(env.content, env.chat_id, env.metadata))
                 else:
                     # Normal reply
                     self.post_message(AgentReplyEvent(env.content, env.chat_id))
@@ -298,25 +559,31 @@ class ChatApp(App):
 
     # ── event handlers ────────────────────────────────────────
 
-    def on_key(self, event: Input.Changed | Any) -> None:
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        """Disable app-level interrupt hotkeys while a modal dialog is open."""
+        if action in ("interrupt_turn", "interrupt_message", "resume_chat") and isinstance(self.screen, ModalScreen):
+            return False
+        if action == "cancel_queued" and not self._buffer:
+            return None  # hide from the footer while nothing is queued
+        return True
+
+    def on_key(self, event: events.Key) -> None:
         """Redirect keystrokes to the prompt unless it already has focus."""
-        prompt = self.query_one("#prompt", Input)
+        if isinstance(self.screen, ModalScreen):
+            return
+        prompt = self.query_one("#prompt", PromptInput)
         if self.focused is not prompt:
             prompt.focus()
             # Forward printable characters into the input
             if event.character and event.is_printable:
-                prompt.value += event.character
-                # Defer cursor move so it isn't reset by the focus change
-                self.call_after_refresh(
-                    setattr, prompt, "cursor_position", len(prompt.value)
-                )
+                prompt.insert(event.character)
                 event.prevent_default()
 
-    async def on_input_submitted(self, event: Input.Submitted) -> None:
+    async def on_prompt_input_submitted(self, event: PromptInput.Submitted) -> None:
         text = event.value.strip()
         if not text:
             return
-        event.input.clear()
+        event.prompt_input.clear()
 
         # Handle slash commands
         if text.startswith("/"):
@@ -324,30 +591,27 @@ class ChatApp(App):
             return
 
         if self._busy:
+            # Queue locally; the gateway rejects messages while a turn is in
+            # flight, so the queue is flushed when the reply arrives.
             self._buffer.append(text)
-            sidebar = self.query_one("#sidebar", RichLog)
-            sidebar.display = True
-            sidebar.write("\n[bold cyan]❯ You (buffered)[/]")
-            sidebar.write(f"  {text}")
-
-            try:
-                await self._client.send(text, chat_id=self._chat_id)
-            except Exception as exc:
-                self._write_system(f"[yellow]⚠ Send failed — reconnecting: {exc}[/]")
+            self._refresh_queued()
+            self._update_status()
             return
 
         # Write user message
         log = self.query_one("#chat", RichLog)
         log.write("\n[bold cyan]❯ You[/]")
-        log.write(f"  {text}")
+        log.write(_indent(text))
 
         # Send to actor
         self._busy = True
+        self._last_sent_text = text
         self._update_status()
         try:
             await self._client.send(text, chat_id=self._chat_id)
         except Exception as exc:
             self._busy = False
+            self._pending_tool_calls.clear()
             self._update_status()
             self._write_system(f"[yellow]⚠ Send failed — reconnecting: {exc}[/]")
 
@@ -355,44 +619,70 @@ class ChatApp(App):
         """Handle structured runtime events from the gateway channel."""
         event = message.event
         log = self.query_one("#chat", RichLog)
-        label = _turn_event_label(event)
 
         if event.event_type == "llm" and event.detail == "thinking":
-            log.write(f"[dim italic]  🤔 {label} thinking…[/]")
+            pass
 
-        elif event.event_type == "llm" and event.detail == "tool_calls":
-            for tc in event.tool_calls or []:
-                args_str = ", ".join(f"{k}={v!r}" for k, v in tc["arguments"].items())
-                prefix = f"{label}: " if label else ""
-                log.write(f"[dim]  ⚡ {prefix}[bold]{tc['name']}[/bold]({args_str})[/]")
+        elif event.event_type == "llm" and event.detail in ("tool_calls", "response_ready"):
+            self._ingest_usage((event.metadata or {}).get("usage"))
+            # Unified LLM response event — show thinking content if present
+            content = event.content or ""
+            if content:
+                preview = content[:240].replace("\n", " ")
+                log.write(f"\n[dim italic]● {preview}[/]")
+
+        elif event.event_type == "tool" and event.detail == "tool_call":
+            name = event.tool_name or "?"
+            if name in self._TASK_TOOL_NAMES:
+                return
+            args_str = ""
+            if event.content:
+                try:
+                    args = json.loads(event.content) if isinstance(event.content, str) else event.content
+                    if isinstance(args, dict):
+                        args_str = ", ".join(f"{k}={v!r}" for k, v in args.items())
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            self._pending_tool_calls.append((name, args_str))
 
         elif event.event_type == "tool" and event.detail == "tool_result":
             name = event.tool_name or "?"
-            preview = str(event.content or "")[:120].replace("\n", " ")
-            log.write(f"[dim]  ↳ {label}: {name} → {preview}[/]")
+            if name in self._TASK_TOOL_NAMES:
+                return
+            preview = str(event.content or "")[:240].replace("\n", " ")
+            if self._pending_tool_calls:
+                call_name, call_args = self._pending_tool_calls.pop(0)
+                log.write(f"  [bold]{call_name}[/]({call_args})")
+                log.write(f"   └ [dim]{preview}[/]")
+            else:
+                log.write(f"  {name}: [dim]{preview}[/]")
 
         elif event.event_type == "task" and event.detail == "task_state":
             tasks = (event.metadata or {}).get("tasks", [])
-            panel = self.query_one("#task-panel", Static)
             if tasks:
-                lines = ["[bold]■ Tasks[/]"]
-                for t in tasks:
-                    marker = {"pending": "⬜", "in_progress": "🔄", "completed": "✅"}.get(t.get("status"), "  ")
-                    blocked = f" [dim](blocked: {', '.join(t.get('blocked_by', []))})[/]" if t.get("blocked_by") else ""
-                    lines.append(f"  {marker} [{t.get('id')}] {t.get('subject')}{blocked}")
-                panel.update("\n".join(lines))
-                panel.display = True
-            else:
-                panel.display = False
+                order = {"completed": 0, "in_progress": 1, "pending": 2}
+                ordered = sorted(tasks, key=lambda t: order.get(t.get("status"), 3))
+                lines = ["[bold]• Tasks[/]"]
+                for i, t in enumerate(ordered):
+                    prefix = "└" if i == 0 else " "
+                    subject = t.get("subject", "")
+                    if t.get("status") == "completed":
+                        lines.append(f"  {prefix} [dim][s]✔ {subject}[/s][/dim]")
+                    elif t.get("status") == "in_progress":
+                        lines.append(f"  {prefix} [bold]■ {subject}[/]")
+                    else:
+                        lines.append(f"  {prefix} □ {subject}")
+                log.write("\n" + "\n".join(lines))
 
         elif event.detail == "max_iteration":
-            log.write(f"[yellow]  ⚠ {label} max iterations reached[/]")
+            log.write("[yellow]  max iterations reached[/]")
 
         elif event.detail == "error":
-            log.write(f"[red]  ⚠ {label} error: {event.content or 'unknown error'}[/]")
+            log.write(f"[red]  error: {event.content or 'unknown error'}[/]")
 
     async def on_agent_reply_event(self, event: AgentReplyEvent) -> None:
         """Handle the final reply from the actor."""
+        self._last_sent_text = ""
         log = self.query_one("#chat", RichLog)
         content = event.content or "(no response)"
 
@@ -407,30 +697,47 @@ class ChatApp(App):
             log.write(f"  {content}")
 
         if self._buffer:
-            log.write("\n[bold cyan]❯ You (buffered)[/]")
-            for txt in self._buffer:
-                log.write(f"  {txt}")
-
-            sidebar = self.query_one("#sidebar", RichLog)
-            sidebar.clear()
-            sidebar.display = False
+            # Flush the queued messages as the next turn.
+            merged = "\n\n".join(self._buffer)
             self._buffer.clear()
+            self._refresh_queued()
+            self._pending_tool_calls.clear()
+
+            log.write("\n[bold cyan]❯ You[/]")
+            log.write(_indent(merged))
 
             self._busy = True
+            self._last_sent_text = merged
+            try:
+                await self._client.send(merged, chat_id=self._chat_id)
+            except Exception as exc:
+                self._busy = False
+                self._write_system(f"[yellow]⚠ Send failed — reconnecting: {exc}[/]")
         else:
             self._busy = False
+            self._pending_tool_calls.clear()
 
         self._update_status()
-        self.query_one("#prompt", Input).focus()
+        self.query_one("#prompt", PromptInput).focus()
 
     async def on_command_result_event(self, event: CommandResultEvent) -> None:
         """Handle a slash command result from the server."""
         data = event.data
         if isinstance(data, dict):
+            if event.name == "chats" and self._awaiting_chat_list:
+                self._awaiting_chat_list = False
+                if data.get("ok"):
+                    self._open_chat_picker(data.get("result") or [])
+                    return
             if event.name in {"new", "resume"} and data.get("ok"):
                 chat_id = data.get("chat_id")
                 if isinstance(chat_id, str):
                     self._set_chat_id(chat_id)
+                if event.name == "resume":
+                    # Replace the viewport with the resumed chat's transcript.
+                    log = self.query_one("#chat", RichLog)
+                    log.clear()
+                    self._render_history(event.metadata.get("missing_messages") or [])
             result = data.get("result")
             error = data.get("error")
             if error:
@@ -451,9 +758,79 @@ class ChatApp(App):
             self._write_system(f"[yellow]{event.content} Exiting.[/]")
             self.exit()
             return
+        meta_event = event.metadata.get("event")
+        if meta_event == "session":
+            self._handle_session_event(event)
+            return
+        if meta_event == "stale_chat":
+            self._handle_stale_rejection(event.metadata.get("payload") or {})
+            return
+        if meta_event == "active_turn":
+            self._handle_active_turn_rejection()
+            return
         if event.chat_id:
             self._set_chat_id(event.chat_id)
         self._write_system(f"[green]{event.content}[/]")
+
+    def _handle_stale_rejection(self, payload: dict[str, Any]) -> None:
+        """The send was rejected: the chat moved on under another client."""
+        self._busy = False
+        self._pending_tool_calls.clear()
+        missing = payload.get("missing_messages") or []
+        if missing:
+            self._write_system("\n[yellow]⚠ This chat was updated from another client — missed messages:[/]")
+            self._render_history(missing)
+        restored = self._restore_last_prompt()
+        notice = "Review the messages above and resubmit"
+        if restored:
+            notice += " — your text is back in the prompt"
+        self._write_system(f"\n[yellow]⚠ Send rejected (stale revision). {notice}.[/]")
+        self._update_status()
+
+    def _handle_active_turn_rejection(self) -> None:
+        """The send was rejected: another client's turn is in flight."""
+        self._busy = False
+        self._pending_tool_calls.clear()
+        restored = self._restore_last_prompt()
+        notice = "⚠ Another turn is in progress — message not sent"
+        if restored:
+            notice += "; your text is back in the prompt"
+        self._write_system(f"[yellow]{notice}.[/]")
+        self._update_status()
+
+    def _restore_last_prompt(self) -> bool:
+        """Put the last rejected text back into the prompt; True if restored."""
+        text, self._last_sent_text = self._last_sent_text, ""
+        if not text:
+            return False
+        prompt = self.query_one("#prompt", PromptInput)
+        if prompt.text.strip():
+            return False  # don't clobber text the user typed meanwhile
+        prompt._replace_text(text)
+        return True
+
+    def _handle_session_event(self, event: SystemEvent) -> None:
+        """Hydrate the viewport from a session acknowledgement (connect/reconnect)."""
+        self._session_count += 1
+        if event.chat_id:
+            self._set_chat_id(event.chat_id)
+        if self._conn_status != "connected":
+            self._conn_status = "connected"
+            self._update_status()
+        log = self.query_one("#chat", RichLog)
+        log.clear()
+        self._write_banner(log)
+        self._render_history(event.metadata.get("missing_messages") or [])
+        if self._session_count > 1:
+            self._write_system("\n[green]↻ Reconnected — transcript refreshed.[/]")
+
+    @staticmethod
+    def _write_banner(log: RichLog) -> None:
+        log.write("[bold $primary]Agent CLI ready.[/]")
+        log.write(
+            "[dim]Type /help for commands · Escape to abort · Ctrl+J for newline"
+            " · Ctrl+/ to interject · Ctrl+C to quit[/]\n"
+        )
 
     # ── slash commands ────────────────────────────────────────
 
@@ -467,25 +844,22 @@ class ChatApp(App):
             self._write_system(
                 "[bold]Commands:[/]\n"
                 "  /help     — show this help\n"
+                "  /resume   — pick a chat to resume, or /resume <chat-id>\n"
                 "  /new      — start a new chat\n"
-                "  /resume   — resume a chat by id or alias\n"
-                "  /alias    — give the current chat an alias\n"
-                "  /aliases  — list chat aliases\n"
-                "  /unalias  — remove a chat alias\n"
-                "  /history  — show chat history\n"
-                "  /compact  — compact chat\n"
-                "  /tokens   — rough token estimate\n"
-                "  /chats    — list all chats\n"
                 "  /clear    — clear the log\n"
-                "  /restart  — restart the gateway\n"
+                "  /workdir  — show, set (/workdir <path>), or unset (/workdir unset)\n"
+                "              the working directory stamped on outgoing messages\n"
                 "\n"
                 "[bold]Hot keys:[/]\n"
                 "  Escape      — abort the current turn\n"
-                "  Ctrl+Enter  — inject a message into the current turn\n"
+                "  Up / Down   — cycle prompt history (cursor on first/last line)\n"
+                "  Ctrl+J / Ctrl+Shift+J — insert a newline in the prompt\n"
+                "  Ctrl+/      — inject a message into the current turn\n"
+                "  Ctrl+G      — drop queued messages without sending\n"
                 "  Ctrl+C      — quit\n"
                 "  Ctrl+L      — clear the log\n"
                 "  Ctrl+N      — start a new chat\n"
-                "  Ctrl+R      — restart the gateway"
+                "  Ctrl+R      — pick a chat to resume"
             )
 
         elif normalized_cmd == "/new":
@@ -494,27 +868,41 @@ class ChatApp(App):
         elif normalized_cmd == "/clear":
             self.query_one("#chat", RichLog).clear()
 
-        elif normalized_cmd == "/restart":
-            if self._local_mode:
-                self._write_system("[yellow]/restart is not available in local mode — use Ctrl+C to quit.[/]")
-            else:
-                await self.action_restart_bos()
+        elif normalized_cmd == "/workdir":
+            self._handle_workdir_command(rest.strip())
 
-        elif normalized_cmd in (
-            "/resume",
-            "/alias",
-            "/aliases",
-            "/unalias",
-            "/history",
-            "/compact",
-            "/tokens",
-            "/chats",
-        ):
-            # Delegate to the server via a command envelope
-            await self._send_command(command_text)
+        elif normalized_cmd == "/resume":
+            if rest.strip():
+                # Delegate to the server via a command envelope
+                await self._send_command(command_text)
+            else:
+                await self._request_chat_picker()
 
         else:
             self._write_system(f"[yellow]Unknown command: {normalized_cmd}[/]")
+
+    def _handle_workdir_command(self, arg: str) -> None:
+        """Show, set, or unset the workdir stamped on outgoing messages."""
+        if not arg:
+            current = self._client.workdir
+            if current:
+                self._write_system(f"[dim]workdir: {current}[/]")
+            else:
+                self._write_system("[dim]workdir: (unset — the gateway workspace is used)[/]")
+            return
+        if arg.lower() in ("unset", "none", "off"):
+            self._client.update_workdir(None)
+            self._write_system("[dim]workdir unset — the gateway workspace is used.[/]")
+            return
+        path = Path(arg).expanduser()
+        if path.is_dir():
+            resolved = str(path.resolve())
+            self._client.update_workdir(resolved)
+            self._write_system(f"[dim]workdir set: {resolved}[/]")
+        else:
+            # The gateway may run on another filesystem (e.g. Docker); set anyway.
+            self._client.update_workdir(str(path))
+            self._write_system(f"[yellow]workdir set: {path} (not found on this machine)[/]")
 
     async def _send_command(self, command_text: str) -> None:
         """Send a slash command to the channel server for execution."""
@@ -534,28 +922,28 @@ class ChatApp(App):
 
     def action_clear_log(self) -> None:
         self.query_one("#chat", RichLog).clear()
-        try:
-            panel = self.query_one("#task-panel", Static)
-            panel.display = False
-        except Exception:
-            pass
 
     def action_reset_chat(self) -> None:
         asyncio.create_task(self._send_command("/new"))
 
-    async def action_restart_bos(self) -> None:
-        """Restart the background BOS agent."""
-        self._write_system("[yellow]↻ Restarting gateway…[/]")
-        import sys
-        try:
-            process = await asyncio.create_subprocess_exec(
-                sys.argv[0], "restart",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            asyncio.create_task(process.wait())
-        except Exception as exc:
-            self._write_system(f"[red]⚠ Failed to restart agent: {exc}[/]")
+    def action_resume_chat(self) -> None:
+        asyncio.create_task(self._request_chat_picker())
+
+    async def _request_chat_picker(self) -> None:
+        """Ask the server for the chat list; the picker opens on the result."""
+        self._awaiting_chat_list = True
+        await self._send_command("/chats")
+
+    def _open_chat_picker(self, chats: list[dict[str, Any]]) -> None:
+        if not chats:
+            self._write_system("[dim]No chats to resume.[/]")
+            return
+
+        def _on_dismiss(chat_id: str | None) -> None:
+            if chat_id and chat_id != self._chat_id:
+                asyncio.create_task(self._send_command(f"/resume {chat_id}"))
+
+        self.push_screen(ChatPickerModal(chats, current_chat_id=self._chat_id), callback=_on_dismiss)
 
     async def action_interrupt_turn(self) -> None:
         """Abort the in-flight turn for the current chat."""
@@ -575,22 +963,34 @@ class ChatApp(App):
             return
 
         self._buffer.clear()
-        sidebar = self.query_one("#sidebar", RichLog)
-        sidebar.clear()
-        sidebar.display = False
+        self._refresh_queued()
         self._busy = False
         self._update_status()
         self._write_system("[yellow]⏹ Turn interrupt requested.[/]")
-        self.query_one("#prompt", Input).focus()
+        self.query_one("#prompt", PromptInput).focus()
 
-    async def action_interrupt_message(self) -> None:
-        """Send the current input as an interrupt message (inject into the ongoing turn)."""
-        prompt = self.query_one("#prompt", Input)
-        text = prompt.value.strip()
-        if not text:
+    def action_cancel_queued(self) -> None:
+        """Drop queued messages without sending them."""
+        if not self._buffer:
             return
-        prompt.clear()
+        count = len(self._buffer)
+        self._buffer.clear()
+        self._refresh_queued()
+        self._update_status()
+        plural = "s" if count > 1 else ""
+        self._write_system(f"[yellow]✗ Dropped {count} queued message{plural}.[/]")
 
+    def action_interrupt_message(self) -> None:
+        """Open a modal dialog to compose an interrupt message for the ongoing turn."""
+
+        def _on_dismiss(text: str | None) -> None:
+            if text:
+                asyncio.create_task(self._send_interrupt_message(text))
+
+        self.push_screen(InterruptModal(), callback=_on_dismiss)
+
+    async def _send_interrupt_message(self, text: str) -> None:
+        """Inject a message into the ongoing turn (or send normally when idle)."""
         log = self.query_one("#chat", RichLog)
 
         if self._busy:
@@ -605,12 +1005,13 @@ class ChatApp(App):
                 return
 
             log.write("\n[bold yellow]❯ You (interrupt)[/]")
-            log.write(f"  {text}")
+            log.write(_indent(text))
             self._write_system("[yellow]⏎ Interrupt message sent.[/]")
         else:
             log.write("\n[bold cyan]❯ You[/]")
-            log.write(f"  {text}")
+            log.write(_indent(text))
             self._busy = True
+            self._last_sent_text = text
             self._update_status()
             try:
                 await self._client.send(text, chat_id=self._chat_id)
@@ -623,8 +1024,6 @@ class ChatApp(App):
 
     def _get_candidates(self, state: Any) -> list[str]:
         """Return candidate completions based on the current input prefix."""
-        if self._local_mode:
-            return []
         text = state.text[: state.cursor_position]
         if text.startswith("/"):
             return [DropdownItem(cmd) for cmd in SLASH_COMMANDS]
@@ -637,36 +1036,85 @@ class ChatApp(App):
     def _write_system(self, text: str) -> None:
         self.query_one("#chat", RichLog).write(text)
 
+    def _render_history(self, messages: list[dict[str, Any]]) -> None:
+        """Render persisted chat messages (a hydration payload) into the log.
+
+        Only user and assistant text is shown; tool traffic and summaries are
+        skipped. Assistant messages that carry tool calls are intermediate
+        thinking steps and render as dim previews, like the live turn trace.
+        """
+        log = self.query_one("#chat", RichLog)
+        for message in messages:
+            if not isinstance(message, dict) or message.get("is_summary"):
+                continue
+            llm_message = message.get("llm_message") or {}
+            role = llm_message.get("role")
+            text = _message_text(llm_message.get("content"))
+            if not text:
+                continue
+            if role == "user":
+                log.write("\n[bold cyan]❯ You[/]")
+                log.write(_indent(text))
+            elif role == "assistant":
+                if llm_message.get("tool_calls"):
+                    preview = text[:240].replace("\n", " ")
+                    log.write(f"\n[dim italic]● {preview}[/]")
+                    continue
+                log.write("\n[bold green]▸ Assistant[/]")
+                try:
+                    log.write(Markdown(text))
+                except Exception:
+                    log.write(f"  {text}")
+
+    def _refresh_queued(self) -> None:
+        """Render queued messages stacked above the prompt input."""
+        queued = self.query_one("#queued", Static)
+        if not self._buffer:
+            queued.update("")
+            queued.display = False
+        else:
+            queued.update(Text("\n".join(self._buffer)))
+            queued.display = True
+        self.refresh_bindings()
+
+    def _ingest_usage(self, usage: Any) -> None:
+        """Track token usage from an LLM response event."""
+        if not isinstance(usage, dict):
+            return
+        total = usage.get("total_tokens")
+        if isinstance(total, int) and total > 0:
+            self._context_tokens = total
+            self._session_tokens += total
+            self._update_status()
+
     def _set_chat_id(self, chat_id: str) -> None:
+        if chat_id != self._chat_id:
+            # Token counters are per chat.
+            self._context_tokens = 0
+            self._session_tokens = 0
         self._chat_id = chat_id
         self._client.update_chat_id(chat_id)
         self._update_status()
-        try:
-            panel = self.query_one("#task-panel", Static)
-            panel.display = False
-        except Exception:
-            pass  # DOM not mounted yet (tests, early lifecycle)
 
     def _connection_indicator(self) -> str:
         if self._conn_status == "connected":
             return "[green]●[/] connected"
         return "[yellow]○[/] reconnecting…"
 
-    def _chat_status_text(self) -> str:
-        conn = self._connection_indicator()
-        return f"  {conn}  |  Chat: {self._chat_id}  |  Channel: {self._client.client_id}"
-
-    def _header_subtitle(self) -> str:
-        conn = "●" if self._conn_status == "connected" else "○ reconnecting"
-        return f"{conn}  Gateway | {self._chat_id}"
-
     def _status_text(self) -> str:
-        state = "● thinking" if self._busy else "○ ready"
-        return f"  Gateway  ·  {self._chat_id}  ·  {state}"
+        conn = self._connection_indicator()
+        if self._busy:
+            state = "● thinking"
+            if self._buffer:
+                state += f"  ·  {len(self._buffer)} queued"
+        else:
+            state = "○ ready"
+        tokens = ""
+        if self._context_tokens:
+            tokens = f"  ·  ctx {_fmt_tokens(self._context_tokens)} · total {_fmt_tokens(self._session_tokens)} tok"
+        return f"  {conn}  ·  Chat: {self._chat_id}  ·  Channel: {self._client.client_id}  ·  {state}{tokens}"
 
     def _update_status(self) -> None:
-        self.sub_title = self._header_subtitle()
-        self.query_one("#chat-status", Static).update(self._chat_status_text())
         self.query_one("#status-bar", Static).update(self._status_text())
 
     async def _poll_connection_status(self) -> None:
@@ -687,18 +1135,11 @@ class ChatApp(App):
 # ── entrypoint ─────────────────────────────────────────────────
 
 
-async def run_chat_tui(
-    client: GatewayClient,
-    *,
-    local_mode: bool = False,
-) -> None:
+async def run_chat_tui(client: GatewayClient) -> None:
     """Launch the TUI connected to a running gateway.
 
     ``client`` must be an ``GatewayClient`` that has already called
     ``connect()``.
-
-    When ``local_mode`` is True, slash commands and @mention autocomplete
-    are disabled since there is no gateway channel support.
     """
-    app = ChatApp(client=client, local_mode=local_mode)
+    app = ChatApp(client=client)
     await app.run_async()

@@ -68,6 +68,7 @@ class GatewayClient:
         chat_id: str | None = None,
         endpoint_resolver: EndpointResolver | None = None,
         api_key: str | None = None,
+        workdir: str | None = None,
     ) -> None:
         self._host = host
         self._port = port
@@ -76,6 +77,7 @@ class GatewayClient:
         self._address = address
         self._channel_id = (channel_id or address or uuid.uuid4().hex).strip()
         self._api_key = api_key
+        self._workdir = workdir or None
         self._chat_id = (
             chat_id.strip() if isinstance(chat_id, str) and chat_id else None
         )
@@ -130,6 +132,17 @@ class GatewayClient:
             raise ValueError("chat_id must be non-empty.")
         self._chat_id = chat_id
 
+    @property
+    def workdir(self) -> str | None:
+        return self._workdir
+
+    def update_workdir(self, workdir: str | None) -> None:
+        """Set or clear the workdir stamped on outgoing message metadata.
+
+        When cleared, the gateway stamps its own workspace as the fallback.
+        """
+        self._workdir = (workdir or "").strip() or None
+
     async def connect(self, *, takeover: bool = False) -> None:
         """Open the WebSocket connection and start the background reader."""
         await self._do_connect(takeover=takeover)
@@ -172,6 +185,18 @@ class GatewayClient:
         if isinstance(chat_id, str) and chat_id:
             self._chat_id = chat_id
         self._ingest_revision(metadata)
+        # Forward the ack to the consumer so it can hydrate its transcript
+        # view; the ack metadata carries the chat's full message history.
+        await self._recv_queue.put(
+            Envelope(
+                sender=data.get("sender", "channel@gateway"),
+                recipient=self._address,
+                content=data.get("content", "connected"),
+                content_type=MessageType.SYSTEM,
+                chat_id=self._chat_id,
+                metadata=metadata,
+            )
+        )
 
     async def _reconnect(self) -> None:
         """Reconnect with exponential backoff. Blocks until connected or closed."""
@@ -266,6 +291,10 @@ class GatewayClient:
                 raise RuntimeError("Not connected — reconnect timed out")
         out_metadata = dict(metadata or {})
         out_metadata.setdefault("base_revision", self._current_revision)
+        if self._workdir:
+            # The client's working directory; the gateway keeps it if present,
+            # otherwise it stamps its own workspace as the fallback.
+            out_metadata.setdefault("workdir", self._workdir)
         await self._ws.send_json(
             _envelope_to_dict(
                 Envelope(

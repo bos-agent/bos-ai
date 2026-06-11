@@ -6,7 +6,6 @@ import aiohttp
 import pytest
 from aiohttp import web
 
-import bos.extensions.actor_commands.system_cmd  # noqa: F401
 from bos.config import Workspace
 from bos.core import Message
 from bos.extensions.chat_stores.in_memory import InMemChatStore
@@ -192,6 +191,12 @@ async def test_gateway_ws_client_tracks_ack_revision_before_send(tmp_path, monke
         await client.connect()
         assert client.current_revision == 1
 
+        # The session ack is forwarded to the consumer with the transcript.
+        ack = await client.receive()
+        assert ack.metadata.get("event") == "session"
+        hydrated = [m["llm_message"]["content"] for m in ack.metadata["missing_messages"]]
+        assert hydrated == ["already here"]
+
         await client.send("fresh")
         response = await client.receive()
 
@@ -255,3 +260,83 @@ async def test_gateway_ws_new_command_updates_channel_cursor(tmp_path, monkeypat
         await gateway.actor_manager.stop_all()
         await gateway.channel_manager.stop_all()
         await runner.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_gateway_client_forwards_session_ack_envelope():
+    client = GatewayClient("127.0.0.1", 1, channel_id="tui-a")
+
+    class _FakeMsg:
+        type = aiohttp.WSMsgType.TEXT
+        data = json.dumps(
+            {
+                "sender": "agent@main",
+                "content": "connected",
+                "content_type": "system",
+                "chat_id": "chat-9",
+                "metadata": {
+                    "event": "session",
+                    "channel_id": "tui-a",
+                    "chat_id": "chat-9",
+                    "current_revision": 4,
+                    "missing_messages": [{"llm_message": {"role": "user", "content": "hi"}}],
+                },
+            }
+        )
+
+    class _FakeWS:
+        closed = False
+
+        async def receive(self, timeout=None):
+            return _FakeMsg()
+
+    client._ws = _FakeWS()
+    await client._receive_session_ack()
+
+    env = await client.receive()
+    assert env.content_type == MessageType.SYSTEM
+    assert env.chat_id == "chat-9"
+    assert env.metadata["event"] == "session"
+    assert env.metadata["missing_messages"][0]["llm_message"]["content"] == "hi"
+    assert client.current_revision == 4
+    assert client.chat_id == "chat-9"
+
+
+@pytest.mark.asyncio
+async def test_gateway_client_send_stamps_workdir():
+    client = GatewayClient("127.0.0.1", 1, channel_id="ask-1", workdir="/home/user/proj")
+    sent: list[dict] = []
+
+    class _FakeWS:
+        closed = False
+
+        async def send_json(self, payload):
+            sent.append(payload)
+
+    client._ws = _FakeWS()
+    client._connected.set()
+
+    await client.send("hello")
+    await client.send("explicit", metadata={"workdir": "/elsewhere"})
+
+    assert sent[0]["metadata"]["workdir"] == "/home/user/proj"
+    assert sent[1]["metadata"]["workdir"] == "/elsewhere"
+
+
+@pytest.mark.asyncio
+async def test_gateway_client_send_omits_workdir_when_unset():
+    client = GatewayClient("127.0.0.1", 1, channel_id="ask-1")
+    sent: list[dict] = []
+
+    class _FakeWS:
+        closed = False
+
+        async def send_json(self, payload):
+            sent.append(payload)
+
+    client._ws = _FakeWS()
+    client._connected.set()
+
+    await client.send("hello")
+
+    assert "workdir" not in sent[0]["metadata"]
