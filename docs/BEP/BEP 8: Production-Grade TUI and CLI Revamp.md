@@ -133,7 +133,7 @@ Typing `/resume` without arguments or pressing **`Ctrl+R`** opens a centered mod
 - Selecting the already-active chat is a no-op.
 - `/resume <chat-id>` with an explicit id (or alias) resumes directly without opening the picker, with the same history rehydration.
 
-Fuzzy text search and workspace/CWD filtering inside the picker are possible future enhancements, not part of the current design.
+Text search and workspace/CWD filtering inside the picker are intentionally not included; the recency-sorted list is sufficient.
 
 ---
 
@@ -266,7 +266,6 @@ Tracked follow-ups that stay within this BEP's intent but are not yet implemente
 1. **Client-side stale/rehydration UX**: render `missing_messages` from stale-send rejections and reconnect session acks into the transcript (resume results already rehydrate), show a warning banner, and preserve the user's unsubmitted prompt.
 2. **Token/cost visibility**: surface per-chat token usage in the status bar once the gateway exposes it.
 3. **Prompt history**: Up/Down cycling through previously submitted prompts, kept in memory for the current session only (no cross-session persistence).
-4. **Resume picker search/filtering**: fuzzy text search and workspace/CWD filters inside the chat selection modal.
 
 ---
 
