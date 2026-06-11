@@ -633,23 +633,18 @@ def restart(ctx):
 @click.option("--channel-id", default=None, help="Stable gateway channel id (defaults to tui:<username>).")
 @click.pass_context
 def tui(ctx, host: str | None, port: int | None, channel_id: str | None):
-    """Connect the TUI to a running gateway."""
+    """Connect the TUI to the gateway, starting one in the background if needed."""
     ws, rd = _get_ws_and_rd(ctx)
 
     def _resolve_endpoint() -> tuple[str, int] | None:
         return _read_gateway_endpoint(rd)
 
-    # Discover initial endpoint (CLI overrides take precedence)
+    # Discover the endpoint, starting the gateway if none is running.
+    # Explicit --host/--port overrides take precedence and never auto-start.
     if not (host and port):
-        resolved = _resolve_endpoint()
-        if resolved:
-            host = host or resolved[0]
-            port = port or resolved[1]
-
-    if not host or not port:
-        raise click.UsageError(
-            "Could not determine gateway endpoint. Use --host and --port, or make sure the gateway is running."
-        )
+        resolved_host, resolved_port = _ensure_gateway_endpoint(ctx, rd, None)
+        host = host or resolved_host
+        port = port or resolved_port
     gateway_config = ws.resolve_gateway_config()
     api_key = os.environ.get(gateway_config.api_key_env, "").strip() or None
 
