@@ -299,7 +299,7 @@ class Agent:
         local_tools: ToolRegistry | None = None,
         interceptor: TurnInterceptor | None = None,
         max_tokens: int = 128 * 1024,
-        max_iterations: int = 25,
+        max_iterations: int = 80,
         tool_noise_filter: ToolNoiseFilter | None = None,
         chat_compaction_lock: Callable[[str], AbstractAsyncContextManager] | None = None,
         history_attribution: bool = False,

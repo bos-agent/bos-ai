@@ -67,7 +67,7 @@ class AgentConfig(BaseModel):
     agent_name: str | None = None
     reasoning_effort: ReasoningEffort | None = None
     max_tokens: int = 131_072
-    max_iterations: int = 60
+    max_iterations: int = 80
     tool_noise_filter: ToolNoiseFilter | None = None
     history_attribution: bool = False
 

@@ -81,6 +81,7 @@ SLASH_COMMANDS = [
     "/new",
     "/resume",
     "/clear",
+    "/plan",
     "/workdir",
 ]
 
@@ -403,6 +404,88 @@ class ChatPickerModal(ModalScreen[str | None]):
         self.dismiss(None)
 
 
+_PLAN_LIST_SECTIONS = [
+    ("constraints", "Constraints"),
+    ("current_context", "Current context"),
+    ("risks", "Risks"),
+    ("non_goals", "Non-goals"),
+    ("breakdown", "Breakdown"),
+    ("verification", "Verification"),
+    ("open_questions", "Open questions"),
+]
+
+
+def _render_plan_text(plan: dict[str, Any]) -> Text:
+    """Render a full plan payload as plain Rich text (no markup injection)."""
+    text = Text()
+
+    def scalar(label: str, value: Any) -> None:
+        if not value:
+            return
+        text.append(f"{label}\n", style="bold")
+        text.append(f"  {value}\n\n")
+
+    scalar("Objective", plan.get("objective"))
+    scalar("User value", plan.get("user_value"))
+    scalar("Appetite", plan.get("appetite"))
+    scalar("Shaped solution", plan.get("shaped_solution"))
+    for key, label in _PLAN_LIST_SECTIONS:
+        items = plan.get(key) or []
+        if not items:
+            continue
+        text.append(f"{label}\n", style="bold")
+        for item in items:
+            text.append(f"  • {item}\n")
+        text.append("\n")
+    return text
+
+
+class PlanModal(ModalScreen[None]):
+    """Full view of the current structured plan: Escape closes."""
+
+    DEFAULT_CSS = """
+    PlanModal {
+        align: center middle;
+    }
+
+    #plan-view {
+        width: 90%;
+        max-width: 110;
+        height: auto;
+        max-height: 80%;
+        border: round $primary;
+        background: $surface;
+        padding: 1 2;
+    }
+
+    #plan-title {
+        color: $text-muted;
+        padding-bottom: 1;
+    }
+
+    #plan-body {
+        height: auto;
+    }
+    """
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Close", show=False),
+    ]
+
+    def __init__(self, plan: dict[str, Any]) -> None:
+        super().__init__()
+        self._plan = plan
+
+    def compose(self) -> ComposeResult:
+        status = self._plan.get("status", "?")
+        with Vertical(id="plan-view"):
+            yield Static(f"Current plan ({status}) — Esc to close", id="plan-title")
+            yield Static(_render_plan_text(self._plan), id="plan-body")
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 # ── ChatApp ────────────────────────────────────────────────────
 
 
@@ -458,9 +541,11 @@ class ChatApp(App):
         Binding("ctrl+l", "clear_log", "Clear", show=True),
         Binding("ctrl+n", "reset_chat", "New Chat", show=True),
         Binding("ctrl+r", "resume_chat", "Resume", show=True),
+        Binding("ctrl+p", "show_plan", "Plan", show=True),
     ]
 
     _TASK_TOOL_NAMES = {"TaskCreate", "TaskUpdate", "TaskList", "TaskGet"}
+    _PLAN_TOOL_NAMES = {"PlanCreate", "PlanUpdate", "PlanGet", "PlanClear"}
 
     def __init__(
         self,
@@ -481,6 +566,7 @@ class ChatApp(App):
         self._last_sent_text = ""
         self._context_tokens = 0
         self._session_tokens = 0
+        self._plan_by_chat: dict[str, dict[str, Any]] = {}
 
     # ── compose ────────────────────────────────────────────────
 
@@ -633,7 +719,7 @@ class ChatApp(App):
 
         elif event.event_type == "tool" and event.detail == "tool_call":
             name = event.tool_name or "?"
-            if name in self._TASK_TOOL_NAMES:
+            if name in self._TASK_TOOL_NAMES or name in self._PLAN_TOOL_NAMES:
                 return
             args_str = ""
             if event.content:
@@ -647,7 +733,7 @@ class ChatApp(App):
 
         elif event.event_type == "tool" and event.detail == "tool_result":
             name = event.tool_name or "?"
-            if name in self._TASK_TOOL_NAMES:
+            if name in self._TASK_TOOL_NAMES or name in self._PLAN_TOOL_NAMES:
                 return
             preview = str(event.content or "")[:240].replace("\n", " ")
             if self._pending_tool_calls:
@@ -674,11 +760,38 @@ class ChatApp(App):
                         lines.append(f"  {prefix} □ {subject}")
                 log.write("\n" + "\n".join(lines))
 
+        elif event.event_type == "plan" and event.detail == "plan_state":
+            chat_id = event.chat_id or self._chat_id
+            plan = (event.metadata or {}).get("plan")
+            if plan:
+                self._plan_by_chat[chat_id] = plan
+            else:
+                self._plan_by_chat.pop(chat_id, None)
+            if chat_id == self._chat_id:
+                self._write_plan_card(log, plan)
+
         elif event.detail == "max_iteration":
             log.write("[yellow]  max iterations reached[/]")
 
         elif event.detail == "error":
             log.write(f"[red]  error: {event.content or 'unknown error'}[/]")
+
+    def _write_plan_card(self, log: RichLog, plan: dict[str, Any] | None) -> None:
+        """Write a compact plan summary to the chat log; full view via Ctrl+P."""
+        if not plan:
+            log.write("\n[bold]◆ Plan[/] [dim]cleared[/]")
+            return
+        status = plan.get("status", "?")
+        card = Text("\n")
+        card.append("◆ Plan", style="bold")
+        card.append(f" ({status}) · Ctrl+P for details", style="dim")
+        card.append(f"\n└ {plan.get('objective', '')}")
+        if status != "in_progress":
+            for step in plan.get("breakdown") or []:
+                card.append(f"\n  □ {step}")
+        for question in plan.get("open_questions") or []:
+            card.append(f"\n  ? {question}", style="yellow")
+        log.write(card)
 
     async def on_agent_reply_event(self, event: AgentReplyEvent) -> None:
         """Handle the final reply from the actor."""
@@ -759,6 +872,15 @@ class ChatApp(App):
             self.exit()
             return
         meta_event = event.metadata.get("event")
+        if meta_event in ("turn_aborted", "turn_error"):
+            self._busy = False
+            self._pending_tool_calls.clear()
+            self._update_status()
+            if meta_event == "turn_aborted":
+                self._write_system("[yellow]■ Turn aborted.[/]")
+            else:
+                self._write_system(f"[red]✗ {event.content or 'Turn failed.'}[/]")
+            return
         if meta_event == "session":
             self._handle_session_event(event)
             return
@@ -823,6 +945,14 @@ class ChatApp(App):
         self._render_history(event.metadata.get("missing_messages") or [])
         if self._session_count > 1:
             self._write_system("\n[green]↻ Reconnected — transcript refreshed.[/]")
+        # Adopt the server's view of the in-flight turn so a freshly started
+        # client can interrupt a turn it did not send (e.g. after Ctrl+C).
+        self._busy = bool(event.metadata.get("active_turn"))
+        if self._busy:
+            self._write_system("\n[dim]⏳ A turn is in progress — Esc to abort.[/]")
+        else:
+            self._pending_tool_calls.clear()
+        self._update_status()
 
     @staticmethod
     def _write_banner(log: RichLog) -> None:
@@ -847,6 +977,7 @@ class ChatApp(App):
                 "  /resume   — pick a chat to resume, or /resume <chat-id>\n"
                 "  /new      — start a new chat\n"
                 "  /clear    — clear the log\n"
+                "  /plan     — show the current plan for this chat\n"
                 "  /workdir  — show, set (/workdir <path>), or unset (/workdir unset)\n"
                 "              the working directory stamped on outgoing messages\n"
                 "\n"
@@ -859,7 +990,8 @@ class ChatApp(App):
                 "  Ctrl+C      — quit\n"
                 "  Ctrl+L      — clear the log\n"
                 "  Ctrl+N      — start a new chat\n"
-                "  Ctrl+R      — pick a chat to resume"
+                "  Ctrl+R      — pick a chat to resume\n"
+                "  Ctrl+P      — show the current plan"
             )
 
         elif normalized_cmd == "/new":
@@ -867,6 +999,9 @@ class ChatApp(App):
 
         elif normalized_cmd == "/clear":
             self.query_one("#chat", RichLog).clear()
+
+        elif normalized_cmd == "/plan":
+            self.action_show_plan()
 
         elif normalized_cmd == "/workdir":
             self._handle_workdir_command(rest.strip())
@@ -922,6 +1057,13 @@ class ChatApp(App):
 
     def action_clear_log(self) -> None:
         self.query_one("#chat", RichLog).clear()
+
+    def action_show_plan(self) -> None:
+        plan = self._plan_by_chat.get(self._chat_id)
+        if plan:
+            self.push_screen(PlanModal(plan))
+        else:
+            self._write_system("[dim]No plan for this chat yet.[/]")
 
     def action_reset_chat(self) -> None:
         asyncio.create_task(self._send_command("/new"))

@@ -61,6 +61,127 @@ async def test_coordinated_actor_begins_and_ends_turn_with_revision_commit():
         await asyncio.gather(task, return_exceptions=True)
 
 
+class AbortPersistAgent:
+    """Blocks until cancelled, then commits abort-safe history like the real agent."""
+
+    name = "main"
+
+    def __init__(self, store: InMemChatStore) -> None:
+        self.store = store
+        self.started = asyncio.Event()
+
+    async def ask(self, chat_id, content, *, turn_id, commit_observer=None, **kwargs):
+        self.started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            commit = await self.store.commit_turn(
+                chat_id,
+                [
+                    Message(llm_message={"role": "user", "content": content}),
+                    Message(llm_message={"role": "assistant", "content": "(turn aborted before completion)"}),
+                ],
+                turn_id=turn_id,
+            )
+            if commit_observer is not None:
+                commit_observer(commit)
+            raise
+        return "unreachable"
+
+
+@pytest.mark.asyncio
+async def test_aborted_turn_notifies_channel_so_revision_cursor_resyncs():
+    store = InMemChatStore()
+    coordinator = ChatCoordinator(store)
+    route = InMemMailRoute()
+    # InMemMailRoute queues are class-level and loop-bound on first use, so use
+    # addresses unique to this test to avoid clashing with other tests' loops.
+    actor_box = route.bind("agent@abort-main")
+    client_box = route.bind("channel@abort-demo")
+    agent = AbortPersistAgent(store)
+    actor = CoordinatedActor(agent, actor_box, chat_coordinator=coordinator)
+    task = asyncio.create_task(actor.run())
+    try:
+        await client_box.send(
+            "agent@abort-main",
+            "hello",
+            chat_id="chat-abort-1",
+            metadata={
+                "base_revision": 0,
+                "channel": {"channel_id": "demo", "channel_conversation_id": "default"},
+            },
+        )
+        await asyncio.wait_for(agent.started.wait(), timeout=2)
+        await client_box.send(
+            "agent@abort-main",
+            "",
+            content_type=MessageType.INTERRUPT_ABORT,
+            chat_id="chat-abort-1",
+        )
+
+        notice = await asyncio.wait_for(client_box.receive(), timeout=2)
+        assert notice.content_type == MessageType.SYSTEM
+        assert notice.metadata.get("event") == "turn_aborted"
+        # The abort-safe commit advanced the revision and the turn was closed.
+        assert await coordinator.current_revision("chat-abort-1") == 1
+        assert coordinator.active_turn_status("chat-abort-1") is None
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+class ErrorPersistAgent:
+    """Commits partial history, then fails the turn with an exception."""
+
+    name = "main"
+
+    def __init__(self, store: InMemChatStore) -> None:
+        self.store = store
+
+    async def ask(self, chat_id, content, *, turn_id, commit_observer=None, **kwargs):
+        commit = await self.store.commit_turn(
+            chat_id,
+            [Message(llm_message={"role": "user", "content": content})],
+            turn_id=turn_id,
+        )
+        if commit_observer is not None:
+            commit_observer(commit)
+        raise RuntimeError("provider exploded")
+
+
+@pytest.mark.asyncio
+async def test_errored_turn_notifies_channel_so_revision_cursor_resyncs():
+    store = InMemChatStore()
+    coordinator = ChatCoordinator(store)
+    route = InMemMailRoute()
+    # Unique addresses: InMemMailRoute queues are class-level and loop-bound.
+    actor_box = route.bind("agent@error-main")
+    client_box = route.bind("channel@error-demo")
+    actor = CoordinatedActor(ErrorPersistAgent(store), actor_box, chat_coordinator=coordinator)
+    task = asyncio.create_task(actor.run())
+    try:
+        await client_box.send(
+            "agent@error-main",
+            "hello",
+            chat_id="chat-error-1",
+            metadata={
+                "base_revision": 0,
+                "channel": {"channel_id": "demo", "channel_conversation_id": "default"},
+            },
+        )
+
+        notice = await asyncio.wait_for(client_box.receive(), timeout=2)
+        assert notice.content_type == MessageType.SYSTEM
+        assert notice.metadata.get("event") == "turn_error"
+        assert "provider exploded" in notice.content
+        # The partial commit advanced the revision and the turn was closed.
+        assert await coordinator.current_revision("chat-error-1") == 1
+        assert coordinator.active_turn_status("chat-error-1") is None
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
 def test_actor_turn_metadata_marks_user_target_and_assistant_actor():
     class LibaiCommitAgent(CommitAgent):
         name = "libai"

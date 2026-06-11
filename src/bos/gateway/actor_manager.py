@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 from bos.config.workspace import ResolvedActorConfig
 from bos.core import ActorTurnContext, ActorTurnResult, AgentActor, MailBox
+from bos.protocol import MessageType
 
 from .chat_coordinator import ChannelConversationRef, ChatCoordinationError, ChatCoordinator
 
@@ -46,6 +47,22 @@ class CoordinatedActor(AgentActor):
             turn_id=ctx.turn_id,
             committed_revision=result.committed_revision,
         )
+        if result.status in ("aborted", "error") and ctx.reply_recipient:
+            # Aborted and errored turns never send a reply envelope, but the
+            # turn may have committed history and advanced the chat revision.
+            # Notify the originating channel so its revision cursor re-syncs;
+            # otherwise the client's next send is rejected as stale.
+            if result.status == "aborted":
+                content, event = "Turn aborted.", "turn_aborted"
+            else:
+                content, event = f"Turn failed: {result.error}", "turn_error"
+            await self._mailbox.send(
+                ctx.reply_recipient,
+                content,
+                content_type=MessageType.SYSTEM,
+                chat_id=ctx.chat_id,
+                metadata={"event": event},
+            )
 
 
 @dataclass

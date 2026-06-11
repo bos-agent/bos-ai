@@ -1,13 +1,20 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 from conftest import create_test_agent
 
 from bos.config.default_agent_spec import default_agent_spec
 from bos.core import LLMResponse, ep_provider
-from bos.plugins.plan import PlanAgentPlugin
+from bos.plugins.plan import (
+    PlanAgentPlugin,
+    PlanContextInterceptor,
+    PlanEventInterceptor,
+    _Plan,
+    _render_current_plan,
+)
 
 
 @pytest.mark.asyncio
@@ -23,7 +30,7 @@ async def test_plan_tools_create_get_update_and_clear_current_plan():
             user_value="Align before implementation",
             appetite="Small first slice",
             constraints=["No client-side question tool"],
-            tasks=["Add plugin", "Add tests"],
+            breakdown=["Add plugin", "Add tests"],
             verification=["Run targeted pytest"],
             open_questions=["Should approval be explicit?"],
             status="needs_input",
@@ -34,7 +41,7 @@ async def test_plan_tools_create_get_update_and_clear_current_plan():
     assert created["plan"]["status"] == "needs_input"
 
     fetched = json.loads(await agent._invoke_tool("PlanGet", chat_id="plan-chat"))
-    assert fetched["plan"]["tasks"] == ["Add plugin", "Add tests"]
+    assert fetched["plan"]["breakdown"] == ["Add plugin", "Add tests"]
 
     updated = json.loads(
         await agent._invoke_tool(
@@ -107,6 +114,112 @@ async def test_plan_plugin_renders_without_current_plan():
     assert "multiple sources, calculations, external/current data" in section
     assert "status needs_input" in section
     assert "<current_plan" not in section
+
+
+def test_plan_render_hides_breakdown_once_in_progress():
+    plan = _Plan(objective="Ship feature", breakdown=["Step one", "Step two"], status="approved")
+
+    rendered = _render_current_plan(plan)
+    assert "<breakdown>" in rendered
+    assert "- Step one" in rendered
+
+    plan.status = "in_progress"
+    rendered = _render_current_plan(plan)
+    assert "<breakdown>" not in rendered
+    assert "Step one" not in rendered
+
+
+class _FakeTurnContext:
+    def __init__(self, chat_id: str = "chat") -> None:
+        self.chat_id = chat_id
+        self.ephemeral: dict[str, dict] = {}
+
+    def set_ephemeral_message(self, key: str, message: dict) -> None:
+        self.ephemeral[key] = message
+
+    def clear_ephemeral_message(self, key: str) -> None:
+        self.ephemeral.pop(key, None)
+
+
+@pytest.mark.asyncio
+async def test_needs_input_plan_injects_end_turn_nudge():
+    plans = {"chat": _Plan(objective="Ship", status="needs_input", open_questions=["Which DB?"])}
+    interceptor = PlanContextInterceptor(plans)
+    context = _FakeTurnContext()
+
+    await interceptor.intercept("before_llm", context)
+
+    assert "plan.current_plan" in context.ephemeral
+    nudge = context.ephemeral["plan.needs_input"]["content"]
+    assert "<plan_needs_input>" in nudge
+    assert "End the turn now" in nudge
+
+    # Status moves on: the nudge is cleared, the plan context stays.
+    plans["chat"].status = "in_progress"
+    await interceptor.intercept("before_llm", context)
+    assert "plan.needs_input" not in context.ephemeral
+    assert "plan.current_plan" in context.ephemeral
+
+    # Terminal status clears both.
+    plans["chat"].status = "verified"
+    await interceptor.intercept("before_llm", context)
+    assert context.ephemeral == {}
+
+
+class _SinkCapture:
+    def __init__(self) -> None:
+        self.events = []
+
+    async def emit(self, event) -> None:
+        self.events.append(event)
+
+
+@pytest.mark.asyncio
+async def test_plan_event_interceptor_emits_on_change_and_clear():
+    plans: dict[str, _Plan] = {}
+    interceptor = PlanEventInterceptor(plans)
+    sink = _SinkCapture()
+    context = SimpleNamespace(chat_id="chat", turn_id="turn", agent_name="agent", event_sink=sink)
+
+    # No plan and nothing previously emitted: no event.
+    await interceptor.intercept("after_tool", context)
+    assert sink.events == []
+
+    plans["chat"] = _Plan(objective="Ship feature")
+    await interceptor.intercept("after_tool", context)
+    assert len(sink.events) == 1
+    assert sink.events[0].event_type == "plan"
+    assert sink.events[0].detail == "plan_state"
+    assert sink.events[0].metadata["plan"]["objective"] == "Ship feature"
+
+    # Unchanged plan: no re-emit.
+    await interceptor.intercept("final_response", context)
+    assert len(sink.events) == 1
+
+    # Updated plan: re-emit.
+    plans["chat"].updated_at += 1
+    await interceptor.intercept("after_tool", context)
+    assert len(sink.events) == 2
+
+    # Cleared plan: emit a None payload once.
+    del plans["chat"]
+    await interceptor.intercept("after_tool", context)
+    assert len(sink.events) == 3
+    assert sink.events[-1].metadata["plan"] is None
+    await interceptor.intercept("final_response", context)
+    assert len(sink.events) == 3
+
+
+@pytest.mark.asyncio
+async def test_plan_event_interceptor_ignores_non_emitting_stages():
+    plans = {"chat": _Plan(objective="Ship feature")}
+    interceptor = PlanEventInterceptor(plans)
+    sink = _SinkCapture()
+    context = SimpleNamespace(chat_id="chat", turn_id="turn", agent_name="agent", event_sink=sink)
+
+    await interceptor.intercept("prepare", context)
+    await interceptor.intercept("before_llm", context)
+    assert sink.events == []
 
 
 def test_default_agent_enables_plan_plugin_before_task_plugin():

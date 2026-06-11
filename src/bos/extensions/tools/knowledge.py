@@ -2,12 +2,13 @@ import asyncio
 import json
 import os
 import ssl
-import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from urllib.error import HTTPError
 
 from bs4 import BeautifulSoup
+from ddgs import DDGS
+from ddgs.exceptions import DDGSException
 
 from bos.core import ep_tool
 
@@ -98,31 +99,23 @@ def _positive_int(value: object, default: int) -> int:
 
 
 async def _search_duckduckgo(query: str, *, timeout_seconds: int, max_results: int) -> list[SearchResult]:
-    url = "https://html.duckduckgo.com/html/?q=" + urllib.parse.quote(query)
-    req = urllib.request.Request(
-        url,
-        headers={
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"  # noqa: E501
-        },
-    )
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
+    def _fetch() -> list[dict]:
+        return DDGS(timeout=timeout_seconds).text(query, max_results=max_results)
 
-    def _fetch() -> bytes:
-        return urllib.request.urlopen(req, context=ctx, timeout=timeout_seconds).read()
+    try:
+        raw = await asyncio.to_thread(_fetch)
+    except DDGSException as e:
+        raise WebSearchProviderError("duckduckgo", str(e)) from e
 
-    html = await asyncio.to_thread(_fetch)
-    soup = BeautifulSoup(html, "html.parser")
     results = []
-    for result in soup.find_all("div", class_="result"):
-        title = result.find("a", class_="result__a") or result.find("a", class_="result__url")
-        snippet = result.find("a", class_="result__snippet")
-        if title and snippet:
-            href = title.get("href") or ""
-            results.append(SearchResult(title=title.text.strip(), url=href, snippet=snippet.text.strip()))
-            if len(results) >= max_results:
-                break
+    for item in raw[:max_results]:
+        if not isinstance(item, dict):
+            continue
+        url = str(item.get("href") or "").strip()
+        title = str(item.get("title") or url).strip()
+        snippet = str(item.get("body") or "").strip()
+        if url and (title or snippet):
+            results.append(SearchResult(title=title, url=url, snippet=snippet))
 
     return results
 
