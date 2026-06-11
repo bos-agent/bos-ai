@@ -26,7 +26,7 @@ from textual.binding import Binding
 from textual.containers import Vertical
 from textual.message import Message
 from textual.screen import ModalScreen
-from textual.widgets import Footer, Header, Input, OptionList, RichLog, Static, TextArea
+from textual.widgets import Footer, Input, OptionList, RichLog, Static, TextArea
 from textual.widgets.option_list import Option
 from textual_autocomplete import AutoComplete, DropdownItem, TargetState
 
@@ -403,7 +403,6 @@ class ChatApp(App):
     # ── compose ────────────────────────────────────────────────
 
     def compose(self) -> ComposeResult:
-        yield Header()
         yield RichLog(
             id="chat",
             highlight=False,
@@ -937,10 +936,6 @@ class ChatApp(App):
             return "[green]●[/] connected"
         return "[yellow]○[/] reconnecting…"
 
-    def _header_subtitle(self) -> str:
-        conn = "●" if self._conn_status == "connected" else "○ reconnecting"
-        return f"{conn}  Gateway | {self._chat_id}"
-
     def _status_text(self) -> str:
         conn = self._connection_indicator()
         if self._busy:
@@ -952,7 +947,6 @@ class ChatApp(App):
         return f"  {conn}  ·  Chat: {self._chat_id}  ·  Channel: {self._client.client_id}  ·  {state}"
 
     def _update_status(self) -> None:
-        self.sub_title = self._header_subtitle()
         self.query_one("#status-bar", Static).update(self._status_text())
 
     async def _poll_connection_status(self) -> None:

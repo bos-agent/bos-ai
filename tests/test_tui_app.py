@@ -526,7 +526,6 @@ def test_status_text_uses_current_client_and_chat():
     assert "Channel: client-1" in app._status_text()
     assert "connected" in app._status_text()
     assert "○ ready" in app._status_text()
-    assert "Gateway | chat-1" in app._header_subtitle()
 
     app._busy = True
     app._buffer.append("x")
