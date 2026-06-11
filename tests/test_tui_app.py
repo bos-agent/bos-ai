@@ -2,7 +2,7 @@ import asyncio
 
 import pytest
 
-from bos.cli.tui_app import ChatApp, CommandResultEvent, run_chat_tui
+from bos.cli.tui_app import ChatApp, CommandResultEvent, PromptHistory, run_chat_tui
 from bos.protocol import WS_TAKEOVER_CLOSE_REASON, MessageType
 
 
@@ -516,6 +516,46 @@ async def test_removed_slash_commands_report_unknown(monkeypatch):
         "[yellow]Unknown command: /chats[/]",
         "[yellow]Unknown command: /restart[/]",
     ]
+
+
+def test_prompt_history_cycles_and_restores_draft():
+    history = PromptHistory()
+    history.record("first")
+    history.record("second")
+
+    # Stepping back saves the in-progress draft.
+    assert history.previous("draft text") == "second"
+    assert history.previous("ignored") == "first"
+    # Past the oldest entry it stays put.
+    assert history.previous("ignored") == "first"
+    # Stepping forward walks back to the saved draft.
+    assert history.next() == "second"
+    assert history.next() == "draft text"
+    # Past the draft there is nothing to recall.
+    assert history.next() is None
+
+
+def test_prompt_history_skips_blank_and_consecutive_duplicates():
+    history = PromptHistory()
+    history.record("hello")
+    history.record("   ")
+    history.record("hello")
+    history.record("world")
+
+    assert history.previous("") == "world"
+    assert history.previous("") == "hello"
+    assert history.previous("") == "hello"
+
+
+def test_prompt_history_record_resets_navigation():
+    history = PromptHistory()
+    history.record("first")
+    assert history.previous("draft") == "first"
+
+    history.record("second")
+    # After a submit, navigation starts from the newest entry again.
+    assert history.next() is None
+    assert history.previous("") == "second"
 
 
 def test_status_text_uses_current_client_and_chat():

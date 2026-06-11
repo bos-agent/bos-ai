@@ -117,6 +117,44 @@ def _relative_time(iso: str | None) -> str:
     return f"{int(seconds // 86400)}d ago"
 
 
+class PromptHistory:
+    """In-memory prompt history for a single TUI session (not persisted)."""
+
+    def __init__(self) -> None:
+        self._items: list[str] = []
+        self._pos: int | None = None
+        self._draft = ""
+
+    def record(self, text: str) -> None:
+        """Store a submitted prompt and reset the navigation cursor."""
+        text = text.strip()
+        if text and (not self._items or self._items[-1] != text):
+            self._items.append(text)
+        self._pos = None
+        self._draft = ""
+
+    def previous(self, current: str) -> str | None:
+        """Step back in history; saves *current* as the draft on first step."""
+        if not self._items:
+            return None
+        if self._pos is None:
+            self._draft = current
+            self._pos = len(self._items) - 1
+        elif self._pos > 0:
+            self._pos -= 1
+        return self._items[self._pos]
+
+    def next(self) -> str | None:
+        """Step forward; returns the saved draft when stepping past the end."""
+        if self._pos is None:
+            return None
+        if self._pos < len(self._items) - 1:
+            self._pos += 1
+            return self._items[self._pos]
+        self._pos = None
+        return self._draft
+
+
 class PromptInput(TextArea):
     """Multiline prompt: Enter submits, Ctrl+J inserts a newline."""
 
@@ -128,6 +166,10 @@ class PromptInput(TextArea):
             self.prompt_input = prompt_input
             self.value = value
 
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.history = PromptHistory()
+
     async def _on_key(self, event: events.Key) -> None:
         if event.key == "enter":
             event.stop()
@@ -136,6 +178,7 @@ class PromptInput(TextArea):
             # submitting (AutoComplete sees the key via the message signal,
             # which fires after this dispatch even for stopped events).
             if not self._autocomplete_open():
+                self.history.record(self.text)
                 self.post_message(self.Submitted(self, self.text))
             return
         # Ctrl+J works on every terminal (legacy ones transmit it as \n).
@@ -146,7 +189,30 @@ class PromptInput(TextArea):
             event.prevent_default()
             self.insert("\n")
             return
+        # Up/Down on the edge lines cycle prompt history; inside a multiline
+        # draft they keep their normal cursor-movement behavior.
+        if event.key == "up" and not self._autocomplete_open() and self.cursor_location[0] == 0:
+            if (recalled := self.history.previous(self.text)) is not None:
+                event.stop()
+                event.prevent_default()
+                self._replace_text(recalled)
+                return
+        if (
+            event.key == "down"
+            and not self._autocomplete_open()
+            and self.cursor_location[0] == self.document.line_count - 1
+        ):
+            if (recalled := self.history.next()) is not None:
+                event.stop()
+                event.prevent_default()
+                self._replace_text(recalled)
+                return
         await super()._on_key(event)
+
+    def _replace_text(self, text: str) -> None:
+        self.text = text
+        self.move_cursor(self.document.end)
+        self._fit_height()
 
     def _autocomplete_open(self) -> bool:
         for ac in self.screen.query(AutoComplete):
@@ -703,6 +769,7 @@ class ChatApp(App):
                 "\n"
                 "[bold]Hot keys:[/]\n"
                 "  Escape      — abort the current turn\n"
+                "  Up / Down   — cycle prompt history (cursor on first/last line)\n"
                 "  Ctrl+J / Ctrl+Shift+J — insert a newline in the prompt\n"
                 "  Ctrl+/      — inject a message into the current turn\n"
                 "  Ctrl+G      — drop queued messages without sending\n"

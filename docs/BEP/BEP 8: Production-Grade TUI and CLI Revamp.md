@@ -144,6 +144,7 @@ The `#prompt` input is a permanently multiline `TextArea`:
 - **Keys**:
   - `Enter`: submits the current content (when the autocomplete dropdown is open, `Enter` completes instead).
   - `Ctrl+J` (and `Ctrl+Shift+J` on kitty-protocol terminals): inserts a newline. `Shift+Enter` is not used because legacy terminals cannot distinguish it from `Enter`.
+  - `Up`/`Down` with the cursor on the first/last line: cycle through previously submitted prompts. The history is in-memory for the current session only (no persistence); stepping past the newest entry restores the unsubmitted draft. Inside a multiline draft the arrows keep their normal cursor movement.
 - **Focus capture**: keystrokes anywhere in the app are redirected into the prompt; printable characters are inserted directly. Keyboard focus never moves into the transcript.
 - **Autocomplete**: typing `/` offers slash commands; typing `@` offers known actor names (fetched from `/api/actors`) for per-message actor routing.
 
@@ -265,7 +266,6 @@ Tracked follow-ups that stay within this BEP's intent but are not yet implemente
 
 1. **Client-side stale/rehydration UX**: render `missing_messages` from stale-send rejections and reconnect session acks into the transcript (resume results already rehydrate), show a warning banner, and preserve the user's unsubmitted prompt.
 2. **Token/cost visibility**: surface per-chat token usage in the status bar once the gateway exposes it.
-3. **Prompt history**: Up/Down cycling through previously submitted prompts, kept in memory for the current session only (no cross-session persistence).
 
 ---
 
