@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -25,7 +26,8 @@ from textual.binding import Binding
 from textual.containers import Vertical
 from textual.message import Message
 from textual.screen import ModalScreen
-from textual.widgets import Footer, Header, Input, RichLog, Static, TextArea
+from textual.widgets import Footer, Header, Input, OptionList, RichLog, Static, TextArea
+from textual.widgets.option_list import Option
 from textual_autocomplete import AutoComplete, DropdownItem, TargetState
 
 from bos.gateway.client import GatewayClient
@@ -57,10 +59,11 @@ class AgentReplyEvent(Message):
 class CommandResultEvent(Message):
     """Result of a slash command executed on the server side."""
 
-    def __init__(self, name: str, data: Any) -> None:
+    def __init__(self, name: str, data: Any, metadata: dict[str, Any] | None = None) -> None:
         super().__init__()
         self.name = name
         self.data = data
+        self.metadata = metadata or {}
 
 
 class SystemEvent(Message):
@@ -76,9 +79,7 @@ SLASH_COMMANDS = [
     "/help",
     "/new",
     "/resume",
-    "/chats",
     "/clear",
-    "/restart",
     "/workdir",
 ]
 
@@ -86,6 +87,34 @@ SLASH_COMMANDS = [
 def _indent(text: str) -> str:
     """Indent every line of a (possibly multiline) message for log display."""
     return "\n".join(f"  {line}" for line in text.splitlines()) or "  "
+
+
+def _message_text(content: Any) -> str:
+    """Extract display text from an LLM message content (string or parts list)."""
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        parts = [p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text"]
+        return "\n".join(p for p in parts if p).strip()
+    return ""
+
+
+def _relative_time(iso: str | None) -> str:
+    """Render an ISO timestamp as a short relative age (e.g. '3h ago')."""
+    if not iso:
+        return ""
+    try:
+        dt = datetime.fromisoformat(iso)
+    except (TypeError, ValueError):
+        return ""
+    seconds = (datetime.now(dt.tzinfo) - dt).total_seconds()
+    if seconds < 60:
+        return "just now"
+    if seconds < 3600:
+        return f"{int(seconds // 60)}m ago"
+    if seconds < 86400:
+        return f"{int(seconds // 3600)}h ago"
+    return f"{int(seconds // 86400)}d ago"
 
 
 class PromptInput(TextArea):
@@ -225,6 +254,77 @@ class InterruptModal(ModalScreen[str | None]):
         self.dismiss(None)
 
 
+class ChatPickerModal(ModalScreen[str | None]):
+    """Modal chat list for /resume: Enter selects, Escape cancels."""
+
+    DEFAULT_CSS = """
+    ChatPickerModal {
+        align: center middle;
+    }
+
+    #chat-picker {
+        width: 90%;
+        max-width: 120;
+        height: auto;
+        max-height: 80%;
+        border: round $primary;
+        background: $surface;
+        padding: 1 2;
+    }
+
+    #chat-picker-title {
+        color: $text-muted;
+        padding-bottom: 1;
+    }
+
+    #chat-picker-list {
+        height: auto;
+        max-height: 20;
+        border: none;
+        background: transparent;
+    }
+    """
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel", show=False),
+    ]
+
+    def __init__(self, chats: list[dict[str, Any]], current_chat_id: str | None = None) -> None:
+        super().__init__()
+        self._chats = chats
+        self._current_chat_id = current_chat_id
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="chat-picker"):
+            yield Static("Resume a chat — Enter to select, Esc to cancel", id="chat-picker-title")
+            yield OptionList(
+                *[Option(self._render_chat(chat), id=chat.get("chat_id")) for chat in self._chats],
+                id="chat-picker-list",
+            )
+
+    def _render_chat(self, chat: dict[str, Any]) -> Text:
+        age = _relative_time(chat.get("last_activity"))
+        description = str(chat.get("description") or "").replace("\n", " ").strip() or "(empty chat)"
+        count = chat.get("message_count")
+        row = Text()
+        row.append(f"{age:>10}  ", style="dim")
+        row.append(description)
+        if count:
+            row.append(f"  · {count} msg", style="dim")
+        if chat.get("chat_id") == self._current_chat_id:
+            row.append("  (current)", style="dim italic")
+        return row
+
+    def on_mount(self) -> None:
+        self.query_one("#chat-picker-list", OptionList).focus()
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        self.dismiss(event.option.id)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 # ── ChatApp ────────────────────────────────────────────────────
 
 
@@ -279,7 +379,7 @@ class ChatApp(App):
         Binding("ctrl+c", "quit", "Quit", show=True, priority=True),
         Binding("ctrl+l", "clear_log", "Clear", show=True),
         Binding("ctrl+n", "reset_chat", "New Chat", show=True),
-        Binding("ctrl+r", "restart_bos", "Restart", show=True),
+        Binding("ctrl+r", "resume_chat", "Resume", show=True),
     ]
 
     _TASK_TOOL_NAMES = {"TaskCreate", "TaskUpdate", "TaskList", "TaskGet"}
@@ -298,6 +398,7 @@ class ChatApp(App):
         self._conn_status: str = "connected"
         self._pending_tool_calls: list[tuple[str, str]] = []
         self._known_actors: list[str] = []
+        self._awaiting_chat_list = False
 
     # ── compose ────────────────────────────────────────────────
 
@@ -359,7 +460,7 @@ class ChatApp(App):
                     except json.JSONDecodeError:
                         data = env.content
                     cmd_name = data.get("name", "?") if isinstance(data, dict) else "?"
-                    self.post_message(CommandResultEvent(cmd_name, data))
+                    self.post_message(CommandResultEvent(cmd_name, data, env.metadata))
                 elif env.content_type == MessageType.TURN_EVENT:
                     try:
                         data = json.loads(env.content) if isinstance(env.content, str) else {}
@@ -386,7 +487,7 @@ class ChatApp(App):
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
         """Disable app-level interrupt hotkeys while a modal dialog is open."""
-        if action in ("interrupt_turn", "interrupt_message") and isinstance(self.screen, ModalScreen):
+        if action in ("interrupt_turn", "interrupt_message", "resume_chat") and isinstance(self.screen, ModalScreen):
             return False
         if action == "cancel_queued" and not self._buffer:
             return None  # hide from the footer while nothing is queued
@@ -545,10 +646,20 @@ class ChatApp(App):
         """Handle a slash command result from the server."""
         data = event.data
         if isinstance(data, dict):
+            if event.name == "chats" and self._awaiting_chat_list:
+                self._awaiting_chat_list = False
+                if data.get("ok"):
+                    self._open_chat_picker(data.get("result") or [])
+                    return
             if event.name in {"new", "resume"} and data.get("ok"):
                 chat_id = data.get("chat_id")
                 if isinstance(chat_id, str):
                     self._set_chat_id(chat_id)
+                if event.name == "resume":
+                    # Replace the viewport with the resumed chat's transcript.
+                    log = self.query_one("#chat", RichLog)
+                    log.clear()
+                    self._render_history(event.metadata.get("missing_messages") or [])
             result = data.get("result")
             error = data.get("error")
             if error:
@@ -585,11 +696,9 @@ class ChatApp(App):
             self._write_system(
                 "[bold]Commands:[/]\n"
                 "  /help     — show this help\n"
+                "  /resume   — pick a chat to resume, or /resume <chat-id>\n"
                 "  /new      — start a new chat\n"
-                "  /resume   — resume a chat by id\n"
-                "  /chats    — list all chats\n"
                 "  /clear    — clear the log\n"
-                "  /restart  — restart the gateway\n"
                 "  /workdir  — show, set (/workdir <path>), or unset (/workdir unset)\n"
                 "              the working directory stamped on outgoing messages\n"
                 "\n"
@@ -601,7 +710,7 @@ class ChatApp(App):
                 "  Ctrl+C      — quit\n"
                 "  Ctrl+L      — clear the log\n"
                 "  Ctrl+N      — start a new chat\n"
-                "  Ctrl+R      — restart the gateway"
+                "  Ctrl+R      — pick a chat to resume"
             )
 
         elif normalized_cmd == "/new":
@@ -610,18 +719,15 @@ class ChatApp(App):
         elif normalized_cmd == "/clear":
             self.query_one("#chat", RichLog).clear()
 
-        elif normalized_cmd == "/restart":
-            await self.action_restart_bos()
-
         elif normalized_cmd == "/workdir":
             self._handle_workdir_command(rest.strip())
 
-        elif normalized_cmd in (
-            "/resume",
-            "/chats",
-        ):
-            # Delegate to the server via a command envelope
-            await self._send_command(command_text)
+        elif normalized_cmd == "/resume":
+            if rest.strip():
+                # Delegate to the server via a command envelope
+                await self._send_command(command_text)
+            else:
+                await self._request_chat_picker()
 
         else:
             self._write_system(f"[yellow]Unknown command: {normalized_cmd}[/]")
@@ -671,18 +777,24 @@ class ChatApp(App):
     def action_reset_chat(self) -> None:
         asyncio.create_task(self._send_command("/new"))
 
-    async def action_restart_bos(self) -> None:
-        """Restart the background BOS agent."""
-        self._write_system("[yellow]↻ Restarting gateway…[/]")
-        import sys
+    def action_resume_chat(self) -> None:
+        asyncio.create_task(self._request_chat_picker())
 
-        try:
-            process = await asyncio.create_subprocess_exec(
-                sys.argv[0], "restart", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-            )
-            asyncio.create_task(process.wait())
-        except Exception as exc:
-            self._write_system(f"[red]⚠ Failed to restart agent: {exc}[/]")
+    async def _request_chat_picker(self) -> None:
+        """Ask the server for the chat list; the picker opens on the result."""
+        self._awaiting_chat_list = True
+        await self._send_command("/chats")
+
+    def _open_chat_picker(self, chats: list[dict[str, Any]]) -> None:
+        if not chats:
+            self._write_system("[dim]No chats to resume.[/]")
+            return
+
+        def _on_dismiss(chat_id: str | None) -> None:
+            if chat_id and chat_id != self._chat_id:
+                asyncio.create_task(self._send_command(f"/resume {chat_id}"))
+
+        self.push_screen(ChatPickerModal(chats, current_chat_id=self._chat_id), callback=_on_dismiss)
 
     async def action_interrupt_turn(self) -> None:
         """Abort the in-flight turn for the current chat."""
@@ -773,6 +885,36 @@ class ChatApp(App):
 
     def _write_system(self, text: str) -> None:
         self.query_one("#chat", RichLog).write(text)
+
+    def _render_history(self, messages: list[dict[str, Any]]) -> None:
+        """Render persisted chat messages (a hydration payload) into the log.
+
+        Only user and assistant text is shown; tool traffic and summaries are
+        skipped. Assistant messages that carry tool calls are intermediate
+        thinking steps and render as dim previews, like the live turn trace.
+        """
+        log = self.query_one("#chat", RichLog)
+        for message in messages:
+            if not isinstance(message, dict) or message.get("is_summary"):
+                continue
+            llm_message = message.get("llm_message") or {}
+            role = llm_message.get("role")
+            text = _message_text(llm_message.get("content"))
+            if not text:
+                continue
+            if role == "user":
+                log.write("\n[bold cyan]❯ You[/]")
+                log.write(_indent(text))
+            elif role == "assistant":
+                if llm_message.get("tool_calls"):
+                    preview = text[:240].replace("\n", " ")
+                    log.write(f"\n[dim italic]● {preview}[/]")
+                    continue
+                log.write("\n[bold green]▸ Assistant[/]")
+                try:
+                    log.write(Markdown(text))
+                except Exception:
+                    log.write(f"  {text}")
 
     def _refresh_queued(self) -> None:
         """Render queued messages stacked above the prompt input."""

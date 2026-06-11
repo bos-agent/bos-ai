@@ -479,8 +479,22 @@ class AgentActor:
         return None
 
     async def _cmd_chats(self, input: str, env: Envelope) -> dict[str, Any]:
-        """List all chats."""
-        result = await self._agent._chat_store.list_chats()
+        """List all chats, most recently active first."""
+        chats = await self._agent._chat_store.list_chats()
+        metas = sorted(
+            chats.values(),
+            key=lambda m: (m.last_activity is not None, m.last_activity),
+            reverse=True,
+        )
+        result = [
+            {
+                "chat_id": m.chat_id,
+                "message_count": m.message_count,
+                "last_activity": m.last_activity.isoformat() if m.last_activity else None,
+                "description": m.description,
+            }
+            for m in metas
+        ]
         return {"name": "chats", "ok": True, "result": result}
 
     async def _cmd_prompt(self, input: str, env: Envelope) -> dict[str, Any]:

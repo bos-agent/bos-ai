@@ -95,9 +95,14 @@ class FakePrompt:
 class FakeLog:
     def __init__(self) -> None:
         self.lines: list = []
+        self.cleared = False
 
     def write(self, content):
         self.lines.append(content)
+
+    def clear(self):
+        self.cleared = True
+        self.lines.clear()
 
 
 def _fake_widgets(app, monkeypatch):
@@ -335,6 +340,7 @@ async def test_command_result_event_for_new_updates_displayed_chat(monkeypatch):
 async def test_command_result_event_for_resume_updates_displayed_chat(monkeypatch):
     client = FakeClient()
     app = ChatApp(client=client)
+    _, log, _ = _fake_widgets(app, monkeypatch)
     updates: list[str] = []
 
     monkeypatch.setattr(app, "_write_system", lambda text: None)
@@ -355,6 +361,161 @@ async def test_command_result_event_for_resume_updates_displayed_chat(monkeypatc
     assert app._chat_id == "resumed-chat"
     assert client.chat_id == "resumed-chat"
     assert updates == ["resumed-chat"]
+    assert log.cleared
+
+
+@pytest.mark.asyncio
+async def test_resume_result_renders_history_into_cleared_log(monkeypatch):
+    from rich.markdown import Markdown
+
+    client = FakeClient()
+    app = ChatApp(client=client)
+    _, log, _ = _fake_widgets(app, monkeypatch)
+    monkeypatch.setattr(app, "_update_status", lambda: None)
+    log.lines.append("previous chat content")
+
+    history = [
+        {"llm_message": {"role": "user", "content": "hello"}},
+        {"llm_message": {"role": "assistant", "content": "I am about to run tests", "tool_calls": [{"id": "t1"}]}},
+        {"llm_message": {"role": "assistant", "content": "", "tool_calls": [{"id": "t2"}]}},
+        {"llm_message": {"role": "tool", "content": "tool output"}},
+        {"llm_message": {"role": "assistant", "content": [{"type": "text", "text": "hi there"}]}},
+        {"llm_message": {"role": "user", "content": "old summary"}, "is_summary": True},
+    ]
+    await app.on_command_result_event(
+        CommandResultEvent(
+            "resume",
+            {"name": "resume", "ok": True, "result": "resumed chat-9", "chat_id": "chat-9"},
+            {"missing_messages": history},
+        )
+    )
+
+    assert log.cleared
+    assert "previous chat content" not in log.lines
+    assert "\n[bold cyan]❯ You[/]" in log.lines
+    assert "  hello" in log.lines
+    # A tool-calling assistant message renders as a dim preview, not a reply.
+    assert "\n[dim italic]● I am about to run tests[/]" in log.lines
+    assert log.lines.count("\n[bold green]▸ Assistant[/]") == 1
+    markdowns = [line.markup for line in log.lines if isinstance(line, Markdown)]
+    assert markdowns == ["hi there"]
+    assert not any("tool output" in str(line) for line in log.lines)
+    assert not any("old summary" in str(line) for line in log.lines)
+    # The confirmation line lands after the rendered history.
+    assert log.lines[-1] == "[dim]resumed chat-9[/]"
+
+
+@pytest.mark.asyncio
+async def test_resume_without_args_requests_chat_list(monkeypatch):
+    client = FakeClient()
+    app = ChatApp(client=client)
+    monkeypatch.setattr(app, "_write_system", lambda text: None)
+
+    await app._handle_slash_command("/resume")
+
+    assert app._awaiting_chat_list is True
+    assert client.calls == [
+        {
+            "content": "/chats",
+            "content_type": MessageType.COMMAND,
+            "chat_id": "chat-1",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_resume_with_chat_id_delegates_to_server(monkeypatch):
+    client = FakeClient()
+    app = ChatApp(client=client)
+    monkeypatch.setattr(app, "_write_system", lambda text: None)
+
+    await app._handle_slash_command("/resume chat-7")
+
+    assert app._awaiting_chat_list is False
+    assert client.calls == [
+        {
+            "content": "/resume chat-7",
+            "content_type": MessageType.COMMAND,
+            "chat_id": "chat-1",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_chats_result_opens_picker_and_selection_resumes(monkeypatch):
+    client = FakeClient()
+    app = ChatApp(client=client)
+    app._awaiting_chat_list = True
+    pushed: dict = {}
+
+    monkeypatch.setattr(app, "_write_system", lambda text: None)
+    monkeypatch.setattr(
+        app, "push_screen", lambda screen, callback=None: pushed.update(screen=screen, callback=callback)
+    )
+
+    chats = [{"chat_id": "chat-2", "message_count": 3, "last_activity": None, "description": "hello"}]
+    await app.on_command_result_event(CommandResultEvent("chats", {"name": "chats", "ok": True, "result": chats}))
+
+    assert app._awaiting_chat_list is False
+    assert pushed["screen"]._chats == chats
+
+    pushed["callback"]("chat-2")
+    await asyncio.sleep(0)
+    assert client.calls[-1] == {
+        "content": "/resume chat-2",
+        "content_type": MessageType.COMMAND,
+        "chat_id": "chat-1",
+    }
+
+
+@pytest.mark.asyncio
+async def test_chat_picker_selecting_current_chat_sends_nothing(monkeypatch):
+    client = FakeClient()
+    app = ChatApp(client=client)
+    app._awaiting_chat_list = True
+    pushed: dict = {}
+
+    monkeypatch.setattr(app, "_write_system", lambda text: None)
+    monkeypatch.setattr(
+        app, "push_screen", lambda screen, callback=None: pushed.update(screen=screen, callback=callback)
+    )
+
+    chats = [{"chat_id": "chat-1", "message_count": 1, "last_activity": None, "description": "current"}]
+    await app.on_command_result_event(CommandResultEvent("chats", {"name": "chats", "ok": True, "result": chats}))
+
+    pushed["callback"]("chat-1")
+    await asyncio.sleep(0)
+    assert client.calls == []
+
+
+@pytest.mark.asyncio
+async def test_chats_result_with_empty_list_shows_message(monkeypatch):
+    client = FakeClient()
+    app = ChatApp(client=client)
+    app._awaiting_chat_list = True
+    outputs: list[str] = []
+    monkeypatch.setattr(app, "_write_system", outputs.append)
+
+    await app.on_command_result_event(CommandResultEvent("chats", {"name": "chats", "ok": True, "result": []}))
+
+    assert outputs == ["[dim]No chats to resume.[/]"]
+
+
+@pytest.mark.asyncio
+async def test_removed_slash_commands_report_unknown(monkeypatch):
+    client = FakeClient()
+    app = ChatApp(client=client)
+    outputs: list[str] = []
+    monkeypatch.setattr(app, "_write_system", outputs.append)
+
+    await app._handle_slash_command("/chats")
+    await app._handle_slash_command("/restart")
+
+    assert client.calls == []
+    assert outputs == [
+        "[yellow]Unknown command: /chats[/]",
+        "[yellow]Unknown command: /restart[/]",
+    ]
 
 
 def test_status_text_uses_current_client_and_chat():

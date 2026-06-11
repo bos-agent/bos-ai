@@ -180,6 +180,43 @@ async def test_command_result_preserves_channel_metadata():
 
 
 @pytest.mark.asyncio
+async def test_chats_command_returns_serializable_list_sorted_by_recency():
+    from datetime import datetime
+
+    mailbox = FakeMailbox("agent@main")
+    agent = StubAgent()
+    actor = AgentActor(agent, mailbox)
+    await agent._chat_store.commit_turn(
+        "chat-old",
+        [Message(llm_message={"role": "user", "content": "older chat"}, created_at=datetime(2026, 1, 1))],
+        turn_id="t1",
+    )
+    await agent._chat_store.commit_turn(
+        "chat-new",
+        [Message(llm_message={"role": "user", "content": "newer chat"}, created_at=datetime(2026, 2, 1))],
+        turn_id="t2",
+    )
+
+    await actor._handle_command(
+        Envelope(
+            sender="channel@tui",
+            recipient="agent@main",
+            content="/chats",
+            content_type=MessageType.COMMAND,
+            chat_id="chat-new",
+        )
+    )
+
+    payload = json.loads(mailbox.sent[-1].content)
+    assert payload["ok"] is True
+    chats = payload["result"]
+    assert [c["chat_id"] for c in chats] == ["chat-new", "chat-old"]
+    assert chats[0]["description"] == "newer chat"
+    assert chats[0]["message_count"] == 1
+    assert chats[0]["last_activity"] == "2026-02-01T00:00:00"
+
+
+@pytest.mark.asyncio
 async def test_resume_uses_channel_metadata_as_cursor_identity():
     mailbox = FakeMailbox("agent@main")
     actor = AgentActor(StubAgent(), mailbox)

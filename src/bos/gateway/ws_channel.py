@@ -136,15 +136,10 @@ class WSChannel(BaseChannel[dict[str, Any]]):
             metadata = dict(payload.get("metadata") or {})
             metadata["current_revision"] = current_revision
             if selected_chat_id:
-                observed_revision = self._runtime.chat_coordinator.observed_revision(
-                    chat_id=selected_chat_id,
-                    ref=self.ref,
-                )
-                if observed_revision is None:
-                    observed_revision = 0
+                # Full transcript, not just unobserved messages: the client
+                # clears its viewport on chat switch and re-renders history.
                 metadata["missing_messages"] = await self._runtime.chat_coordinator.hydrate(
                     chat_id=selected_chat_id,
-                    from_revision=observed_revision,
                 )
                 self._chat_id = selected_chat_id
                 out_chat_id = selected_chat_id
