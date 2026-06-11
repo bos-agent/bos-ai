@@ -1,6 +1,53 @@
 import pytest
+from ddgs.exceptions import DDGSException
 
 from bos.extensions.tools import knowledge
+
+
+@pytest.mark.asyncio
+async def test_duckduckgo_maps_sdk_results(monkeypatch):
+    captured = {}
+
+    class FakeDDGS:
+        def __init__(self, timeout=None):
+            captured["timeout"] = timeout
+
+        def text(self, query, max_results=None):
+            captured["query"] = query
+            captured["max_results"] = max_results
+            return [
+                {"title": "T1", "href": "https://a.test", "body": "B1"},
+                {"title": "", "href": "", "body": "no url: skipped"},
+                {"title": "T3", "href": "https://c.test", "body": ""},
+            ]
+
+    monkeypatch.setattr(knowledge, "DDGS", FakeDDGS)
+
+    results = await knowledge._search_duckduckgo("bos ai", timeout_seconds=9, max_results=3)
+
+    assert captured == {"timeout": 9, "query": "bos ai", "max_results": 3}
+    assert results == [
+        knowledge.SearchResult(title="T1", url="https://a.test", snippet="B1"),
+        knowledge.SearchResult(title="T3", url="https://c.test", snippet=""),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_duckduckgo_wraps_sdk_errors_as_provider_error(monkeypatch):
+    class FakeDDGS:
+        def __init__(self, timeout=None):
+            pass
+
+        def text(self, query, max_results=None):
+            raise DDGSException("ratelimited")
+
+    monkeypatch.setattr(knowledge, "DDGS", FakeDDGS)
+
+    with pytest.raises(knowledge.WebSearchProviderError) as exc_info:
+        await knowledge._search_duckduckgo("bos ai", timeout_seconds=5, max_results=3)
+
+    assert exc_info.value.provider == "duckduckgo"
+    assert exc_info.value.fallback_allowed is True
 
 
 @pytest.mark.asyncio

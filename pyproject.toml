@@ -17,6 +17,7 @@ dependencies = [
     "aiohttp==3.13.5",
     "textual-autocomplete==4.0.6",
     "pydantic==2.12.5",
+    "ddgs==9.14.4",
 ]
 
 [project.urls]
