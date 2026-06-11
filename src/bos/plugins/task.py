@@ -70,6 +70,57 @@ class _TaskList:
         ]
 
 
+def _apply_task_update(
+    tl: _TaskList,
+    *,
+    taskId: str,
+    status: str | None = None,
+    subject: str | None = None,
+    description: str | None = None,
+    addBlocks: list[str] | None = None,
+    addBlockedBy: list[str] | None = None,
+) -> tuple[str, bool]:
+    """Apply one task update; returns (result line, whether state changed)."""
+    store = tl.tasks
+    if taskId not in store:
+        return (f"Error: Task '{taskId}' not found. Use TaskList to see available tasks.", False)
+    task = store[taskId]
+    if status == "deleted":
+        for other in store.values():
+            other.blocked_by = [x for x in other.blocked_by if x != taskId]
+            other.blocks = [x for x in other.blocks if x != taskId]
+        del store[taskId]
+        return (f"Task '{taskId}' deleted.", True)
+    # Validate dependency ids before mutating anything.
+    for blocked_id in addBlocks or []:
+        if blocked_id not in store:
+            return (f"Error: Blocked task '{blocked_id}' not found.", False)
+    for blocker_id in addBlockedBy or []:
+        if blocker_id not in store:
+            return (f"Error: Blocker task '{blocker_id}' not found.", False)
+    if status is not None:
+        task.status = status
+        if status == "completed":
+            for other in store.values():
+                other.blocked_by = [x for x in other.blocked_by if x != taskId]
+                other.blocks = [x for x in other.blocks if x != taskId]
+            task.blocked_by.clear()
+            task.blocks.clear()
+    if subject is not None:
+        task.subject = subject
+    if description is not None:
+        task.description = description
+    if addBlocks:
+        task.blocks.extend(addBlocks)
+        for blocked_id in addBlocks:
+            store[blocked_id].blocked_by.append(taskId)
+    if addBlockedBy:
+        task.blocked_by.extend(addBlockedBy)
+        for blocker_id in addBlockedBy:
+            store[blocker_id].blocks.append(taskId)
+    return (f"Task '{taskId}' updated. Status: {task.status}.", True)
+
+
 def _render_current_tasks(task_list: _TaskList) -> str:
     lines = ["<current_tasks>"]
     for task in sorted(task_list.tasks.values(), key=lambda t: t.created_at):
@@ -140,13 +191,14 @@ class TaskEventInterceptor:
 
 
 _TASK_TOOL_USAGE = {
-    "TaskCreate": """Create a new task in the task list.
+    "TaskCreate": """Create one or more tasks in the task list.
 
 Use the task tools (TaskCreate, TaskUpdate, TaskList, TaskGet) to plan and track your work.
 
 For complex or multi-part tasks: create a task list BEFORE starting work. Break the work into
-concrete, verifiable steps. After receiving new multi-part instructions, capture them as tasks
-before starting implementation.
+concrete, verifiable steps and create the FULL list in a single TaskCreate call by passing every
+step in order — do not create tasks one call at a time. After receiving new multi-part
+instructions, capture them as tasks before starting implementation.
 
 For simple single-step tasks: skip task creation and just do the work.
 
@@ -160,7 +212,10 @@ Use proactively when:
 - The task is non-trivial and needs careful planning
 - The user provides multiple tasks (numbered or comma-separated)""",
 
-    "TaskUpdate": """Update task status, metadata, or dependencies.
+    "TaskUpdate": """Update status, metadata, or dependencies for one or more tasks.
+
+Batch related changes into a single call — e.g. mark the finished task completed and the next
+one in_progress together, or wire several dependencies at once.
 
 ### Status Workflow
 
@@ -183,6 +238,10 @@ _TASK_PROMPT_SECTION = """<task_workflow>
 Use task tools to track complex, multi-step work in the current conversation.
 
 - Use TaskCreate when the request has multiple parts, needs careful sequencing, or benefits from progress tracking.
+- Create the full task list in a single TaskCreate call; batch related status changes into one TaskUpdate call
+  (e.g. mark the finished task completed and the next one in_progress together).
+- The task list is the single source of truth for execution progress. When a plan exists, seed tasks from the
+  approved plan's breakdown instead of re-deriving steps.
 - Skip task tools for simple one-step requests where tracking would add noise.
 - Mark a task in_progress with TaskUpdate when you begin it.
 - Use TaskGet before starting a task when you need its full description or dependency state.
@@ -227,35 +286,64 @@ class TaskAgentPlugin:
 
         @registry(
             name="TaskCreate",
-            description="Create a new task to track progress on complex, multi-step work.",
+            description=(
+                "Create one or more tasks to track progress on complex, multi-step work."
+                " Pass the full task list in a single call."
+            ),
             usage=_TASK_TOOL_USAGE["TaskCreate"],
             parameters={
                 "type": "object",
                 "properties": {
-                    "subject": {
-                        "type": "string",
-                        "description": "Brief, actionable title in imperative form (e.g., 'Fix auth bug').",
-                    },
-                    "description": {
-                        "type": "string",
-                        "description": "What needs to be done. 1-2 sentences.",
+                    "tasks": {
+                        "type": "array",
+                        "minItems": 1,
+                        "description": "Tasks to create, in intended execution order.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "subject": {
+                                    "type": "string",
+                                    "description": (
+                                        "Brief, actionable title in imperative form (e.g., 'Fix auth bug')."
+                                    ),
+                                },
+                                "description": {
+                                    "type": "string",
+                                    "description": "What needs to be done. 1-2 sentences.",
+                                },
+                            },
+                            "required": ["subject", "description"],
+                        },
                     },
                 },
-                "required": ["subject", "description"],
+                "required": ["tasks"],
             },
         )
-        async def task_create(subject: str, description: str, chat_id: str = "") -> str:
+        async def task_create(tasks: list[dict[str, Any]], chat_id: str = "") -> str:
+            if not tasks:
+                return "Error: 'tasks' must contain at least one task."
+            for index, item in enumerate(tasks):
+                if not isinstance(item, dict) or not str(item.get("subject", "")).strip():
+                    return f"Error: task at index {index} requires a non-empty 'subject'."
             tl = task_lists.setdefault(chat_id, _TaskList())
-            task_id = tl.next_id()
-            task = _Task(id=task_id, subject=subject, description=description)
-            tl.tasks[task_id] = task
+            lines = []
+            for item in tasks:
+                task_id = tl.next_id()
+                task = _Task(
+                    id=task_id,
+                    subject=str(item["subject"]).strip(),
+                    description=str(item.get("description", "")).strip(),
+                )
+                tl.tasks[task_id] = task
+                lines.append(f"[{task_id}] {task.subject}")
             tl.bump()
-            return f"Task created: [{task_id}] {subject} (status: pending)"
+            noun = "Task" if len(lines) == 1 else f"{len(lines)} tasks"
+            return f"{noun} created (status: pending):\n" + "\n".join(lines)
 
         @registry(
             name="TaskUpdate",
             description=(
-                "Update a task's status or metadata."
+                "Update status or metadata for one or more tasks in a single call."
                 " Status flows: pending -> in_progress -> completed."
                 " Only mark completed when FULLY done."
             ),
@@ -263,77 +351,65 @@ class TaskAgentPlugin:
             parameters={
                 "type": "object",
                 "properties": {
-                    "taskId": {"type": "string", "description": "Task ID to update."},
-                    "status": {
-                        "type": "string",
-                        "enum": ["pending", "in_progress", "completed", "deleted"],
-                        "description": "New status.",
-                    },
-                    "subject": {"type": "string", "description": "New title."},
-                    "description": {"type": "string", "description": "New description."},
-                    "addBlocks": {
+                    "updates": {
                         "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Task IDs that this task blocks.",
-                    },
-                    "addBlockedBy": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Task IDs that block this task.",
+                        "minItems": 1,
+                        "description": "Updates to apply, each targeting one task by id.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "taskId": {"type": "string", "description": "Task ID to update."},
+                                "status": {
+                                    "type": "string",
+                                    "enum": ["pending", "in_progress", "completed", "deleted"],
+                                    "description": "New status.",
+                                },
+                                "subject": {"type": "string", "description": "New title."},
+                                "description": {"type": "string", "description": "New description."},
+                                "addBlocks": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "description": "Task IDs that this task blocks.",
+                                },
+                                "addBlockedBy": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "description": "Task IDs that block this task.",
+                                },
+                            },
+                            "required": ["taskId"],
+                        },
                     },
                 },
-                "required": ["taskId"],
+                "required": ["updates"],
             },
         )
-        async def task_update(
-            taskId: str,
-            status: str | None = None,
-            subject: str | None = None,
-            description: str | None = None,
-            addBlocks: list[str] | None = None,
-            addBlockedBy: list[str] | None = None,
-            chat_id: str = "",
-        ) -> str:
+        async def task_update(updates: list[dict[str, Any]], chat_id: str = "") -> str:
+            if not updates:
+                return "Error: 'updates' must contain at least one update."
             tl = task_lists.get(chat_id)
-            if tl is None or taskId not in tl.tasks:
-                return f"Error: Task '{taskId}' not found. Use TaskList to see available tasks."
-            store = tl.tasks
-            task = store[taskId]
-            if status is not None:
-                if status == "deleted":
-                    for other in store.values():
-                        other.blocked_by = [x for x in other.blocked_by if x != taskId]
-                        other.blocks = [x for x in other.blocks if x != taskId]
-                    del store[taskId]
-                    tl.bump()
-                    return f"Task '{taskId}' deleted."
-                task.status = status
-                if status == "completed":
-                    for other in store.values():
-                        other.blocked_by = [x for x in other.blocked_by if x != taskId]
-                        other.blocks = [x for x in other.blocks if x != taskId]
-                    task.blocked_by.clear()
-                    task.blocks.clear()
-            if subject is not None:
-                task.subject = subject
-            if description is not None:
-                task.description = description
-            if addBlocks:
-                for blocked_id in addBlocks:
-                    if blocked_id not in store:
-                        return f"Error: Blocked task '{blocked_id}' not found."
-                task.blocks.extend(addBlocks)
-                for blocked_id in addBlocks:
-                    store[blocked_id].blocked_by.append(taskId)
-            if addBlockedBy:
-                for blocker_id in addBlockedBy:
-                    if blocker_id not in store:
-                        return f"Error: Blocker task '{blocker_id}' not found."
-                task.blocked_by.extend(addBlockedBy)
-                for blocker_id in addBlockedBy:
-                    store[blocker_id].blocks.append(taskId)
-            tl.bump()
-            return f"Task '{taskId}' updated. Status: {task.status}."
+            if tl is None:
+                return "Error: no tasks exist for this conversation. Use TaskCreate first."
+            lines = []
+            changed = False
+            for item in updates:
+                if not isinstance(item, dict):
+                    lines.append("Error: each update must be an object with a 'taskId'.")
+                    continue
+                line, applied = _apply_task_update(
+                    tl,
+                    taskId=str(item.get("taskId", "")),
+                    status=item.get("status"),
+                    subject=item.get("subject"),
+                    description=item.get("description"),
+                    addBlocks=item.get("addBlocks"),
+                    addBlockedBy=item.get("addBlockedBy"),
+                )
+                lines.append(line)
+                changed = changed or applied
+            if changed:
+                tl.bump()
+            return "\n".join(lines)
 
         @registry(
             name="TaskList",

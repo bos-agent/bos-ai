@@ -33,7 +33,7 @@ class _Plan:
     shaped_solution: str = ""
     risks: list[str] = field(default_factory=list)
     non_goals: list[str] = field(default_factory=list)
-    tasks: list[str] = field(default_factory=list)
+    breakdown: list[str] = field(default_factory=list)
     verification: list[str] = field(default_factory=list)
     open_questions: list[str] = field(default_factory=list)
     status: str = "draft"
@@ -54,7 +54,7 @@ class _Plan:
             "shaped_solution": self.shaped_solution,
             "risks": self.risks,
             "non_goals": self.non_goals,
-            "tasks": self.tasks,
+            "breakdown": self.breakdown,
             "verification": self.verification,
             "open_questions": self.open_questions,
             "created_at": self.created_at,
@@ -86,7 +86,8 @@ def _render_current_plan(plan: _Plan) -> str:
         lines.append(f"<shaped_solution>{escape(plan.shaped_solution)}</shaped_solution>")
     lines.extend(_render_list("risks", plan.risks))
     lines.extend(_render_list("non_goals", plan.non_goals))
-    lines.extend(_render_list("tasks", plan.tasks))
+    if plan.status != "in_progress":
+        lines.extend(_render_list("breakdown", plan.breakdown))
     lines.extend(_render_list("verification", plan.verification))
     lines.extend(_render_list("open_questions", plan.open_questions))
     lines.append("</current_plan>")
@@ -97,16 +98,16 @@ _PLAN_TOOL_USAGE = {
     "PlanCreate": """Create or replace the current structured plan for this conversation.
 
 Use for non-trivial work when alignment matters before implementation. Capture the desired
-outcome, user-visible value, appetite, constraints, current evidence, shaped solution, tasks,
-verification, non-goals, risks, and any open questions. If open questions remain, set status to
-needs_input and end the turn by asking those questions in normal assistant text.""",
+outcome, user-visible value, appetite, constraints, current evidence, shaped solution, step
+breakdown, verification, non-goals, risks, and any open questions. If open questions remain, set
+status to needs_input and end the turn by asking those questions in normal assistant text.""",
 
     "PlanUpdate": """Update the current structured plan.
 
 Use this as planning evolves across turns: incorporate user answers, record new evidence from
-read-only inspection, move status from needs_input to approved/in_progress, or refine tasks and
-verification. List fields replace the previous list when provided; omit fields you do not want to
-change.""",
+read-only inspection, move status from needs_input to approved/in_progress, or refine the
+breakdown and verification. List fields replace the previous list when provided; omit fields you
+do not want to change.""",
 
     "PlanGet": """Return the current structured plan for this conversation.
 
@@ -135,17 +136,27 @@ How to plan:
   state, and PlanClear when the plan is completed, abandoned, or superseded.
 - Plan from the desired outcome backwards, then shape a bounded approach.
 - Clarify the user-visible objective, user value, appetite, constraints, current context, risks, and non-goals.
-- Define a shaped solution, concrete tasks, and verification before editing.
+- Define a shaped solution, a concrete step breakdown, and verification before editing.
 - If important unknowns remain, set plan status to needs_input and end the turn with concise questions.
 - Do not implement while the plan is needs_input; wait for the user to answer, clarify, or clearly ask you to proceed.
 - After user approval or an explicit proceed instruction, set status to in_progress and execute.
-- During execution, use task tools for step-by-step progress tracking when useful.
+- The plan is a contract with the user; the task list is the ledger for the work. When moving to in_progress,
+  materialize the plan breakdown into tasks with TaskCreate and track execution progress only with task tools.
+- Do not edit the plan breakdown during execution; the task list is the single source of truth for steps.
 - When verification is complete, set status to verified or clear the plan if it is no longer useful.
 </plan_workflow>"""
 
+_NEEDS_INPUT_NUDGE = """<plan_needs_input>
+The current plan status is needs_input: it has blocking open questions.
+- If the latest user message answers them, use PlanUpdate to record the answers, clear the answered
+  questions, set an appropriate status, and continue.
+- Otherwise do not start or continue implementation work, and do not call any more non-plan tools.
+  End the turn now by asking the user the open questions in plain assistant text.
+</plan_needs_input>"""
+
 _AUTO_PLAN_CONTEXT = [
     "Plan auto-triggered because the request appears complex.",
-    "Before doing substantive work, update the plan with shaped solution, tasks, verification, and open questions.",
+    "Before doing substantive work, update the plan with shaped solution, breakdown, verification, and open questions.",
     "If there is no blocking ambiguity, proceed after updating the plan.",
 ]
 
@@ -200,7 +211,15 @@ class PlanAgentPlugin:
                     "shaped_solution": {"type": "string", "description": "Bounded approach to implement."},
                     "risks": {"type": "array", "items": {"type": "string"}},
                     "non_goals": {"type": "array", "items": {"type": "string"}},
-                    "tasks": {"type": "array", "items": {"type": "string"}},
+                    "breakdown": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Proposed step breakdown for user review. After approval, materialize"
+                            " these via TaskCreate; the task list is the source of truth during"
+                            " execution."
+                        ),
+                    },
                     "verification": {"type": "array", "items": {"type": "string"}},
                     "open_questions": {"type": "array", "items": {"type": "string"}},
                     "status": {
@@ -221,7 +240,7 @@ class PlanAgentPlugin:
             shaped_solution: str = "",
             risks: list[str] | None = None,
             non_goals: list[str] | None = None,
-            tasks: list[str] | None = None,
+            breakdown: list[str] | None = None,
             verification: list[str] | None = None,
             open_questions: list[str] | None = None,
             status: str = "draft",
@@ -240,7 +259,7 @@ class PlanAgentPlugin:
                 shaped_solution=shaped_solution,
                 risks=risks or [],
                 non_goals=non_goals or [],
-                tasks=tasks or [],
+                breakdown=breakdown or [],
                 verification=verification or [],
                 open_questions=open_questions or [],
                 status=status,
@@ -263,7 +282,15 @@ class PlanAgentPlugin:
                     "shaped_solution": {"type": "string"},
                     "risks": {"type": "array", "items": {"type": "string"}},
                     "non_goals": {"type": "array", "items": {"type": "string"}},
-                    "tasks": {"type": "array", "items": {"type": "string"}},
+                    "breakdown": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Proposed step breakdown for user review. After approval, materialize"
+                            " these via TaskCreate; the task list is the source of truth during"
+                            " execution."
+                        ),
+                    },
                     "verification": {"type": "array", "items": {"type": "string"}},
                     "open_questions": {"type": "array", "items": {"type": "string"}},
                     "status": {"type": "string", "enum": sorted(_PLAN_STATUSES)},
@@ -280,7 +307,7 @@ class PlanAgentPlugin:
             shaped_solution: str | None = None,
             risks: list[str] | None = None,
             non_goals: list[str] | None = None,
-            tasks: list[str] | None = None,
+            breakdown: list[str] | None = None,
             verification: list[str] | None = None,
             open_questions: list[str] | None = None,
             status: str | None = None,
@@ -307,7 +334,7 @@ class PlanAgentPlugin:
                 "current_context": current_context,
                 "risks": risks,
                 "non_goals": non_goals,
-                "tasks": tasks,
+                "breakdown": breakdown,
                 "verification": verification,
                 "open_questions": open_questions,
             }.items():
@@ -342,9 +369,13 @@ class PlanAgentPlugin:
         return _PLAN_PROMPT_SECTION
 
     def get_interceptors(self) -> Sequence[TurnInterceptor]:
-        if not self._auto_trigger:
-            return [PlanContextInterceptor(self._plans)]
-        return [PlanContextInterceptor(self._plans), PlanAutoTriggerInterceptor(self._plans)]
+        interceptors: list[TurnInterceptor] = [
+            PlanContextInterceptor(self._plans),
+            PlanEventInterceptor(self._plans),
+        ]
+        if self._auto_trigger:
+            interceptors.append(PlanAutoTriggerInterceptor(self._plans))
+        return interceptors
 
 
 class PlanContextInterceptor:
@@ -357,10 +388,59 @@ class PlanContextInterceptor:
         plan = self._plans.get(context.chat_id)
         if plan is None or plan.status in _TERMINAL_PLAN_STATUSES:
             context.clear_ephemeral_message("plan.current_plan")
+            context.clear_ephemeral_message("plan.needs_input")
             return
         context.set_ephemeral_message(
             "plan.current_plan",
             {"role": "user", "content": _render_current_plan(plan)},
+        )
+        if plan.status == "needs_input":
+            context.set_ephemeral_message(
+                "plan.needs_input",
+                {"role": "user", "content": _NEEDS_INPUT_NUDGE},
+            )
+        else:
+            context.clear_ephemeral_message("plan.needs_input")
+
+
+class PlanEventInterceptor:
+    """Emits plan state events so channels (e.g. the TUI) can render the current plan."""
+
+    def __init__(self, plans: dict[str, _Plan]) -> None:
+        self._plans = plans
+        self._emitted: dict[str, float] = {}
+
+    async def intercept(self, stage: str, context: TurnContext) -> None:
+        if stage not in ("after_tool", "final_response"):
+            return
+        event_sink = getattr(context, "event_sink", None)
+        if event_sink is None:
+            return
+        plan = self._plans.get(context.chat_id)
+        if plan is None:
+            if context.chat_id not in self._emitted:
+                return
+            del self._emitted[context.chat_id]
+            payload = None
+        else:
+            if self._emitted.get(context.chat_id) == plan.updated_at:
+                return
+            self._emitted[context.chat_id] = plan.updated_at
+            payload = plan.to_payload()
+        from bos.protocol import TurnEvent
+
+        await event_sink.emit(
+            TurnEvent(
+                event_type="plan",
+                phase="update",
+                chat_id=context.chat_id,
+                turn_id=context.turn_id,
+                agent_name=context.agent_name,
+                stage=stage,
+                detail="plan_state",
+                content="",
+                metadata={"plan": payload},
+            )
         )
 
 

@@ -1232,11 +1232,12 @@ async def test_agent_emits_task_state_events(monkeypatch):
                 tool_calls=[
                     ToolCallRequest(
                         id="tc1", name="TaskCreate",
-                        arguments={"subject": "Task 1", "description": "First task"},
-                    ),
-                    ToolCallRequest(
-                        id="tc2", name="TaskCreate",
-                        arguments={"subject": "Task 2", "description": "Second task"},
+                        arguments={
+                            "tasks": [
+                                {"subject": "Task 1", "description": "First task"},
+                                {"subject": "Task 2", "description": "Second task"},
+                            ]
+                        },
                     ),
                 ],
                 finish_reason="tool_calls",
@@ -1247,7 +1248,7 @@ async def test_agent_emits_task_state_events(monkeypatch):
                 tool_calls=[
                     ToolCallRequest(
                         id="tc3", name="TaskUpdate",
-                        arguments={"taskId": captured_task_id[0], "status": "in_progress"},
+                        arguments={"updates": [{"taskId": captured_task_id[0], "status": "in_progress"}]},
                     ),
                 ],
                 finish_reason="tool_calls",
@@ -1276,23 +1277,16 @@ async def test_agent_emits_task_state_events(monkeypatch):
         ep_provider._extensions.pop(provider_name, None)
 
     task_events = [e for e in events if e.event_type == "task" and e.detail == "task_state"]
-    assert len(task_events) >= 3, f"Expected >= 3 task_state events (2 creates + 1 update), got {len(task_events)}"
+    assert len(task_events) >= 2, f"Expected >= 2 task_state events (bulk create + update), got {len(task_events)}"
 
-    # After 1st TaskCreate: one task pending
+    # After the bulk TaskCreate: both tasks present and pending
     tasks1 = task_events[0].metadata.get("tasks", [])
-    assert len(tasks1) == 1
-    assert tasks1[0]["status"] == "pending"
-    assert tasks1[0]["subject"] == "Task 1"
-
-    # After 2nd TaskCreate: both tasks present
-    tasks2 = task_events[1].metadata.get("tasks", [])
-    assert len(tasks2) == 2
-    assert tasks2[0]["subject"] == "Task 1"
-    assert tasks2[1]["subject"] == "Task 2"
+    assert [t["subject"] for t in tasks1] == ["Task 1", "Task 2"]
+    assert all(t["status"] == "pending" for t in tasks1)
 
     # After TaskUpdate: first task now in_progress
-    tasks3 = task_events[2].metadata.get("tasks", [])
-    assert tasks3[0]["status"] == "in_progress"
+    tasks2 = task_events[1].metadata.get("tasks", [])
+    assert tasks2[0]["status"] == "in_progress"
 
 
 @pytest.mark.asyncio
@@ -1380,8 +1374,12 @@ async def test_task_plugin_injects_current_tasks_as_ephemeral_user_context():
                         id="tc_task_create",
                         name="TaskCreate",
                         arguments={
-                            "subject": "Implement <feature>",
-                            "description": "Update the & parser.",
+                            "tasks": [
+                                {
+                                    "subject": "Implement <feature>",
+                                    "description": "Update the & parser.",
+                                }
+                            ]
                         },
                     )
                 ],
