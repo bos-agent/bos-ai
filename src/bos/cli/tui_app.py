@@ -467,6 +467,7 @@ class ChatApp(App):
         self._known_actors: list[str] = []
         self._awaiting_chat_list = False
         self._session_count = 0
+        self._last_sent_text = ""
 
     # ── compose ────────────────────────────────────────────────
 
@@ -591,6 +592,7 @@ class ChatApp(App):
 
         # Send to actor
         self._busy = True
+        self._last_sent_text = text
         self._update_status()
         try:
             await self._client.send(text, chat_id=self._chat_id)
@@ -666,6 +668,7 @@ class ChatApp(App):
 
     async def on_agent_reply_event(self, event: AgentReplyEvent) -> None:
         """Handle the final reply from the actor."""
+        self._last_sent_text = ""
         log = self.query_one("#chat", RichLog)
         content = event.content or "(no response)"
 
@@ -690,6 +693,7 @@ class ChatApp(App):
             log.write(_indent(merged))
 
             self._busy = True
+            self._last_sent_text = merged
             try:
                 await self._client.send(merged, chat_id=self._chat_id)
             except Exception as exc:
@@ -740,12 +744,56 @@ class ChatApp(App):
             self._write_system(f"[yellow]{event.content} Exiting.[/]")
             self.exit()
             return
-        if event.metadata.get("event") == "session":
+        meta_event = event.metadata.get("event")
+        if meta_event == "session":
             self._handle_session_event(event)
+            return
+        if meta_event == "stale_chat":
+            self._handle_stale_rejection(event.metadata.get("payload") or {})
+            return
+        if meta_event == "active_turn":
+            self._handle_active_turn_rejection()
             return
         if event.chat_id:
             self._set_chat_id(event.chat_id)
         self._write_system(f"[green]{event.content}[/]")
+
+    def _handle_stale_rejection(self, payload: dict[str, Any]) -> None:
+        """The send was rejected: the chat moved on under another client."""
+        self._busy = False
+        self._pending_tool_calls.clear()
+        missing = payload.get("missing_messages") or []
+        if missing:
+            self._write_system("\n[yellow]⚠ This chat was updated from another client — missed messages:[/]")
+            self._render_history(missing)
+        restored = self._restore_last_prompt()
+        notice = "Review the messages above and resubmit"
+        if restored:
+            notice += " — your text is back in the prompt"
+        self._write_system(f"\n[yellow]⚠ Send rejected (stale revision). {notice}.[/]")
+        self._update_status()
+
+    def _handle_active_turn_rejection(self) -> None:
+        """The send was rejected: another client's turn is in flight."""
+        self._busy = False
+        self._pending_tool_calls.clear()
+        restored = self._restore_last_prompt()
+        notice = "⚠ Another turn is in progress — message not sent"
+        if restored:
+            notice += "; your text is back in the prompt"
+        self._write_system(f"[yellow]{notice}.[/]")
+        self._update_status()
+
+    def _restore_last_prompt(self) -> bool:
+        """Put the last rejected text back into the prompt; True if restored."""
+        text, self._last_sent_text = self._last_sent_text, ""
+        if not text:
+            return False
+        prompt = self.query_one("#prompt", PromptInput)
+        if prompt.text.strip():
+            return False  # don't clobber text the user typed meanwhile
+        prompt._replace_text(text)
+        return True
 
     def _handle_session_event(self, event: SystemEvent) -> None:
         """Hydrate the viewport from a session acknowledgement (connect/reconnect)."""
@@ -949,6 +997,7 @@ class ChatApp(App):
             log.write("\n[bold cyan]❯ You[/]")
             log.write(_indent(text))
             self._busy = True
+            self._last_sent_text = text
             self._update_status()
             try:
                 await self._client.send(text, chat_id=self._chat_id)

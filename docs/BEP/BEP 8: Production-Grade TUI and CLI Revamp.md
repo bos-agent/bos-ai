@@ -208,7 +208,8 @@ The TUI is a standard WebSocket channel client conforming to the gateway convent
 ### 1. Client-side concurrency handling
 - `GatewayClient` tracks the observed `current_revision` from every inbound envelope and the session acknowledgement, and stamps `base_revision` on every outbound send.
 - The server preflight (`chat_coordinator.prepare_send`) rejects stale sends with structured SYSTEM events (`stale_chat`, `stale_channel_cursor`, `unobserved_chat`, `future_base_revision`) carrying `missing_messages`.
-- **Remaining work (client)**: the TUI currently surfaces these events as raw system lines. Rendering `missing_messages` into the transcript, showing a "chat updated from another client" warning banner, and returning the unsubmitted prompt to the input field are not yet implemented.
+- On a `stale_chat` rejection the TUI clears the busy state, renders the missed messages into the transcript under a "chat was updated from another client" warning, and returns the rejected text to the prompt (unless the user has typed something new meanwhile). The rejection event also carries `current_revision`, so the next submit uses the fresh revision.
+- On an `active_turn` rejection (another client's turn is in flight) the TUI clears the busy state, restores the rejected text to the prompt, and shows a notice.
 
 ### 2. Reconnection resiliency
 - If the WebSocket drops, `GatewayClient` reconnects with exponential backoff (0.5s → 10s cap), re-resolving the endpoint from `gateway.state` (so it follows gateway restarts to a new port) and re-authenticating with the API key.
@@ -264,8 +265,7 @@ A dedicated HTTP read API (`GET /api/chats`, `GET /api/chats/{chat_id}/messages?
 
 Tracked follow-ups that stay within this BEP's intent but are not yet implemented:
 
-1. **Stale-send UX**: render `missing_messages` from stale-send rejections into the transcript (resume results and session acks already rehydrate), show a warning banner, and preserve the user's unsubmitted prompt.
-2. **Token/cost visibility**: surface per-chat token usage in the status bar once the gateway exposes it.
+1. **Token/cost visibility**: surface per-chat token usage in the status bar once the gateway exposes it.
 
 ---
 

@@ -87,9 +87,13 @@ class FakeQueued:
 class FakePrompt:
     def __init__(self, focused: list[bool]) -> None:
         self._focused = focused
+        self.text = ""
 
     def focus(self):
         self._focused.append(True)
+
+    def _replace_text(self, text: str) -> None:
+        self.text = text
 
 
 class FakeLog:
@@ -110,12 +114,13 @@ def _fake_widgets(app, monkeypatch):
     queued = FakeQueued()
     log = FakeLog()
     focused: list[bool] = []
+    prompt = FakePrompt(focused)
 
     def fake_query_one(selector, *args, **kwargs):
         if selector == "#queued":
             return queued
         if selector == "#prompt":
-            return FakePrompt(focused)
+            return prompt
         if selector == "#chat":
             return log
         raise AssertionError(selector)
@@ -620,6 +625,69 @@ async def test_session_event_hydrates_transcript(monkeypatch):
     )
 
     assert any("Reconnected" in str(line) for line in log.lines)
+
+
+@pytest.mark.asyncio
+async def test_stale_rejection_renders_missing_and_restores_prompt(monkeypatch):
+    from rich.markdown import Markdown
+
+    client = FakeClient()
+    app = ChatApp(client=client)
+    _, log, _ = _fake_widgets(app, monkeypatch)
+    monkeypatch.setattr(app, "_update_status", lambda: None)
+    app._busy = True
+    app._last_sent_text = "my rejected message"
+
+    payload = {
+        "event": "stale_chat",
+        "error": "stale_chat",
+        "missing_messages": [{"llm_message": {"role": "assistant", "content": "from elsewhere"}}],
+    }
+    await app.on_system_event(SystemEvent("{}", "chat-1", {"event": "stale_chat", "payload": payload}))
+
+    assert app._busy is False
+    assert app.query_one("#prompt").text == "my rejected message"
+    assert app._last_sent_text == ""
+    assert any("updated from another client" in str(line) for line in log.lines)
+    assert any(getattr(line, "markup", "") == "from elsewhere" for line in log.lines if isinstance(line, Markdown))
+    assert any("Send rejected" in str(line) and "back in the prompt" in str(line) for line in log.lines)
+
+
+@pytest.mark.asyncio
+async def test_stale_rejection_does_not_clobber_typed_text(monkeypatch):
+    client = FakeClient()
+    app = ChatApp(client=client)
+    _, log, _ = _fake_widgets(app, monkeypatch)
+    monkeypatch.setattr(app, "_update_status", lambda: None)
+    app._busy = True
+    app._last_sent_text = "my rejected message"
+    app.query_one("#prompt").text = "already typing something new"
+
+    await app.on_system_event(
+        SystemEvent("{}", "chat-1", {"event": "stale_chat", "payload": {"missing_messages": []}})
+    )
+
+    assert app.query_one("#prompt").text == "already typing something new"
+    assert not any("back in the prompt" in str(line) for line in log.lines)
+    assert any("Send rejected" in str(line) for line in log.lines)
+
+
+@pytest.mark.asyncio
+async def test_active_turn_rejection_restores_prompt(monkeypatch):
+    client = FakeClient()
+    app = ChatApp(client=client)
+    _, log, _ = _fake_widgets(app, monkeypatch)
+    monkeypatch.setattr(app, "_update_status", lambda: None)
+    app._busy = True
+    app._last_sent_text = "try later"
+
+    await app.on_system_event(
+        SystemEvent("{}", "chat-1", {"event": "active_turn", "payload": {"event": "active_turn"}})
+    )
+
+    assert app._busy is False
+    assert app.query_one("#prompt").text == "try later"
+    assert any("Another turn is in progress" in str(line) for line in log.lines)
 
 
 @pytest.mark.asyncio
