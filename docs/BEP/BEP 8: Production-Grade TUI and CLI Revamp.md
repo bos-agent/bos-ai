@@ -265,7 +265,7 @@ Tracked follow-ups that stay within this BEP's intent but are not yet implemente
 
 1. **Client-side stale/rehydration UX**: render `missing_messages` from stale-send rejections and reconnect session acks into the transcript (resume results already rehydrate), show a warning banner, and preserve the user's unsubmitted prompt.
 2. **Token/cost visibility**: surface per-chat token usage in the status bar once the gateway exposes it.
-3. **Prompt history**: optional Up/Down cycling through previously submitted prompts.
+3. **Prompt history**: Up/Down cycling through previously submitted prompts, kept in memory for the current session only (no cross-session persistence).
 4. **Resume picker search/filtering**: fuzzy text search and workspace/CWD filters inside the chat selection modal.
 
 ---
