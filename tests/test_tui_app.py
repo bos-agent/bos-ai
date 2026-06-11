@@ -2,7 +2,7 @@ import asyncio
 
 import pytest
 
-from bos.cli.tui_app import ChatApp, CommandResultEvent, PromptHistory, run_chat_tui
+from bos.cli.tui_app import ChatApp, CommandResultEvent, PromptHistory, SystemEvent, run_chat_tui
 from bos.protocol import WS_TAKEOVER_CLOSE_REASON, MessageType
 
 
@@ -583,7 +583,7 @@ async def test_system_event_updates_displayed_chat(monkeypatch):
     monkeypatch.setattr(app, "_write_system", outputs.append)
     monkeypatch.setattr(app, "_update_status", lambda: updates.append(app._chat_id))
 
-    event = type("E", (), {"content": "session acknowledged", "chat_id": "handshake-chat"})()
+    event = SystemEvent("session acknowledged", "handshake-chat")
 
     await app.on_system_event(event)
 
@@ -591,6 +591,35 @@ async def test_system_event_updates_displayed_chat(monkeypatch):
     assert client.chat_id == "handshake-chat"
     assert updates == ["handshake-chat"]
     assert outputs == ["[green]session acknowledged[/]"]
+
+
+@pytest.mark.asyncio
+async def test_session_event_hydrates_transcript(monkeypatch):
+    client = FakeClient()
+    app = ChatApp(client=client)
+    _, log, _ = _fake_widgets(app, monkeypatch)
+    monkeypatch.setattr(app, "_update_status", lambda: None)
+    log.lines.append("stale viewport content")
+
+    history = [{"llm_message": {"role": "user", "content": "hi"}}]
+    await app.on_system_event(
+        SystemEvent("connected", "chat-7", {"event": "session", "missing_messages": history})
+    )
+
+    assert app._chat_id == "chat-7"
+    assert client.chat_id == "chat-7"
+    assert log.cleared
+    assert "stale viewport content" not in log.lines
+    assert any("Agent CLI ready" in str(line) for line in log.lines)
+    assert "  hi" in log.lines
+    # The first session ack is the initial connect, not a reconnect.
+    assert not any("Reconnected" in str(line) for line in log.lines)
+
+    await app.on_system_event(
+        SystemEvent("connected", "chat-7", {"event": "session", "missing_messages": history})
+    )
+
+    assert any("Reconnected" in str(line) for line in log.lines)
 
 
 @pytest.mark.asyncio

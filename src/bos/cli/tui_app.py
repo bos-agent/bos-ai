@@ -69,10 +69,11 @@ class CommandResultEvent(Message):
 class SystemEvent(Message):
     """System event emitted by the channel infrastructure."""
 
-    def __init__(self, content: str, chat_id: str | None = None) -> None:
+    def __init__(self, content: str, chat_id: str | None = None, metadata: dict[str, Any] | None = None) -> None:
         super().__init__()
         self.content = content
         self.chat_id = chat_id
+        self.metadata = metadata or {}
 
 
 SLASH_COMMANDS = [
@@ -465,6 +466,7 @@ class ChatApp(App):
         self._pending_tool_calls: list[tuple[str, str]] = []
         self._known_actors: list[str] = []
         self._awaiting_chat_list = False
+        self._session_count = 0
 
     # ── compose ────────────────────────────────────────────────
 
@@ -492,17 +494,10 @@ class ChatApp(App):
     async def on_mount(self) -> None:
         self._update_status()
 
-        # Start reply polling worker
+        # Start reply polling worker; the queued session ack envelope writes
+        # the welcome banner and hydrates the transcript.
         self._poll_task = asyncio.create_task(self._poll_replies())
         self._conn_poll_task = asyncio.create_task(self._poll_connection_status())
-
-        # Welcome
-        log = self.query_one("#chat", RichLog)
-        log.write("[bold $primary]Agent CLI ready.[/]")
-        log.write(
-            "[dim]Type /help for commands · Escape to abort · Ctrl+J for newline"
-            " · Ctrl+/ to interject · Ctrl+C to quit[/]\n"
-        )
 
         # Fetch actor list for @mention autocomplete
         try:
@@ -539,7 +534,7 @@ class ChatApp(App):
                     log.write(f"\n[bold dim cyan]❯ User ({env.sender})[/]")
                     log.write(f"  {env.content}")
                 elif env.content_type == MessageType.SYSTEM:
-                    self.post_message(SystemEvent(env.content, env.chat_id))
+                    self.post_message(SystemEvent(env.content, env.chat_id, env.metadata))
                 else:
                     # Normal reply
                     self.post_message(AgentReplyEvent(env.content, env.chat_id))
@@ -745,9 +740,35 @@ class ChatApp(App):
             self._write_system(f"[yellow]{event.content} Exiting.[/]")
             self.exit()
             return
+        if event.metadata.get("event") == "session":
+            self._handle_session_event(event)
+            return
         if event.chat_id:
             self._set_chat_id(event.chat_id)
         self._write_system(f"[green]{event.content}[/]")
+
+    def _handle_session_event(self, event: SystemEvent) -> None:
+        """Hydrate the viewport from a session acknowledgement (connect/reconnect)."""
+        self._session_count += 1
+        if event.chat_id:
+            self._set_chat_id(event.chat_id)
+        if self._conn_status != "connected":
+            self._conn_status = "connected"
+            self._update_status()
+        log = self.query_one("#chat", RichLog)
+        log.clear()
+        self._write_banner(log)
+        self._render_history(event.metadata.get("missing_messages") or [])
+        if self._session_count > 1:
+            self._write_system("\n[green]↻ Reconnected — transcript refreshed.[/]")
+
+    @staticmethod
+    def _write_banner(log: RichLog) -> None:
+        log.write("[bold $primary]Agent CLI ready.[/]")
+        log.write(
+            "[dim]Type /help for commands · Escape to abort · Ctrl+J for newline"
+            " · Ctrl+/ to interject · Ctrl+C to quit[/]\n"
+        )
 
     # ── slash commands ────────────────────────────────────────
 

@@ -214,7 +214,7 @@ The TUI is a standard WebSocket channel client conforming to the gateway convent
 - If the WebSocket drops, `GatewayClient` reconnects with exponential backoff (0.5s → 10s cap), re-resolving the endpoint from `gateway.state` (so it follows gateway restarts to a new port) and re-authenticating with the API key.
 - The status bar polls the connection and shows `● connected` / `○ reconnecting…`.
 - The prompt stays editable while disconnected; `send()` waits up to 15s for reconnection before surfacing a "Send failed — reconnecting" warning. (The BEP originally called for disabling the input; keeping it editable was chosen so typed text is never lost.)
-- On reconnect, the server's session acknowledgement carries `current_revision` and the `missing_messages` since the channel's cursor. **Remaining work (client)**: the TUI does not yet render this hydration payload into the transcript.
+- On every connect and reconnect, the server's session acknowledgement carries `current_revision` and the chat's **full transcript** in `missing_messages`. `GatewayClient` forwards the ack to its consumer as a SYSTEM envelope; the TUI clears the viewport, writes the welcome banner, and re-renders the transcript (with a "Reconnected — transcript refreshed" notice on reconnects). A freshly launched TUI on an existing chat cursor therefore shows the chat history immediately.
 
 ### 3. Prompt submission lifecycle
 1. If idle and connected, the TUI renders the user message, sends it with the current `base_revision`, and enters the busy state.
@@ -264,7 +264,7 @@ A dedicated HTTP read API (`GET /api/chats`, `GET /api/chats/{chat_id}/messages?
 
 Tracked follow-ups that stay within this BEP's intent but are not yet implemented:
 
-1. **Client-side stale/rehydration UX**: render `missing_messages` from stale-send rejections and reconnect session acks into the transcript (resume results already rehydrate), show a warning banner, and preserve the user's unsubmitted prompt.
+1. **Stale-send UX**: render `missing_messages` from stale-send rejections into the transcript (resume results and session acks already rehydrate), show a warning banner, and preserve the user's unsubmitted prompt.
 2. **Token/cost visibility**: surface per-chat token usage in the status bar once the gateway exposes it.
 
 ---

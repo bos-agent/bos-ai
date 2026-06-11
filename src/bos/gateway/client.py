@@ -185,6 +185,18 @@ class GatewayClient:
         if isinstance(chat_id, str) and chat_id:
             self._chat_id = chat_id
         self._ingest_revision(metadata)
+        # Forward the ack to the consumer so it can hydrate its transcript
+        # view; the ack metadata carries the chat's full message history.
+        await self._recv_queue.put(
+            Envelope(
+                sender=data.get("sender", "channel@gateway"),
+                recipient=self._address,
+                content=data.get("content", "connected"),
+                content_type=MessageType.SYSTEM,
+                chat_id=self._chat_id,
+                metadata=metadata,
+            )
+        )
 
     async def _reconnect(self) -> None:
         """Reconnect with exponential backoff. Blocks until connected or closed."""

@@ -61,10 +61,9 @@ class WSChannel(BaseChannel[dict[str, Any]]):
             observed_revision = 0
             self._runtime.chat_coordinator.set_cursor(self.ref, self._chat_id, observed_revision=observed_revision)
         current_revision = await self._runtime.chat_coordinator.current_revision(self._chat_id)
-        missing_messages = await self._runtime.chat_coordinator.hydrate(
-            chat_id=self._chat_id,
-            from_revision=observed_revision,
-        )
+        # Full transcript, not just unobserved messages: clients replace their
+        # viewport with the session ack payload on connect and reconnect.
+        missing_messages = await self._runtime.chat_coordinator.hydrate(chat_id=self._chat_id)
         await self._send_session_ack(mailbox, current_revision, observed_revision, missing_messages)
         self._runtime.chat_coordinator.mark_observed(
             chat_id=self._chat_id,
