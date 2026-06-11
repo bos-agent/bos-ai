@@ -57,6 +57,28 @@ async def test_react_agent_emits_root_lifecycle_events():
 
 
 @pytest.mark.asyncio
+async def test_llm_response_event_carries_usage_metadata():
+    suffix = uuid.uuid4().hex
+    provider_name = f"test_event_sink_usage_{suffix}"
+    usage = {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+
+    @ep_provider(name=provider_name)
+    async def usage_provider(messages, model=None, **kwargs):
+        return LLMResponse(content="done", usage=dict(usage))
+
+    try:
+        sink = CaptureSink()
+        agent = create_test_agent(model=f"{provider_name}/usage")
+
+        await agent.ask("usage-chat", "Say something.", event_sink=sink)
+
+        ready = next(event for event in sink.events if event.detail == "response_ready")
+        assert ready.metadata["usage"] == usage
+    finally:
+        ep_provider._extensions.pop(provider_name, None)
+
+
+@pytest.mark.asyncio
 async def test_react_agent_emits_tool_events_and_injects_event_sink():
     suffix = uuid.uuid4().hex
     provider_name = f"test_event_sink_tool_{suffix}"

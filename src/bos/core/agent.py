@@ -540,7 +540,11 @@ class Agent:
                         if response.tool_calls
                         else None
                     ),
-                    metadata={"finish_reason": response.finish_reason},
+                    metadata=(
+                        {"finish_reason": response.finish_reason, "usage": response.usage}
+                        if response.usage
+                        else {"finish_reason": response.finish_reason}
+                    ),
                 )
                 if not response.tool_calls:
                     # finalize the response if there is no tool call required

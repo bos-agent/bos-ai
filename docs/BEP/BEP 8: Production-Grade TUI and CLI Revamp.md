@@ -76,7 +76,7 @@ There is no in-process chat mode: both `ask` and `tui` always go through the gat
 
 ## TUI Layout
 
-A clean vertical layout preserves maximum terminal width for transcript content. A single status bar sits directly above the prompt (there is no separate status header/footer pair); the Textual footer shows the active key bindings.
+A clean vertical layout preserves maximum terminal width for transcript content. There is no header bar; a single status bar sits directly above the prompt and the Textual footer shows the active key bindings. The status bar shows the connection state, chat id, channel id, busy/ready state, and — once the first LLM response arrives — token usage: the latest context size (`ctx`) and the cumulative per-chat total (`total`). Counters reset when switching chats; cost estimation is not shown (no pricing data client-side).
 
 ```
 ┌───────────────────────────────────────────────────────────────────┐
@@ -95,7 +95,8 @@ A clean vertical layout preserves maximum terminal width for transcript content.
 ├───────────────────────────────────────────────────────────────────┤
 │ ⏳ queued message (sent when the current turn finishes)            │ <= queue stack (when non-empty)
 ├───────────────────────────────────────────────────────────────────┤
-│  ● connected · Chat: chat-id · Channel: tui:jerry · ○ ready       │ <= Status bar
+│  ● connected · Chat: chat-id · Channel: tui:jerry · ○ ready ·    │
+│    ctx 8.1k · total 14.2k tok                                     │ <= Status bar
 │ Send a message… (Enter to send, Ctrl+J for newline)               │ <= Prompt
 │ Esc Interrupt · ^/ Interject · ^G Drop queued · ^C Quit · …       │ <= Footer (bindings)
 └───────────────────────────────────────────────────────────────────┘
@@ -263,9 +264,7 @@ A dedicated HTTP read API (`GET /api/chats`, `GET /api/chats/{chat_id}/messages?
 
 ## Remaining Work
 
-Tracked follow-ups that stay within this BEP's intent but are not yet implemented:
-
-1. **Token/cost visibility**: surface per-chat token usage in the status bar once the gateway exposes it.
+None — all reconciled items are implemented. Token usage flows from the provider's `LLMResponse.usage` through the unified `llm` turn event metadata into the status bar; cost estimation (pricing) remains out of scope.
 
 ---
 
@@ -277,3 +276,4 @@ Tracked follow-ups that stay within this BEP's intent but are not yet implemente
 | 2026-06-06 | Design review pass | Resolve Escape precedence, remove side panel references, fix shortcut conflicts, clarify /resume and /restart |
 | 2026-06-06 | Implementation spec pass | Clarify CLI end state, add gateway read APIs, define prompt/reconnect lifecycles, and specify `[cli.tui]` config |
 | 2026-06-10 | Implementation reconciliation | Align the doc with the `tui-rewrite` implementation: keep `ask` (oneshot) + `tui` instead of `boscli chat`; drop card-based transcript UI, feed navigation/copy, and `[cli.tui]` config; replace the HTTP read API with command envelopes; resume picker modal via `/resume`//`Ctrl+R`; remove `/chats` and `/restart` from the TUI; document actual keybindings (`Ctrl+J`, `Ctrl+/`, `Ctrl+G`) and merged queue-flush semantics; list remaining work explicitly |
+| 2026-06-11 | Remaining-work completion | Drop picker search/filter from scope; implement session-only prompt history, connect/reconnect transcript hydration, stale-send/active-turn rejection UX, and token usage in the status bar; remove the header bar |

@@ -90,6 +90,15 @@ def _indent(text: str) -> str:
     return "\n".join(f"  {line}" for line in text.splitlines()) or "  "
 
 
+def _fmt_tokens(count: int) -> str:
+    """Format a token count compactly (842, 12.4k, 1.2M)."""
+    if count < 1000:
+        return str(count)
+    if count < 1_000_000:
+        return f"{count / 1000:.1f}k"
+    return f"{count / 1_000_000:.1f}M"
+
+
 def _message_text(content: Any) -> str:
     """Extract display text from an LLM message content (string or parts list)."""
     if isinstance(content, str):
@@ -468,6 +477,8 @@ class ChatApp(App):
         self._awaiting_chat_list = False
         self._session_count = 0
         self._last_sent_text = ""
+        self._context_tokens = 0
+        self._session_tokens = 0
 
     # ── compose ────────────────────────────────────────────────
 
@@ -611,6 +622,7 @@ class ChatApp(App):
             pass
 
         elif event.event_type == "llm" and event.detail in ("tool_calls", "response_ready"):
+            self._ingest_usage((event.metadata or {}).get("usage"))
             # Unified LLM response event — show thinking content if present
             content = event.content or ""
             if content:
@@ -1063,7 +1075,21 @@ class ChatApp(App):
             queued.display = True
         self.refresh_bindings()
 
+    def _ingest_usage(self, usage: Any) -> None:
+        """Track token usage from an LLM response event."""
+        if not isinstance(usage, dict):
+            return
+        total = usage.get("total_tokens")
+        if isinstance(total, int) and total > 0:
+            self._context_tokens = total
+            self._session_tokens += total
+            self._update_status()
+
     def _set_chat_id(self, chat_id: str) -> None:
+        if chat_id != self._chat_id:
+            # Token counters are per chat.
+            self._context_tokens = 0
+            self._session_tokens = 0
         self._chat_id = chat_id
         self._client.update_chat_id(chat_id)
         self._update_status()
@@ -1081,7 +1107,10 @@ class ChatApp(App):
                 state += f"  ·  {len(self._buffer)} queued"
         else:
             state = "○ ready"
-        return f"  {conn}  ·  Chat: {self._chat_id}  ·  Channel: {self._client.client_id}  ·  {state}"
+        tokens = ""
+        if self._context_tokens:
+            tokens = f"  ·  ctx {_fmt_tokens(self._context_tokens)} · total {_fmt_tokens(self._session_tokens)} tok"
+        return f"  {conn}  ·  Chat: {self._chat_id}  ·  Channel: {self._client.client_id}  ·  {state}{tokens}"
 
     def _update_status(self) -> None:
         self.query_one("#status-bar", Static).update(self._status_text())

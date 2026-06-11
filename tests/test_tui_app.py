@@ -2,8 +2,8 @@ import asyncio
 
 import pytest
 
-from bos.cli.tui_app import ChatApp, CommandResultEvent, PromptHistory, SystemEvent, run_chat_tui
-from bos.protocol import WS_TAKEOVER_CLOSE_REASON, MessageType
+from bos.cli.tui_app import ChatApp, CommandResultEvent, PromptHistory, SystemEvent, TurnEventMessage, run_chat_tui
+from bos.protocol import WS_TAKEOVER_CLOSE_REASON, MessageType, TurnEvent
 
 
 class FakeClient:
@@ -561,6 +561,38 @@ def test_prompt_history_record_resets_navigation():
     # After a submit, navigation starts from the newest entry again.
     assert history.next() is None
     assert history.previous("") == "second"
+
+
+@pytest.mark.asyncio
+async def test_llm_usage_events_update_status_tokens(monkeypatch):
+    client = FakeClient()
+    app = ChatApp(client=client)
+    _fake_widgets(app, monkeypatch)
+    monkeypatch.setattr(app, "_update_status", lambda: None)
+
+    def usage_event(total: int) -> TurnEventMessage:
+        return TurnEventMessage(
+            TurnEvent(
+                event_type="llm",
+                phase="finish",
+                chat_id="chat-1",
+                turn_id="turn-1",
+                detail="response_ready",
+                metadata={"usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": total}},
+            )
+        )
+
+    await app.on_turn_event_message(usage_event(1200))
+    await app.on_turn_event_message(usage_event(1500))
+
+    assert app._context_tokens == 1500
+    assert app._session_tokens == 2700
+    assert "ctx 1.5k · total 2.7k tok" in app._status_text()
+
+    # Token counters are per chat: switching chats resets them.
+    app._set_chat_id("other-chat")
+    assert app._context_tokens == 0
+    assert "tok" not in app._status_text()
 
 
 def test_status_text_uses_current_client_and_chat():
