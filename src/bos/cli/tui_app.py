@@ -178,7 +178,9 @@ class PromptInput(TextArea):
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
-        self.history = PromptHistory()
+        # Not named `history`: TextArea already owns an undo/redo EditHistory
+        # under that attribute.
+        self.prompt_history = PromptHistory()
 
     async def _on_key(self, event: events.Key) -> None:
         if event.key == "enter":
@@ -188,7 +190,7 @@ class PromptInput(TextArea):
             # submitting (AutoComplete sees the key via the message signal,
             # which fires after this dispatch even for stopped events).
             if not self._autocomplete_open():
-                self.history.record(self.text)
+                self.prompt_history.record(self.text)
                 self.post_message(self.Submitted(self, self.text))
             return
         # Ctrl+J works on every terminal (legacy ones transmit it as \n).
@@ -202,7 +204,7 @@ class PromptInput(TextArea):
         # Up/Down on the edge lines cycle prompt history; inside a multiline
         # draft they keep their normal cursor-movement behavior.
         if event.key == "up" and not self._autocomplete_open() and self.cursor_location[0] == 0:
-            if (recalled := self.history.previous(self.text)) is not None:
+            if (recalled := self.prompt_history.previous(self.text)) is not None:
                 event.stop()
                 event.prevent_default()
                 self._replace_text(recalled)
@@ -212,7 +214,7 @@ class PromptInput(TextArea):
             and not self._autocomplete_open()
             and self.cursor_location[0] == self.document.line_count - 1
         ):
-            if (recalled := self.history.next()) is not None:
+            if (recalled := self.prompt_history.next()) is not None:
                 event.stop()
                 event.prevent_default()
                 self._replace_text(recalled)

@@ -2,7 +2,15 @@ import asyncio
 
 import pytest
 
-from bos.cli.tui_app import ChatApp, CommandResultEvent, PromptHistory, SystemEvent, TurnEventMessage, run_chat_tui
+from bos.cli.tui_app import (
+    ChatApp,
+    CommandResultEvent,
+    PromptHistory,
+    PromptInput,
+    SystemEvent,
+    TurnEventMessage,
+    run_chat_tui,
+)
 from bos.protocol import WS_TAKEOVER_CLOSE_REASON, MessageType, TurnEvent
 
 
@@ -16,6 +24,12 @@ class FakeClient:
 
     async def send(self, content, **kwargs):
         self.calls.append({"content": content, **kwargs})
+
+    async def receive(self):
+        await asyncio.Event().wait()
+
+    async def list_actors(self):
+        return {}
 
     def update_chat_id(self, chat_id: str) -> None:
         self.chat_id = chat_id
@@ -521,6 +535,21 @@ async def test_removed_slash_commands_report_unknown(monkeypatch):
         "[yellow]Unknown command: /chats[/]",
         "[yellow]Unknown command: /restart[/]",
     ]
+
+
+@pytest.mark.asyncio
+async def test_app_mounts_and_focuses_prompt_without_crash():
+    """Mount the real widget tree: catches conflicts with Textual internals
+    (e.g. TextArea's own `history` attribute) that widget-level fakes miss."""
+    client = FakeClient()
+    app = ChatApp(client=client)
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        prompt = app.query_one("#prompt", PromptInput)
+        assert app.focused is prompt
+        await pilot.press("h", "i")
+        assert prompt.text == "hi"
 
 
 def test_prompt_history_cycles_and_restores_draft():
