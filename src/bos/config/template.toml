@@ -39,13 +39,14 @@ mail_route = "_default"
 [exts.ep_consolidator._default]
 model = "gemini/gemini-2.5-flash"
 
-# [exts.ep_message_store._default]
+# [exts.ep_chat_store._default]
 # store_dir = "./messages"
 
 # [exts.ep_mail_route._default]
 # store_dir = "./mailboxes"
 
-# [exts.ep_skills_loader._default]
+# Plugin-defined extension points use the pep_ prefix
+# [exts.pep_skills_loader._default]
 # skill_dirs = ["skills"]
 
 # Tool-specific runtime configuration

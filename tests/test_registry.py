@@ -1,10 +1,28 @@
 import pytest
 
-from bos.core.registry import ToolRegistry
+from bos.core.registry import ExtensionPoint, ToolRegistry
+
+
+def test_extension_point_requires_a_name():
+    with pytest.raises(ValueError, match="non-empty name"):
+        ExtensionPoint("")
+
+
+def test_extension_point_public_names_are_unique():
+    point = ExtensionPoint("unique_point_test", "first")
+    assert ExtensionPoint.lookup("unique_point_test") is point
+    with pytest.raises(ValueError, match="Duplicate extension point name"):
+        ExtensionPoint("unique_point_test", "second")
+
+
+def test_extension_point_private_names_skip_the_lookup():
+    ExtensionPoint("_private_point", "first")
+    ExtensionPoint("_private_point", "second")  # repeated instantiation is allowed
+    assert ExtensionPoint.lookup("_private_point") is None
 
 
 def test_tool_registry_allows_runtime_injected_function_arguments():
-    registry = ToolRegistry("test tools")
+    registry = ToolRegistry("_test_tools")
 
     @registry(
         name="EchoWithContext",
@@ -28,7 +46,7 @@ def test_tool_registry_allows_runtime_injected_function_arguments():
 
 @pytest.mark.asyncio
 async def test_tool_registry_invoke_async_auto_serializes_json_results():
-    registry = ToolRegistry("test tools")
+    registry = ToolRegistry("_test_tools")
 
     @registry(
         name="BuildList",
@@ -48,7 +66,7 @@ async def test_tool_registry_invoke_async_auto_serializes_json_results():
 
 
 def test_tool_registry_can_force_result_serialization_mode():
-    registry = ToolRegistry("test tools")
+    registry = ToolRegistry("_test_tools")
 
     @registry(
         name="ForceJson",
@@ -73,7 +91,7 @@ def test_tool_registry_can_force_result_serialization_mode():
 
 
 def test_describe_usage_returns_usage_when_provided():
-    registry = ToolRegistry("test tools")
+    registry = ToolRegistry("_test_tools")
 
     @registry(
         name="MyTool",
@@ -88,7 +106,7 @@ def test_describe_usage_returns_usage_when_provided():
 
 
 def test_describe_usage_falls_back_to_description():
-    registry = ToolRegistry("test tools")
+    registry = ToolRegistry("_test_tools")
 
     @registry(
         name="MyTool",
@@ -102,7 +120,7 @@ def test_describe_usage_falls_back_to_description():
 
 
 def test_build_openai_schema_uses_description_not_usage():
-    registry = ToolRegistry("test tools")
+    registry = ToolRegistry("_test_tools")
 
     @registry(
         name="MyTool",
@@ -122,7 +140,7 @@ def test_build_openai_schema_uses_description_not_usage():
 
 
 def test_describe_still_returns_description():
-    registry = ToolRegistry("test tools")
+    registry = ToolRegistry("_test_tools")
 
     @registry(
         name="MyTool",
@@ -137,7 +155,7 @@ def test_describe_still_returns_description():
 
 
 def test_tool_registry_rejects_unsupported_result_serializer():
-    registry = ToolRegistry("test tools")
+    registry = ToolRegistry("_test_tools")
 
     with pytest.raises(ValueError, match="unsupported result_serializer"):
 

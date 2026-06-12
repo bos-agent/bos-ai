@@ -5,7 +5,7 @@ from pathlib import Path
 
 from bos.core import _read_text
 
-from .plugin import SkillMeta, ep_skills_loader
+from .plugin import SkillMeta, pep_skills_loader
 
 
 def _parse_frontmatter_fields(frontmatter: str) -> dict[str, str]:
@@ -53,7 +53,7 @@ def _parse_frontmatter_fields(frontmatter: str) -> dict[str, str]:
     return fields
 
 
-@ep_skills_loader(name="_default")
+@pep_skills_loader(name="_default")
 class FileSystemSkillsLoader:
     def __init__(self, skill_dirs: Iterable[Path | str] | None = None, bos_dir: str | Path | None = None) -> None:
         import bos.skills

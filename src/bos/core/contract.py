@@ -26,6 +26,7 @@ class Closeable(Protocol):
 
 
 ep_tool = ToolRegistry(
+    name="ep_tool",
     description="""
         Tool. An async function could be invoked by llm.
         On registration, the parameters of the tool whould be provided in jsonschema format.
@@ -48,6 +49,7 @@ ep_tool = ToolRegistry(
 )
 
 ep_provider = ExtensionPoint(
+    name="ep_provider",
     description="""
         LLM provider. An async function that takes messages and returns response:LLMResponse.
         for example:
@@ -104,7 +106,8 @@ class ChatMeta:
 
 
 ep_chat_store = ExtensionPoint(
-    description="Chat store factory. Creates ChatStore implementations for persistence + context assembly."
+    name="ep_chat_store",
+    description="Chat store factory. Creates ChatStore implementations for persistence + context assembly.",
 )
 
 
@@ -160,6 +163,7 @@ class ChatStore(Protocol):
 
 
 ep_consolidator = ExtensionPoint(
+    name="ep_consolidator",
     description="""
         Content consolidator. A factory that creates consolidators implementing the Consolidator protocol.
     """
@@ -172,7 +176,8 @@ class Consolidator(Protocol):
 
 
 ep_turn_interceptor = ExtensionPoint(
-    description="Turn Interceptor. A factory that creates interceptors implementing the TurnInterceptor protocol."
+    name="ep_turn_interceptor",
+    description="Turn Interceptor. A factory that creates interceptors implementing the TurnInterceptor protocol.",
 )
 
 
@@ -203,7 +208,8 @@ class EventSink(Protocol):
 
 
 ep_mail_route = ExtensionPoint(
-    description="MailRoute. Used for message routing between agents. It should implement the MailRoute protocol."
+    name="ep_mail_route",
+    description="MailRoute. Used for message routing between agents. It should implement the MailRoute protocol.",
 )
 
 
@@ -233,7 +239,10 @@ class MailRoute(Protocol):
     async def deliver(self, env: Envelope) -> None: ...
 
 
-ep_channel = ExtensionPoint(description="Channel. Bridges external clients to/from a bound mailbox address.")
+ep_channel = ExtensionPoint(
+    name="ep_channel",
+    description="Channel. Bridges external clients to/from a bound mailbox address.",
+)
 
 
 SettingsT = TypeVar("SettingsT")
@@ -301,7 +310,10 @@ class BaseChannel(Generic[SettingsT]):
 
 # ── BEP 4: Plugin Architecture ─────────────────────────────────────────────
 
-ep_plugin = ExtensionPoint(description="Harness plugin. A class or factory implementing HarnessPlugin.")
+ep_plugin = ExtensionPoint(
+    name="ep_plugin",
+    description="Harness plugin. A class or factory implementing HarnessPlugin.",
+)
 
 
 @dataclass(frozen=True)

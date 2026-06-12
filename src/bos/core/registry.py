@@ -4,7 +4,7 @@ import inspect
 import json
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any, Callable, ClassVar
 
 from ._utils import _apply, _apply_async, _compact, _deep_merge
 
@@ -21,17 +21,49 @@ class Extension:
 
 
 class ExtensionPoint:
+    """Named registry of interchangeable implementations.
+
+    Every extension point requires a unique ``name``. Public names are
+    recorded in a class-level lookup (see :meth:`lookup`) and resolve
+    ``[exts.<name>]`` config sections; a duplicate public name raises at
+    construction time, crashing startup. Names with a leading underscore
+    are private: not configurable, kept out of the lookup, and may be
+    instantiated repeatedly (e.g. per-agent local tool registries).
+
+    Naming convention (not enforced): core extension points defined in
+    ``bos.core.contract`` are named ``ep_<name>``; extension points defined
+    by plugins are named ``pep_<name>`` (plugin extension point) so the two
+    are distinguishable at a glance and in ``[exts]`` config keys.
+    """
+
+    _by_name: ClassVar[dict[str, "ExtensionPoint"]] = {}
+
     def __init__(
         self,
-        description: str,
+        name: str,
+        description: str = "",
         validate: Callable[..., bool] | None = None,
     ) -> None:
+        if not name or not isinstance(name, str):
+            raise ValueError("ExtensionPoint requires a non-empty name")
+        self.name = name
         self.description = description
         self._validate = validate or getattr(self, "default_validate", None)
         self._extensions: dict[str, Extension] = {}
         self.get = self._extensions.get
         self.has = lambda name: name in self._extensions
         self.describe = lambda: {k: v.description for k, v in self._extensions.items()}
+        if not name.startswith("_"):
+            if name in ExtensionPoint._by_name:
+                raise ValueError(
+                    f"Duplicate extension point name `{name}`; extension point names must be unique"
+                )
+            ExtensionPoint._by_name[name] = self
+
+    @classmethod
+    def lookup(cls, name: str) -> "ExtensionPoint | None":
+        """Return the extension point registered under *name*, if any."""
+        return ExtensionPoint._by_name.get(name)
 
     def register(self, ext: Extension) -> None:
         if ext.name in self._extensions:

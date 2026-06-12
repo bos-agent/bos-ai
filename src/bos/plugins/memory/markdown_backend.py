@@ -13,13 +13,13 @@ from pathlib import Path
 
 from bos.core import _flock
 
-from .plugin import ep_memory_backend
+from .plugin import pep_memory_backend
 from .scoped_memory import MemoryEntry
 
 logger = logging.getLogger(__name__)
 
 
-@ep_memory_backend(name="_default")
+@pep_memory_backend(name="_default")
 class MarkdownMemoryBackend:
     """File-based memory store. Maxims in ``maxims/``, memories in ``memories/``."""
 

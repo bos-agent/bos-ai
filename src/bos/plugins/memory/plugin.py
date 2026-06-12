@@ -18,8 +18,11 @@ from bos.core.registry import ExtensionPoint, ToolRegistry
 
 from .scoped_memory import MemoryBackend
 
-ep_memory_backend = ExtensionPoint(
-    description="Memory store implementations (MarkdownMemoryBackend, InMemMemoryExtension, etc.)."
+# Plugin-defined extension points use the `pep_` prefix (plugin extension
+# point) to distinguish them from the core `ep_` points in bos.core.contract.
+pep_memory_backend = ExtensionPoint(
+    name="pep_memory_backend",
+    description="Memory store implementations (MarkdownMemoryBackend, InMemMemoryExtension, etc.).",
 )
 
 if TYPE_CHECKING:
@@ -113,7 +116,7 @@ class MemoryHarnessPlugin:
     def bind(self, config: Mapping[str, Any]) -> AgentPlugin:
         if self._backend is None:
             backend_name = config.get("backend", "_default")
-            backend_ext = ep_memory_backend.get(backend_name)
+            backend_ext = pep_memory_backend.get(backend_name)
             if backend_ext is None:
                 raise ValueError(f"MemoryPlugin: unknown backend {backend_name!r}")
             self._backend = backend_ext.fn(bos_dir=self._services.bos_dir)

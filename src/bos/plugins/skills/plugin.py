@@ -17,8 +17,11 @@ from bos.core.contract import (
 )
 from bos.core.registry import ExtensionPoint, ToolRegistry
 
-ep_skills_loader = ExtensionPoint(
-    description="Skills loader implementations (FileSystemSkillsLoader, etc.)."
+# Plugin-defined extension points use the `pep_` prefix (plugin extension
+# point) to distinguish them from the core `ep_` points in bos.core.contract.
+pep_skills_loader = ExtensionPoint(
+    name="pep_skills_loader",
+    description="Skills loader implementations (FileSystemSkillsLoader, etc.).",
 )
 
 
@@ -74,7 +77,7 @@ class SkillsHarnessPlugin:
         cache_key = _loader_cache_key(config)
         loader_name, skill_dirs = cache_key
         if cache_key not in self._loaders:
-            loader_ext = ep_skills_loader.get(loader_name)
+            loader_ext = pep_skills_loader.get(loader_name)
             if loader_ext is None:
                 raise ValueError(f"SkillsPlugin: unknown loader {loader_name!r}")
             self._loaders[cache_key] = loader_ext.fn(

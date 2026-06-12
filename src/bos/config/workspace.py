@@ -545,15 +545,21 @@ class Workspace:
                 _load_ext_paths(paths=paths)
 
         # 3. Merge EP defaults from [exts]
-        import bos.core as _core
+        from bos.core import ExtensionPoint
 
         if self.config.exts:
             exts_data = self.config.exts.model_dump()
+            # [exts.<key>] resolves through the ExtensionPoint name lookup, so
+            # any registered name works (core EPs use `ep_*`, plugin-defined
+            # ones `pep_*` by convention).
             for ep_key, impl_configs in exts_data.items():
-                if not ep_key.startswith("ep_") or not isinstance(impl_configs, dict):
+                if not isinstance(impl_configs, dict):
                     continue
-                ep = getattr(_core, ep_key, None)
+                ep = ExtensionPoint.lookup(ep_key)
                 if ep is None:
+                    logging.getLogger(__name__).warning(
+                        f"[exts.{ep_key}] does not match any registered extension point; ignored"
+                    )
                     continue
                 for impl_name, cfg in impl_configs.items():
                     if isinstance(cfg, dict):

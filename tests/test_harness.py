@@ -31,7 +31,7 @@ class _MockSubagentRuntime:
 
 
 def test_react_agent_local_tools_describe_ask_subagent(caplog):
-    local_tools = ToolRegistry("test tools")
+    local_tools = ToolRegistry("_test_tools")
     role = f"ask_subagent_tool_{uuid.uuid4().hex}"
 
     try:
@@ -64,7 +64,7 @@ async def test_subagent_plugin_hides_prompt_and_tool_when_no_subagents():
     AgentRegistry._registry.clear()
     try:
         AgentRegistry.register(name="_default", description="Default agent", tools=[])
-        local_tools = ToolRegistry("test tools")
+        local_tools = ToolRegistry("_test_tools")
         subagent = SubagentAgentPlugin(_MockSubagentRuntime(), enabled=None, disabled=[])
 
         agent = create_test_agent(local_tools=local_tools, plugins=[subagent])
@@ -628,7 +628,7 @@ async def test_plugins_prompt_overrides_plugin_section():
 
 @pytest.mark.asyncio
 async def test_prompt_sections_render_first_50_items_and_warn(caplog):
-    local_tools = ToolRegistry("many test tools")
+    local_tools = ToolRegistry("_many_test_tools")
     tool_names = [f"Tool{i:03}" for i in range(51)]
 
     for i, tool_name in enumerate(tool_names):
@@ -689,7 +689,7 @@ async def test_prompt_sections_render_first_50_items_and_warn(caplog):
 
 @pytest.mark.asyncio
 async def test_tools_usage_overrides_tool_description_in_prompt():
-    local_tools = ToolRegistry("test tools")
+    local_tools = ToolRegistry("_test_tools")
 
     @local_tools(
         name="FetchURL",
@@ -722,7 +722,7 @@ async def test_tools_usage_overrides_tool_description_in_prompt():
 
 @pytest.mark.asyncio
 async def test_tools_usage_default_none_keeps_original_descriptions():
-    local_tools = ToolRegistry("test tools")
+    local_tools = ToolRegistry("_test_tools")
 
     @local_tools(
         name="FetchURL",
@@ -741,7 +741,7 @@ async def test_tools_usage_default_none_keeps_original_descriptions():
 
 @pytest.mark.asyncio
 async def test_tools_usage_empty_dict_keeps_all_original_descriptions():
-    local_tools = ToolRegistry("test tools")
+    local_tools = ToolRegistry("_test_tools")
 
     @local_tools(
         name="FetchURL",
@@ -786,7 +786,7 @@ async def test_react_agent_first_turn_passes_only_user_text():
 async def test_react_agent_injects_runtime_tool_context():
     suffix = uuid.uuid4().hex
     provider_name = f"test_tool_context_provider_{suffix}"
-    tools = ToolRegistry("test tools")
+    tools = ToolRegistry("_test_tools")
 
     @tools(
         name="EchoWithContext",
@@ -835,7 +835,7 @@ async def test_react_agent_injects_runtime_tool_context():
 async def test_parallel_safe_tool_calls_run_concurrently_in_result_order():
     suffix = uuid.uuid4().hex
     provider_name = f"test_parallel_safe_tools_{suffix}"
-    tools = ToolRegistry("parallel test tools")
+    tools = ToolRegistry("_parallel_test_tools")
     first_started = asyncio.Event()
     second_started = asyncio.Event()
 
@@ -928,7 +928,7 @@ async def test_react_agent_persists_sanitized_abort_on_cancellation():
 @pytest.mark.asyncio
 async def test_react_agent_abort_persistence_drops_incomplete_tool_call_state():
     store = InMemChatStore()
-    tools = ToolRegistry("test tools")
+    tools = ToolRegistry("_test_tools")
     tool_started = asyncio.Event()
 
     @tools(
@@ -1003,7 +1003,7 @@ async def test_react_agent_cancellation_after_final_response_persists_answer():
 async def test_harness_passes_tool_config_to_agent_tools(tmp_path):
     suffix = uuid.uuid4().hex
     provider_name = f"test_tool_config_provider_{suffix}"
-    tools = ToolRegistry("test tools")
+    tools = ToolRegistry("_test_tools")
 
     @tools(
         name="EchoWithConfig",

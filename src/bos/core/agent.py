@@ -318,9 +318,9 @@ class Agent:
         self._llm = llm or LLMClient()
         self._chat_store = chat_store
         self._consolidator = consolidator
-        self._local_tools = local_tools or ToolRegistry("Agent-scoped local tools.")
         self._kind = kind
         self._name = agent_name or kind
+        self._local_tools = local_tools or ToolRegistry(f"_local_tools:{self._name}", "Agent-scoped local tools.")
         self._plugins = plugins
         self._plugins_prompt = plugins_prompt or {}
         self._current_context: TurnContext | None = None
