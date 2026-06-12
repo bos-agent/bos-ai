@@ -1,0 +1,50 @@
+# ${project_name}
+
+${purpose}
+
+A [BOS](https://github.com/bos-agent/bos-ai) extension package (archetype: `${archetype}`):
+an installable Python package whose tools register with the BOS runtime through the
+`bos.exts` entry point — usable in this project and in any project that installs it.
+
+## Layout
+
+| Path | Purpose |
+|---|---|
+| `.bos/config.toml` | Project configuration: agents, plugins, runtime. |
+| `.bos/agents/` | Agent definitions (`.md` frontmatter + system prompt, or `.toml`). |
+| `.bos/skills/` | Reusable instruction packs the agent can load on demand. |
+| `.bos/.env` | Secrets (API keys, tokens). Gitignored — never commit it. |
+| `src/${pkg_name}/tools.py` | Your extensions. The `bos.exts` entry point in `pyproject.toml` points here. |
+| `tests/` | Package tests (`uv run pytest`). |
+
+## Run
+
+Always run BOS through the project venv so the package is importable
+(a globally installed `boscli` will not see it):
+
+```bash
+uv run boscli gateway start   # uv syncs the venv (bos-ai + this package) on first run
+uv run boscli tui             # attach the terminal UI
+```
+
+First prompt to try:
+
+> ${first_prompt}
+
+## Develop
+
+```bash
+uv run pytest                        # test the package
+uv run boscli project doctor         # check config, env, and that the package imports
+uv run boscli project add agent <n>  # add a specialist agent
+```
+
+## Publish
+
+```bash
+uv build
+uv publish
+```
+
+Any BOS project that installs the published package gets its extensions
+automatically via the `bos.exts` entry point.

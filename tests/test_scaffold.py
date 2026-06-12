@@ -1,5 +1,8 @@
 """Scaffold engine tests (BEP 9): every archetype must produce a config that loads."""
 
+import importlib
+import tomllib
+
 import pytest
 
 from bos.cli.commands.project import _build_context, _fallback_specialists, _specialist_files
@@ -18,7 +21,7 @@ def _scaffold(tmp_path, archetype, *, dotbos=False, model="anthropic/claude-sonn
     )
 
 
-@pytest.mark.parametrize("archetype", ARCHETYPES)
+@pytest.mark.parametrize("archetype", [a for a in ARCHETYPES if a != "package"])
 def test_archetype_scaffold_loads_and_resolves_agents(tmp_path, archetype):
     """Each archetype validates against the config schema and its agent specs load."""
     result = _scaffold(tmp_path, archetype)
@@ -62,6 +65,37 @@ def test_service_scaffold_requires_api_key_env(tmp_path):
 
     ws = Workspace.from_discovery(tmp_path)
     assert ws.config.runtime.gateway.api_key_env == "BOS_GATEWAY_API_KEY"
+
+
+def test_package_scaffold_layout_and_tool_registration(tmp_path, monkeypatch):
+    """BEP 9 CI bar for the package archetype: the entry-point target module
+    imports from src/ and registers the example tool — no uv, no venv, no LLM."""
+    specialists = _fallback_specialists(PURPOSE)
+    context = _build_context("my-pkg-proj", PURPOSE, "package", None, True, specialists)
+    context["pkg_name"] = "my_pkg_proj"
+    context["dist_name"] = "my-pkg-proj"
+    scaffold_workspace(tmp_path, "package", context, dotbos=True, env_content="X=1\n")
+
+    assert (tmp_path / "pyproject.toml").is_file()
+    assert (tmp_path / "src" / "my_pkg_proj" / "tools.py").is_file()
+    assert (tmp_path / "tests" / "test_tools.py").is_file()
+    assert (tmp_path / ".bos" / "config.toml").is_file()
+    assert not (tmp_path / ".bos" / "extensions").exists()  # the package IS the extension
+
+    ws = Workspace.from_discovery(tmp_path)
+    ws.resolve_agents()
+    assert "main" in ws.config.agents
+    assert ws.config.platform.extensions == ["bos.exts"]
+
+    pyproject = tomllib.loads((tmp_path / "pyproject.toml").read_text(encoding="utf-8"))
+    (target,) = pyproject["project"]["entry-points"]["bos.exts"].values()
+    assert target == "my_pkg_proj.tools"
+
+    from bos.core import ep_tool
+
+    monkeypatch.syspath_prepend(str(tmp_path / "src"))
+    importlib.import_module(target)
+    assert ep_tool.has("WordCount")
 
 
 def test_scaffold_dotbos_layout(tmp_path):

@@ -8,6 +8,7 @@ import os
 import re
 import secrets
 import subprocess
+import tomllib
 from pathlib import Path
 
 import click
@@ -67,8 +68,11 @@ def project():
 @click.option("--git/--no-git", "init_git", default=None, help="Run git init and create a .gitignore.")
 @click.option("--no-probe", is_flag=True, default=False, help="Skip the live model credential check.")
 @click.option("--no-generate", is_flag=True, default=False, help="Skip LLM generation of team specialists.")
+@click.option("--name", "pkg_name_opt", default=None, help="Package name (package archetype; default: dir name).")
 @click.pass_context
-def init(ctx, directory, archetype, model, purpose, yes, minimal, dotbos, init_git, no_probe, no_generate):
+def init(
+    ctx, directory, archetype, model, purpose, yes, minimal, dotbos, init_git, no_probe, no_generate, pkg_name_opt
+):
     """Initialize a BOS project with a guided, runnable baseline."""
     workspace_path = Path(directory).expanduser().resolve()
 
@@ -89,6 +93,11 @@ def init(ctx, directory, archetype, model, purpose, yes, minimal, dotbos, init_g
     if archetype is None:
         archetype = "assistant" if yes else _prompt_archetype()
 
+    pkg_name = None
+    if archetype == "package":
+        dotbos = True  # the project root belongs to the Python package; config lives in .bos/
+        pkg_name = _normalize_pkg_name(pkg_name_opt or project_name)
+
     model, env_pairs = _provider_step(ctx, model, yes)
 
     env_pairs = dict(env_pairs)
@@ -99,6 +108,9 @@ def init(ctx, directory, archetype, model, purpose, yes, minimal, dotbos, init_g
 
     specialists = _fallback_specialists(purpose)
     context = _build_context(project_name, purpose, archetype, model, dotbos, specialists)
+    if pkg_name:
+        context["pkg_name"] = pkg_name
+        context["dist_name"] = pkg_name.replace("_", "-")
     agent_files = _specialist_files(specialists, purpose) if archetype == "team" else {}
 
     try:
@@ -147,8 +159,10 @@ def init(ctx, directory, archetype, model, purpose, yes, minimal, dotbos, init_g
 
     click.echo("")
     click.echo("Next steps:")
-    click.echo("  boscli gateway start")
-    click.echo("  boscli tui")
+    # The package archetype must run through the project venv so the package is importable.
+    prefix = "uv run " if archetype == "package" else ""
+    click.echo(f"  {prefix}boscli gateway start")
+    click.echo(f"  {prefix}boscli tui")
     if model:
         click.echo(f'  Try: "{context["first_prompt"]}"')
     else:
@@ -162,6 +176,7 @@ def _prompt_archetype() -> str:
         "team": "a coordinator agent that delegates to specialists",
         "service": "headless HTTP gateway, API-first",
         "telegram-bot": "an agent wired to a Telegram channel",
+        "package": "an installable Python extension package (tools, channels, providers)",
     }
     for i, name in enumerate(ARCHETYPES, start=1):
         click.echo(f"  {i}. {name} — {descriptions[name]}")
@@ -276,6 +291,13 @@ def _top_level_name(path: Path, workspace: Path) -> str:
     rel = path.relative_to(workspace)
     head = rel.parts[0]
     return f"{head}/" if len(rel.parts) > 1 else head
+
+
+def _normalize_pkg_name(raw: str) -> str:
+    name = re.sub(r"[^0-9a-zA-Z]+", "_", raw).strip("_").lower()
+    if not name.isidentifier() or name[0].isdigit():
+        raise click.ClickException(f"Cannot derive a Python package name from {raw!r} — pass one with --name.")
+    return name
 
 
 def _inside_git_repo(workspace: Path) -> bool:
@@ -599,6 +621,7 @@ def doctor(do_probe: bool):
     results.append(("ok", "config", f"{ws.config_file.name} parses and validates"))
 
     results.append(_check_paths(ws))
+    results.append(_check_extension_imports(ws))
     results.append(_check_agents(ws))
     env_map = _effective_env(ws)
     results.extend(_check_env(ws, env_map))
@@ -636,6 +659,38 @@ def _check_paths(ws: Workspace) -> tuple[str, str, str]:
     if missing:
         return ("fail", "paths", f"missing: {', '.join(missing)}")
     return ("ok", "paths", "agent_dirs, extensions, envfile paths exist")
+
+
+def _importable(module: str) -> bool:
+    import importlib.util
+
+    try:
+        return importlib.util.find_spec(module) is not None
+    except (ImportError, ModuleNotFoundError, ValueError):
+        return False
+
+
+def _check_extension_imports(ws: Workspace) -> tuple[str, str, str]:
+    """Module entries in [platform.extensions] and the project's own bos.exts
+    entry points must be importable by this interpreter (BEP 9, package archetype)."""
+    missing = [e for e in ws.config.platform.extensions if not e.startswith((".", "/", "~")) and not _importable(e)]
+
+    pyproject = ws.workspace / "pyproject.toml"
+    if pyproject.is_file():
+        try:
+            data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+            targets = data.get("project", {}).get("entry-points", {}).get("bos.exts", {}).values()
+        except (tomllib.TOMLDecodeError, OSError):
+            targets = []
+        for target in targets:
+            module = str(target).split(":", 1)[0]
+            if not _importable(module):
+                missing.append(f"{module} (bos.exts entry point)")
+
+    if missing:
+        detail = "not importable: " + ", ".join(missing) + " — run via `uv run boscli …` so the project venv is used"
+        return ("fail", "imports", detail)
+    return ("ok", "imports", "extension modules import")
 
 
 def _check_agents(ws: Workspace) -> tuple[str, str, str]:

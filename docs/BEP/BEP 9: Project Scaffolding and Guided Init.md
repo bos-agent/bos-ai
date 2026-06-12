@@ -1,6 +1,6 @@
 # BEP 9: Project Scaffolding and Guided Init
 
-Status: **accepted — implemented** (reconciled 2026-06-11); the `package` archetype and dynamic gateway ports accepted 2026-06-12, `package` pending implementation.
+Status: **accepted — implemented** (reconciled 2026-06-11; `package` archetype and dynamic gateway ports implemented 2026-06-12).
 
 ---
 
@@ -329,3 +329,4 @@ Decisions from the 2026-06-11 review (details integrated into the sections above
 | 2026-06-11 | Implementation reconciliation | Implemented: `cli/scaffold/` engine + 4 archetypes, `project init/add/doctor`, banner, init removal, tomlkit dependency; documented generation replace-after-probe mechanics, banner call site, snake_case tool filenames, git default |
 | 2026-06-12 | Dynamic gateway ports | All archetype configs (and the reference template) set `[runtime.gateway] port = 0` — system-assigned, discovered via `gateway.state`; `service` documents pinning a fixed port |
 | 2026-06-12 | `package` archetype accepted | Installable Python package scaffold for extension authors: `bos.exts` entry-point wiring as primary, templated `pyproject.toml` (no `uv init` dependency), example tool inside the package, `uv run boscli` caveat + doctor import check; pending implementation |
+| 2026-06-12 | `package` implementation | Implemented as designed (templates, `--name`, implied dotbos, uv-run next steps, doctor `imports` check covering `[platform.extensions]` modules and project `bos.exts` entry points); verified end-to-end in a synced uv venv. CI bar test uses `importlib.import_module` on the entry-point target (sys.path-prepended src/) — equivalent to `ep.load()` |

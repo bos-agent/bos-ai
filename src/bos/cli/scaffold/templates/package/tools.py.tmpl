@@ -1,0 +1,22 @@
+"""BOS extensions registered by this package.
+
+This module is the `bos.exts` entry-point target declared in pyproject.toml:
+importing it registers every decorator below with the BOS runtime. Add more
+@ep_tool functions here, or grow into @ep_channel / @ep_provider / stores —
+anything in bos.core's extension points.
+"""
+
+from bos.core import ep_tool
+
+
+@ep_tool(
+    name="WordCount",
+    description="Count the words in a text.",
+    parameters={
+        "type": "object",
+        "properties": {"text": {"type": "string", "description": "Text to count."}},
+        "required": ["text"],
+    },
+)
+async def word_count(text: str) -> str:
+    return f"{len(text.split())} words"

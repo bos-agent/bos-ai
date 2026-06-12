@@ -1,0 +1,49 @@
+# ${project_name} — BOS project configuration (package archetype).
+# Full commented reference: `boscli project init --minimal` in an empty directory.
+# purpose: ${purpose_comment}
+#
+# This project is an installable Python package (src/${pkg_name}/). Its
+# extensions register through the `bos.exts` entry point declared in
+# pyproject.toml, so they load automatically — no extensions list edit needed.
+# IMPORTANT: run BOS through the project venv so the package is importable:
+#   uv run boscli gateway start
+
+[platform]
+envfile = ".env"
+extensions = ["bos.exts"]
+# Zero-packaging alternative to the entry point: list the module explicitly.
+# extensions = ["bos.exts", "${pkg_name}"]
+# .toml / .md files under ./agents define named agents (filename stem = agent name).
+agent_dirs = ["./agents"]
+
+[agent.defaults]
+${model_line}
+
+[agent.defaults.tools]
+enabled = ["*"]
+
+[agent.defaults.plugins]
+enabled = ["*"]
+
+[agents.main]
+description = "Main agent for ${project_name}"
+system_prompt = """
+You are the main agent of this project.
+
+Project purpose: ${purpose_toml}
+
+Help the user accomplish this purpose. Use the available tools, skills, and
+memory; keep answers concrete and grounded in what you can verify.
+"""
+
+[runtime]
+location = "process"
+default_actor = "main"
+
+[runtime.gateway]
+# 0 = let the system assign a free port; clients discover it via gateway.state.
+port = 0
+
+[runtime.actors.main]
+agent = "main"
+display_name = "Main"

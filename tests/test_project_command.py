@@ -87,6 +87,60 @@ def test_project_init_wizard_team_with_skipped_model(tmp_path, monkeypatch):
     assert binding["enabled"] == ["researcher", "writer"]
 
 
+def test_project_init_package_archetype(tmp_path, monkeypatch):
+    monkeypatch.delenv("BOS_CONFIG", raising=False)
+    target = tmp_path / "my-weather-tools"
+    target.mkdir()
+    result = _invoke(["project", "init", str(target), "--yes", "--no-git", "--archetype", "package"])
+
+    assert result.exit_code == 0, result.output
+    # dotbos is implied: the root belongs to the Python package
+    assert (target / ".bos" / "config.toml").is_file()
+    assert not (target / "bos.toml").exists()
+    assert (target / "src" / "my_weather_tools" / "tools.py").is_file()
+    pyproject = tomllib.loads((target / "pyproject.toml").read_text(encoding="utf-8"))
+    assert pyproject["project"]["name"] == "my-weather-tools"
+    assert pyproject["project"]["entry-points"]["bos.exts"] == {"my_weather_tools": "my_weather_tools.tools"}
+    assert "uv run boscli gateway start" in result.output
+
+
+def test_project_init_package_name_override(tmp_path, monkeypatch):
+    monkeypatch.delenv("BOS_CONFIG", raising=False)
+    result = _invoke(
+        ["project", "init", str(tmp_path), "--yes", "--no-git", "--archetype", "package", "--name", "CoolTools"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert (tmp_path / "src" / "cooltools" / "tools.py").is_file()
+
+
+def test_project_doctor_package_flags_uninstalled_entry_point(tmp_path, monkeypatch):
+    monkeypatch.delenv("BOS_CONFIG", raising=False)
+    target = tmp_path / "pkgproj"
+    target.mkdir()
+    _invoke(["project", "init", str(target), "--yes", "--no-git", "--archetype", "package"])
+    monkeypatch.chdir(target)
+
+    result = _invoke(["project", "doctor"])
+
+    # the package is not installed in the test interpreter — doctor must say so
+    assert result.exit_code == 1
+    assert "bos.exts entry point" in result.output
+    assert "uv run boscli" in result.output
+
+
+def test_normalize_pkg_name():
+    from bos.cli.commands.project import _normalize_pkg_name
+
+    assert _normalize_pkg_name("my-agent") == "my_agent"
+    assert _normalize_pkg_name("My Weather.Tools") == "my_weather_tools"
+    import click
+    import pytest
+
+    with pytest.raises(click.ClickException):
+        _normalize_pkg_name("123")
+
+
 def test_project_init_with_model_writes_env_placeholder(tmp_path, monkeypatch):
     monkeypatch.delenv("BOS_CONFIG", raising=False)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)

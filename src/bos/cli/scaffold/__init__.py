@@ -17,7 +17,7 @@ from bos.config.workspace import _find_discovered_config
 
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
 
-ARCHETYPES: tuple[str, ...] = ("assistant", "team", "service", "telegram-bot")
+ARCHETYPES: tuple[str, ...] = ("assistant", "team", "service", "telegram-bot", "package")
 
 
 def render_template(relpath: str, context: dict[str, str] | None = None) -> str:
@@ -92,13 +92,26 @@ def scaffold_workspace(
         path.write_text(content, encoding="utf-8")
         result.written.append(path)
 
+    readme_template = f"{archetype}/README.md.tmpl"
+    if not (_TEMPLATES_DIR / readme_template).is_file():
+        readme_template = "_shared/README.md.tmpl"
+
     try:
         write(config_file, config_text)
-        write(workspace / "README.md", render_template("_shared/README.md.tmpl", context))
+        write(workspace / "README.md", render_template(readme_template, context))
         write(bos_dir / ".env", env_content)
         if not (workspace / ".gitignore").exists():
             write(workspace / ".gitignore", render_template("_shared/gitignore.tmpl"))
-        write(bos_dir / "extensions" / "project_tools.py", render_template("_shared/project_tools.py.tmpl"))
+        if archetype == "package":
+            # The package *is* the extension: the example tool lives inside it
+            # (registered via the bos.exts entry point), not in ./extensions.
+            pkg_name = context["pkg_name"]
+            write(workspace / "pyproject.toml", render_template("package/pyproject.toml.tmpl", context))
+            write(workspace / "src" / pkg_name / "__init__.py", render_template("package/__init__.py.tmpl", context))
+            write(workspace / "src" / pkg_name / "tools.py", render_template("package/tools.py.tmpl", context))
+            write(workspace / "tests" / "test_tools.py", render_template("package/test_tools.py.tmpl", context))
+        else:
+            write(bos_dir / "extensions" / "project_tools.py", render_template("_shared/project_tools.py.tmpl"))
         write(bos_dir / "skills" / "example-skill" / "SKILL.md", render_template("_shared/skill.md.tmpl"))
         agents_dir = bos_dir / "agents"
         agents_dir.mkdir(parents=True, exist_ok=True)
