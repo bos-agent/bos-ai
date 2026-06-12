@@ -1,0 +1,17 @@
+You are helping scaffold a BOS multi-agent project.
+
+Project purpose: ${purpose}
+
+Design exactly two specialist sub-agents that cover complementary parts of this
+purpose. Respond with ONLY a JSON array of exactly two objects — no prose, no
+code fences. Each object has exactly these keys:
+
+  "name": short kebab-case identifier (lowercase letters, digits, dashes; starts
+          with a letter; at most 30 characters; not "main")
+  "description": one line telling a coordinator agent when to delegate to this
+                 specialist
+  "system_prompt": a focused system prompt of 3-6 sentences for the specialist;
+                   describe its expertise, working style, and output expectations;
+                   do not mention specific tool names
+
+The two names must be different.

@@ -35,13 +35,22 @@ Or if you have uv installed:
 uvx boscli ask "how are you"
 ```
 
-## Gateway Setup
+## Project Setup
 
 ```bash
 mkdir my-agent && cd my-agent
-boscli init          # creates .bos/config.toml
+boscli project init  # guided setup: purpose, topology, model — writes a runnable baseline
 boscli gateway start # start the agent runtime
 boscli tui           # connect the terminal UI
+```
+
+Grow the project as you go:
+
+```bash
+boscli project add agent <name>      # add a specialist agent
+boscli project add tool <Name>       # add a custom tool stub
+boscli project add channel telegram  # wire a Telegram bot
+boscli project doctor                # check config, paths, env, credentials
 ```
 
 ## Docs

@@ -1,0 +1,47 @@
+# ${project_name} — BOS project configuration (telegram-bot archetype).
+# Full commented reference: `boscli project init --minimal` in an empty directory.
+# purpose: ${purpose_comment}
+
+[platform]
+envfile = ".env"
+# Python files under ./extensions are scanned for @ep_tool / @ep_channel / … registrations.
+extensions = ["bos.exts", "./extensions"]
+# .toml / .md files under ./agents define named agents (filename stem = agent name).
+agent_dirs = ["./agents"]
+
+[agent.defaults]
+${model_line}
+
+[agent.defaults.tools]
+enabled = ["*"]
+
+[agent.defaults.plugins]
+enabled = ["*"]
+
+[agents.main]
+description = "Main agent for ${project_name}"
+system_prompt = """
+You are the main agent of this project, reachable via Telegram.
+
+Project purpose: ${purpose_toml}
+
+Replies are read on a phone: keep them short, lead with the answer, and avoid
+heavy formatting.
+"""
+
+[runtime]
+location = "process"
+default_actor = "main"
+
+[runtime.actors.main]
+agent = "main"
+display_name = "Main"
+
+# Telegram bot wiring. Put the bot token in .env as TELEGRAM_BOT_TOKEN
+# (create a bot and get a token from @BotFather).
+[[runtime.channels]]
+type = "TelegramChannel"
+channel_id = "telegram:main"
+display_name = "Telegram"
+target_actor = "main"
+settings = { token_env = "TELEGRAM_BOT_TOKEN" }

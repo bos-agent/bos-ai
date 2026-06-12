@@ -1,0 +1,21 @@
+"""Project-local tools.
+
+Any function decorated with @ep_tool in this directory is auto-discovered on
+startup via [platform.extensions] = [..., "./extensions"] in the project config.
+The returned string is what the agent sees as the tool result.
+"""
+
+from bos.core import ep_tool
+
+
+@ep_tool(
+    name="WordCount",
+    description="Count the words in a text.",
+    parameters={
+        "type": "object",
+        "properties": {"text": {"type": "string", "description": "Text to count."}},
+        "required": ["text"],
+    },
+)
+async def word_count(text: str) -> str:
+    return f"{len(text.split())} words"

@@ -16,7 +16,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```
 src/bos/
-  cli/          - Click CLI entrypoints (boscli init, start, stop, tui, auth)
+  cli/          - Click CLI entrypoints (boscli project, gateway, ask, tui, auth)
+                  and the project scaffolding engine (cli/scaffold/, BEP 9)
   config/       - Workspace discovery, TOML config loading, agent resolution
   core/         - Runtime primitives: Agent, AgentActor, AgentHarness,
                   ExtensionPoint, ToolRegistry, contracts, LLM client
