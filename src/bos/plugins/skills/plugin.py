@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 from xml.sax.saxutils import escape
@@ -49,6 +49,33 @@ def _loader_cache_key(config: Mapping[str, Any]) -> tuple[str, tuple[str, ...]]:
 
 if TYPE_CHECKING:
     from bos.core.agent import TurnContext
+    from bos.core.contract import ToolContext
+
+
+@dataclass(frozen=True)
+class _SkillTestRuntime:
+    """Harness services captured at bind time so TestSkill can build throwaway agents."""
+
+    llm: Any
+    consolidator: Any
+    workspace: str
+    loader_factory: Callable[[], Any]
+    test_tools: Any = "*"  # "*" (all tools) or an explicit tool-name list
+
+
+class _RecordingLoader:
+    """Skills-loader wrapper that records load_skill calls (TestSkill's triggering signal)."""
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+        self.loaded: list[str] = []
+
+    async def load_skill(self, name: str) -> str:
+        self.loaded.append(name)
+        return await self._inner.load_skill(name)
+
+    async def search_skills(self, query: str | None = None) -> dict[str, SkillMeta]:
+        return await self._inner.search_skills(query)
 
 
 @ep_plugin(name="SkillsPlugin")
@@ -64,6 +91,7 @@ class SkillsHarnessPlugin:
             "exclude": [],
             "loader": "_default",
             "preload": [],
+            "test_tools": "*",
         }
 
     async def setup(self, services: PluginServices) -> None:
@@ -83,14 +111,18 @@ class SkillsHarnessPlugin:
             not isinstance(preload, list) or not all(isinstance(p, str) for p in preload)
         ):
             raise TypeError("SkillsPlugin: 'preload' must be a list of skill names")
+        test_tools = config.get("test_tools")
+        if test_tools is not None and test_tools != "*":
+            if not isinstance(test_tools, list) or not all(isinstance(t, str) for t in test_tools):
+                raise TypeError('SkillsPlugin: \'test_tools\' must be "*" or a list of tool names')
 
     def bind(self, config: Mapping[str, Any]) -> AgentPlugin:
         cache_key = _loader_cache_key(config)
         loader_name, skill_dirs = cache_key
+        loader_ext = pep_skills_loader.get(loader_name)
+        if loader_ext is None:
+            raise ValueError(f"SkillsPlugin: unknown loader {loader_name!r}")
         if cache_key not in self._loaders:
-            loader_ext = pep_skills_loader.get(loader_name)
-            if loader_ext is None:
-                raise ValueError(f"SkillsPlugin: unknown loader {loader_name!r}")
             self._loaders[cache_key] = loader_ext.fn(
                 bos_dir=self._services.bos_dir,
                 skill_dirs=list(skill_dirs),
@@ -100,7 +132,19 @@ class SkillsHarnessPlugin:
         exclude = config.get("exclude", [])
         if isinstance(allow, str) and allow == "*":
             allow = None
-        return SkillsAgentPlugin(loader, allow, exclude, preload=config.get("preload", []))
+        services = self._services
+        test_runtime = _SkillTestRuntime(
+            llm=services.llm,
+            consolidator=services.consolidator,
+            workspace=str(services.workspace),
+            # A fresh loader per test run so a just-written skill is visible
+            # immediately, bypassing the shared loader's metadata cache.
+            loader_factory=lambda: loader_ext.fn(bos_dir=services.bos_dir, skill_dirs=list(skill_dirs)),
+            test_tools=config.get("test_tools", "*"),
+        )
+        return SkillsAgentPlugin(
+            loader, allow, exclude, preload=config.get("preload", []), test_runtime=test_runtime
+        )
 
     async def teardown(self) -> None:
         from bos.core._utils import _aclose
@@ -122,6 +166,21 @@ Guidelines:
 - Load only relevant skills.
 - Load the full skill before relying on skill-specific procedures, scripts, templates, or assets.
 - Treat skill instructions as task-specific operating guidance alongside repository instructions.""",
+    "TestSkill": """Run a task against an isolated throwaway agent with exactly one skill enabled.
+
+Use while creating or improving a skill, to check two things at once: whether the skill triggers
+(the test agent decides to load it from the description alone) and whether following its body
+produces the right result. The run is fully isolated — in-memory chat state, a fresh scan of the
+skill directories (a just-written skill is visible immediately), no change to project config,
+and no interaction with the running gateway or real chat history.
+
+Guidelines:
+- Phrase task as a realistic user prompt; do not name the skill in it, or the triggering check
+  proves nothing.
+- Run 2-3 differently phrased tasks before judging the skill.
+- A 'not triggered' result means the description needs work; a wrong response means the body does.
+- The test agent sees only the skill under test, so this cannot detect a description that loses
+  to a competing skill — do a final end-to-end check through the real agent for that.""",
 }
 
 _SKILLS_PROMPT_SECTION = """<skills_workflow>
@@ -144,11 +203,13 @@ class SkillsAgentPlugin:
         allow: list[str] | str | None,
         exclude: list[str],
         preload: Sequence[str] = (),
+        test_runtime: _SkillTestRuntime | None = None,
     ) -> None:
         self._loader = loader
         self._allow = allow
         self._exclude = exclude
         self._preload = tuple(preload)
+        self._test_runtime = test_runtime
 
     @property
     def name(self) -> str:
@@ -176,6 +237,84 @@ class SkillsAgentPlugin:
                 return await loader.load_skill(name)
             except Exception as ex:
                 return f"(Failed to load skill '{name}': {ex}.)"
+
+        if self._test_runtime is not None:
+            self._register_test_tool(registry, self._test_runtime)
+
+    def _register_test_tool(self, registry: ToolRegistry, runtime: _SkillTestRuntime) -> None:
+        @registry(
+            name="TestSkill",
+            description=(
+                "Test a skill in isolation: run a task on a throwaway agent that has only "
+                "that skill enabled, and report whether it triggered and what it produced."
+            ),
+            usage=_SKILLS_TOOL_USAGE["TestSkill"],
+            parameters={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Skill name (its directory name)."},
+                    "task": {
+                        "type": "string",
+                        "description": "Realistic user prompt to run; must not name the skill.",
+                    },
+                },
+                "required": ["name", "task"],
+            },
+        )
+        async def test_skill(name: str, task: str, context: ToolContext | None = None) -> str:
+            import uuid
+
+            from bos.core import AgentRegistry
+            from bos.core.agent import Agent
+            from bos.extensions.chat_stores.in_memory import InMemChatStore
+
+            loader = _RecordingLoader(runtime.loader_factory())
+            try:
+                metas = await loader.search_skills()
+            except Exception as ex:
+                return f"(Skill discovery failed: {ex}.)"
+            if name not in metas:
+                listing = ", ".join(sorted(metas)) or "none"
+                return f"(Skill '{name}' not found. Discovered skills: {listing}.)"
+
+            # Inherit the calling agent's model when it is resolvable from the
+            # registry; otherwise fall back to the LLM client default (BOS_MODEL).
+            model = AgentRegistry.get_defaults(context.agent_name).get("model") if context else None
+
+            test_tools = runtime.test_tools
+            tools = None if test_tools == "*" else sorted(set(test_tools) | {"LoadSkill"})
+
+            # Conceptually a subagent run, but built directly: the harness
+            # subagent path pins the shared chat store and cached skills
+            # loader, and gives no signal on whether LoadSkill was called.
+            test_agent = Agent(
+                kind="_skill_test",
+                agent_name=f"skill-test:{name}",
+                system_prompt=(
+                    "You are a general-purpose assistant. Handle the user's task as you "
+                    "normally would, using the tools and skills available to you."
+                ),
+                chat_store=InMemChatStore(),
+                consolidator=runtime.consolidator,
+                llm=runtime.llm,
+                model=model,
+                tools=tools,
+                plugins=[SkillsAgentPlugin(loader, allow=[name], exclude=[])],
+                max_iterations=30,
+                workspace=runtime.workspace,
+            )
+            try:
+                response = await test_agent.ask(f"skill-test-{uuid.uuid4().hex}", task)
+            except Exception as ex:
+                return f"(Skill test run failed: {ex}.)"
+
+            triggered = name in loader.loaded
+            verdict = "yes" if triggered else "NO — the description did not convince the agent to load it"
+            return (
+                f"Skill under test: {name}\n"
+                f"Triggered (test agent loaded it from the description alone): {verdict}\n"
+                f"--- test agent response ---\n{response}"
+            )
 
     async def get_system_prompt_section(self, context: TurnContext | None) -> str | None:
         import logging
