@@ -90,10 +90,10 @@ class ChannelManager:
     def channels(self) -> dict[str, ManagedChannel]:
         return dict(self._channels)
 
-    def create_persistent(self, configs: list[ResolvedGatewayChannelConfig]) -> list[ManagedChannel]:
+    async def create_persistent(self, configs: list[ResolvedGatewayChannelConfig]) -> list[ManagedChannel]:
         managed: list[ManagedChannel] = []
         for cfg in configs:
-            channel = self._instantiate_channel(cfg)
+            channel = await self._instantiate_channel(cfg)
             managed.append(self.register(channel, type_name=cfg.type, kind="persistent", address=cfg.address))
         return managed
 
@@ -188,13 +188,13 @@ class ChannelManager:
             managed.task = None
             await self._notify_state_changed()
 
-    def _instantiate_channel(self, cfg: ResolvedGatewayChannelConfig) -> Channel:
+    async def _instantiate_channel(self, cfg: ResolvedGatewayChannelConfig) -> Channel:
         ext = ep_channel.get(cfg.type)
         if ext is None:
             raise ChannelFactoryError(f"Unknown channel type {cfg.type!r}.")
 
         settings = _validate_settings(getattr(ext.fn, "SettingsType", None), cfg.settings)
-        channel = ep_channel.invoke(
+        channel = await ep_channel.invoke(
             cfg.type,
             {
                 "channel_id": cfg.channel_id,

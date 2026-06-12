@@ -32,13 +32,13 @@ def _get_bos_home() -> Path:
     return Path.home() / ".bos"
 
 
-def _create_extension_instance(ext_point: Any, ext_protocol: type, config: Any) -> Any:
+async def _create_extension_instance(ext_point: Any, ext_protocol: type, config: Any) -> Any:
     if isinstance(config, ext_protocol):
         return config
     if config is None and not ext_point.has("_default"):
         return None
     cfg = (config or {}).copy()
-    return ext_point.invoke(cfg.pop("name", "_default"), cfg)
+    return await ext_point.invoke(cfg.pop("name", "_default"), cfg)
 
 
 def _compact(*dicts: dict, **kwargs: Any) -> dict[str, Any]:

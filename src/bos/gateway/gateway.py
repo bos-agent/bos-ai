@@ -61,7 +61,8 @@ class Gateway:
                 state_changed=self._write_state,
             )
         )
-        self.channel_manager.create_persistent(workspace.resolve_gateway_channels())
+        # Channel instantiation is async (ep_channel.invoke); deferred to run().
+        self._persistent_channel_configs = workspace.resolve_gateway_channels()
 
     def status_snapshot(self) -> dict[str, Any]:
         gateway = {
@@ -145,6 +146,7 @@ class Gateway:
         write_gateway_state(GatewayRunDir(self.workspace.bos_dir), self.status_snapshot())
 
     async def run(self) -> None:
+        await self.channel_manager.create_persistent(self._persistent_channel_configs)
         app = self.build_app()
         runner = web.AppRunner(app, access_log=None)
         await runner.setup()

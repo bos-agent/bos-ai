@@ -74,12 +74,14 @@ class ExtensionPoint:
             )
         self._extensions[ext.name] = ext
 
-    def invoke(self, name: str, kwargs: dict[str, Any] | None = None) -> Any:
+    async def invoke(self, name: str, kwargs: dict[str, Any] | None = None) -> Any:
+        """Invoke extension *name*, awaiting its result when the fn is async.
+
+        Implementations may be sync or async functions interchangeably;
+        callers always await.
+        """
         if name not in self._extensions:
             raise ValueError(f"Extension '{name}' not found for '{self.description[:30].strip()}...'")
-        return _apply(self.get(name).fn, _compact(self.get(name).defaults, kwargs or {}))
-
-    async def invoke_async(self, name: str, kwargs: dict[str, Any] | None = None) -> Any:
         return await _apply_async(self.get(name).fn, _compact(self.get(name).defaults, kwargs or {}))
 
     def update_defaults(self, name: str, defaults: dict[str, Any]) -> None:
@@ -131,14 +133,7 @@ class ToolRegistry(ExtensionPoint):
     def to_openai_schema(self) -> dict[str, dict[str, Any]]:
         return {t.name: self.build_openai_schema(t) for t in self._extensions.values()}
 
-    def invoke(self, name: str, kwargs: dict[str, Any] | None = None) -> str:
-        if name not in self._extensions:
-            raise ValueError(f"Extension '{name}' not found for '{self.description[:30].strip()}...'")
-        ext = self.get(name)
-        result = _apply(ext.fn, _compact(ext.defaults, kwargs or {}))
-        return self._serialize_result(ext, result)
-
-    async def invoke_async(self, name: str, kwargs: dict[str, Any] | None = None) -> str:
+    async def invoke(self, name: str, kwargs: dict[str, Any] | None = None) -> str:
         if name not in self._extensions:
             raise ValueError(f"Extension '{name}' not found for '{self.description[:30].strip()}...'")
         ext = self.get(name)

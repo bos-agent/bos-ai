@@ -374,11 +374,11 @@ def _invoke_agent_factories() -> dict[str, dict[str, Any]]:
 
     Factories receive their merged ``[exts.ep_agent.<name>]`` defaults as
     keyword arguments and must return a dict validatable by ``AgentConfig``
-    (the same shape as a ``[agents.<name>]`` TOML table). Async factories are
-    supported via ``asyncio.run`` — bootstrap runs outside any event loop.
+    (the same shape as a ``[agents.<name>]`` TOML table). ``invoke`` is async
+    (sync and async factories alike) and bootstrap runs outside any event
+    loop, so each call is driven via ``asyncio.run``.
     """
     import asyncio
-    import inspect
 
     from pydantic import ValidationError
 
@@ -386,9 +386,7 @@ def _invoke_agent_factories() -> dict[str, dict[str, Any]]:
 
     specs: dict[str, dict[str, Any]] = {}
     for name in ep_agent.describe():
-        result = ep_agent.invoke(name)
-        if inspect.iscoroutine(result):
-            result = asyncio.run(result)
+        result = asyncio.run(ep_agent.invoke(name))
         if not isinstance(result, dict):
             raise ValueError(
                 f"ep_agent factory `{name}` must return an agent spec dict, "

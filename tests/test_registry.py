@@ -21,7 +21,8 @@ def test_extension_point_private_names_skip_the_lookup():
     assert ExtensionPoint.lookup("_private_point") is None
 
 
-def test_tool_registry_allows_runtime_injected_function_arguments():
+@pytest.mark.asyncio
+async def test_tool_registry_allows_runtime_injected_function_arguments():
     registry = ToolRegistry("_test_tools")
 
     @registry(
@@ -36,7 +37,7 @@ def test_tool_registry_allows_runtime_injected_function_arguments():
     def tool_echo_with_context(text: str, chat_id: str, turn_id: str) -> dict[str, str]:
         return {"text": text, "chat_id": chat_id, "turn_id": turn_id}
 
-    result = registry.invoke(
+    result = await registry.invoke(
         "EchoWithContext",
         {"text": "hello", "chat_id": "chat-1", "turn_id": "turn-1"},
     )
@@ -45,7 +46,7 @@ def test_tool_registry_allows_runtime_injected_function_arguments():
 
 
 @pytest.mark.asyncio
-async def test_tool_registry_invoke_async_auto_serializes_json_results():
+async def test_tool_registry_invoke_awaits_async_fn_and_auto_serializes_json_results():
     registry = ToolRegistry("_test_tools")
 
     @registry(
@@ -60,12 +61,13 @@ async def test_tool_registry_invoke_async_auto_serializes_json_results():
     async def tool_build_list(count: int) -> list[int]:
         return list(range(count))
 
-    result = await registry.invoke_async("BuildList", {"count": 3})
+    result = await registry.invoke("BuildList", {"count": 3})
 
     assert result == "[0, 1, 2]"
 
 
-def test_tool_registry_can_force_result_serialization_mode():
+@pytest.mark.asyncio
+async def test_tool_registry_can_force_result_serialization_mode():
     registry = ToolRegistry("_test_tools")
 
     @registry(
@@ -86,8 +88,8 @@ def test_tool_registry_can_force_result_serialization_mode():
     def tool_force_string() -> dict[str, int]:
         return {"value": 1}
 
-    assert registry.invoke("ForceJson", {}) == "true"
-    assert registry.invoke("ForceString", {}) == "{'value': 1}"
+    assert await registry.invoke("ForceJson", {}) == "true"
+    assert await registry.invoke("ForceString", {}) == "{'value': 1}"
 
 
 def test_describe_usage_returns_usage_when_provided():

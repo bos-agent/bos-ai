@@ -62,4 +62,4 @@ class LLMClient:
         else:
             provider_name, model_name = "_default", None
         params = kwargs | {"messages": messages, "model": model_name}
-        return await ep_provider.invoke_async(provider_name, params)
+        return await ep_provider.invoke(provider_name, params)

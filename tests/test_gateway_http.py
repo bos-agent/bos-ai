@@ -53,7 +53,8 @@ class _FakeHarness:
     mail_route = _FakeMailRoute()
 
 
-def test_gateway_status_uses_channel_manager_payload(monkeypatch):
+@pytest.mark.asyncio
+async def test_gateway_status_uses_channel_manager_payload(monkeypatch):
     monkeypatch.setenv("BOS_GATEWAY_API_KEY", "secret")
     from bos.config import Workspace
 
@@ -76,7 +77,10 @@ def test_gateway_status_uses_channel_manager_payload(monkeypatch):
         },
     )
 
-    snapshot = Gateway(workspace=ws, harness=_FakeHarness()).status_snapshot()
+    gateway = Gateway(workspace=ws, harness=_FakeHarness())
+    # Persistent channels are instantiated by run(); replicate that step only.
+    await gateway.channel_manager.create_persistent(gateway._persistent_channel_configs)
+    snapshot = gateway.status_snapshot()
 
     assert snapshot["channels"]["demo"]["type"] == "GatewayStatusTestChannel"
     assert snapshot["channels"]["demo"]["address"] == "channel@demo"

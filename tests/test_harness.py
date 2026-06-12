@@ -514,7 +514,7 @@ Use this skill to search YouTube.
     )
     skills_prompt = await skills_plugin.get_system_prompt_section(None)
     skill_metas = await loader.search_skills("YouTube")
-    load_result = await agent._local_tools.invoke_async("LoadSkill", {"name": "youtube-searcher"})
+    load_result = await agent._local_tools.invoke("LoadSkill", {"name": "youtube-searcher"})
 
     assert "<skills_workflow>" in skills_prompt
     assert 'Use the exact name attribute from available_skills as the LoadSkill name.' in skills_prompt

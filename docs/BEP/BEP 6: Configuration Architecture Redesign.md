@@ -594,6 +594,8 @@ def weather_agent(region: str = "us") -> dict:
 
 **Invocation: exactly once per bootstrap.** Factories run in bootstrap step 4 — after environment loading (step 1) and the `[exts]` defaults merge (step 3) — so a factory sees the project's env vars, working directory, and its merged parameters. Context sensitivity comes from per-project bootstrap, not per-call; within a process the resolved spec is stable. `bootstrap_platform()` is sync at all call sites, so async factories are run via `asyncio.run()`.
 
+This generalizes across the registry: `ExtensionPoint.invoke` is a single async method that awaits the implementation's result when it is a coroutine, so every EP accepts sync or async implementations interchangeably (`invoke_async` is removed). Async callers `await ep.invoke(...)`; the one sync caller (bootstrap) wraps with `asyncio.run`.
+
 **Validation at startup.** Each returned spec is validated via `AgentConfig` immediately after invocation. An invalid spec crashes bootstrap with the factory name in the error — the same gate external agent files go through, moved as early as possible.
 
 **Merge chain.** For each agent name:
