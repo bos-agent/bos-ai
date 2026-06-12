@@ -2,6 +2,80 @@
 
 <!-- version list -->
 
+## v1.4.0 (2026-06-12)
+
+### Chores
+
+- **deps**: Pin dependency versions and configure uv
+  ([#31](https://github.com/bos-agent/bos-ai/pull/31),
+  [`88c6d75`](https://github.com/bos-agent/bos-ai/commit/88c6d75123e62a8f45884c984c87c7a8127f04f4))
+
+### Documentation
+
+- Simplify README and switch license to MIT ([#29](https://github.com/bos-agent/bos-ai/pull/29),
+  [`d6ba67a`](https://github.com/bos-agent/bos-ai/commit/d6ba67a2ade41656647d4fdc33e42d34cad0aded))
+
+- **bep**: BEP 4 - micro-kernel and plugin architecture
+  ([#28](https://github.com/bos-agent/bos-ai/pull/28),
+  [`eeacd7e`](https://github.com/bos-agent/bos-ai/commit/eeacd7ec9758b067d998c2898bcbd5bafae41200))
+
+- **bep**: BEP 4 - micro-kernel and plugin architecture
+  ([#27](https://github.com/bos-agent/bos-ai/pull/27),
+  [`f499dc5`](https://github.com/bos-agent/bos-ai/commit/f499dc57a82e5acf13cb93f4d21796ede7904808))
+
+### Features
+
+- **cli**: Add entry-point plugin discovery for 3rd-party CLI extensions
+  ([#40](https://github.com/bos-agent/bos-ai/pull/40),
+  [`fe8cc15`](https://github.com/bos-agent/bos-ai/commit/fe8cc1583d329c01821c9530d447580c708aa447))
+
+- **cli**: BEP 9 — project scaffolding, generators, and doctor
+  ([#43](https://github.com/bos-agent/bos-ai/pull/43),
+  [`da80655`](https://github.com/bos-agent/bos-ai/commit/da80655c4ac63c2f23e27f3329d9355bc85fce5f))
+
+- **config**: BEP 6 — Configuration Architecture Redesign
+  ([#38](https://github.com/bos-agent/bos-ai/pull/38),
+  [`98a76e3`](https://github.com/bos-agent/bos-ai/commit/98a76e39aff66246d6599897de8a30145901ebd6))
+
+- **core**: BEP 4 — micro-kernel and plugin architecture
+  ([#30](https://github.com/bos-agent/bos-ai/pull/30),
+  [`ae0f882`](https://github.com/bos-agent/bos-ai/commit/ae0f88278785b6102f4b92a13285d59b7ed79d3f))
+
+- **core**: BEP 5 — ChatStore unified chat persistence and context assembly
+  ([#32](https://github.com/bos-agent/bos-ai/pull/32),
+  [`9df16d4`](https://github.com/bos-agent/bos-ai/commit/9df16d418e71df8070e63ab8660ceaae1d75ff1b))
+
+- **core**: Bos agent parity with top agents — Part 1
+  ([#35](https://github.com/bos-agent/bos-ai/pull/35),
+  [`e8350f4`](https://github.com/bos-agent/bos-ai/commit/e8350f4736238147c6e106a513808ea59c1ed192))
+
+- **exts**: Add entry-point extension discovery for third-party packages
+  ([#33](https://github.com/bos-agent/bos-ai/pull/33),
+  [`5f9fdf0`](https://github.com/bos-agent/bos-ai/commit/5f9fdf08763158b66b834c893d59b0a37acca580))
+
+- **gateway**: Implement channel runtime architecture
+  ([#39](https://github.com/bos-agent/bos-ai/pull/39),
+  [`ff0b767`](https://github.com/bos-agent/bos-ai/commit/ff0b76793488300104561363bc5de3b464f14e03))
+
+- **plugins**: Plugins, tools, and gateway improvements
+  ([#42](https://github.com/bos-agent/bos-ai/pull/42),
+  [`f4625ef`](https://github.com/bos-agent/bos-ai/commit/f4625ef8ecd67f5c027d51fbf3bfd76cc9bd8e16))
+
+- **skills**: Extension improvements — skills, EPs, and CLI init
+  ([#44](https://github.com/bos-agent/bos-ai/pull/44),
+  [`0d3175f`](https://github.com/bos-agent/bos-ai/commit/0d3175ffea43963f533824e070eda39f4e756a98))
+
+- **tui**: Production-grade TUI and CLI revamp (BEP 8)
+  ([#41](https://github.com/bos-agent/bos-ai/pull/41),
+  [`1289165`](https://github.com/bos-agent/bos-ai/commit/128916553d7836d4733d645d85e7f75a5af7544c))
+
+### Refactoring
+
+- **core**: Separate agent kind from name, consolidate NamedActor identity
+  ([#36](https://github.com/bos-agent/bos-ai/pull/36),
+  [`0a5d802`](https://github.com/bos-agent/bos-ai/commit/0a5d802c55a71b63813cfec906005c4050d7d4c1))
+
+
 ## v1.3.0 (2026-05-20)
 
 ### Features
