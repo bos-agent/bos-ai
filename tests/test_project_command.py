@@ -34,12 +34,13 @@ def test_project_init_yes_scaffolds_runnable_baseline(tmp_path, monkeypatch):
 
     assert "Initialized assistant project" in result.output
     assert "Config validates ✓" in result.output
-    assert (tmp_path / "bos.toml").is_file()
+    assert (tmp_path / ".bos" / "config.toml").is_file()
+    assert not (tmp_path / "bos.toml").exists()
     assert (tmp_path / "README.md").is_file()
-    assert (tmp_path / ".env").is_file()
+    assert (tmp_path / ".bos" / ".env").is_file()
     assert (tmp_path / ".gitignore").is_file()
-    assert (tmp_path / "extensions" / "project_tools.py").is_file()
-    assert (tmp_path / "skills" / "example-skill" / "SKILL.md").is_file()
+    assert (tmp_path / ".bos" / "extensions" / "project_tools.py").is_file()
+    assert (tmp_path / ".bos" / "skills" / "example-skill" / "SKILL.md").is_file()
     assert not (tmp_path / ".git").exists()
 
 
@@ -58,17 +59,25 @@ def test_project_init_minimal_copies_reference_template(tmp_path, monkeypatch):
     result = _invoke(["project", "init", str(tmp_path), "--minimal"])
 
     assert result.exit_code == 0
-    assert f"Initialized BOS workspace at {tmp_path}" in result.output
-    assert (tmp_path / "bos.toml").is_file()
-    assert not (tmp_path / "extensions").exists()
-
-
-def test_project_init_dotbos_layout(tmp_path, monkeypatch):
-    monkeypatch.delenv("BOS_CONFIG", raising=False)
-    _init_project(tmp_path, "--dotbos")
-
+    assert f"Initialized BOS workspace at {tmp_path / '.bos'}" in result.output
     assert (tmp_path / ".bos" / "config.toml").is_file()
-    assert not (tmp_path / "bos.toml").exists()
+    assert not (tmp_path / ".bos" / "extensions").exists()
+
+
+def test_project_init_flat_layout(tmp_path, monkeypatch):
+    monkeypatch.delenv("BOS_CONFIG", raising=False)
+    _init_project(tmp_path, "--flat")
+
+    assert (tmp_path / "bos.toml").is_file()
+    assert not (tmp_path / ".bos").exists()
+
+
+def test_project_init_flat_rejected_for_package_archetype(tmp_path, monkeypatch):
+    monkeypatch.delenv("BOS_CONFIG", raising=False)
+    result = _invoke(["project", "init", str(tmp_path), "--yes", "--no-git", "--archetype", "package", "--flat"])
+
+    assert result.exit_code != 0
+    assert "--flat is not supported with the package archetype" in result.output
 
 
 def test_project_init_wizard_team_with_skipped_model(tmp_path, monkeypatch):
@@ -80,9 +89,9 @@ def test_project_init_wizard_team_with_skipped_model(tmp_path, monkeypatch):
     )
 
     assert result.exit_code == 0, result.output
-    assert (tmp_path / "agents" / "researcher.md").is_file()
-    assert (tmp_path / "agents" / "writer.md").is_file()
-    config = tomllib.loads((tmp_path / "bos.toml").read_text(encoding="utf-8"))
+    assert (tmp_path / ".bos" / "agents" / "researcher.md").is_file()
+    assert (tmp_path / ".bos" / "agents" / "writer.md").is_file()
+    config = tomllib.loads((tmp_path / ".bos" / "config.toml").read_text(encoding="utf-8"))
     binding = config["agents"]["main"]["plugin-bindings"]["SubagentPlugin"]
     assert binding["enabled"] == ["researcher", "writer"]
 
@@ -146,9 +155,9 @@ def test_project_init_with_model_writes_env_placeholder(tmp_path, monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     _init_project(tmp_path, "--model", "anthropic/claude-sonnet-4-6", "--no-probe")
 
-    config = tomllib.loads((tmp_path / "bos.toml").read_text(encoding="utf-8"))
+    config = tomllib.loads((tmp_path / ".bos" / "config.toml").read_text(encoding="utf-8"))
     assert config["agent"]["defaults"]["model"] == "anthropic/claude-sonnet-4-6"
-    assert "ANTHROPIC_API_KEY=" in (tmp_path / ".env").read_text(encoding="utf-8")
+    assert "ANTHROPIC_API_KEY=" in (tmp_path / ".bos" / ".env").read_text(encoding="utf-8")
 
 
 # ── project add ─────────────────────────────────────────────────
@@ -162,7 +171,7 @@ def test_project_add_agent_creates_markdown_spec(tmp_path, monkeypatch):
     result = _invoke(["project", "add", "agent", "analyst"])
 
     assert result.exit_code == 0, result.output
-    content = (tmp_path / "agents" / "analyst.md").read_text(encoding="utf-8")
+    content = (tmp_path / ".bos" / "agents" / "analyst.md").read_text(encoding="utf-8")
     assert content.startswith("---\ndescription:")
     assert "You are analyst" in content
 
@@ -179,11 +188,12 @@ def test_project_add_agent_actor_appends_runtime_entry(tmp_path, monkeypatch):
     result = _invoke(["project", "add", "agent", "analyst", "--actor"])
 
     assert result.exit_code == 0, result.output
-    config = tomllib.loads((tmp_path / "bos.toml").read_text(encoding="utf-8"))
+    config_file = tmp_path / ".bos" / "config.toml"
+    config = tomllib.loads(config_file.read_text(encoding="utf-8"))
     assert config["runtime"]["actors"]["analyst"]["agent"] == "analyst"
     # the original entries and comments survive the tomlkit round-trip
     assert config["runtime"]["actors"]["main"]["agent"] == "main"
-    assert "# purpose:" in (tmp_path / "bos.toml").read_text(encoding="utf-8")
+    assert "# purpose:" in config_file.read_text(encoding="utf-8")
 
 
 def test_project_add_tool_creates_stub(tmp_path, monkeypatch):
@@ -194,7 +204,7 @@ def test_project_add_tool_creates_stub(tmp_path, monkeypatch):
     result = _invoke(["project", "add", "tool", "FetchQuote"])
 
     assert result.exit_code == 0, result.output
-    content = (tmp_path / "extensions" / "fetch_quote.py").read_text(encoding="utf-8")
+    content = (tmp_path / ".bos" / "extensions" / "fetch_quote.py").read_text(encoding="utf-8")
     assert 'name="FetchQuote"' in content
     assert "async def fetch_quote" in content
 
@@ -207,11 +217,11 @@ def test_project_add_channel_telegram_appends_config_and_env(tmp_path, monkeypat
     result = _invoke(["project", "add", "channel", "telegram"])
 
     assert result.exit_code == 0, result.output
-    config = tomllib.loads((tmp_path / "bos.toml").read_text(encoding="utf-8"))
+    config = tomllib.loads((tmp_path / ".bos" / "config.toml").read_text(encoding="utf-8"))
     channels = config["runtime"]["channels"]
     assert channels[0]["type"] == "TelegramChannel"
     assert channels[0]["settings"]["token_env"] == "TELEGRAM_BOT_TOKEN"
-    assert "TELEGRAM_BOT_TOKEN=" in (tmp_path / ".env").read_text(encoding="utf-8")
+    assert "TELEGRAM_BOT_TOKEN=" in (tmp_path / ".bos" / ".env").read_text(encoding="utf-8")
 
     duplicate = _invoke(["project", "add", "channel", "telegram"])
     assert duplicate.exit_code != 0
@@ -240,7 +250,7 @@ def test_project_doctor_healthy_project(tmp_path, monkeypatch):
     result = _invoke(["project", "doctor"])
 
     assert result.exit_code == 0, result.output
-    assert "bos.toml parses and validates" in result.output
+    assert "config.toml parses and validates" in result.output
     assert "agent spec(s) load" in result.output
     assert "no model configured" in result.output  # warn, not fail
     assert "dynamic port" in result.output  # scaffolds default to port = 0
@@ -250,7 +260,7 @@ def test_project_doctor_checks_fixed_port(tmp_path, monkeypatch):
     monkeypatch.delenv("BOS_CONFIG", raising=False)
     _init_project(tmp_path)
     port = _free_port()
-    config_file = tmp_path / "bos.toml"
+    config_file = tmp_path / ".bos" / "config.toml"
     content = config_file.read_text(encoding="utf-8").replace("port = 0", f"port = {port}")
     config_file.write_text(content, encoding="utf-8")
     monkeypatch.chdir(tmp_path)
@@ -276,7 +286,7 @@ def test_project_doctor_fails_on_unset_channel_env(tmp_path, monkeypatch):
 def test_project_doctor_fails_on_missing_paths(tmp_path, monkeypatch):
     monkeypatch.delenv("BOS_CONFIG", raising=False)
     _init_project(tmp_path)
-    (tmp_path / ".env").unlink()
+    (tmp_path / ".bos" / ".env").unlink()
     monkeypatch.chdir(tmp_path)
 
     result = _invoke(["project", "doctor"])

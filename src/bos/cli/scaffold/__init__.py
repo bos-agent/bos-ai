@@ -55,7 +55,7 @@ def scaffold_workspace(
     archetype: str,
     context: dict[str, str],
     *,
-    dotbos: bool = False,
+    dotbos: bool = True,
     env_content: str = "",
     agent_files: dict[str, str] | None = None,
 ) -> ScaffoldResult:

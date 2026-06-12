@@ -75,7 +75,7 @@ $ boscli project init
 │
 │ Initialize a git repository? [Y/n]
 │
-├ Wrote bos.toml, agents/, extensions/, skills/, .env, .gitignore, README.md
+├ Wrote .bos/, .gitignore, README.md
 ├ Config validates ✓ · credential probe ✓ (1 model call)
 │
 │ Next steps:
@@ -93,7 +93,7 @@ Flags:
 | `--purpose <text>` | Skip the purpose question. |
 | `--yes` | Accept defaults for all unanswered questions (archetype `assistant`, model skipped); never prompts. |
 | `--minimal` | Old `boscli init` behavior: copy `template.toml` only, no wizard, no scaffold. |
-| `--dotbos` | Use `.bos/config.toml` layout instead of root `bos.toml` (carried over). |
+| `--flat` | Write a root `bos.toml` instead of the default `.bos/config.toml` layout (decision 2026-06-12; replaces `--dotbos`, rejected for the `package` archetype). |
 | `--git` | Run `git init` + write `.gitignore` without asking (carried over). |
 | `--no-probe` | Skip the live credential probe. |
 
@@ -128,7 +128,7 @@ Read-only diagnosis of the discovered project, exit code 0/1:
 
 ```
 $ boscli project doctor
-✓ config         bos.toml parses and validates (BEP 6 schema)
+✓ config         config.toml parses and validates (BEP 6 schema)
 ✓ paths          agent_dirs, extensions, skills dirs exist
 ✓ agents         3 agent specs load (researcher.md, poet.md, inline main)
 ✗ env            TELEGRAM_BOT_TOKEN referenced by channel 'telegram:main' but unset
@@ -150,7 +150,7 @@ Checks, in order: config parse + `validate_config()`; existence of every path re
 Every command that resolves a workspace (`ask`, `tui`, `gateway start/stop/status/restart`, `project add`, `project doctor`) prints **one stderr line stating which config source is in use** — always, not only on fallback:
 
 ```
-Using project: /home/me/my-agent (bos.toml)
+Using project: /home/me/my-agent (config.toml)
 Using built-in preset: default (~/.bos/presets/default)
 Using config file: /path/to/custom.toml
 ```
@@ -167,16 +167,19 @@ All archetypes share the common scaffold:
 
 ```
 <project>/
-  bos.toml               # archetype config, real values, sparse comments
-  .env                   # captured secrets (gitignored)
+  .bos/
+    config.toml          # archetype config, real values, sparse comments
+    .env                 # captured secrets (gitignored)
+    agents/              # markdown agent specs (auto-discovered)
+    extensions/
+      project_tools.py   # one working @ep_tool — the teaching artifact
+    skills/
+      example-skill/SKILL.md
   .gitignore             # .env, run/
   README.md              # purpose, topology diagram, file map, next commands
-  agents/                # markdown agent specs (auto-discovered)
-  extensions/
-    project_tools.py     # one working @ep_tool — the teaching artifact
-  skills/
-    example-skill/SKILL.md
 ```
+
+The `.bos/config.toml` layout is the default (decision 2026-06-12); `--flat` writes the config as a root `bos.toml` instead, with `agents/`, `extensions/`, `skills/`, and `.env` as project-root siblings.
 
 | Archetype | Topology | Distinctive content |
 |---|---|---|
@@ -249,7 +252,7 @@ The other archetypes serve project-local extensions (scripts dropped into `./ext
 ```
 <project>/
   .bos/
-    config.toml          # dotbos layout is implied for this archetype
+    config.toml          # the default layout; --flat is rejected for this archetype
     agents/  skills/  .env
   src/<pkg_name>/
     __init__.py
@@ -274,7 +277,7 @@ Decisions:
 - **No `./extensions` directory.** The package *is* the extension; shipping two discovery mechanisms in one scaffold would muddy the teaching. The example `@ep_tool` moves to `src/<pkg_name>/tools.py`.
 - **`pyproject.toml` is rendered from our template, not `uv init`.** Shelling out would make `init` depend on uv being installed and on whatever `uv init --lib` emits that month, which we would post-edit anyway. Templating keeps the deterministic/offline guarantee. uv owns everything after init: next-steps print `uv run boscli gateway start` (uv syncs the venv, installing bos-ai and the package editable, on first run).
 - **The `uv run` caveat.** The package must be importable by the interpreter running the gateway — a globally installed `boscli` (pipx/uvx) will not see it. The scaffolded README, the config comments, and the `init` next-steps consistently say `uv run boscli …` for this archetype, and `doctor` gains an import check: every non-path entry in `[platform.extensions]` and every `bos.exts` entry point owned by the project must import, failing with "run via `uv run boscli`" advice.
-- **Naming.** The package name is the snake_cased directory name, overridable with `--name`. `--dotbos` is implied (the root belongs to the Python package); the rest of the wizard (purpose, model, git) applies unchanged.
+- **Naming.** The package name is the snake_cased directory name, overridable with `--name`. The `.bos/` layout is mandatory — `--flat` is rejected with an error (the root belongs to the Python package); the rest of the wizard (purpose, model, git) applies unchanged.
 - **CI bar.** Same as the other archetypes plus: the scaffold test prepends `src/` to `sys.path`, runs the real bootstrap, and asserts the example tool is registered — no uv, no venv, no LLM call in tests.
 
 ---
@@ -330,3 +333,4 @@ Decisions from the 2026-06-11 review (details integrated into the sections above
 | 2026-06-12 | Dynamic gateway ports | All archetype configs (and the reference template) set `[runtime.gateway] port = 0` — system-assigned, discovered via `gateway.state`; `service` documents pinning a fixed port |
 | 2026-06-12 | `package` archetype accepted | Installable Python package scaffold for extension authors: `bos.exts` entry-point wiring as primary, templated `pyproject.toml` (no `uv init` dependency), example tool inside the package, `uv run boscli` caveat + doctor import check; pending implementation |
 | 2026-06-12 | `package` implementation | Implemented as designed (templates, `--name`, implied dotbos, uv-run next steps, doctor `imports` check covering `[platform.extensions]` modules and project `bos.exts` entry points); verified end-to-end in a synced uv venv. CI bar test uses `importlib.import_module` on the entry-point target (sys.path-prepended src/) — equivalent to `ep.load()` |
+| 2026-06-12 | `.bos/` layout becomes the default | `project init` (wizard, `--minimal`) and the scaffold engine now default to `.bos/config.toml`; `--dotbos` replaced by `--flat` for the root `bos.toml` layout, rejected for the `package` archetype |

@@ -149,7 +149,7 @@ def resolve_config_source(config_arg: str) -> tuple[Path, Path, RootConfig]:
     raise WorkspaceResolutionError(f"Unknown config source {config_arg!r}. {presets_msg}")
 
 
-def initialize_workspace(workspace: str | Path = ".", *, dotbos: bool = False) -> Path:
+def initialize_workspace(workspace: str | Path = ".", *, dotbos: bool = True) -> Path:
     workspace = _resolve_path(workspace)
 
     existing_config = _find_discovered_config(workspace)
