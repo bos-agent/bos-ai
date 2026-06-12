@@ -39,6 +39,10 @@ enabled = ["${specialist_a}", "${specialist_b}"]
 location = "process"
 default_actor = "main"
 
+[runtime.gateway]
+# 0 = let the system assign a free port; clients discover it via gateway.state.
+port = 0
+
 [runtime.actors.main]
 agent = "main"
 display_name = "Main"

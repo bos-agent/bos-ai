@@ -181,11 +181,6 @@ def test_project_doctor_healthy_project(tmp_path, monkeypatch):
     monkeypatch.delenv("BOS_CONFIG", raising=False)
     monkeypatch.delenv("BOS_MODEL", raising=False)
     _init_project(tmp_path)
-    port = _free_port()
-    config_file = tmp_path / "bos.toml"
-    config_file.write_text(
-        config_file.read_text(encoding="utf-8") + f"\n[runtime.gateway]\nport = {port}\n", encoding="utf-8"
-    )
     monkeypatch.chdir(tmp_path)
 
     result = _invoke(["project", "doctor"])
@@ -194,6 +189,21 @@ def test_project_doctor_healthy_project(tmp_path, monkeypatch):
     assert "bos.toml parses and validates" in result.output
     assert "agent spec(s) load" in result.output
     assert "no model configured" in result.output  # warn, not fail
+    assert "dynamic port" in result.output  # scaffolds default to port = 0
+
+
+def test_project_doctor_checks_fixed_port(tmp_path, monkeypatch):
+    monkeypatch.delenv("BOS_CONFIG", raising=False)
+    _init_project(tmp_path)
+    port = _free_port()
+    config_file = tmp_path / "bos.toml"
+    content = config_file.read_text(encoding="utf-8").replace("port = 0", f"port = {port}")
+    config_file.write_text(content, encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    result = _invoke(["project", "doctor"])
+
+    assert result.exit_code == 0, result.output
     assert f"port {port} free" in result.output
 
 
@@ -201,11 +211,6 @@ def test_project_doctor_fails_on_unset_channel_env(tmp_path, monkeypatch):
     monkeypatch.delenv("BOS_CONFIG", raising=False)
     monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
     _init_project(tmp_path, "--archetype", "telegram-bot")
-    port = _free_port()
-    config_file = tmp_path / "bos.toml"
-    config_file.write_text(
-        config_file.read_text(encoding="utf-8") + f"\n[runtime.gateway]\nport = {port}\n", encoding="utf-8"
-    )
     monkeypatch.chdir(tmp_path)
 
     result = _invoke(["project", "doctor"])

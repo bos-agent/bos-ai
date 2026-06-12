@@ -1,6 +1,6 @@
 # BEP 9: Project Scaffolding and Guided Init
 
-Status: **accepted — implemented** (reconciled with the implementation 2026-06-11)
+Status: **accepted — implemented** (reconciled 2026-06-11); the `package` archetype and dynamic gateway ports accepted 2026-06-12, `package` pending implementation.
 
 ---
 
@@ -182,8 +182,11 @@ All archetypes share the common scaffold:
 |---|---|---|
 | `assistant` | one actor (`main`), memory + skills plugins on | the default; minimal config surface |
 | `team` | `main` coordinator + two specialist agents in `agents/`, `SubagentPlugin` wired with the specialists enabled; second actor exposed for `@mention` routing | demonstrates `agents/*.md`, `plugin-bindings.SubagentPlugin`, `[runtime.actors.*]`. Specialist content is **generated from the purpose answer** via a predefined meta-prompt (see *Specialist content generation*), falling back to lightly themed static templates when no model is configured or the call fails |
-| `service` | one actor, HTTP gateway pinned to a fixed port, `BOS_GATEWAY_API_KEY` generated into `.env` | demonstrates API-first usage; README documents the WS/HTTP endpoints |
+| `service` | one actor, HTTP gateway with `BOS_GATEWAY_API_KEY` generated into `.env` | demonstrates API-first usage; README documents the WS/HTTP endpoints |
 | `telegram-bot` | one actor + a `[[runtime.channels]]` TelegramChannel entry | demonstrates channel config + token env wiring |
+| `package` | one actor; the project is an installable Python package whose extensions register via the `bos.exts` entry point | the extension-author path: proper dependencies, tests, publishable to PyPI (see *Package archetype*) |
+
+All archetype configs set `[runtime.gateway] port = 0` — the system assigns a free port and clients discover it via `gateway.state` (decision 2026-06-12). The `service` config comments how to pin a fixed port when external callers need a stable endpoint.
 
 Every archetype must pass a CI test that scaffolds into a temp dir, validates the config, bootstraps the platform, and creates the main agent (no LLM call). Templates that drift from the schema fail the build, not the user.
 
@@ -239,6 +242,41 @@ Mechanics:
 - **Fallback**: if the model was skipped, the call fails, or validation rejects the output (one retry), `init` falls back to the lightly themed static templates (purpose text substituted via `string.Template`) and says so. The team archetype therefore still scaffolds offline and deterministically; generation is an enhancement layered on top.
 - `--yes` (model skipped) and `--no-generate` both take the fallback path. The CI scaffold test exercises the fallback templates; the generation path is covered by a unit test with a stubbed provider.
 
+### Package archetype (`package`)
+
+The other archetypes serve project-local extensions (scripts dropped into `./extensions`). The `package` archetype serves the **extension author**: the project is an installable Python package with proper dependencies, tests, and a publish path — the route from "hack a tool in `extensions/`" to "share a BOS extension on PyPI".
+
+```
+<project>/
+  .bos/
+    config.toml          # dotbos layout is implied for this archetype
+    agents/  skills/  .env
+  src/<pkg_name>/
+    __init__.py
+    tools.py             # the WordCount teaching artifact lives here
+  tests/
+    test_tools.py
+  pyproject.toml         # bos-ai dependency; entry-point wiring (below)
+  .gitignore             # + .venv/, dist/
+  README.md
+```
+
+Decisions:
+
+- **Wiring: `bos.exts` entry point is primary.** The scaffolded `pyproject.toml` declares
+
+  ```toml
+  [project.entry-points."bos.exts"]
+  <pkg_name> = "<pkg_name>.tools"
+  ```
+
+  BOS already discovers this group when `bos.exts` loads (`src/bos/exts.py`), so `config.toml` needs **no `[platform.extensions]` edit** — the default `["bos.exts"]` pulls the package in, and so does any other BOS project that installs the published package. Listing the module name in `[platform.extensions]` remains the zero-packaging alternative and is shown commented in `config.toml`. A commented `[project.entry-points."boscli.commands"]` block documents the CLI-plugin axis.
+- **No `./extensions` directory.** The package *is* the extension; shipping two discovery mechanisms in one scaffold would muddy the teaching. The example `@ep_tool` moves to `src/<pkg_name>/tools.py`.
+- **`pyproject.toml` is rendered from our template, not `uv init`.** Shelling out would make `init` depend on uv being installed and on whatever `uv init --lib` emits that month, which we would post-edit anyway. Templating keeps the deterministic/offline guarantee. uv owns everything after init: next-steps print `uv run boscli gateway start` (uv syncs the venv, installing bos-ai and the package editable, on first run).
+- **The `uv run` caveat.** The package must be importable by the interpreter running the gateway — a globally installed `boscli` (pipx/uvx) will not see it. The scaffolded README, the config comments, and the `init` next-steps consistently say `uv run boscli …` for this archetype, and `doctor` gains an import check: every non-path entry in `[platform.extensions]` and every `bos.exts` entry point owned by the project must import, failing with "run via `uv run boscli`" advice.
+- **Naming.** The package name is the snake_cased directory name, overridable with `--name`. `--dotbos` is implied (the root belongs to the Python package); the rest of the wizard (purpose, model, git) applies unchanged.
+- **CI bar.** Same as the other archetypes plus: the scaffold test prepends `src/` to `sys.path`, runs the real bootstrap, and asserts the example tool is registered — no uv, no venv, no LLM call in tests.
+
 ---
 
 ## Template Rendering and TOML Mutation Rules
@@ -289,3 +327,5 @@ Decisions from the 2026-06-11 review (details integrated into the sections above
 | 2026-06-11 | Design review pass | Resolve open issues: always-on config source banner (replaces fallback hint), BOS-maintained API-key env map, lightly themed team specialists, Windows pass deferred to implementation |
 | 2026-06-11 | Specialist generation revision | Team specialists move from static themed templates to bounded meta-prompt generation (prose only, deterministic skeleton + wiring, themed templates as fallback); Non-Goals carve-out clarified |
 | 2026-06-11 | Implementation reconciliation | Implemented: `cli/scaffold/` engine + 4 archetypes, `project init/add/doctor`, banner, init removal, tomlkit dependency; documented generation replace-after-probe mechanics, banner call site, snake_case tool filenames, git default |
+| 2026-06-12 | Dynamic gateway ports | All archetype configs (and the reference template) set `[runtime.gateway] port = 0` — system-assigned, discovered via `gateway.state`; `service` documents pinning a fixed port |
+| 2026-06-12 | `package` archetype accepted | Installable Python package scaffold for extension authors: `bos.exts` entry-point wiring as primary, templated `pyproject.toml` (no `uv init` dependency), example tool inside the package, `uv run boscli` caveat + doctor import check; pending implementation |
