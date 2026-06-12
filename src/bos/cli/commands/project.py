@@ -64,17 +64,18 @@ def project():
 @click.option("--purpose", default=None, help="What the agent project is for.")
 @click.option("--yes", is_flag=True, default=False, help="Accept defaults for unanswered questions; never prompt.")
 @click.option("--minimal", is_flag=True, default=False, help="Only copy the reference config template, no wizard.")
-@click.option("--dotbos", is_flag=True, default=False, help="Use .bos/config.toml layout instead of bos.toml.")
+@click.option("--flat", is_flag=True, default=False, help="Write a root bos.toml instead of the default .bos/ layout.")
 @click.option("--git/--no-git", "init_git", default=None, help="Run git init and create a .gitignore.")
 @click.option("--no-probe", is_flag=True, default=False, help="Skip the live model credential check.")
 @click.option("--no-generate", is_flag=True, default=False, help="Skip LLM generation of team specialists.")
 @click.option("--name", "pkg_name_opt", default=None, help="Package name (package archetype; default: dir name).")
 @click.pass_context
 def init(
-    ctx, directory, archetype, model, purpose, yes, minimal, dotbos, init_git, no_probe, no_generate, pkg_name_opt
+    ctx, directory, archetype, model, purpose, yes, minimal, flat, init_git, no_probe, no_generate, pkg_name_opt
 ):
     """Initialize a BOS project with a guided, runnable baseline."""
     workspace_path = Path(directory).expanduser().resolve()
+    dotbos = not flat
 
     if minimal:
         try:
@@ -95,7 +96,11 @@ def init(
 
     pkg_name = None
     if archetype == "package":
-        dotbos = True  # the project root belongs to the Python package; config lives in .bos/
+        if flat:
+            raise click.ClickException(
+                "--flat is not supported with the package archetype: the project root belongs to "
+                "the Python package, so the config always lives in .bos/."
+            )
         pkg_name = _normalize_pkg_name(pkg_name_opt or project_name)
 
     model, env_pairs = _provider_step(ctx, model, yes)

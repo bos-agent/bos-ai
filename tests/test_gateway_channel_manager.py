@@ -65,11 +65,12 @@ def _cfg(channel_id: str, *, bot_id: str = "123") -> ResolvedGatewayChannelConfi
     )
 
 
-def test_channel_manager_factory_passes_runtime_and_validated_settings():
+@pytest.mark.asyncio
+async def test_channel_manager_factory_passes_runtime_and_validated_settings():
     runtime = _runtime()
     manager = ChannelManager(runtime=runtime)
 
-    [managed] = manager.create_persistent([_cfg("demo")])
+    [managed] = await manager.create_persistent([_cfg("demo")])
 
     assert managed.channel.channel_id == "demo"
     assert managed.channel.target_actor == "main"
@@ -81,11 +82,12 @@ def test_channel_manager_factory_passes_runtime_and_validated_settings():
     assert manager.status_payload()["demo"]["identity_key"] == "demo:bot:123"
 
 
-def test_channel_manager_rejects_duplicate_identity_key():
+@pytest.mark.asyncio
+async def test_channel_manager_rejects_duplicate_identity_key():
     manager = ChannelManager(runtime=_runtime())
 
     with pytest.raises(ChannelFactoryError, match="identity_key"):
-        manager.create_persistent([_cfg("demo-a", bot_id="same"), _cfg("demo-b", bot_id="same")])
+        await manager.create_persistent([_cfg("demo-a", bot_id="same"), _cfg("demo-b", bot_id="same")])
 
 
 def test_channel_manager_rejects_duplicate_dynamic_channel_without_takeover():
@@ -111,7 +113,8 @@ def test_channel_manager_allows_dynamic_takeover_same_channel_id():
     assert manager.channels["ws:one"].channel is second
 
 
-def test_channel_factory_rejects_unknown_or_non_protocol_channel():
+@pytest.mark.asyncio
+async def test_channel_factory_rejects_unknown_or_non_protocol_channel():
     manager = ChannelManager(runtime=_runtime())
     unknown = ResolvedGatewayChannelConfig(
         type="MissingChannel",
@@ -129,9 +132,9 @@ def test_channel_factory_rejects_unknown_or_non_protocol_channel():
     )
 
     with pytest.raises(ChannelFactoryError, match="Unknown channel"):
-        manager.create_persistent([unknown])
+        await manager.create_persistent([unknown])
     with pytest.raises(ChannelFactoryError, match="Channel protocol"):
-        manager.create_persistent([bad])
+        await manager.create_persistent([bad])
 
 
 @pytest.mark.asyncio
@@ -144,7 +147,7 @@ async def test_channel_manager_binds_mailboxes_and_notifies_state_change():
 
     runtime = _runtime(state_changed=state_changed)
     manager = ChannelManager(runtime=runtime)
-    manager.create_persistent([_cfg("demo")])
+    await manager.create_persistent([_cfg("demo")])
 
     await manager.start_all()
     await manager.stop_all()

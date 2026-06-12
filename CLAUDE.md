@@ -32,19 +32,30 @@ docs/architecture/ - Design docs for core, config, protocol, runner
 
 ### Extension Points (the core pattern)
 
-The framework is built around named `ExtensionPoint` registries (defined in `src/bos/core/contract.py`). Each is a key-value registry of implementations that can be configured via TOML:
+The framework is built around named `ExtensionPoint` registries. Core extension points (defined in `src/bos/core/contract.py`) use the `ep_` prefix; extension points defined by plugins use the `pep_` prefix (plugin extension point). This is a naming convention, not enforced by the runtime — follow it for any new plugin-defined extension point. Every `ExtensionPoint` requires a unique name and self-registers in a class-level lookup (`ExtensionPoint.lookup`), which is how `[exts.<name>]` config sections resolve — any registered name is configurable, whatever its prefix. A duplicate name raises at construction time (crashes startup). Names with a leading underscore are private: excluded from the lookup and the uniqueness check, for internal containers such as per-agent local tool registries.
+
+Core extension points:
 
 | EP | Protocol | Purpose |
 |---|---|---|
 | `ep_tool` | async fn → str | LLM-callable tools |
 | `ep_provider` | async fn → LLMResponse | Model backends (litellm by default) |
+| `ep_agent` | fn (sync/async) → agent spec dict | Agent spec factories, invoked once at bootstrap |
 | `ep_channel` | `Channel` protocol (`.run(mailbox)`) | External interfaces (HTTP, Telegram) |
 | `ep_mail_route` | `MailRoute` protocol | Message transport between actors |
-| `ep_message_store` | `MessageStore` protocol | Chat history persistence |
-| `ep_memory_store` | `MemoryStore` protocol | Long-term memory persistence |
+| `ep_chat_store` | `ChatStore` factory | Chat persistence + context assembly |
 | `ep_consolidator` | `Consolidator` protocol | Chat history summarization |
-| `ep_skills_loader` | `SkillsLoader` protocol | Skill discovery and loading |
 | `ep_turn_interceptor` | `TurnInterceptor` protocol | Turn lifecycle hooks |
+| `ep_plugin` | `HarnessPlugin` protocol | Harness plugins |
+
+Plugin-defined extension points:
+
+| EP | Defined in | Purpose |
+|---|---|---|
+| `pep_memory_backend` | `bos.plugins.memory` | Long-term memory persistence backends |
+| `pep_skills_loader` | `bos.plugins.skills` | Skill discovery and loading |
+
+Third-party packages can also ship skills declaratively (no code) via the `bos.skills` entry-point group: the entry point names a package whose directory contains skills, expanded where the `__builtin__` sentinel appears in SkillsPlugin `skill_dirs`.
 
 Extensions register via decorator (e.g., `@ep_tool(name="...", description="...", parameters={...})`) or via TOML config in `[platform.extensions]`.
 

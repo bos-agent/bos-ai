@@ -144,10 +144,10 @@ class AgentHarness:
                 "the current harness instead of re-entering."
             )
 
-        self.mail_route = self._create_and_own("ep_mail_route", MailRoute, None, impl=self._mail_route_impl)
-        self.chat_store = self._create_and_own("ep_chat_store", ChatStore, None, impl=self._chat_store_impl)
+        self.mail_route = await self._create_and_own("ep_mail_route", MailRoute, None, impl=self._mail_route_impl)
+        self.chat_store = await self._create_and_own("ep_chat_store", ChatStore, None, impl=self._chat_store_impl)
         self.llm = LLMClient()
-        self.consolidator = self._create_consolidator()
+        self.consolidator = await self._create_consolidator()
         self.interceptor = ChainInterceptor(self._interceptors_impl)
 
         # Build plugin services
@@ -274,33 +274,33 @@ class AgentHarness:
 
     async def _instantiate_and_setup_plugin(self, plugin_name: str) -> HarnessPlugin:
         """Instantiate a harness plugin provider from ep_plugin and run setup."""
-        instance = ep_plugin.invoke(plugin_name, {})
+        instance = await ep_plugin.invoke(plugin_name, {})
         if not isinstance(instance, HarnessPlugin):
             raise TypeError(f"Plugin {plugin_name} does not implement HarnessPlugin")
         if self._plugin_services is not None:
             await instance.setup(self._plugin_services)
         return instance
 
-    def _create_and_own(self, ep_name: str, protocol: type, cfg: Any, *, impl: str | None = None) -> Any:
+    async def _create_and_own(self, ep_name: str, protocol: type, cfg: Any, *, impl: str | None = None) -> Any:
         from . import __dict__ as core_exports
 
         ep = core_exports[ep_name]
         context = {"bos_dir": str(self._bos_root), "workspace_dir": str(self._workspace)}
         if impl is not None and cfg is None:
-            instance = ep.invoke(impl, context)
+            instance = await ep.invoke(impl, context)
         elif impl is not None:
-            instance = ep.invoke(impl, cfg | context)
+            instance = await ep.invoke(impl, cfg | context)
         else:
             config = (cfg or {}) | context
-            instance = _create_extension_instance(ep, protocol, config)
+            instance = await _create_extension_instance(ep, protocol, config)
         if instance is not None:
             self._owned.append(instance)
         return instance
 
-    def _create_consolidator(self) -> Consolidator:
+    async def _create_consolidator(self) -> Consolidator:
         cfg = {"model": os.getenv("BOS_CONSOLIDATOR_MODEL"), "llm": self.llm}
         from . import __dict__ as core_exports
-        instance = core_exports["ep_consolidator"].invoke(self._consolidator_impl, cfg)
+        instance = await core_exports["ep_consolidator"].invoke(self._consolidator_impl, cfg)
         if instance is not None:
             self._owned.append(instance)
         return instance

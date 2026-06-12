@@ -55,7 +55,7 @@ def scaffold_workspace(
     archetype: str,
     context: dict[str, str],
     *,
-    dotbos: bool = False,
+    dotbos: bool = True,
     env_content: str = "",
     agent_files: dict[str, str] | None = None,
 ) -> ScaffoldResult:
@@ -103,16 +103,20 @@ def scaffold_workspace(
         if not (workspace / ".gitignore").exists():
             write(workspace / ".gitignore", render_template("_shared/gitignore.tmpl"))
         if archetype == "package":
-            # The package *is* the extension: the example tool lives inside it
-            # (registered via the bos.exts entry point), not in ./extensions.
+            # The package *is* the extension: the example tool and skills live
+            # inside it (registered via the bos.exts / bos.skills entry
+            # points), not in ./extensions or .bos/skills.
             pkg_name = context["pkg_name"]
             write(workspace / "pyproject.toml", render_template("package/pyproject.toml.tmpl", context))
             write(workspace / "src" / pkg_name / "__init__.py", render_template("package/__init__.py.tmpl", context))
             write(workspace / "src" / pkg_name / "tools.py", render_template("package/tools.py.tmpl", context))
+            skills_dir = workspace / "src" / pkg_name / "skills"
+            write(skills_dir / "__init__.py", render_template("package/skills_init.py.tmpl", context))
+            write(skills_dir / "example-skill" / "SKILL.md", render_template("_shared/skill.md.tmpl"))
             write(workspace / "tests" / "test_tools.py", render_template("package/test_tools.py.tmpl", context))
         else:
             write(bos_dir / "extensions" / "project_tools.py", render_template("_shared/project_tools.py.tmpl"))
-        write(bos_dir / "skills" / "example-skill" / "SKILL.md", render_template("_shared/skill.md.tmpl"))
+            write(bos_dir / "skills" / "example-skill" / "SKILL.md", render_template("_shared/skill.md.tmpl"))
         agents_dir = bos_dir / "agents"
         agents_dir.mkdir(parents=True, exist_ok=True)
         for filename, content in (agent_files or {}).items():

@@ -237,7 +237,7 @@ class ChainInterceptor:
         for i, cfg in enumerate(self._configs):
             if self._instances[i] is None and ep_turn_interceptor.has(cfg["name"]):
                 try:
-                    self._instances[i] = _create_extension_instance(ep_turn_interceptor, TurnInterceptor, cfg)
+                    self._instances[i] = await _create_extension_instance(ep_turn_interceptor, TurnInterceptor, cfg)
                 except Exception as e:
                     self._instances[i] = e
                     logger.error(f"Failed to create interceptor {cfg['name']}: {e}")
@@ -318,9 +318,9 @@ class Agent:
         self._llm = llm or LLMClient()
         self._chat_store = chat_store
         self._consolidator = consolidator
-        self._local_tools = local_tools or ToolRegistry("Agent-scoped local tools.")
         self._kind = kind
         self._name = agent_name or kind
+        self._local_tools = local_tools or ToolRegistry(f"_local_tools:{self._name}", "Agent-scoped local tools.")
         self._plugins = plugins
         self._plugins_prompt = plugins_prompt or {}
         self._current_context: TurnContext | None = None
@@ -699,9 +699,9 @@ class Agent:
             ),
         }
         if self._local_tools.has(tool_name):
-            return await self._local_tools.invoke_async(tool_name, kwargs)
+            return await self._local_tools.invoke(tool_name, kwargs)
         if ep_tool.has(tool_name):
-            return await ep_tool.invoke_async(tool_name, kwargs)
+            return await ep_tool.invoke(tool_name, kwargs)
         raise Exception(f"Tool {tool_name} not found")
 
     async def _load_and_compact_history(self, chat_id: str, *, budget_model: str | None) -> list[dict[str, Any]]:

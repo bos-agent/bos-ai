@@ -20,7 +20,7 @@ from bos.core import AgentHarness, AgentRegistry, LLMResponse, Message, ToolCall
 from bos.core.contract import ep_consolidator, ep_tool
 from bos.core.registry import ToolRegistry
 from bos.plugins.memory import MemoryAgentPlugin
-from bos.plugins.skills import SkillMeta, SkillsAgentPlugin
+from bos.plugins.skills import SkillMeta, SkillsAgentPlugin, SkillsHarnessPlugin
 from bos.plugins.subagent import SubagentAgentPlugin, SubagentHarnessPlugin
 from bos.plugins.task import TaskAgentPlugin
 
@@ -31,7 +31,7 @@ class _MockSubagentRuntime:
 
 
 def test_react_agent_local_tools_describe_ask_subagent(caplog):
-    local_tools = ToolRegistry("test tools")
+    local_tools = ToolRegistry("_test_tools")
     role = f"ask_subagent_tool_{uuid.uuid4().hex}"
 
     try:
@@ -64,7 +64,7 @@ async def test_subagent_plugin_hides_prompt_and_tool_when_no_subagents():
     AgentRegistry._registry.clear()
     try:
         AgentRegistry.register(name="_default", description="Default agent", tools=[])
-        local_tools = ToolRegistry("test tools")
+        local_tools = ToolRegistry("_test_tools")
         subagent = SubagentAgentPlugin(_MockSubagentRuntime(), enabled=None, disabled=[])
 
         agent = create_test_agent(local_tools=local_tools, plugins=[subagent])
@@ -514,7 +514,7 @@ Use this skill to search YouTube.
     )
     skills_prompt = await skills_plugin.get_system_prompt_section(None)
     skill_metas = await loader.search_skills("YouTube")
-    load_result = await agent._local_tools.invoke_async("LoadSkill", {"name": "youtube-searcher"})
+    load_result = await agent._local_tools.invoke("LoadSkill", {"name": "youtube-searcher"})
 
     assert "<skills_workflow>" in skills_prompt
     assert 'Use the exact name attribute from available_skills as the LoadSkill name.' in skills_prompt
@@ -525,6 +525,238 @@ Use this skill to search YouTube.
     assert skill_metas["youtube-searcher"].name == "youtube-searcher"
     assert skill_metas["youtube-searcher"].description == "Search YouTube."
     assert load_result == skill_file.read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_builtin_python_skill_discovered_and_loadable(tmp_path):
+    """The packaged builtin skills resolve via the __builtin__ sentinel."""
+    from bos.plugins.skills.fs_skill_loader import FileSystemSkillsLoader
+
+    loader = FileSystemSkillsLoader(skill_dirs=["__builtin__"], bos_dir=tmp_path)
+    metas = await loader.search_skills()
+
+    assert "python" in metas
+    assert "uv" in metas["python"].description
+    body = await loader.load_skill("python")
+    assert "/// script" in body
+    assert "uv run" in body
+
+
+@pytest.mark.asyncio
+async def test_builtin_skill_creator_discovered_and_loadable(tmp_path):
+    from bos.plugins.skills.fs_skill_loader import FileSystemSkillsLoader
+
+    loader = FileSystemSkillsLoader(skill_dirs=["__builtin__"], bos_dir=tmp_path)
+    metas = await loader.search_skills()
+
+    assert "skill-creator" in metas
+    # the `>` block-scalar description folds to a single line for the system prompt
+    assert "\n" not in metas["skill-creator"].description
+    assert "not triggering" in metas["skill-creator"].description
+    body = await loader.load_skill("skill-creator")
+    assert "directory name is the skill's identity" in body
+    assert "`LoadSkill` returns only the SKILL.md text" in body
+
+
+@pytest.mark.asyncio
+async def test_test_skill_tool_runs_isolated_agent_and_reports_trigger(tmp_path):
+    from bos.core import LLMClient
+    from bos.core.contract import ToolContext
+    from bos.plugins.skills.fs_skill_loader import FileSystemSkillsLoader
+    from bos.plugins.skills.plugin import _SkillTestRuntime
+
+    skills_dir = tmp_path / "skills"
+    suffix = uuid.uuid4().hex
+    provider_name = f"test_skill_tool_provider_{suffix}"
+    parent_kind = f"skill_test_parent_{suffix}"
+
+    @ep_provider(name=provider_name)
+    async def skill_test_provider(messages, model=None, **kwargs):
+        if any(m.get("role") == "tool" for m in messages):
+            return LLMResponse(content="ahoy, captain!")
+        return LLMResponse(
+            content="",
+            tool_calls=[ToolCallRequest(id="c1", name="LoadSkill", arguments={"name": "greeter"})],
+            finish_reason="tool_calls",
+        )
+
+    def make_loader():
+        return FileSystemSkillsLoader(skill_dirs=[skills_dir])
+
+    AgentRegistry.register(name=parent_kind, description="parent", tools=[], model=f"{provider_name}/x")
+    try:
+        runtime = _SkillTestRuntime(
+            llm=LLMClient(),
+            consolidator=MessageOnlyConsolidator(),
+            workspace=str(tmp_path),
+            loader_factory=make_loader,
+            test_tools="*",
+        )
+        plugin = SkillsAgentPlugin(make_loader(), allow=None, exclude=[], test_runtime=runtime)
+        registry = ToolRegistry(f"_test_skill_tools_{suffix}")
+        plugin.register_tools(registry)
+        assert registry.get("TestSkill") is not None
+
+        context = ToolContext(agent_name=parent_kind, chat_id="chat", turn_id="turn")
+        missing = await registry.invoke("TestSkill", {"name": "greeter", "task": "say hi", "context": context})
+        assert "not found" in missing
+
+        # The skill is written *after* the plugin's own loader cached its scan —
+        # TestSkill must still see it via its per-run fresh loader.
+        _write_skill(skills_dir, "greeter", "Greet users warmly.", "Always greet with 'ahoy'.")
+        result = await registry.invoke("TestSkill", {"name": "greeter", "task": "say hi", "context": context})
+    finally:
+        AgentRegistry._registry.pop(parent_kind, None)
+        ep_provider._extensions.pop(provider_name, None)
+
+    assert "Skill under test: greeter" in result
+    assert "Triggered (test agent loaded it from the description alone): yes" in result
+    assert "ahoy, captain!" in result
+
+
+def test_test_skill_tool_absent_without_runtime_so_test_agents_cannot_recurse(tmp_path):
+    from bos.plugins.skills.fs_skill_loader import FileSystemSkillsLoader
+
+    # The ephemeral agent's plugin is constructed without a test runtime, so a
+    # skill test run never exposes TestSkill to the agent under test.
+    plugin = SkillsAgentPlugin(FileSystemSkillsLoader(skill_dirs=[tmp_path]), allow=None, exclude=[])
+    registry = ToolRegistry(f"_no_test_skill_tools_{uuid.uuid4().hex}")
+    plugin.register_tools(registry)
+    assert registry.get("TestSkill") is None
+    assert registry.get("LoadSkill") is not None
+
+
+def _write_skill(skills_dir, name, description, body):
+    skill_dir = skills_dir / name
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        f"---\nname: {name}\ndescription: {description}\n---\n{body}\n",
+        encoding="utf-8",
+    )
+
+
+class _FakeSkillsEntryPoint:
+    def __init__(self, name, target=None, error=None):
+        self.name = name
+        self._target = target
+        self._error = error
+
+    def load(self):
+        if self._error is not None:
+            raise self._error
+        return self._target
+
+
+def _fake_entry_points(monkeypatch, *eps):
+    from bos.plugins.skills import fs_skill_loader
+
+    def entry_points(group):
+        assert group == "bos.skills"
+        return list(eps)
+
+    monkeypatch.setattr(fs_skill_loader, "entry_points", entry_points)
+
+
+@pytest.mark.asyncio
+async def test_packages_contribute_skill_dirs_via_entry_points(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from bos.plugins.skills.fs_skill_loader import FileSystemSkillsLoader
+
+    pkg_dir = tmp_path / "pkg_skills"
+    _write_skill(pkg_dir, "weather", "Weather skill.", "Contributed weather body.")
+    pkg = SimpleNamespace(__path__=[str(pkg_dir)])
+    _fake_entry_points(monkeypatch, _FakeSkillsEntryPoint("weather", target=pkg))
+
+    loader = FileSystemSkillsLoader(skill_dirs=["__builtin__"], bos_dir=tmp_path)
+    metas = await loader.search_skills()
+
+    assert "weather" in metas
+    assert "python" in metas  # bos builtins still included
+    body = await loader.load_skill("weather")
+    assert "Contributed weather body." in body
+
+
+@pytest.mark.asyncio
+async def test_workspace_skills_override_contributed_skills(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from bos.plugins.skills.fs_skill_loader import FileSystemSkillsLoader
+
+    pkg_dir = tmp_path / "pkg_skills"
+    _write_skill(pkg_dir, "alpha", "Alpha skill.", "Contributed alpha body.")
+    _write_skill(tmp_path / "skills", "alpha", "Alpha skill.", "Workspace alpha body.")
+    pkg = SimpleNamespace(__path__=[str(pkg_dir)])
+    _fake_entry_points(monkeypatch, _FakeSkillsEntryPoint("alpha_pkg", target=pkg))
+
+    loader = FileSystemSkillsLoader(skill_dirs=["__builtin__", "skills"], bos_dir=tmp_path)
+    body = await loader.load_skill("alpha")
+    assert "Workspace alpha body." in body
+
+
+@pytest.mark.asyncio
+async def test_broken_skills_entry_point_is_skipped(tmp_path, monkeypatch):
+    from bos.plugins.skills.fs_skill_loader import FileSystemSkillsLoader
+
+    _fake_entry_points(
+        monkeypatch,
+        _FakeSkillsEntryPoint("broken", error=RuntimeError("boom")),
+        _FakeSkillsEntryPoint("not_a_package", target=object()),
+    )
+
+    loader = FileSystemSkillsLoader(skill_dirs=["__builtin__"], bos_dir=tmp_path)
+    metas = await loader.search_skills()
+    assert "python" in metas  # discovery survives broken or non-package entry points
+
+
+@pytest.mark.asyncio
+async def test_skills_preload_renders_full_body_and_omits_from_available(tmp_path):
+    from bos.plugins.skills.fs_skill_loader import FileSystemSkillsLoader
+
+    skills_dir = tmp_path / "skills"
+    _write_skill(skills_dir, "alpha", "Alpha skill.", "Full alpha instructions body.")
+    _write_skill(skills_dir, "beta", "Beta skill.", "Full beta instructions body.")
+
+    loader = FileSystemSkillsLoader(skill_dirs=[skills_dir])
+    plugin = SkillsAgentPlugin(loader, allow=None, exclude=[], preload=["alpha"])
+
+    prompt = await plugin.get_system_prompt_section(None)
+
+    assert '<skill_instructions name="alpha">' in prompt
+    assert "Full alpha instructions body." in prompt
+    assert "do not call LoadSkill for them" in prompt
+    assert '<skill name="alpha">' not in prompt  # not duplicated as metadata
+    assert '<skill name="beta">Beta skill.</skill>' in prompt
+    assert "Full beta instructions body." not in prompt
+
+
+@pytest.mark.asyncio
+async def test_skills_preload_unknown_name_is_ignored(tmp_path):
+    from bos.plugins.skills.fs_skill_loader import FileSystemSkillsLoader
+
+    skills_dir = tmp_path / "skills"
+    _write_skill(skills_dir, "alpha", "Alpha skill.", "Full alpha instructions body.")
+
+    loader = FileSystemSkillsLoader(skill_dirs=[skills_dir])
+    plugin = SkillsAgentPlugin(loader, allow=None, exclude=[], preload=["missing"])
+
+    prompt = await plugin.get_system_prompt_section(None)
+
+    assert "<skill_instructions" not in prompt
+    assert '<skill name="alpha">Alpha skill.</skill>' in prompt
+
+
+def test_skills_plugin_default_config_ships_builtins_and_validates_preload():
+    plugin = SkillsHarnessPlugin()
+    cfg = plugin.default_config()
+
+    assert cfg["skill_dirs"] == ["__builtin__", "skills"]
+    assert cfg["preload"] == []
+    plugin.validate_config({"preload": ["python"]})
+    with pytest.raises(TypeError, match="preload"):
+        plugin.validate_config({"preload": "python"})
+    with pytest.raises(TypeError, match="preload"):
+        plugin.validate_config({"preload": [1]})
 
 
 @pytest.mark.asyncio
@@ -628,7 +860,7 @@ async def test_plugins_prompt_overrides_plugin_section():
 
 @pytest.mark.asyncio
 async def test_prompt_sections_render_first_50_items_and_warn(caplog):
-    local_tools = ToolRegistry("many test tools")
+    local_tools = ToolRegistry("_many_test_tools")
     tool_names = [f"Tool{i:03}" for i in range(51)]
 
     for i, tool_name in enumerate(tool_names):
@@ -689,7 +921,7 @@ async def test_prompt_sections_render_first_50_items_and_warn(caplog):
 
 @pytest.mark.asyncio
 async def test_tools_usage_overrides_tool_description_in_prompt():
-    local_tools = ToolRegistry("test tools")
+    local_tools = ToolRegistry("_test_tools")
 
     @local_tools(
         name="FetchURL",
@@ -722,7 +954,7 @@ async def test_tools_usage_overrides_tool_description_in_prompt():
 
 @pytest.mark.asyncio
 async def test_tools_usage_default_none_keeps_original_descriptions():
-    local_tools = ToolRegistry("test tools")
+    local_tools = ToolRegistry("_test_tools")
 
     @local_tools(
         name="FetchURL",
@@ -741,7 +973,7 @@ async def test_tools_usage_default_none_keeps_original_descriptions():
 
 @pytest.mark.asyncio
 async def test_tools_usage_empty_dict_keeps_all_original_descriptions():
-    local_tools = ToolRegistry("test tools")
+    local_tools = ToolRegistry("_test_tools")
 
     @local_tools(
         name="FetchURL",
@@ -786,7 +1018,7 @@ async def test_react_agent_first_turn_passes_only_user_text():
 async def test_react_agent_injects_runtime_tool_context():
     suffix = uuid.uuid4().hex
     provider_name = f"test_tool_context_provider_{suffix}"
-    tools = ToolRegistry("test tools")
+    tools = ToolRegistry("_test_tools")
 
     @tools(
         name="EchoWithContext",
@@ -835,7 +1067,7 @@ async def test_react_agent_injects_runtime_tool_context():
 async def test_parallel_safe_tool_calls_run_concurrently_in_result_order():
     suffix = uuid.uuid4().hex
     provider_name = f"test_parallel_safe_tools_{suffix}"
-    tools = ToolRegistry("parallel test tools")
+    tools = ToolRegistry("_parallel_test_tools")
     first_started = asyncio.Event()
     second_started = asyncio.Event()
 
@@ -928,7 +1160,7 @@ async def test_react_agent_persists_sanitized_abort_on_cancellation():
 @pytest.mark.asyncio
 async def test_react_agent_abort_persistence_drops_incomplete_tool_call_state():
     store = InMemChatStore()
-    tools = ToolRegistry("test tools")
+    tools = ToolRegistry("_test_tools")
     tool_started = asyncio.Event()
 
     @tools(
@@ -1003,7 +1235,7 @@ async def test_react_agent_cancellation_after_final_response_persists_answer():
 async def test_harness_passes_tool_config_to_agent_tools(tmp_path):
     suffix = uuid.uuid4().hex
     provider_name = f"test_tool_config_provider_{suffix}"
-    tools = ToolRegistry("test tools")
+    tools = ToolRegistry("_test_tools")
 
     @tools(
         name="EchoWithConfig",

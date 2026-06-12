@@ -1,14 +1,9 @@
 import asyncio
-import contextlib
-import io
 import os
 import signal
-import traceback
 from typing import Any
 
 from bos.core import ep_tool
-
-_REPL_GLOBALS = {}
 
 
 def _subprocess_kwargs() -> dict[str, Any]:
@@ -145,48 +140,6 @@ async def tool_powershell(command: str, cwd: str = ".", timeout: int = 60) -> st
         return "Error: pwsh (PowerShell) not found on system."
     except Exception as e:
         return f"Error executing PowerShell: {e}"
-
-
-@ep_tool(
-    name="Repl",
-    description="Execute Python code in a persistent REPL environment.",
-    parameters={
-        "type": "object",
-        "properties": {
-            "code": {"type": "string", "description": "Python code snippet to execute."},
-        },
-        "required": ["code"],
-    },
-)
-async def tool_repl(code: str) -> str:
-    return await asyncio.to_thread(_sync_tool_repl, code)
-
-
-def _sync_tool_repl(code: str) -> str:
-    global _REPL_GLOBALS
-    stdout = io.StringIO()
-    stderr = io.StringIO()
-    try:
-        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
-            try:
-                comp = compile(code, "<repl>", "eval")
-                res = eval(comp, _REPL_GLOBALS)
-                if res is not None:
-                    print(repr(res))
-            except SyntaxError:
-                comp = compile(code, "<repl>", "exec")
-                exec(comp, _REPL_GLOBALS)
-    except Exception:
-        traceback.print_exc(file=stderr)
-
-    out = stdout.getvalue()
-    err = stderr.getvalue()
-    result = out
-    if err:
-        if result:
-            result += "\n"
-        result += err
-    return result.strip() or "(Execution succeeded with no output)"
 
 
 @ep_tool(

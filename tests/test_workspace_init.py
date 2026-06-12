@@ -54,29 +54,30 @@ def test_workspace_load_allows_matching_discovered_bos_dir_and_bos_dir_env(tmp_p
     assert ws.config.platform is None
 
 
-def test_initialize_workspace_creates_bos_toml_by_default(tmp_path, monkeypatch):
+def test_initialize_workspace_creates_dot_bos_layout_by_default(tmp_path, monkeypatch):
     workspace = tmp_path / "project"
     workspace.mkdir()
     monkeypatch.delenv("BOS_CONFIG", raising=False)
 
     bos_dir = initialize_workspace(workspace)
-
-    assert bos_dir == workspace.resolve()
-    assert (workspace / "bos.toml").exists()
-    assert not (workspace / ".bos").exists()
-
-
-def test_initialize_workspace_dotbos_creates_dot_bos_layout(tmp_path, monkeypatch):
-    workspace = tmp_path / "project"
-    workspace.mkdir()
-    monkeypatch.delenv("BOS_CONFIG", raising=False)
-
-    bos_dir = initialize_workspace(workspace, dotbos=True)
     ws = Workspace.from_discovery(workspace)
 
     assert bos_dir == (workspace / ".bos").resolve()
     assert (bos_dir / "config.toml").exists()
+    assert not (workspace / "bos.toml").exists()
     assert ws.bos_dir == bos_dir
+
+
+def test_initialize_workspace_flat_creates_bos_toml(tmp_path, monkeypatch):
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    monkeypatch.delenv("BOS_CONFIG", raising=False)
+
+    bos_dir = initialize_workspace(workspace, dotbos=False)
+
+    assert bos_dir == workspace.resolve()
+    assert (workspace / "bos.toml").exists()
+    assert not (workspace / ".bos").exists()
 
 
 def test_initialize_workspace_rejects_already_initialized(tmp_path, monkeypatch):

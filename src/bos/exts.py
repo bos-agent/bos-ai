@@ -12,18 +12,38 @@ such as ``@ep_tool``::
     weather = "bos_weather_tools.bos_exts"
 
     # bos_weather_tools/bos_exts.py
-    from bos.core import ep_tool, AgentRegistry
+    from bos.core import ep_agent, ep_tool
 
     @ep_tool(name="GetWeather", description="...", parameters={...})
     async def tool_get_weather(city: str) -> str:
         ...
 
-    AgentRegistry.register(
-        name="weather_agent",
-        description="Weather agent",
-        model="gemini-2.5-flash",
-        tools=["GetWeather"],
-    )
+    @ep_agent(name="weather_agent", description="Weather agent")
+    def weather_agent(region: str = "us") -> dict:
+        return {
+            "system_prompt": f"You report weather for {region}.",
+            "model": "gemini-2.5-flash",
+            "tools": {"enabled": ["GetWeather"]},
+        }
+
+Agent spec factories are invoked once per bootstrap (sync or async). The
+returned dict must validate as ``AgentConfig`` — the same shape as a
+``[agents.<name>]`` TOML table. ``[exts.ep_agent.<name>]`` config is passed
+into the factory as keyword arguments, and users can still override the
+resulting spec via ``[agents.<name>]``.
+
+Packages can also ship skills declaratively via the ``bos.skills``
+entry-point group. The entry point names a package whose directory contains
+the skills (each skill is a subdirectory with ``SKILL.md``)::
+
+    # Third-party pyproject.toml
+    [project.entry-points."bos.skills"]
+    weather = "bos_weather_tools.skills"
+
+Contributed directories load wherever the ``__builtin__`` sentinel appears
+in the SkillsPlugin ``skill_dirs`` (included in the default config), after
+the bos builtins and before workspace skill dirs — so workspace skills win
+on name clashes.
 """
 
 # Core defaults (consolidator, litellm provider, etc.)

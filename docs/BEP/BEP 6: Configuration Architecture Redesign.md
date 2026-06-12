@@ -481,8 +481,9 @@ presets/<name>.toml           ─┤  tomllib.loads()
 1. **Environment loading**: inline `[platform.envs]` loaded first; `[platform.envfile]` loaded with `override=True` (envfile wins).
 2. **Extension loading**: modules and paths from `[platform.extensions]` loaded via `_load_ext_modules` / `_load_ext_paths`.
 3. **EP defaults merge**: the bootstrap iterates through `[exts]` entries. Each `ep_<name>.<impl>` path maps to `ExtensionPoint.update_defaults(<impl>, config)`. This pre-loads implementation defaults so the harness can call `ep_<name>.invoke(<impl>)` without passing config at call site.
-4. **Agent registration**: 
-   - For each `(name, cfg)` in `root_config.agents`: `AgentRegistry.register(name, deep_merge(agent_defaults, cfg))`.
+4. **Agent registration** (see Addendum: `ep_agent`):
+   - Each `ep_agent` factory is invoked exactly once; its returned spec is validated as `AgentConfig`.
+   - For each agent name in `ep_agent` factories ∪ `root_config.agents`: `AgentRegistry.register(name, deep_merge(agent_defaults, deep_merge(factory_spec, cfg)))` where either middle/last term may be absent.
    - If `_default` does not exist after registration: `AgentRegistry.register("_default", deep_merge(agent_defaults, default_agent_spec))`.
 
 ### AgentHarness — slimmed down
@@ -565,6 +566,50 @@ Channel resolution and actor-to-agent wiring remain the same in structure — on
 | `plugins = {Name: {enabled: true}}` | `plugins.enabled = ["Name"]` + `plugin-bindings.Name = {...}` |
 
 
+## Addendum: `ep_agent` — Agent Spec Factories
+
+### Motivation
+
+Extension packages previously registered agents by calling `AgentRegistry.register(...)` at import time (the pattern documented in `bos/exts.py`). This bypassed `AgentConfig` validation and the `[agent.defaults]` merge, offered no config override path, overwrote same-named agents silently with ordering-dependent precedence, and was the only extensible surface in the framework not modeled as an `ExtensionPoint`.
+
+### Design
+
+A new core extension point `ep_agent` (defined in `bos.core.contract`) holds **agent spec factories**: sync or async functions that return an agent spec dict. The returned spec must be validatable by `AgentConfig` — it is the exact same shape as a `[agents.<name>]` TOML table, keeping one canonical agent schema regardless of source.
+
+```python
+from bos.core import ep_agent
+
+@ep_agent(name="weather_agent", description="Weather forecasting agent")
+def weather_agent(region: str = "us") -> dict:
+    return {
+        "system_prompt": f"You report weather for {region}.",
+        "model": "gemini-2.5-flash",
+        "tools": {"enabled": ["GetWeather"]},
+    }
+```
+
+**Static metadata, lazy spec.** `name` and `description` are registration metadata. Discovery surfaces (`AgentRegistry.describe()`, CLI agent listings, the subagent role list) read metadata only and never invoke factories.
+
+**`[exts.ep_agent.<name>]` = factory parameters, not spec overrides.** Standard EP semantics apply unchanged: bootstrap step 3 merges the section into the extension's registered defaults, and the values are passed into the factory as keyword arguments (e.g. `region = "eu"` above). The factory interprets them however it likes; users who want to override the *resulting spec* use `[agents.<name>]`.
+
+**Invocation: exactly once per bootstrap.** Factories run in bootstrap step 4 — after environment loading (step 1) and the `[exts]` defaults merge (step 3) — so a factory sees the project's env vars, working directory, and its merged parameters. Context sensitivity comes from per-project bootstrap, not per-call; within a process the resolved spec is stable. `bootstrap_platform()` is sync at all call sites, so async factories are run via `asyncio.run()`.
+
+This generalizes across the registry: `ExtensionPoint.invoke` is a single async method that awaits the implementation's result when it is a coroutine, so every EP accepts sync or async implementations interchangeably (`invoke_async` is removed). Async callers `await ep.invoke(...)`; the one sync caller (bootstrap) wraps with `asyncio.run`.
+
+**Validation at startup.** Each returned spec is validated via `AgentConfig` immediately after invocation. An invalid spec crashes bootstrap with the factory name in the error — the same gate external agent files go through, moved as early as possible.
+
+**Merge chain.** For each agent name:
+
+```
+[agent.defaults]  →  ep_agent factory result  →  [agents.<name>]
+```
+
+Either of the last two terms may be absent; a pure-TOML agent is the degenerate case with no factory term. The `[agents.<name>]` entry deep-merges per the BEP 6 merge semantics (dicts merge recursively, lists replace, scalars replace) — so a user can partially override a packaged agent (e.g. just its `model`) from config. This supersedes the previous behavior where a same-named config agent replaced an extension-registered agent wholesale and only by accident of load order.
+
+**`_default`.** A factory may register `_default`; it participates in the chain like any named agent. The Python `default_agent_spec` remains the fallback used only when no `_default` was produced by factories or TOML.
+
+**`AgentRegistry` becomes internal.** It remains the resolved-spec store read by `AgentHarness.create_agent()`, but it is written only by `bootstrap_platform()`. Direct `AgentRegistry.register()` calls from extension packages are no longer a documented or supported registration path.
+
 ## Revision History
 
 | Date | Change | Intention |
@@ -574,3 +619,4 @@ Channel resolution and actor-to-agent wiring remain the same in structure — on
 | 2026-05-30 | System design | Added architecture overview, config loading pipeline, bootstrap relocation, harness slim-down, plugin enable/bind flow, runner integration |
 | 2026-05-30 | Rename [ext] → [harness] | TOML section, Pydantic model, and all references renamed for clarity |
 | 2026-05-30 | Design accepted | Full design approved — ready for implementation planning |
+| 2026-06-12 | Addendum: `ep_agent` agent spec factories | Replace direct `AgentRegistry.register` from extension packages with a core EP; one validated agent schema, config-driven factory params, deterministic merge chain |
