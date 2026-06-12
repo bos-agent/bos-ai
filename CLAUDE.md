@@ -40,6 +40,7 @@ Core extension points:
 |---|---|---|
 | `ep_tool` | async fn → str | LLM-callable tools |
 | `ep_provider` | async fn → LLMResponse | Model backends (litellm by default) |
+| `ep_agent` | fn (sync/async) → agent spec dict | Agent spec factories, invoked once at bootstrap |
 | `ep_channel` | `Channel` protocol (`.run(mailbox)`) | External interfaces (HTTP, Telegram) |
 | `ep_mail_route` | `MailRoute` protocol | Message transport between actors |
 | `ep_chat_store` | `ChatStore` factory | Chat persistence + context assembly |

@@ -59,6 +59,26 @@ ep_provider = ExtensionPoint(
     """
 )
 
+ep_agent = ExtensionPoint(
+    name="ep_agent",
+    description="""
+        Agent spec factory. A sync or async function returning an agent spec dict
+        validatable by AgentConfig — the same shape as a [agents.<name>] TOML table.
+        Invoked exactly once per bootstrap, after env loading and the [exts] defaults
+        merge; [exts.ep_agent.<name>] config is passed in as keyword arguments.
+        The resolved spec merges as: [agent.defaults] -> factory result -> [agents.<name>].
+        for example:
+
+        @ep_agent(name="weather_agent", description="Weather forecasting agent")
+        def weather_agent(region: str = "us") -> dict:
+            return {
+                "system_prompt": f"You report weather for {region}.",
+                "model": "gemini-2.5-flash",
+                "tools": {"enabled": ["GetWeather"]},
+            }
+    """
+)
+
 
 @dataclass
 class Message:

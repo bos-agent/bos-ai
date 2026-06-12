@@ -1,4 +1,5 @@
 """Tests for BEP6 agent resolution: inline [agents.<name>], external files, resolve_agents()."""
+from contextlib import contextmanager
 from textwrap import dedent
 
 import pytest
@@ -286,3 +287,118 @@ def test_multiple_agent_dirs_scanned(tmp_path):
 
     assert "a" in ws.config.agents
     assert "b" in ws.config.agents
+
+
+# ── ep_agent spec factories ─────────────────────────────────────────
+
+
+@contextmanager
+def _agent_factory(name, fn, description=""):
+    """Register an ep_agent factory and clean up registry state afterwards."""
+    from bos.core import ep_agent
+
+    ep_agent(name=name, description=description)(fn)
+    try:
+        yield
+    finally:
+        ep_agent._extensions.pop(name, None)
+        AgentRegistry._registry.pop(name, None)
+
+
+def test_ep_agent_factory_registered(tmp_path):
+    """An ep_agent factory's spec is validated, resolved, and registered."""
+
+    def pkg_agent():
+        return {"system_prompt": "From factory", "tools": {"enabled": ["ReadFile"]}}
+
+    with _agent_factory("pkg_agent", pkg_agent, description="Packaged agent"):
+        ws = Workspace(tmp_path, tmp_path / ".bos", {})
+        ws.bootstrap_platform()
+        assert AgentRegistry.has_registered("pkg_agent")
+        defaults = AgentRegistry.get_defaults("pkg_agent")
+        assert defaults["system_prompt"] == "From factory"
+        assert defaults["tools"] == ["ReadFile"]
+        # Static extension description is exposed without invoking the factory again
+        assert AgentRegistry.describe()["pkg_agent"] == "Packaged agent"
+
+
+def test_ep_agent_factory_receives_exts_params(tmp_path):
+    """[exts.ep_agent.<name>] values are passed into the factory as kwargs."""
+
+    def param_agent(region: str = "us"):
+        return {"system_prompt": f"region={region}"}
+
+    config = {"exts": {"ep_agent": {"param_agent": {"region": "eu"}}}}
+    with _agent_factory("param_agent", param_agent):
+        ws = Workspace(tmp_path, tmp_path / ".bos", config)
+        ws.bootstrap_platform()
+        assert AgentRegistry.get_defaults("param_agent")["system_prompt"] == "region=eu"
+
+
+def test_ep_agent_merge_chain(tmp_path):
+    """[agent.defaults] -> factory result -> [agents.<name>] deep-merge order."""
+
+    def chain_agent():
+        return {"system_prompt": "From factory", "model": "factory-model"}
+
+    config = {
+        "agent": {"defaults": {"model": "gpt-4o", "max_tokens": 1234}},
+        "agents": {"chain_agent": {"model": "toml-model"}},
+    }
+    with _agent_factory("chain_agent", chain_agent):
+        ws = Workspace(tmp_path, tmp_path / ".bos", config)
+        ws.bootstrap_platform()
+        defaults = AgentRegistry.get_defaults("chain_agent")
+        assert defaults["model"] == "toml-model"  # [agents.<name>] wins
+        assert defaults["system_prompt"] == "From factory"  # factory term survives
+        assert defaults["max_tokens"] == 1234  # [agent.defaults] base
+
+
+def test_ep_agent_async_factory(tmp_path):
+    """Async factories run via asyncio.run during bootstrap."""
+
+    async def async_agent():
+        return {"system_prompt": "async spec"}
+
+    with _agent_factory("async_agent", async_agent):
+        ws = Workspace(tmp_path, tmp_path / ".bos", {})
+        ws.bootstrap_platform()
+        assert AgentRegistry.get_defaults("async_agent")["system_prompt"] == "async spec"
+
+
+def test_ep_agent_factory_invoked_once(tmp_path):
+    """A factory is invoked exactly once per bootstrap."""
+    calls = []
+
+    def counted_agent():
+        calls.append(1)
+        return {"system_prompt": "counted"}
+
+    with _agent_factory("counted_agent", counted_agent):
+        ws = Workspace(tmp_path, tmp_path / ".bos", {})
+        ws.bootstrap_platform()
+        assert len(calls) == 1
+
+
+def test_ep_agent_factory_non_dict_raises(tmp_path):
+    """A factory returning a non-dict crashes bootstrap with the factory name."""
+
+    def bad_agent():
+        return ["not", "a", "spec"]
+
+    with _agent_factory("bad_agent", bad_agent):
+        ws = Workspace(tmp_path, tmp_path / ".bos", {})
+        with pytest.raises(ValueError, match="bad_agent"):
+            ws.bootstrap_platform()
+
+
+def test_ep_agent_factory_invalid_spec_raises(tmp_path):
+    """A factory returning a spec that fails AgentConfig validation crashes bootstrap."""
+
+    def invalid_agent():
+        return {"max_tokens": "not-an-int"}
+
+    with _agent_factory("invalid_agent", invalid_agent):
+        ws = Workspace(tmp_path, tmp_path / ".bos", {})
+        with pytest.raises(ValueError, match="invalid_agent"):
+            ws.bootstrap_platform()

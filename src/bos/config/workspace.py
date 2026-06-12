@@ -369,6 +369,39 @@ def _is_comment_or_empty(value: str) -> bool:
     return not value or value.startswith("#")
 
 
+def _invoke_agent_factories() -> dict[str, dict[str, Any]]:
+    """Invoke each ``ep_agent`` spec factory once and validate its output.
+
+    Factories receive their merged ``[exts.ep_agent.<name>]`` defaults as
+    keyword arguments and must return a dict validatable by ``AgentConfig``
+    (the same shape as a ``[agents.<name>]`` TOML table). Async factories are
+    supported via ``asyncio.run`` — bootstrap runs outside any event loop.
+    """
+    import asyncio
+    import inspect
+
+    from pydantic import ValidationError
+
+    from bos.core import ep_agent
+
+    specs: dict[str, dict[str, Any]] = {}
+    for name in ep_agent.describe():
+        result = ep_agent.invoke(name)
+        if inspect.iscoroutine(result):
+            result = asyncio.run(result)
+        if not isinstance(result, dict):
+            raise ValueError(
+                f"ep_agent factory `{name}` must return an agent spec dict, "
+                f"got {type(result).__name__}"
+            )
+        try:
+            validated = AgentConfig.model_validate(result)
+        except ValidationError as exc:
+            raise ValueError(f"ep_agent factory `{name}` returned an invalid agent spec:\n{exc}") from exc
+        specs[name] = _agent_config_to_core_kwargs(validated)
+    return specs
+
+
 @dataclass(frozen=True)
 class AgentRuntimeConfig:
     kind: str = "process"
@@ -566,14 +599,29 @@ class Workspace:
                         ep.update_defaults(impl_name, cfg)
 
         # 4. Agent registration
+        # Resolution chain per agent name: [agent.defaults] -> ep_agent factory
+        # result -> [agents.<name>]. Factory and TOML terms may each be absent.
         agent_defaults: dict[str, Any] = {}
         if self.config.agent and self.config.agent.defaults:
             agent_defaults = _agent_config_to_core_kwargs(self.config.agent.defaults)
 
-        for name, agent_config in (self.config.agents or {}).items():
-            cfg = _agent_config_to_core_kwargs(agent_config)
-            merged = _deep_merge(dict(agent_defaults), cfg)
+        factory_specs = _invoke_agent_factories()
+
+        config_specs = {
+            name: _agent_config_to_core_kwargs(agent_config)
+            for name, agent_config in (self.config.agents or {}).items()
+        }
+
+        for name in {**factory_specs, **config_specs}:
+            merged = _deep_merge(dict(agent_defaults), dict(factory_specs.get(name, {})))
+            merged = _deep_merge(merged, config_specs.get(name, {}))
             merged.pop("name", None)  # name is the registration key, not a kwarg
+            if "description" not in merged and name in factory_specs:
+                from bos.core import ep_agent
+
+                ext = ep_agent.get(name)
+                if ext is not None and ext.description:
+                    merged["description"] = ext.description
             AgentRegistry.register(name, **merged)
 
         if not AgentRegistry.has_registered("_default"):

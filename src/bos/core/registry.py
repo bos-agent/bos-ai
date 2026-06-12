@@ -92,7 +92,7 @@ class ExtensionPoint:
         if ext is None or not defaults:
             return
         try:
-            origin = _deep_merge({}, ext.defaults)
+            origin = _deep_merge({}, ext.defaults or {})
             _deep_merge(origin, defaults)
             ext.defaults = origin
         except Exception:
