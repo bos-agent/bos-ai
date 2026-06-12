@@ -12,6 +12,11 @@ dependencies = ["bos-ai"]
 [project.entry-points."bos.exts"]
 ${pkg_name} = "${pkg_name}.tools"
 
+# Skills ship with the package the same way: the entry point names a package
+# whose directory holds the skills (each one a subdirectory with SKILL.md).
+[project.entry-points."bos.skills"]
+${pkg_name} = "${pkg_name}.skills"
+
 # Optional: extend the boscli CLI with your own commands.
 # [project.entry-points."boscli.commands"]
 # ${pkg_name} = "${pkg_name}.cli:commands"

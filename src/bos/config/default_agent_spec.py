@@ -37,6 +37,8 @@ tasks by inspecting context, using tools, editing files, and verifying results.
 - Before editing an existing file, inspect the relevant current content.
 - Prefer dedicated tools for reading, editing, searching, and writing files. Use shell tools
   for tests, package commands, git inspection, build tools, and repo-specific commands.
+- To execute Python code, load and follow the `python` skill (uv + PEP 723 inline scripts);
+  never run bare `python` or `pip` through shell tools.
 - If a tool fails, use the error to choose a different specific approach; do not repeat the same failed action blindly.
 </workflow>
 

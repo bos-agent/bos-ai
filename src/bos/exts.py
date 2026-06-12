@@ -31,6 +31,19 @@ returned dict must validate as ``AgentConfig`` — the same shape as a
 ``[agents.<name>]`` TOML table. ``[exts.ep_agent.<name>]`` config is passed
 into the factory as keyword arguments, and users can still override the
 resulting spec via ``[agents.<name>]``.
+
+Packages can also ship skills declaratively via the ``bos.skills``
+entry-point group. The entry point names a package whose directory contains
+the skills (each skill is a subdirectory with ``SKILL.md``)::
+
+    # Third-party pyproject.toml
+    [project.entry-points."bos.skills"]
+    weather = "bos_weather_tools.skills"
+
+Contributed directories load wherever the ``__builtin__`` sentinel appears
+in the SkillsPlugin ``skill_dirs`` (included in the default config), after
+the bos builtins and before workspace skill dirs — so workspace skills win
+on name clashes.
 """
 
 # Core defaults (consolidator, litellm provider, etc.)

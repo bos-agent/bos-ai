@@ -20,7 +20,7 @@ from bos.core import AgentHarness, AgentRegistry, LLMResponse, Message, ToolCall
 from bos.core.contract import ep_consolidator, ep_tool
 from bos.core.registry import ToolRegistry
 from bos.plugins.memory import MemoryAgentPlugin
-from bos.plugins.skills import SkillMeta, SkillsAgentPlugin
+from bos.plugins.skills import SkillMeta, SkillsAgentPlugin, SkillsHarnessPlugin
 from bos.plugins.subagent import SubagentAgentPlugin, SubagentHarnessPlugin
 from bos.plugins.task import TaskAgentPlugin
 
@@ -525,6 +525,154 @@ Use this skill to search YouTube.
     assert skill_metas["youtube-searcher"].name == "youtube-searcher"
     assert skill_metas["youtube-searcher"].description == "Search YouTube."
     assert load_result == skill_file.read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_builtin_python_skill_discovered_and_loadable(tmp_path):
+    """The packaged builtin skills resolve via the __builtin__ sentinel."""
+    from bos.plugins.skills.fs_skill_loader import FileSystemSkillsLoader
+
+    loader = FileSystemSkillsLoader(skill_dirs=["__builtin__"], bos_dir=tmp_path)
+    metas = await loader.search_skills()
+
+    assert "python" in metas
+    assert "uv" in metas["python"].description
+    body = await loader.load_skill("python")
+    assert "/// script" in body
+    assert "uv run" in body
+
+
+def _write_skill(skills_dir, name, description, body):
+    skill_dir = skills_dir / name
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        f"---\nname: {name}\ndescription: {description}\n---\n{body}\n",
+        encoding="utf-8",
+    )
+
+
+class _FakeSkillsEntryPoint:
+    def __init__(self, name, target=None, error=None):
+        self.name = name
+        self._target = target
+        self._error = error
+
+    def load(self):
+        if self._error is not None:
+            raise self._error
+        return self._target
+
+
+def _fake_entry_points(monkeypatch, *eps):
+    from bos.plugins.skills import fs_skill_loader
+
+    def entry_points(group):
+        assert group == "bos.skills"
+        return list(eps)
+
+    monkeypatch.setattr(fs_skill_loader, "entry_points", entry_points)
+
+
+@pytest.mark.asyncio
+async def test_packages_contribute_skill_dirs_via_entry_points(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from bos.plugins.skills.fs_skill_loader import FileSystemSkillsLoader
+
+    pkg_dir = tmp_path / "pkg_skills"
+    _write_skill(pkg_dir, "weather", "Weather skill.", "Contributed weather body.")
+    pkg = SimpleNamespace(__path__=[str(pkg_dir)])
+    _fake_entry_points(monkeypatch, _FakeSkillsEntryPoint("weather", target=pkg))
+
+    loader = FileSystemSkillsLoader(skill_dirs=["__builtin__"], bos_dir=tmp_path)
+    metas = await loader.search_skills()
+
+    assert "weather" in metas
+    assert "python" in metas  # bos builtins still included
+    body = await loader.load_skill("weather")
+    assert "Contributed weather body." in body
+
+
+@pytest.mark.asyncio
+async def test_workspace_skills_override_contributed_skills(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from bos.plugins.skills.fs_skill_loader import FileSystemSkillsLoader
+
+    pkg_dir = tmp_path / "pkg_skills"
+    _write_skill(pkg_dir, "alpha", "Alpha skill.", "Contributed alpha body.")
+    _write_skill(tmp_path / "skills", "alpha", "Alpha skill.", "Workspace alpha body.")
+    pkg = SimpleNamespace(__path__=[str(pkg_dir)])
+    _fake_entry_points(monkeypatch, _FakeSkillsEntryPoint("alpha_pkg", target=pkg))
+
+    loader = FileSystemSkillsLoader(skill_dirs=["__builtin__", "skills"], bos_dir=tmp_path)
+    body = await loader.load_skill("alpha")
+    assert "Workspace alpha body." in body
+
+
+@pytest.mark.asyncio
+async def test_broken_skills_entry_point_is_skipped(tmp_path, monkeypatch):
+    from bos.plugins.skills.fs_skill_loader import FileSystemSkillsLoader
+
+    _fake_entry_points(
+        monkeypatch,
+        _FakeSkillsEntryPoint("broken", error=RuntimeError("boom")),
+        _FakeSkillsEntryPoint("not_a_package", target=object()),
+    )
+
+    loader = FileSystemSkillsLoader(skill_dirs=["__builtin__"], bos_dir=tmp_path)
+    metas = await loader.search_skills()
+    assert "python" in metas  # discovery survives broken or non-package entry points
+
+
+@pytest.mark.asyncio
+async def test_skills_preload_renders_full_body_and_omits_from_available(tmp_path):
+    from bos.plugins.skills.fs_skill_loader import FileSystemSkillsLoader
+
+    skills_dir = tmp_path / "skills"
+    _write_skill(skills_dir, "alpha", "Alpha skill.", "Full alpha instructions body.")
+    _write_skill(skills_dir, "beta", "Beta skill.", "Full beta instructions body.")
+
+    loader = FileSystemSkillsLoader(skill_dirs=[skills_dir])
+    plugin = SkillsAgentPlugin(loader, allow=None, exclude=[], preload=["alpha"])
+
+    prompt = await plugin.get_system_prompt_section(None)
+
+    assert '<skill_instructions name="alpha">' in prompt
+    assert "Full alpha instructions body." in prompt
+    assert "do not call LoadSkill for them" in prompt
+    assert '<skill name="alpha">' not in prompt  # not duplicated as metadata
+    assert '<skill name="beta">Beta skill.</skill>' in prompt
+    assert "Full beta instructions body." not in prompt
+
+
+@pytest.mark.asyncio
+async def test_skills_preload_unknown_name_is_ignored(tmp_path):
+    from bos.plugins.skills.fs_skill_loader import FileSystemSkillsLoader
+
+    skills_dir = tmp_path / "skills"
+    _write_skill(skills_dir, "alpha", "Alpha skill.", "Full alpha instructions body.")
+
+    loader = FileSystemSkillsLoader(skill_dirs=[skills_dir])
+    plugin = SkillsAgentPlugin(loader, allow=None, exclude=[], preload=["missing"])
+
+    prompt = await plugin.get_system_prompt_section(None)
+
+    assert "<skill_instructions" not in prompt
+    assert '<skill name="alpha">Alpha skill.</skill>' in prompt
+
+
+def test_skills_plugin_default_config_ships_builtins_and_validates_preload():
+    plugin = SkillsHarnessPlugin()
+    cfg = plugin.default_config()
+
+    assert cfg["skill_dirs"] == ["__builtin__", "skills"]
+    assert cfg["preload"] == []
+    plugin.validate_config({"preload": ["python"]})
+    with pytest.raises(TypeError, match="preload"):
+        plugin.validate_config({"preload": "python"})
+    with pytest.raises(TypeError, match="preload"):
+        plugin.validate_config({"preload": [1]})
 
 
 @pytest.mark.asyncio

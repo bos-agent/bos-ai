@@ -1,11 +1,40 @@
+import logging
 import re
 from collections.abc import Iterable
 from datetime import datetime, timedelta
+from importlib.metadata import entry_points
 from pathlib import Path
 
 from bos.core import _read_text
 
 from .plugin import SkillMeta, pep_skills_loader
+
+logger = logging.getLogger(__name__)
+
+
+def _contributed_skill_dirs() -> list[Path]:
+    """Collect skill dirs shipped by packages via the ``bos.skills`` entry-point group.
+
+    Each entry point names a package whose directory contains skills (each
+    skill is a subdirectory with ``SKILL.md``)::
+
+        [project.entry-points."bos.skills"]
+        weather = "bos_weather_tools.skills"
+    """
+    dirs: list[Path] = []
+    for ep in entry_points(group="bos.skills"):
+        try:
+            target = ep.load()
+        except Exception:
+            logger.warning("Failed to load bos.skills entry point %r; skipping.", ep.name, exc_info=True)
+            continue
+        if hasattr(target, "__path__"):
+            dirs.extend(Path(p).resolve() for p in target.__path__)
+        elif getattr(target, "__file__", None):
+            dirs.append(Path(target.__file__).parent.resolve())
+        else:
+            logger.warning("bos.skills entry point %r does not resolve to a package; skipping.", ep.name)
+    return dirs
 
 
 def _parse_frontmatter_fields(frontmatter: str) -> dict[str, str]:
@@ -56,17 +85,33 @@ def _parse_frontmatter_fields(frontmatter: str) -> dict[str, str]:
 @pep_skills_loader(name="_default")
 class FileSystemSkillsLoader:
     def __init__(self, skill_dirs: Iterable[Path | str] | None = None, bos_dir: str | Path | None = None) -> None:
-        import bos.skills
-
-        builtin_dirs = list(bos.skills.__path__)
         if skill_dirs is None:
-            skill_dirs = builtin_dirs + ["skills"]
-        elif "__builtin__" in skill_dirs:
-            skill_dirs = builtin_dirs + list(skill_dirs)
-
-        self._skill_dirs = [(Path(bos_dir or ".") / Path(dir).expanduser()).resolve() for dir in skill_dirs]
+            skill_dirs = ["__builtin__", "skills"]
+        self._base_dir = Path(bos_dir or ".")
+        self._raw_dirs = [str(d) for d in skill_dirs]
+        self._resolved_dirs: list[Path] | None = None
         self._skill_metas: dict[str, SkillMeta] = {}
         self._skill_metas_refreshed_at = datetime(2000, 1, 1)
+
+    async def _get_skill_dirs(self) -> list[Path]:
+        """Resolve configured dirs once, expanding `__builtin__` in place.
+
+        The sentinel expands to the packaged bos.skills dirs followed by the
+        ``bos.skills`` entry-point contributions, so later (workspace) dirs
+        win on skill-name clashes.
+        """
+        if self._resolved_dirs is None:
+            dirs: list[Path] = []
+            for raw in self._raw_dirs:
+                if raw == "__builtin__":
+                    import bos.skills
+
+                    dirs.extend(Path(p).resolve() for p in bos.skills.__path__)
+                    dirs.extend(_contributed_skill_dirs())
+                else:
+                    dirs.append((self._base_dir / Path(raw).expanduser()).resolve())
+            self._resolved_dirs = dirs
+        return self._resolved_dirs
 
     async def load_skill(self, name: str) -> str:
         skill_files = await self._list_skill_files()
@@ -94,7 +139,7 @@ class FileSystemSkillsLoader:
 
     async def _list_skill_files(self) -> dict[str, Path]:
         skill_files = {}
-        for d in self._skill_dirs:
+        for d in await self._get_skill_dirs():
             if (d / "SKILL.md").exists():
                 skill_files[d.name] = d / "SKILL.md"
             if d.is_dir():

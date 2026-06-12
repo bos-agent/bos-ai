@@ -58,7 +58,13 @@ class SkillsHarnessPlugin:
         return "SkillsPlugin"
 
     def default_config(self) -> Mapping[str, Any]:
-        return {"skill_dirs": ["skills"], "allow": "*", "exclude": [], "loader": "_default"}
+        return {
+            "skill_dirs": ["__builtin__", "skills"],
+            "allow": "*",
+            "exclude": [],
+            "loader": "_default",
+            "preload": [],
+        }
 
     async def setup(self, services: PluginServices) -> None:
         self._services = services
@@ -72,6 +78,11 @@ class SkillsHarnessPlugin:
         exclude = config.get("exclude")
         if exclude is not None and not isinstance(exclude, list):
             raise TypeError("SkillsPlugin: 'exclude' must be a list or None")
+        preload = config.get("preload")
+        if preload is not None and (
+            not isinstance(preload, list) or not all(isinstance(p, str) for p in preload)
+        ):
+            raise TypeError("SkillsPlugin: 'preload' must be a list of skill names")
 
     def bind(self, config: Mapping[str, Any]) -> AgentPlugin:
         cache_key = _loader_cache_key(config)
@@ -89,7 +100,7 @@ class SkillsHarnessPlugin:
         exclude = config.get("exclude", [])
         if isinstance(allow, str) and allow == "*":
             allow = None
-        return SkillsAgentPlugin(loader, allow, exclude)
+        return SkillsAgentPlugin(loader, allow, exclude, preload=config.get("preload", []))
 
     async def teardown(self) -> None:
         from bos.core._utils import _aclose
@@ -127,10 +138,17 @@ Use skills as progressively disclosed task playbooks.
 
 
 class SkillsAgentPlugin:
-    def __init__(self, loader: Any, allow: list[str] | str | None, exclude: list[str]) -> None:
+    def __init__(
+        self,
+        loader: Any,
+        allow: list[str] | str | None,
+        exclude: list[str],
+        preload: Sequence[str] = (),
+    ) -> None:
         self._loader = loader
         self._allow = allow
         self._exclude = exclude
+        self._preload = tuple(preload)
 
     @property
     def name(self) -> str:
@@ -164,8 +182,29 @@ class SkillsAgentPlugin:
 
         logger = logging.getLogger(__name__)
         available = await self._loader.search_skills()
-        available = _pick_collection(available, self._allow, self._exclude)
+        # Copy: _pick_collection may return the loader's cached dict unfiltered.
+        available = dict(_pick_collection(available, self._allow, self._exclude))
         sections = [_SKILLS_PROMPT_SECTION]
+
+        preloaded: list[str] = []
+        for name in self._preload:
+            if name not in available:
+                continue
+            try:
+                body = await self._loader.load_skill(name)
+            except Exception:
+                logger.warning(
+                    "Failed to preload skill %r; leaving it in available_skills.", name, exc_info=True
+                )
+                continue
+            available.pop(name)
+            preloaded.append(f'<skill_instructions name="{_xml_attr(name)}">\n{body.strip()}\n</skill_instructions>')
+        if preloaded:
+            preloaded.append(
+                "(The skill_instructions above are already fully loaded; do not call LoadSkill for them.)"
+            )
+            sections.append("\n\n".join(preloaded))
+
         if not available:
             return "\n\n".join(sections)
         try:

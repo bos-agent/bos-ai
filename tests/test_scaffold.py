@@ -2,6 +2,7 @@
 
 import importlib
 import tomllib
+from pathlib import Path
 
 import pytest
 
@@ -81,6 +82,7 @@ def test_package_scaffold_layout_and_tool_registration(tmp_path, monkeypatch):
     assert (tmp_path / "tests" / "test_tools.py").is_file()
     assert (tmp_path / ".bos" / "config.toml").is_file()
     assert not (tmp_path / ".bos" / "extensions").exists()  # the package IS the extension
+    assert not (tmp_path / ".bos" / "skills").exists()  # skills ship inside the package
 
     ws = Workspace.from_discovery(tmp_path)
     ws.resolve_agents()
@@ -90,12 +92,19 @@ def test_package_scaffold_layout_and_tool_registration(tmp_path, monkeypatch):
     pyproject = tomllib.loads((tmp_path / "pyproject.toml").read_text(encoding="utf-8"))
     (target,) = pyproject["project"]["entry-points"]["bos.exts"].values()
     assert target == "my_pkg_proj.tools"
+    (skills_target,) = pyproject["project"]["entry-points"]["bos.skills"].values()
+    assert skills_target == "my_pkg_proj.skills"
 
     from bos.core import ep_tool
 
     monkeypatch.syspath_prepend(str(tmp_path / "src"))
     importlib.import_module(target)
     assert ep_tool.has("WordCount")
+
+    # The bos.skills entry-point target resolves to the packaged skills dir.
+    skills_pkg = importlib.import_module(skills_target)
+    (skills_dir,) = [Path(p) for p in skills_pkg.__path__]
+    assert (skills_dir / "example-skill" / "SKILL.md").is_file()
 
 
 def test_scaffold_dotbos_layout(tmp_path):

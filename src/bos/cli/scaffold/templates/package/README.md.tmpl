@@ -12,9 +12,9 @@ an installable Python package whose tools register with the BOS runtime through 
 |---|---|
 | `.bos/config.toml` | Project configuration: agents, plugins, runtime. |
 | `.bos/agents/` | Agent definitions (`.md` frontmatter + system prompt, or `.toml`). |
-| `.bos/skills/` | Reusable instruction packs the agent can load on demand. |
 | `.bos/.env` | Secrets (API keys, tokens). Gitignored — never commit it. |
 | `src/${pkg_name}/tools.py` | Your extensions. The `bos.exts` entry point in `pyproject.toml` points here. |
+| `src/${pkg_name}/skills/` | Skills that ship with the package, via the `bos.skills` entry point. |
 | `tests/` | Package tests (`uv run pytest`). |
 
 ## Run
@@ -46,5 +46,5 @@ uv build
 uv publish
 ```
 
-Any BOS project that installs the published package gets its extensions
-automatically via the `bos.exts` entry point.
+Any BOS project that installs the published package gets its extensions and
+skills automatically via the `bos.exts` and `bos.skills` entry points.

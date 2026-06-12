@@ -55,6 +55,8 @@ Plugin-defined extension points:
 | `pep_memory_backend` | `bos.plugins.memory` | Long-term memory persistence backends |
 | `pep_skills_loader` | `bos.plugins.skills` | Skill discovery and loading |
 
+Third-party packages can also ship skills declaratively (no code) via the `bos.skills` entry-point group: the entry point names a package whose directory contains skills, expanded where the `__builtin__` sentinel appears in SkillsPlugin `skill_dirs`.
+
 Extensions register via decorator (e.g., `@ep_tool(name="...", description="...", parameters={...})`) or via TOML config in `[platform.extensions]`.
 
 ### Agent Lifecycle
