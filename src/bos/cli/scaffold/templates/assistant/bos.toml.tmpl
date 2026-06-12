@@ -1,0 +1,42 @@
+# ${project_name} — BOS project configuration (assistant archetype).
+# Full commented reference: `boscli project init --minimal` in an empty directory.
+# purpose: ${purpose_comment}
+
+[platform]
+envfile = ".env"
+# Python files under ./extensions are scanned for @ep_tool / @ep_channel / … registrations.
+extensions = ["bos.exts", "./extensions"]
+# .toml / .md files under ./agents define named agents (filename stem = agent name).
+agent_dirs = ["./agents"]
+
+[agent.defaults]
+${model_line}
+
+[agent.defaults.tools]
+enabled = ["*"]
+
+[agent.defaults.plugins]
+enabled = ["*"]
+
+[agents.main]
+description = "Main agent for ${project_name}"
+system_prompt = """
+You are the main agent of this project.
+
+Project purpose: ${purpose_toml}
+
+Help the user accomplish this purpose. Use the available tools, skills, and
+memory; keep answers concrete and grounded in what you can verify.
+"""
+
+[runtime]
+location = "process"
+default_actor = "main"
+
+[runtime.gateway]
+# 0 = let the system assign a free port; clients discover it via gateway.state.
+port = 0
+
+[runtime.actors.main]
+agent = "main"
+display_name = "Main"

@@ -96,8 +96,26 @@ def _build_workspace_for_daemon(ctx, workspace_override: str | None = None) -> W
 def _get_ws_and_rd(ctx, workspace_override: str | None = None) -> tuple[Workspace, GatewayRunDir]:
     """Build Workspace + GatewayRunDir for daemon commands."""
     ws = _build_workspace_for_daemon(ctx, workspace_override)
+    _echo_config_source(ws, config_arg=ctx.obj.get("CONFIG"))
     rd = GatewayRunDir(ws.bos_dir)
     return ws, rd
+
+
+def _echo_config_source(ws: Workspace, config_arg: str | None = None) -> None:
+    """Print one stderr line stating which config source is in use (BEP 9).
+
+    Suppressed when stderr is not a terminal so piped output stays clean.
+    """
+    if not sys.stderr.isatty():
+        return
+    if preset := _builtin_preset_name_for_config_file(ws.config_file):
+        message = f"Using built-in preset: {preset} ({ws.bos_dir})"
+    elif config_arg:
+        message = f"Using config file: {ws.config_file}"
+    else:
+        config_name = Path(ws.config_file).name if ws.config_file else "?"
+        message = f"Using project: {ws.workspace} ({config_name})"
+    click.echo(message, err=True)
 
 
 def _runner_config_arg(ctx, ws: Workspace) -> str:

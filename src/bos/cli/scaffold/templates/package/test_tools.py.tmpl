@@ -1,0 +1,7 @@
+import asyncio
+
+from ${pkg_name}.tools import word_count
+
+
+def test_word_count():
+    assert asyncio.run(word_count("one two three")) == "3 words"

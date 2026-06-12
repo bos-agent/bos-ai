@@ -191,5 +191,5 @@ def test_existing_commands_still_listed():
     runner = CliRunner()
     result = runner.invoke(cli, ["--help"])
     assert result.exit_code == 0
-    for name in ("auth", "init", "gateway", "ask", "tui"):
+    for name in ("auth", "project", "gateway", "ask", "tui"):
         assert name in result.output

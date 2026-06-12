@@ -1,0 +1,47 @@
+# ${project_name} — BOS project configuration (service archetype).
+# Full commented reference: `boscli project init --minimal` in an empty directory.
+# purpose: ${purpose_comment}
+
+[platform]
+envfile = ".env"
+# Python files under ./extensions are scanned for @ep_tool / @ep_channel / … registrations.
+extensions = ["bos.exts", "./extensions"]
+# .toml / .md files under ./agents define named agents (filename stem = agent name).
+agent_dirs = ["./agents"]
+
+[agent.defaults]
+${model_line}
+
+[agent.defaults.tools]
+enabled = ["*"]
+
+[agent.defaults.plugins]
+enabled = ["*"]
+
+[agents.main]
+description = "Main agent for ${project_name}"
+system_prompt = """
+You are the main agent of this service.
+
+Project purpose: ${purpose_toml}
+
+Requests arrive over the HTTP gateway. Be concise and structured; callers are
+programs or operators, not a chat audience.
+"""
+
+[runtime]
+location = "process"
+default_actor = "main"
+
+# API-first: API key required (generated into .env at init).
+# WebSocket channel + HTTP endpoints are served at this address.
+[runtime.gateway]
+host = "127.0.0.1"
+# 0 = let the system assign a free port; clients discover it via gateway.state.
+# Set a fixed port if external callers need a stable endpoint.
+port = 0
+api_key_env = "BOS_GATEWAY_API_KEY"
+
+[runtime.actors.main]
+agent = "main"
+display_name = "Main"

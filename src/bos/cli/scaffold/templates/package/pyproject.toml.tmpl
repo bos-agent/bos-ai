@@ -1,0 +1,27 @@
+[project]
+name = "${dist_name}"
+version = "0.1.0"
+description = "${purpose_comment}"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = ["bos-ai"]
+
+# BOS discovers this group whenever `bos.exts` loads (the config default).
+# Importing the target module registers its @ep_tool / @ep_channel / …
+# decorators — in this project AND in any project that installs this package.
+[project.entry-points."bos.exts"]
+${pkg_name} = "${pkg_name}.tools"
+
+# Optional: extend the boscli CLI with your own commands.
+# [project.entry-points."boscli.commands"]
+# ${pkg_name} = "${pkg_name}.cli:commands"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/${pkg_name}"]
+
+[dependency-groups]
+dev = ["pytest"]

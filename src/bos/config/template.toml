@@ -124,7 +124,8 @@ default_actor = "main"
 
 [runtime.gateway]
 host = "127.0.0.1"
-port = 5920
+# 0 = let the system assign a free port; clients discover it via gateway.state.
+port = 0
 api_key_env = "BOS_GATEWAY_API_KEY"
 
 [runtime.actors.main]
