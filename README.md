@@ -39,7 +39,7 @@ uvx boscli ask "how are you"
 
 ```bash
 mkdir my-agent && cd my-agent
-boscli project init  # guided setup: purpose, topology, model — writes a runnable baseline
+boscli init          # guided setup: purpose, topology, model — writes a runnable baseline
 boscli gateway start # start the agent runtime
 boscli tui           # connect the terminal UI
 ```
@@ -47,10 +47,10 @@ boscli tui           # connect the terminal UI
 Grow the project as you go:
 
 ```bash
-boscli project add agent <name>      # add a specialist agent
-boscli project add tool <Name>       # add a custom tool stub
-boscli project add channel telegram  # wire a Telegram bot
-boscli project doctor                # check config, paths, env, credentials
+boscli gen agent <name>      # add a specialist agent
+boscli gen tool <Name>       # add a custom tool stub
+boscli gen channel telegram  # wire a Telegram bot
+boscli doctor                # check config, paths, env, credentials
 ```
 
 ## Docs

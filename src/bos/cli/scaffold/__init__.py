@@ -1,4 +1,4 @@
-"""Project scaffolding engine for ``boscli project`` (BEP 9).
+"""Project scaffolding engine for ``boscli init``/``gen`` (BEP 9).
 
 Archetypes are template directories under ``templates/``; shared fragments live
 in ``templates/_shared/``. Rendering uses :class:`string.Template` only — the
@@ -72,7 +72,7 @@ def scaffold_workspace(
     existing = _find_discovered_config(workspace)
     if existing is not None:
         raise WorkspaceResolutionError(
-            f"Workspace already initialized: found {existing}. Use `boscli project add` to extend it."
+            f"Workspace already initialized: found {existing}. Use `boscli gen` to extend it."
         )
 
     config_text = render_template(f"{archetype}/bos.toml.tmpl", context)
