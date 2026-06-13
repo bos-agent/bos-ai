@@ -177,7 +177,7 @@ find where the relevant list is actually pinned before touching anything:
 
 To share a skill beyond one workspace, ship it in a Python package: declare a
 `bos.skills` entry point naming a package directory whose subdirectories are
-skills. `boscli project init --archetype package` scaffolds exactly this
+skills. `boscli init --archetype package` scaffolds exactly this
 layout, wired and publishable.
 
 ## Improving an existing skill

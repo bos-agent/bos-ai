@@ -1,11 +1,10 @@
-"""``boscli project`` CLI tests (BEP 9)."""
+"""``boscli init`` and ``boscli gen`` CLI tests (BEP 9)."""
 
-import socket
 import tomllib
 
 from click.testing import CliRunner
 
-from bos.cli.commands.project import _infer_key_env, _parse_specialists
+from bos.cli.commands.scaffolding import _infer_key_env, _parse_specialists
 from bos.cli.entry import cli
 
 
@@ -13,22 +12,16 @@ def _invoke(args, **kwargs):
     return CliRunner().invoke(cli, args, **kwargs)
 
 
-def _free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
-
-
 def _init_project(workspace, *extra_args):
-    result = _invoke(["project", "init", str(workspace), "--yes", "--no-git", *extra_args])
+    result = _invoke(["init", str(workspace), "--yes", "--no-git", *extra_args])
     assert result.exit_code == 0, result.output
     return result
 
 
-# ── project init ────────────────────────────────────────────────
+# ── init ────────────────────────────────────────────────────────
 
 
-def test_project_init_yes_scaffolds_runnable_baseline(tmp_path, monkeypatch):
+def test_init_yes_scaffolds_runnable_baseline(tmp_path, monkeypatch):
     monkeypatch.delenv("BOS_CONFIG", raising=False)
     result = _init_project(tmp_path)
 
@@ -44,19 +37,19 @@ def test_project_init_yes_scaffolds_runnable_baseline(tmp_path, monkeypatch):
     assert not (tmp_path / ".git").exists()
 
 
-def test_project_init_rejects_initialized_workspace(tmp_path, monkeypatch):
+def test_init_rejects_initialized_workspace(tmp_path, monkeypatch):
     monkeypatch.delenv("BOS_CONFIG", raising=False)
     (tmp_path / "bos.toml").write_text("", encoding="utf-8")
 
-    result = _invoke(["project", "init", str(tmp_path), "--yes", "--no-git"])
+    result = _invoke(["init", str(tmp_path), "--yes", "--no-git"])
 
     assert result.exit_code != 0
     assert "already initialized" in result.output
 
 
-def test_project_init_minimal_copies_reference_template(tmp_path, monkeypatch):
+def test_init_minimal_copies_reference_template(tmp_path, monkeypatch):
     monkeypatch.delenv("BOS_CONFIG", raising=False)
-    result = _invoke(["project", "init", str(tmp_path), "--minimal"])
+    result = _invoke(["init", str(tmp_path), "--minimal"])
 
     assert result.exit_code == 0
     assert f"Initialized BOS workspace at {tmp_path / '.bos'}" in result.output
@@ -64,7 +57,7 @@ def test_project_init_minimal_copies_reference_template(tmp_path, monkeypatch):
     assert not (tmp_path / ".bos" / "extensions").exists()
 
 
-def test_project_init_flat_layout(tmp_path, monkeypatch):
+def test_init_flat_layout(tmp_path, monkeypatch):
     monkeypatch.delenv("BOS_CONFIG", raising=False)
     _init_project(tmp_path, "--flat")
 
@@ -72,19 +65,19 @@ def test_project_init_flat_layout(tmp_path, monkeypatch):
     assert not (tmp_path / ".bos").exists()
 
 
-def test_project_init_flat_rejected_for_package_archetype(tmp_path, monkeypatch):
+def test_init_flat_rejected_for_package_archetype(tmp_path, monkeypatch):
     monkeypatch.delenv("BOS_CONFIG", raising=False)
-    result = _invoke(["project", "init", str(tmp_path), "--yes", "--no-git", "--archetype", "package", "--flat"])
+    result = _invoke(["init", str(tmp_path), "--yes", "--no-git", "--archetype", "package", "--flat"])
 
     assert result.exit_code != 0
     assert "--flat is not supported with the package archetype" in result.output
 
 
-def test_project_init_wizard_team_with_skipped_model(tmp_path, monkeypatch):
+def test_init_wizard_team_with_skipped_model(tmp_path, monkeypatch):
     monkeypatch.delenv("BOS_CONFIG", raising=False)
     # purpose, archetype 2 (team), provider 5 (skip), git: no
     result = _invoke(
-        ["project", "init", str(tmp_path)],
+        ["init", str(tmp_path)],
         input="A bot that reviews pull requests\n2\n5\nn\n",
     )
 
@@ -96,11 +89,11 @@ def test_project_init_wizard_team_with_skipped_model(tmp_path, monkeypatch):
     assert binding["enabled"] == ["researcher", "writer"]
 
 
-def test_project_init_package_archetype(tmp_path, monkeypatch):
+def test_init_package_archetype(tmp_path, monkeypatch):
     monkeypatch.delenv("BOS_CONFIG", raising=False)
     target = tmp_path / "my-weather-tools"
     target.mkdir()
-    result = _invoke(["project", "init", str(target), "--yes", "--no-git", "--archetype", "package"])
+    result = _invoke(["init", str(target), "--yes", "--no-git", "--archetype", "package"])
 
     assert result.exit_code == 0, result.output
     # dotbos is implied: the root belongs to the Python package
@@ -113,33 +106,18 @@ def test_project_init_package_archetype(tmp_path, monkeypatch):
     assert "uv run boscli gateway start" in result.output
 
 
-def test_project_init_package_name_override(tmp_path, monkeypatch):
+def test_init_package_name_override(tmp_path, monkeypatch):
     monkeypatch.delenv("BOS_CONFIG", raising=False)
     result = _invoke(
-        ["project", "init", str(tmp_path), "--yes", "--no-git", "--archetype", "package", "--name", "CoolTools"]
+        ["init", str(tmp_path), "--yes", "--no-git", "--archetype", "package", "--name", "CoolTools"]
     )
 
     assert result.exit_code == 0, result.output
     assert (tmp_path / "src" / "cooltools" / "tools.py").is_file()
 
 
-def test_project_doctor_package_flags_uninstalled_entry_point(tmp_path, monkeypatch):
-    monkeypatch.delenv("BOS_CONFIG", raising=False)
-    target = tmp_path / "pkgproj"
-    target.mkdir()
-    _invoke(["project", "init", str(target), "--yes", "--no-git", "--archetype", "package"])
-    monkeypatch.chdir(target)
-
-    result = _invoke(["project", "doctor"])
-
-    # the package is not installed in the test interpreter — doctor must say so
-    assert result.exit_code == 1
-    assert "bos.exts entry point" in result.output
-    assert "uv run boscli" in result.output
-
-
 def test_normalize_pkg_name():
-    from bos.cli.commands.project import _normalize_pkg_name
+    from bos.cli.commands.scaffolding import _normalize_pkg_name
 
     assert _normalize_pkg_name("my-agent") == "my_agent"
     assert _normalize_pkg_name("My Weather.Tools") == "my_weather_tools"
@@ -150,7 +128,7 @@ def test_normalize_pkg_name():
         _normalize_pkg_name("123")
 
 
-def test_project_init_with_model_writes_env_placeholder(tmp_path, monkeypatch):
+def test_init_with_model_writes_env_placeholder(tmp_path, monkeypatch):
     monkeypatch.delenv("BOS_CONFIG", raising=False)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     _init_project(tmp_path, "--model", "anthropic/claude-sonnet-4-6", "--no-probe")
@@ -160,32 +138,32 @@ def test_project_init_with_model_writes_env_placeholder(tmp_path, monkeypatch):
     assert "ANTHROPIC_API_KEY=" in (tmp_path / ".bos" / ".env").read_text(encoding="utf-8")
 
 
-# ── project add ─────────────────────────────────────────────────
+# ── gen ─────────────────────────────────────────────────────────
 
 
-def test_project_add_agent_creates_markdown_spec(tmp_path, monkeypatch):
+def test_gen_agent_creates_markdown_spec(tmp_path, monkeypatch):
     monkeypatch.delenv("BOS_CONFIG", raising=False)
     _init_project(tmp_path)
     monkeypatch.chdir(tmp_path)
 
-    result = _invoke(["project", "add", "agent", "analyst"])
+    result = _invoke(["gen", "agent", "analyst"])
 
     assert result.exit_code == 0, result.output
     content = (tmp_path / ".bos" / "agents" / "analyst.md").read_text(encoding="utf-8")
     assert content.startswith("---\ndescription:")
     assert "You are analyst" in content
 
-    duplicate = _invoke(["project", "add", "agent", "analyst"])
+    duplicate = _invoke(["gen", "agent", "analyst"])
     assert duplicate.exit_code != 0
     assert "already exists" in duplicate.output
 
 
-def test_project_add_agent_actor_appends_runtime_entry(tmp_path, monkeypatch):
+def test_gen_agent_actor_appends_runtime_entry(tmp_path, monkeypatch):
     monkeypatch.delenv("BOS_CONFIG", raising=False)
     _init_project(tmp_path)
     monkeypatch.chdir(tmp_path)
 
-    result = _invoke(["project", "add", "agent", "analyst", "--actor"])
+    result = _invoke(["gen", "agent", "analyst", "--actor"])
 
     assert result.exit_code == 0, result.output
     config_file = tmp_path / ".bos" / "config.toml"
@@ -196,12 +174,12 @@ def test_project_add_agent_actor_appends_runtime_entry(tmp_path, monkeypatch):
     assert "# purpose:" in config_file.read_text(encoding="utf-8")
 
 
-def test_project_add_tool_creates_stub(tmp_path, monkeypatch):
+def test_gen_tool_creates_stub(tmp_path, monkeypatch):
     monkeypatch.delenv("BOS_CONFIG", raising=False)
     _init_project(tmp_path)
     monkeypatch.chdir(tmp_path)
 
-    result = _invoke(["project", "add", "tool", "FetchQuote"])
+    result = _invoke(["gen", "tool", "FetchQuote"])
 
     assert result.exit_code == 0, result.output
     content = (tmp_path / ".bos" / "extensions" / "fetch_quote.py").read_text(encoding="utf-8")
@@ -209,12 +187,12 @@ def test_project_add_tool_creates_stub(tmp_path, monkeypatch):
     assert "async def fetch_quote" in content
 
 
-def test_project_add_channel_telegram_appends_config_and_env(tmp_path, monkeypatch):
+def test_gen_channel_telegram_appends_config_and_env(tmp_path, monkeypatch):
     monkeypatch.delenv("BOS_CONFIG", raising=False)
     _init_project(tmp_path)
     monkeypatch.chdir(tmp_path)
 
-    result = _invoke(["project", "add", "channel", "telegram"])
+    result = _invoke(["gen", "channel", "telegram"])
 
     assert result.exit_code == 0, result.output
     config = tomllib.loads((tmp_path / ".bos" / "config.toml").read_text(encoding="utf-8"))
@@ -223,76 +201,19 @@ def test_project_add_channel_telegram_appends_config_and_env(tmp_path, monkeypat
     assert channels[0]["settings"]["token_env"] == "TELEGRAM_BOT_TOKEN"
     assert "TELEGRAM_BOT_TOKEN=" in (tmp_path / ".bos" / ".env").read_text(encoding="utf-8")
 
-    duplicate = _invoke(["project", "add", "channel", "telegram"])
+    duplicate = _invoke(["gen", "channel", "telegram"])
     assert duplicate.exit_code != 0
     assert "already configured" in duplicate.output
 
 
-def test_project_add_outside_project_fails(tmp_path, monkeypatch):
+def test_gen_outside_project_fails(tmp_path, monkeypatch):
     monkeypatch.delenv("BOS_CONFIG", raising=False)
     monkeypatch.chdir(tmp_path)
 
-    result = _invoke(["project", "add", "agent", "analyst"])
+    result = _invoke(["gen", "agent", "analyst"])
 
     assert result.exit_code != 0
     assert "No BOS project found" in result.output
-
-
-# ── project doctor ──────────────────────────────────────────────
-
-
-def test_project_doctor_healthy_project(tmp_path, monkeypatch):
-    monkeypatch.delenv("BOS_CONFIG", raising=False)
-    monkeypatch.delenv("BOS_MODEL", raising=False)
-    _init_project(tmp_path)
-    monkeypatch.chdir(tmp_path)
-
-    result = _invoke(["project", "doctor"])
-
-    assert result.exit_code == 0, result.output
-    assert "config.toml parses and validates" in result.output
-    assert "agent spec(s) load" in result.output
-    assert "no model configured" in result.output  # warn, not fail
-    assert "dynamic port" in result.output  # scaffolds default to port = 0
-
-
-def test_project_doctor_checks_fixed_port(tmp_path, monkeypatch):
-    monkeypatch.delenv("BOS_CONFIG", raising=False)
-    _init_project(tmp_path)
-    port = _free_port()
-    config_file = tmp_path / ".bos" / "config.toml"
-    content = config_file.read_text(encoding="utf-8").replace("port = 0", f"port = {port}")
-    config_file.write_text(content, encoding="utf-8")
-    monkeypatch.chdir(tmp_path)
-
-    result = _invoke(["project", "doctor"])
-
-    assert result.exit_code == 0, result.output
-    assert f"port {port} free" in result.output
-
-
-def test_project_doctor_fails_on_unset_channel_env(tmp_path, monkeypatch):
-    monkeypatch.delenv("BOS_CONFIG", raising=False)
-    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
-    _init_project(tmp_path, "--archetype", "telegram-bot")
-    monkeypatch.chdir(tmp_path)
-
-    result = _invoke(["project", "doctor"])
-
-    assert result.exit_code == 1
-    assert "TELEGRAM_BOT_TOKEN" in result.output
-
-
-def test_project_doctor_fails_on_missing_paths(tmp_path, monkeypatch):
-    monkeypatch.delenv("BOS_CONFIG", raising=False)
-    _init_project(tmp_path)
-    (tmp_path / ".bos" / ".env").unlink()
-    monkeypatch.chdir(tmp_path)
-
-    result = _invoke(["project", "doctor"])
-
-    assert result.exit_code == 1
-    assert "missing: .env" in result.output
 
 
 # ── helpers and parsing ─────────────────────────────────────────

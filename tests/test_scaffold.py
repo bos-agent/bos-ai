@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from bos.cli.commands.project import _build_context, _fallback_specialists, _specialist_files
+from bos.cli.commands.scaffolding import _build_context, _fallback_specialists, _specialist_files
 from bos.cli.scaffold import ARCHETYPES, scaffold_workspace
 from bos.config import Workspace, WorkspaceResolutionError
 

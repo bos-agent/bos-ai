@@ -11,7 +11,9 @@ PLUGIN_ENTRY_POINT_GROUP = "boscli.commands"
 
 _LAZY_COMMANDS: dict[str, str] = {
     "auth": "bos.cli.commands.auth:auth",
-    "project": "bos.cli.commands.project:project",
+    "init": "bos.cli.commands.scaffolding:init",
+    "gen": "bos.cli.commands.scaffolding:gen",
+    "doctor": "bos.cli.commands.doctor:doctor",
     "gateway": "bos.cli.commands.agent:gateway",
     "ask": "bos.cli.commands.agent:ask",
     "tui": "bos.cli.commands.agent:tui",
