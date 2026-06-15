@@ -24,14 +24,17 @@ def _slugify(address: str) -> str:
     """Convert an address to a filesystem-safe filename segment using URL encoding.
 
     The ``@`` separator and the ``+`` channel-id separator are kept unencoded
-    for readability with the ``type@name`` and ``kind+name`` conventions.
+    for readability with the ``type@name`` and ``kind+name`` conventions. Any
+    ``:`` is normalized to ``+`` first so a hand-written ``kind:name`` channel
+    id never produces a ``%3A``-escaped filename.
 
     Examples:
         "agent@main"  -> "agent@main"
         "channel@http"  -> "channel@http"
         "channel@telegram+main"  -> "channel@telegram+main"
+        "channel@telegram:main"  -> "channel@telegram+main"
     """
-    return urllib.parse.quote(address, safe="@+")
+    return urllib.parse.quote(address.replace(":", "+"), safe="@+")
 
 
 class _JsonlMailBox:
