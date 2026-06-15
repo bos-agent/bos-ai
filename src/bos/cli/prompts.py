@@ -115,3 +115,67 @@ def _select_interactive(message: str, choices: list[Choice], selectables: list[C
         return app.run()
     except KeyboardInterrupt:
         raise click.Abort()
+
+
+def text(message: str, *, default=None, _input=None, _output=None) -> str:
+    if not is_interactive():
+        return click.prompt(message, default=default if default is not None else "")
+    from prompt_toolkit import prompt as ptk_prompt
+
+    try:
+        value = ptk_prompt(f"{message}: ", default=default or "", **_io_kwargs(_input, _output))
+    except (KeyboardInterrupt, EOFError):
+        raise click.Abort()
+    return value.strip() or (default or "")
+
+
+def password(message: str, *, _input=None, _output=None) -> str:
+    if not is_interactive():
+        return click.prompt(message, hide_input=True, default="", show_default=False)
+    from prompt_toolkit import prompt as ptk_prompt
+
+    try:
+        return ptk_prompt(f"{message}: ", is_password=True, **_io_kwargs(_input, _output))
+    except (KeyboardInterrupt, EOFError):
+        raise click.Abort()
+
+
+def confirm(message: str, *, default: bool = True, _input=None, _output=None) -> bool:
+    if not is_interactive():
+        return click.confirm(message, default=default)
+    from prompt_toolkit.shortcuts import confirm as ptk_confirm
+
+    try:
+        return ptk_confirm(message)
+    except (KeyboardInterrupt, EOFError):
+        raise click.Abort()
+
+
+def autocomplete(message: str, options, *, default=None, _input=None, _output=None) -> str:
+    options = list(options)
+    fallback_default = default if default is not None else (options[0] if options else "")
+    if not is_interactive():
+        return click.prompt(message, default=fallback_default)
+    from prompt_toolkit import prompt as ptk_prompt
+    from prompt_toolkit.completion import FuzzyWordCompleter
+
+    try:
+        value = ptk_prompt(
+            f"{message}: ",
+            completer=FuzzyWordCompleter(options),
+            complete_while_typing=True,
+            default=default or "",
+            **_io_kwargs(_input, _output),
+        )
+    except (KeyboardInterrupt, EOFError):
+        raise click.Abort()
+    return value.strip() or fallback_default
+
+
+def _io_kwargs(_input, _output) -> dict:
+    kwargs = {}
+    if _input is not None:
+        kwargs["input"] = _input
+    if _output is not None:
+        kwargs["output"] = _output
+    return kwargs

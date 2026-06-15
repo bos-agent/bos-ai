@@ -47,3 +47,34 @@ def test_select_interactive_arrow_down(monkeypatch):
         inp.send_text("\x1b[B\r")  # down arrow, then Enter
         result = prompts.select("pick", choices, _input=inp, _output=DummyOutput())
     assert result == "b"
+
+
+def test_text_fallback(monkeypatch):
+    monkeypatch.setattr(prompts, "is_interactive", lambda: False)
+    monkeypatch.setattr(click, "prompt", lambda *a, **k: "hello")
+    assert prompts.text("msg", default="x") == "hello"
+
+
+def test_password_fallback(monkeypatch):
+    monkeypatch.setattr(prompts, "is_interactive", lambda: False)
+    seen = {}
+
+    def fake_prompt(msg, **kwargs):
+        seen.update(kwargs)
+        return "secret"
+
+    monkeypatch.setattr(click, "prompt", fake_prompt)
+    assert prompts.password("Key") == "secret"
+    assert seen.get("hide_input") is True
+
+
+def test_confirm_fallback(monkeypatch):
+    monkeypatch.setattr(prompts, "is_interactive", lambda: False)
+    monkeypatch.setattr(click, "confirm", lambda *a, **k: True)
+    assert prompts.confirm("ok?", default=False) is True
+
+
+def test_autocomplete_fallback(monkeypatch):
+    monkeypatch.setattr(prompts, "is_interactive", lambda: False)
+    monkeypatch.setattr(click, "prompt", lambda *a, **k: "openai/gpt-4.1")
+    assert prompts.autocomplete("Model", ["a", "b"], default="a") == "openai/gpt-4.1"
