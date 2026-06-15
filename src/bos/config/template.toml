@@ -50,12 +50,12 @@ model = "gemini/gemini-2.5-flash"
 # skill_dirs = ["skills"]
 
 # Tool-specific runtime configuration
-# [exts.ep_tool.WebSearch._default]
+# [exts.ep_tool.WebSearch]
 # priority = ["tavily", "duckduckgo"]
 # timeout_seconds = 15
 # max_results = 5
 #
-# [exts.ep_tool.WebSearch._default.tavily]
+# [exts.ep_tool.WebSearch.tavily]
 # api_key_env = "TAVILY_API_KEY"
 # search_depth = "basic"
 # fallback_on_status = [429, 432, 433, 500, 502, 503, 504]

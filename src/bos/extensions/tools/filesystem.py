@@ -261,7 +261,7 @@ def _sync_tool_glob_search(pattern: str, cwd: str = ".") -> str:
         # file globs ("*.min.js") are both supported.  The ep_tool
         # defaults supply the standard set; config overrides flow through
         # update_defaults at invocation time.
-        # Override in [exts.ep_tool.GrepSearch._default]:
+        # Override in [exts.ep_tool.GrepSearch]:
         #   exclude = [".venv", ".git", "*.min.js"]
         "exclude": sorted(_IGNORE_DIRS),
     },
