@@ -12,6 +12,7 @@ from pathlib import Path
 
 import click
 
+from bos.cli import prompts
 from bos.cli.scaffold import (
     ARCHETYPES,
     frontmatter_text,
@@ -45,6 +46,28 @@ _OAUTH_PROVIDERS = {
     "codex": ("codex", "codex/gpt-5.3-codex"),
     "gemini-cli": ("gemini_cli", "gemini-cli/gemini-2.5-pro"),
     "antigravity": ("antigravity", "antigravity/gemini-3-pro-preview"),
+}
+
+# API providers offered in the interactive wizard, in display order, with the
+# litellm key env var each one reads. Mirrors _API_KEY_ENV_BY_PREFIX as a flat
+# provider list. BOS-maintained; occasional drift against litellm is accepted.
+_PROVIDER_KEY_ENV: tuple[tuple[str, str], ...] = (
+    ("anthropic", "ANTHROPIC_API_KEY"),
+    ("openai", "OPENAI_API_KEY"),
+    ("gemini", "GEMINI_API_KEY"),
+    ("groq", "GROQ_API_KEY"),
+    ("mistral", "MISTRAL_API_KEY"),
+    ("deepseek", "DEEPSEEK_API_KEY"),
+    ("xai", "XAI_API_KEY"),
+    ("openrouter", "OPENROUTER_API_KEY"),
+)
+
+_DEFAULT_MODEL = "anthropic/claude-sonnet-4-6"
+
+# Curated ids pinned to the top of the picker and used as the last-resort source
+# when both the live API and the litellm catalog come back empty.
+_RECOMMENDED_MODELS: dict[str, tuple[str, ...]] = {
+    "anthropic": ("anthropic/claude-sonnet-4-6", "anthropic/claude-opus-4-5"),
 }
 
 
@@ -84,7 +107,7 @@ def init(
     project_name = workspace_path.name or "bos-project"
 
     if purpose is None:
-        purpose = _DEFAULT_PURPOSE if yes else click.prompt("What is this agent project for?", default=_DEFAULT_PURPOSE)
+        purpose = _DEFAULT_PURPOSE if yes else prompts.text("What is this agent project for?", default=_DEFAULT_PURPOSE)
     if archetype is None:
         archetype = "assistant" if yes else _prompt_archetype()
 
@@ -152,7 +175,7 @@ def init(
 
     if init_git is None:
         default_git = not _inside_git_repo(workspace_path)
-        init_git = default_git if yes else click.confirm("Initialize a git repository?", default=default_git)
+        init_git = default_git if yes else prompts.confirm("Initialize a git repository?", default=default_git)
     if init_git:
         _git_init(workspace_path)
 
@@ -169,7 +192,6 @@ def init(
 
 
 def _prompt_archetype() -> str:
-    click.echo("Choose a starting topology:")
     descriptions = {
         "assistant": "single agent with memory and skills",
         "team": "a coordinator agent that delegates to specialists",
@@ -177,10 +199,8 @@ def _prompt_archetype() -> str:
         "telegram-bot": "an agent wired to a Telegram channel",
         "package": "an installable Python extension package (tools, channels, providers)",
     }
-    for i, name in enumerate(ARCHETYPES, start=1):
-        click.echo(f"  {i}. {name} — {descriptions[name]}")
-    choice = click.prompt("Archetype", type=click.IntRange(1, len(ARCHETYPES)), default=1)
-    return ARCHETYPES[choice - 1]
+    choices = [prompts.Choice(name, name, descriptions[name]) for name in ARCHETYPES]
+    return prompts.select("Choose a starting topology:", choices, default=ARCHETYPES[0])
 
 
 def _provider_step(ctx, model: str | None, yes: bool) -> tuple[str | None, dict[str, str]]:
@@ -189,7 +209,13 @@ def _provider_step(ctx, model: str | None, yes: bool) -> tuple[str | None, dict[
         return model, _api_key_env_pairs(model, yes)
     if yes:
         return None, {}
+    if not prompts.is_interactive():
+        return _provider_step_fallback(ctx)
+    return _provider_step_interactive(ctx)
 
+
+def _provider_step_fallback(ctx) -> tuple[str | None, dict[str, str]]:
+    """The historical numbered provider menu, used for non-TTY callers (CI, pipes)."""
     click.echo("Choose a model provider:")
     click.echo("  1. API key (any litellm model id, e.g. anthropic/claude-…, gpt-…)")
     click.echo("  2. OpenAI Codex subscription (boscli auth codex)")
@@ -197,14 +223,56 @@ def _provider_step(ctx, model: str | None, yes: bool) -> tuple[str | None, dict[
     click.echo("  4. Google Antigravity (boscli auth antigravity)")
     click.echo("  5. Skip — configure the model later")
     choice = click.prompt("Provider", type=click.IntRange(1, 5), default=1)
-
     if choice == 5:
         return None, {}
     if choice == 1:
-        model = click.prompt("Model id (litellm format)", default="anthropic/claude-sonnet-4-6")
+        model = click.prompt("Model id (litellm format)", default=_DEFAULT_MODEL)
         return model, _api_key_env_pairs(model, yes=False)
-
     provider = ("codex", "gemini-cli", "antigravity")[choice - 2]
+    return _oauth_provider(ctx, provider)
+
+
+def _provider_step_interactive(ctx) -> tuple[str | None, dict[str, str]]:
+    detected = _detect_provider_keys()
+    choices = _provider_choices(detected)
+    default = next(iter(detected)) if len(detected) == 1 else None
+    selection = prompts.select("Choose a model provider:", choices, default=default)
+    if selection == "__skip__":
+        return None, {}
+    if selection in _OAUTH_PROVIDERS:
+        return _oauth_provider(ctx, selection)
+    return _api_provider(selection)
+
+
+def _provider_choices(detected: dict[str, str]) -> list[prompts.Choice]:
+    rows: list[prompts.Choice] = []
+    for provider, env in _PROVIDER_KEY_ENV:
+        if provider in detected:
+            rows.append(prompts.Choice(provider, provider, f"✓ {env}"))
+    for provider, env in _PROVIDER_KEY_ENV:
+        if provider not in detected:
+            rows.append(prompts.Choice(provider, provider, f"set {env}"))
+    rows.append(prompts.Choice(None, "── OAuth subscriptions ──", selectable=False))
+    for provider in _OAUTH_PROVIDERS:
+        rows.append(prompts.Choice(provider, provider, "OAuth subscription"))
+    rows.append(prompts.Choice(None, "", selectable=False))
+    rows.append(prompts.Choice("__skip__", "Skip — configure the model later"))
+    return rows
+
+
+def _api_provider(provider: str) -> tuple[str, dict[str, str]]:
+    env_var = dict(_PROVIDER_KEY_ENV)[provider]
+    existing = os.environ.get(env_var)
+    if existing:
+        api_key, env_pairs = existing, {}  # already in env; never copy into .env
+    else:
+        api_key = prompts.password(f"{env_var} (stored in .env, leave empty to skip)")
+        env_pairs = {env_var: api_key}
+    models, source = _fetch_models(provider, api_key)
+    return _pick_model(provider, models, source), env_pairs
+
+
+def _oauth_provider(ctx, provider: str) -> tuple[str, dict[str, str]]:
     auth_attr, default_model = _OAUTH_PROVIDERS[provider]
     try:
         from bos.cli.commands import auth as auth_module
@@ -214,8 +282,24 @@ def _provider_step(ctx, model: str | None, yes: bool) -> tuple[str | None, dict[
         click.echo(f"Authentication failed ({exc.message}) — continuing; run `boscli auth {provider}` later.", err=True)
     except Exception as exc:  # OAuth flows talk to the network; never abort init on failure
         click.echo(f"Authentication failed ({exc}) — continuing; run `boscli auth {provider}` later.", err=True)
-    model = click.prompt("Model id", default=default_model)
-    return model, {}
+    return prompts.text("Model id", default=default_model), {}
+
+
+def _pick_model(provider: str, models: list[str], source: str) -> str:
+    recommended = list(_RECOMMENDED_MODELS.get(provider, ()))
+    ordered = recommended + [m for m in models if m not in recommended]
+    if not ordered:
+        ordered = [_DEFAULT_MODEL]
+    notes = {
+        "live": f"models live from your {provider} account",
+        "catalog": "models from the litellm catalog (may be stale)",
+        "curated": "built-in recommended models (could not reach the provider)",
+    }
+    click.echo(f"  {notes[source]}")
+    click.echo(f"  {len(ordered)} model(s) available · ↑↓ to browse, type to filter, Enter for {ordered[0]}")
+    # No pre-filled default: an empty buffer lets the completion menu show the
+    # full list up front. autocomplete() still returns ordered[0] on empty Enter.
+    return prompts.autocomplete("Model id (type to filter, or enter a custom id)", ordered)
 
 
 def _api_key_env_pairs(model: str, yes: bool) -> dict[str, str]:
@@ -327,6 +411,28 @@ def _bootstrapped_workspace(workspace_path: Path) -> Workspace:
     return ws
 
 
+_LLM_LOOP: asyncio.AbstractEventLoop | None = None
+
+
+def _run_llm(coro):
+    """Run an LLM coroutine on a single, reused event loop for the process.
+
+    litellm enqueues its success/error callbacks onto a background
+    ``LoggingWorker`` bound to whatever event loop is running. ``asyncio.run``
+    creates and tears down a fresh loop per call, so the *next* call detects the
+    loop change and resets the worker's queue (``logging_worker.py`` line 75,
+    ``self._queue = None``), discarding still-queued callback coroutines — that
+    is the source of the ``coroutine 'Logging.async_success_handler' was never
+    awaited`` RuntimeWarning. Reusing one loop lets the worker drain those
+    callbacks naturally between calls and via litellm's atexit flush.
+    """
+    global _LLM_LOOP
+    if _LLM_LOOP is None or _LLM_LOOP.is_closed():
+        _LLM_LOOP = asyncio.new_event_loop()
+    asyncio.set_event_loop(_LLM_LOOP)
+    return _LLM_LOOP.run_until_complete(coro)
+
+
 def _complete(model: str, prompt: str) -> str:
     from bos.core import LLMClient
 
@@ -334,7 +440,46 @@ def _complete(model: str, prompt: str) -> str:
         response = await LLMClient().complete([{"role": "user", "content": prompt}], model=model)
         return response.text or ""
 
-    return asyncio.run(_call())
+    return _run_llm(_call())
+
+
+def _detect_provider_keys() -> dict[str, str]:
+    """Providers whose key env var is set (non-empty) in the environment."""
+    return {provider: env for provider, env in _PROVIDER_KEY_ENV if os.environ.get(env)}
+
+
+def _qualify(provider: str, model: str) -> str:
+    """Ensure a model id is in litellm ``provider/model`` form."""
+    return model if "/" in model else f"{provider}/{model}"
+
+
+def _fetch_models(provider: str, api_key: str | None) -> tuple[list[str], str]:
+    """Return (models, source) where source is 'live', 'catalog', or 'curated'.
+
+    Tries the provider's live /models endpoint first (needs a key), then the
+    static litellm catalog, then the curated shortlist. Never raises.
+    """
+    import logging
+
+    import litellm
+
+    if api_key:
+        logging.getLogger("LiteLLM").setLevel(logging.ERROR)  # silence the 401/empty warning
+        try:
+            live = litellm.get_valid_models(
+                check_provider_endpoint=True, custom_llm_provider=provider, api_key=api_key
+            )
+        except Exception:
+            live = []
+        live = [_qualify(provider, m) for m in live]
+        if live:
+            return live, "live"
+
+    catalog = sorted(_qualify(provider, m) for m in litellm.models_by_provider.get(provider, set()))
+    if catalog:
+        return catalog, "catalog"
+
+    return list(_RECOMMENDED_MODELS.get(provider, ())), "curated"
 
 
 def _probe_model(workspace_path: Path, model: str) -> tuple[bool, str]:

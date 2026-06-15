@@ -259,3 +259,101 @@ def test_config_source_banner_formats(tmp_path, monkeypatch):
 
     agent_module._echo_config_source(ws, config_arg="/some/custom.toml")
     assert captured[-1][0].startswith("Using config file:")
+
+
+def test_detect_provider_keys(monkeypatch):
+    from bos.cli.commands import scaffolding as s
+
+    for _, env in s._PROVIDER_KEY_ENV:
+        monkeypatch.delenv(env, raising=False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "x")
+    monkeypatch.setenv("OPENAI_API_KEY", "y")
+    assert s._detect_provider_keys() == {
+        "anthropic": "ANTHROPIC_API_KEY",
+        "openai": "OPENAI_API_KEY",
+    }
+
+
+def test_qualify_model_id():
+    from bos.cli.commands import scaffolding as s
+
+    assert s._qualify("anthropic", "claude-x") == "anthropic/claude-x"
+    assert s._qualify("anthropic", "anthropic/claude-x") == "anthropic/claude-x"
+
+
+def test_fetch_models_live(monkeypatch):
+    import litellm
+
+    from bos.cli.commands import scaffolding as s
+
+    monkeypatch.setattr(litellm, "get_valid_models", lambda **k: ["claude-a", "claude-b"])
+    models, source = s._fetch_models("anthropic", "key")
+    assert source == "live"
+    assert models == ["anthropic/claude-a", "anthropic/claude-b"]
+
+
+def test_fetch_models_catalog_fallback(monkeypatch):
+    import litellm
+
+    from bos.cli.commands import scaffolding as s
+
+    monkeypatch.setattr(litellm, "get_valid_models", lambda **k: [])
+    monkeypatch.setattr(litellm, "models_by_provider", {"anthropic": {"claude-z", "claude-a"}})
+    models, source = s._fetch_models("anthropic", "key")
+    assert source == "catalog"
+    assert models == ["anthropic/claude-a", "anthropic/claude-z"]  # sorted, qualified
+
+
+def test_fetch_models_curated_fallback(monkeypatch):
+    import litellm
+
+    from bos.cli.commands import scaffolding as s
+
+    monkeypatch.setattr(litellm, "get_valid_models", lambda **k: [])
+    monkeypatch.setattr(litellm, "models_by_provider", {})
+    models, source = s._fetch_models("anthropic", None)
+    assert source == "curated"
+    assert models == list(s._RECOMMENDED_MODELS["anthropic"])
+
+
+def test_provider_step_interactive_existing_key(monkeypatch):
+    from bos.cli import prompts
+    from bos.cli.commands import scaffolding as s
+
+    for _, env in s._PROVIDER_KEY_ENV:
+        monkeypatch.delenv(env, raising=False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "live-key")
+    monkeypatch.setattr(prompts, "is_interactive", lambda: True)
+    monkeypatch.setattr(prompts, "select", lambda *a, **k: "anthropic")
+    monkeypatch.setattr(s, "_fetch_models", lambda p, key: (["anthropic/claude-sonnet-4-6"], "live"))
+    monkeypatch.setattr(prompts, "autocomplete", lambda *a, **k: "anthropic/claude-sonnet-4-6")
+
+    model, env_pairs = s._provider_step(None, None, False)
+    assert model == "anthropic/claude-sonnet-4-6"
+    assert env_pairs == {}  # key already in env, never copied into .env
+
+
+def test_provider_step_interactive_prompts_for_missing_key(monkeypatch):
+    from bos.cli import prompts
+    from bos.cli.commands import scaffolding as s
+
+    for _, env in s._PROVIDER_KEY_ENV:
+        monkeypatch.delenv(env, raising=False)
+    monkeypatch.setattr(prompts, "is_interactive", lambda: True)
+    monkeypatch.setattr(prompts, "select", lambda *a, **k: "openai")
+    monkeypatch.setattr(prompts, "password", lambda *a, **k: "typed-key")
+    monkeypatch.setattr(s, "_fetch_models", lambda p, key: (["openai/gpt-4.1"], "live"))
+    monkeypatch.setattr(prompts, "autocomplete", lambda *a, **k: "openai/gpt-4.1")
+
+    model, env_pairs = s._provider_step(None, None, False)
+    assert model == "openai/gpt-4.1"
+    assert env_pairs == {"OPENAI_API_KEY": "typed-key"}
+
+
+def test_provider_step_interactive_skip(monkeypatch):
+    from bos.cli import prompts
+    from bos.cli.commands import scaffolding as s
+
+    monkeypatch.setattr(prompts, "is_interactive", lambda: True)
+    monkeypatch.setattr(prompts, "select", lambda *a, **k: "__skip__")
+    assert s._provider_step(None, None, False) == (None, {})

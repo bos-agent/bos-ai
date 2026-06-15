@@ -12,6 +12,7 @@ dependencies = [
     "click==8.3.2",
     "rich==14.3.3",
     "textual==8.2.3",
+    "prompt_toolkit==3.0.52",
     "tomli==2.0.1; python_version<'3.11'",
     "beautifulsoup4==4.14.3",
     "aiohttp==3.13.5",
