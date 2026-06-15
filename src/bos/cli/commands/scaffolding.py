@@ -370,6 +370,35 @@ def _qualify(provider: str, model: str) -> str:
     return model if "/" in model else f"{provider}/{model}"
 
 
+def _fetch_models(provider: str, api_key: str | None) -> tuple[list[str], str]:
+    """Return (models, source) where source is 'live', 'catalog', or 'curated'.
+
+    Tries the provider's live /models endpoint first (needs a key), then the
+    static litellm catalog, then the curated shortlist. Never raises.
+    """
+    import logging
+
+    import litellm
+
+    if api_key:
+        logging.getLogger("LiteLLM").setLevel(logging.ERROR)  # silence the 401/empty warning
+        try:
+            live = litellm.get_valid_models(
+                check_provider_endpoint=True, custom_llm_provider=provider, api_key=api_key
+            )
+        except Exception:
+            live = []
+        live = [_qualify(provider, m) for m in live]
+        if live:
+            return live, "live"
+
+    catalog = sorted(_qualify(provider, m) for m in litellm.models_by_provider.get(provider, set()))
+    if catalog:
+        return catalog, "catalog"
+
+    return list(_RECOMMENDED_MODELS.get(provider, ())), "curated"
+
+
 def _probe_model(workspace_path: Path, model: str) -> tuple[bool, str]:
     try:
         _bootstrapped_workspace(workspace_path)

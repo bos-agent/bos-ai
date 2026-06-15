@@ -279,3 +279,38 @@ def test_qualify_model_id():
 
     assert s._qualify("anthropic", "claude-x") == "anthropic/claude-x"
     assert s._qualify("anthropic", "anthropic/claude-x") == "anthropic/claude-x"
+
+
+def test_fetch_models_live(monkeypatch):
+    import litellm
+
+    from bos.cli.commands import scaffolding as s
+
+    monkeypatch.setattr(litellm, "get_valid_models", lambda **k: ["claude-a", "claude-b"])
+    models, source = s._fetch_models("anthropic", "key")
+    assert source == "live"
+    assert models == ["anthropic/claude-a", "anthropic/claude-b"]
+
+
+def test_fetch_models_catalog_fallback(monkeypatch):
+    import litellm
+
+    from bos.cli.commands import scaffolding as s
+
+    monkeypatch.setattr(litellm, "get_valid_models", lambda **k: [])
+    monkeypatch.setattr(litellm, "models_by_provider", {"anthropic": {"claude-z", "claude-a"}})
+    models, source = s._fetch_models("anthropic", "key")
+    assert source == "catalog"
+    assert models == ["anthropic/claude-a", "anthropic/claude-z"]  # sorted, qualified
+
+
+def test_fetch_models_curated_fallback(monkeypatch):
+    import litellm
+
+    from bos.cli.commands import scaffolding as s
+
+    monkeypatch.setattr(litellm, "get_valid_models", lambda **k: [])
+    monkeypatch.setattr(litellm, "models_by_provider", {})
+    models, source = s._fetch_models("anthropic", None)
+    assert source == "curated"
+    assert models == list(s._RECOMMENDED_MODELS["anthropic"])
