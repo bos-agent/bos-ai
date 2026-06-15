@@ -23,14 +23,15 @@ from ..contract import ep_mail_route
 def _slugify(address: str) -> str:
     """Convert an address to a filesystem-safe filename segment using URL encoding.
 
-    The ``@`` separator is kept unencoded for readability with the
-    ``type@name`` convention.
+    The ``@`` separator and the ``+`` channel-id separator are kept unencoded
+    for readability with the ``type@name`` and ``kind+name`` conventions.
 
     Examples:
         "agent@main"  -> "agent@main"
         "channel@http"  -> "channel@http"
+        "channel@telegram+main"  -> "channel@telegram+main"
     """
-    return urllib.parse.quote(address, safe="@")
+    return urllib.parse.quote(address, safe="@+")
 
 
 class _JsonlMailBox:
