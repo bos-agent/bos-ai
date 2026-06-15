@@ -259,3 +259,23 @@ def test_config_source_banner_formats(tmp_path, monkeypatch):
 
     agent_module._echo_config_source(ws, config_arg="/some/custom.toml")
     assert captured[-1][0].startswith("Using config file:")
+
+
+def test_detect_provider_keys(monkeypatch):
+    from bos.cli.commands import scaffolding as s
+
+    for _, env in s._PROVIDER_KEY_ENV:
+        monkeypatch.delenv(env, raising=False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "x")
+    monkeypatch.setenv("OPENAI_API_KEY", "y")
+    assert s._detect_provider_keys() == {
+        "anthropic": "ANTHROPIC_API_KEY",
+        "openai": "OPENAI_API_KEY",
+    }
+
+
+def test_qualify_model_id():
+    from bos.cli.commands import scaffolding as s
+
+    assert s._qualify("anthropic", "claude-x") == "anthropic/claude-x"
+    assert s._qualify("anthropic", "anthropic/claude-x") == "anthropic/claude-x"

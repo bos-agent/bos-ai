@@ -12,6 +12,7 @@ from pathlib import Path
 
 import click
 
+from bos.cli import prompts
 from bos.cli.scaffold import (
     ARCHETYPES,
     frontmatter_text,
@@ -45,6 +46,28 @@ _OAUTH_PROVIDERS = {
     "codex": ("codex", "codex/gpt-5.3-codex"),
     "gemini-cli": ("gemini_cli", "gemini-cli/gemini-2.5-pro"),
     "antigravity": ("antigravity", "antigravity/gemini-3-pro-preview"),
+}
+
+# API providers offered in the interactive wizard, in display order, with the
+# litellm key env var each one reads. Mirrors _API_KEY_ENV_BY_PREFIX as a flat
+# provider list. BOS-maintained; occasional drift against litellm is accepted.
+_PROVIDER_KEY_ENV: tuple[tuple[str, str], ...] = (
+    ("anthropic", "ANTHROPIC_API_KEY"),
+    ("openai", "OPENAI_API_KEY"),
+    ("gemini", "GEMINI_API_KEY"),
+    ("groq", "GROQ_API_KEY"),
+    ("mistral", "MISTRAL_API_KEY"),
+    ("deepseek", "DEEPSEEK_API_KEY"),
+    ("xai", "XAI_API_KEY"),
+    ("openrouter", "OPENROUTER_API_KEY"),
+)
+
+_DEFAULT_MODEL = "anthropic/claude-sonnet-4-6"
+
+# Curated ids pinned to the top of the picker and used as the last-resort source
+# when both the live API and the litellm catalog come back empty.
+_RECOMMENDED_MODELS: dict[str, tuple[str, ...]] = {
+    "anthropic": ("anthropic/claude-sonnet-4-6", "anthropic/claude-opus-4-5"),
 }
 
 
@@ -335,6 +358,16 @@ def _complete(model: str, prompt: str) -> str:
         return response.text or ""
 
     return asyncio.run(_call())
+
+
+def _detect_provider_keys() -> dict[str, str]:
+    """Providers whose key env var is set (non-empty) in the environment."""
+    return {provider: env for provider, env in _PROVIDER_KEY_ENV if os.environ.get(env)}
+
+
+def _qualify(provider: str, model: str) -> str:
+    """Ensure a model id is in litellm ``provider/model`` form."""
+    return model if "/" in model else f"{provider}/{model}"
 
 
 def _probe_model(workspace_path: Path, model: str) -> tuple[bool, str]:
