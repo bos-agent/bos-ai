@@ -56,22 +56,26 @@ A command adopts the harness by providing a small config: the generation prompt,
 Precedent: `boscli debug prompt` (`src/bos/cli/commands/debug.py:58-63`).
 
 ```python
-ws = _bootstrapped_workspace(workspace_path)              # resolve_agents + bootstrap_platform
+ws = _bootstrapped_workspace(workspace_path)  # resolve_agents + bootstrap_platform
+
+
 async def _run() -> str:
-    async with ws.harness(...) as harness:                # isolated audit store (A3)
+    async with ws.harness(...) as harness:  # isolated audit store (A3)
         agent = await harness.create_agent(
             kind=None,
             agent_cfg={
                 "agent_name": "<command>-agent",
-                "system_prompt": COMMAND_PROMPT,           # per-command
-                "tools": [...],                            # builtin read/inspect tools
-                "plugins": {"enabled": ["*"]},             # builtin plugin tools + skills
-                "local_tools": ask_user_registry,         # HITL tool (A2)
+                "system_prompt": COMMAND_PROMPT,  # per-command
+                "tools": [...],  # builtin read/inspect tools
+                "plugins": {"enabled": ["*"]},  # builtin plugin tools + skills
+                "local_tools": ask_user_registry,  # HITL tool (A2)
                 "model": model,
             },
         )
-        return await agent.ask(chat_id, intent)           # full tool/skill loop
-result = _run_llm(_run())                                  # shared event loop (litellm-logging-safe)
+        return await agent.ask(chat_id, intent)  # full tool/skill loop
+
+
+result = _run_llm(_run())  # shared event loop (litellm-logging-safe)
 ```
 
 `harness.create_agent` (`src/bos/core/harness.py:183-215`) deep-merges `agent_cfg` into `Agent(**kwargs)`; `Agent.__init__` (`src/bos/core/agent.py:283-341`) accepts `system_prompt`, `tools`, `plugins`, `model`, `agent_name`, `local_tools`. Running under `_run_llm` keeps the harness lifecycle and litellm background-logging correct.
@@ -154,4 +158,3 @@ The scaffolded config already defaults to `[runtime.gateway] port = 0`, making f
 ## References
 
 - BEP 9: Project Scaffolding and Guided Init (deterministic substrate; defers LLM-assisted generation — lifted here).
-- Interview spec: `.omc/specs/deep-interview-gen-agent-interactive-worktree.md` (requirements basis; captured against the `gen agent` first instance).
