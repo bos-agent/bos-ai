@@ -395,16 +395,22 @@ class TelegramChannel(BaseChannel[TelegramSettings]):
 
         message_id = self._chat_to_status_message_id.get(chat_id)
         if message_id is not None:
+            # Overwrite the single status message in place. If the edit fails
+            # (Telegram rate-limits editMessageText, transient error), keep the
+            # existing message and skip this update — do NOT fall through to
+            # sendMessage, which would spam a new message per failed edit and
+            # leave every intermediate status in the chat.
             try:
                 await self._api_call(
                     "editMessageText",
                     {"chat_id": telegram_chat_id, "message_id": message_id, "text": text},
                 )
                 self._chat_to_status_text[chat_id] = text
-                return
             except Exception as exc:
                 logger.debug("Telegram editMessageText failed for chat_id=%s: %s", chat_id, exc)
+            return
 
+        # No status message yet for this chat — create the one we will edit.
         try:
             data = await self._api_call("sendMessage", {"chat_id": telegram_chat_id, "text": text})
         except Exception as exc:

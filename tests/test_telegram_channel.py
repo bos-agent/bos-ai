@@ -257,6 +257,35 @@ async def test_forward_replies_uses_transient_status_message_then_final_reply():
 
 
 @pytest.mark.asyncio
+async def test_set_status_message_does_not_spam_on_edit_failure():
+    """A failed editMessageText must keep the single status message, not send a new one.
+
+    Telegram rate-limits editMessageText; falling back to sendMessage on every
+    failure would leave each intermediate status in the chat (the regression).
+    """
+    channel = _channel()
+    channel._chat_to_status_message_id["chat-a"] = 99  # an existing status message
+
+    calls: list[tuple[str, dict]] = []
+
+    async def fake_api_call(method: str, payload: dict):
+        calls.append((method, payload))
+        if method == "editMessageText":
+            raise RuntimeError("Too Many Requests: retry after 1")
+        return {"ok": True, "result": {"message_id": 123}}
+
+    channel._api_call = fake_api_call  # type: ignore[method-assign]
+
+    await channel._set_status_message("42", "chat-a", "[main] first thought")
+    await channel._set_status_message("42", "chat-a", "[main] second thought")
+
+    # Both updates attempted an edit; neither fell back to a new sendMessage,
+    # and the original status message id is preserved for the next attempt.
+    assert [m for m, _ in calls] == ["editMessageText", "editMessageText"]
+    assert channel._chat_to_status_message_id["chat-a"] == 99
+
+
+@pytest.mark.asyncio
 async def test_poll_updates_uses_chat_coordinator_cursor_and_channel_metadata():
     store = InMemChatStore()
     channel = _channel(store)
