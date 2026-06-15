@@ -55,6 +55,7 @@ def _select_interactive(message: str, choices: list[Choice], selectables: list[C
     from prompt_toolkit.layout import Layout
     from prompt_toolkit.layout.containers import HSplit, Window
     from prompt_toolkit.layout.controls import FormattedTextControl
+    from prompt_toolkit.styles import Style
 
     pos = 0
     if default is not None:
@@ -62,6 +63,9 @@ def _select_interactive(message: str, choices: list[Choice], selectables: list[C
             if choice.value == default:
                 pos = i
                 break
+
+    # Pad labels to a common width so annotations line up in a column.
+    label_width = max((len(c.label) for c in choices if c.selectable and c.annotation), default=0)
 
     def get_text():
         current = selectables[pos].value
@@ -72,12 +76,22 @@ def _select_interactive(message: str, choices: list[Choice], selectables: list[C
                 continue
             selected = choice.value == current
             cursor = "❯ " if selected else "  "
-            style = "class:cursor" if selected else ""
-            text = f"{cursor}{choice.label}"
+            label_style = "class:cursor" if selected else "class:label"
             if choice.annotation:
-                text += f"    {choice.annotation}"
-            lines.append((style, text + "\n"))
+                lines.append((label_style, f"{cursor}{choice.label:<{label_width}}"))
+                lines.append(("class:annotation", f"    {choice.annotation}\n"))
+            else:
+                lines.append((label_style, f"{cursor}{choice.label}\n"))
         return lines
+
+    style = Style.from_dict(
+        {
+            "cursor": "bold",
+            "label": "",
+            "annotation": "fg:ansibrightblack",
+            "sep": "italic fg:ansibrightblack",
+        }
+    )
 
     kb = KeyBindings()
 
@@ -108,6 +122,7 @@ def _select_interactive(message: str, choices: list[Choice], selectables: list[C
     app = Application(
         layout=Layout(HSplit([Window(FormattedTextControl(get_text), always_hide_cursor=True)])),
         key_bindings=kb,
+        style=style,
         full_screen=False,
         **kwargs,
     )
@@ -157,7 +172,13 @@ def autocomplete(message: str, options, *, default=None, _input=None, _output=No
     if not is_interactive():
         return click.prompt(message, default=fallback_default)
     from prompt_toolkit import prompt as ptk_prompt
+    from prompt_toolkit.application import get_app
     from prompt_toolkit.completion import FuzzyWordCompleter
+
+    def _open_completions() -> None:
+        # Surface the full option list up front so the user sees what's available
+        # instead of an empty prompt that only reveals choices once they type.
+        get_app().current_buffer.start_completion(select_first=False)
 
     try:
         value = ptk_prompt(
@@ -165,6 +186,7 @@ def autocomplete(message: str, options, *, default=None, _input=None, _output=No
             completer=FuzzyWordCompleter(options),
             complete_while_typing=True,
             default=default or "",
+            pre_run=_open_completions if options else None,
             **_io_kwargs(_input, _output),
         )
     except (KeyboardInterrupt, EOFError):

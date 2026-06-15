@@ -296,11 +296,10 @@ def _pick_model(provider: str, models: list[str], source: str) -> str:
         "curated": "built-in recommended models (could not reach the provider)",
     }
     click.echo(f"  {notes[source]}")
-    if recommended:
-        click.echo(f"  recommended: {recommended[0]}")
-    return prompts.autocomplete(
-        "Model id (type to filter, or enter a custom id)", ordered, default=ordered[0]
-    )
+    click.echo(f"  {len(ordered)} model(s) available · ↑↓ to browse, type to filter, Enter for {ordered[0]}")
+    # No pre-filled default: an empty buffer lets the completion menu show the
+    # full list up front. autocomplete() still returns ordered[0] on empty Enter.
+    return prompts.autocomplete("Model id (type to filter, or enter a custom id)", ordered)
 
 
 def _api_key_env_pairs(model: str, yes: bool) -> dict[str, str]:
@@ -412,6 +411,28 @@ def _bootstrapped_workspace(workspace_path: Path) -> Workspace:
     return ws
 
 
+_LLM_LOOP: asyncio.AbstractEventLoop | None = None
+
+
+def _run_llm(coro):
+    """Run an LLM coroutine on a single, reused event loop for the process.
+
+    litellm enqueues its success/error callbacks onto a background
+    ``LoggingWorker`` bound to whatever event loop is running. ``asyncio.run``
+    creates and tears down a fresh loop per call, so the *next* call detects the
+    loop change and resets the worker's queue (``logging_worker.py`` line 75,
+    ``self._queue = None``), discarding still-queued callback coroutines — that
+    is the source of the ``coroutine 'Logging.async_success_handler' was never
+    awaited`` RuntimeWarning. Reusing one loop lets the worker drain those
+    callbacks naturally between calls and via litellm's atexit flush.
+    """
+    global _LLM_LOOP
+    if _LLM_LOOP is None or _LLM_LOOP.is_closed():
+        _LLM_LOOP = asyncio.new_event_loop()
+    asyncio.set_event_loop(_LLM_LOOP)
+    return _LLM_LOOP.run_until_complete(coro)
+
+
 def _complete(model: str, prompt: str) -> str:
     from bos.core import LLMClient
 
@@ -419,7 +440,7 @@ def _complete(model: str, prompt: str) -> str:
         response = await LLMClient().complete([{"role": "user", "content": prompt}], model=model)
         return response.text or ""
 
-    return asyncio.run(_call())
+    return _run_llm(_call())
 
 
 def _detect_provider_keys() -> dict[str, str]:
