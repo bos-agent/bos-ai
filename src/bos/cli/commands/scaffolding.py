@@ -212,7 +212,13 @@ def _provider_step(ctx, model: str | None, yes: bool) -> tuple[str | None, dict[
         return model, _api_key_env_pairs(model, yes)
     if yes:
         return None, {}
+    if not prompts.is_interactive():
+        return _provider_step_fallback(ctx)
+    return _provider_step_interactive(ctx)
 
+
+def _provider_step_fallback(ctx) -> tuple[str | None, dict[str, str]]:
+    """The historical numbered provider menu, used for non-TTY callers (CI, pipes)."""
     click.echo("Choose a model provider:")
     click.echo("  1. API key (any litellm model id, e.g. anthropic/claude-…, gpt-…)")
     click.echo("  2. OpenAI Codex subscription (boscli auth codex)")
@@ -220,14 +226,56 @@ def _provider_step(ctx, model: str | None, yes: bool) -> tuple[str | None, dict[
     click.echo("  4. Google Antigravity (boscli auth antigravity)")
     click.echo("  5. Skip — configure the model later")
     choice = click.prompt("Provider", type=click.IntRange(1, 5), default=1)
-
     if choice == 5:
         return None, {}
     if choice == 1:
-        model = click.prompt("Model id (litellm format)", default="anthropic/claude-sonnet-4-6")
+        model = click.prompt("Model id (litellm format)", default=_DEFAULT_MODEL)
         return model, _api_key_env_pairs(model, yes=False)
-
     provider = ("codex", "gemini-cli", "antigravity")[choice - 2]
+    return _oauth_provider(ctx, provider)
+
+
+def _provider_step_interactive(ctx) -> tuple[str | None, dict[str, str]]:
+    detected = _detect_provider_keys()
+    choices = _provider_choices(detected)
+    default = next(iter(detected)) if len(detected) == 1 else None
+    selection = prompts.select("Choose a model provider:", choices, default=default)
+    if selection == "__skip__":
+        return None, {}
+    if selection in _OAUTH_PROVIDERS:
+        return _oauth_provider(ctx, selection)
+    return _api_provider(selection)
+
+
+def _provider_choices(detected: dict[str, str]) -> list[prompts.Choice]:
+    rows: list[prompts.Choice] = []
+    for provider, env in _PROVIDER_KEY_ENV:
+        if provider in detected:
+            rows.append(prompts.Choice(provider, provider, f"✓ {env}"))
+    for provider, env in _PROVIDER_KEY_ENV:
+        if provider not in detected:
+            rows.append(prompts.Choice(provider, provider, f"set {env}"))
+    rows.append(prompts.Choice(None, "── OAuth subscriptions ──", selectable=False))
+    for provider in _OAUTH_PROVIDERS:
+        rows.append(prompts.Choice(provider, provider, "OAuth subscription"))
+    rows.append(prompts.Choice(None, "", selectable=False))
+    rows.append(prompts.Choice("__skip__", "Skip — configure the model later"))
+    return rows
+
+
+def _api_provider(provider: str) -> tuple[str, dict[str, str]]:
+    env_var = dict(_PROVIDER_KEY_ENV)[provider]
+    existing = os.environ.get(env_var)
+    if existing:
+        api_key, env_pairs = existing, {}  # already in env; never copy into .env
+    else:
+        api_key = prompts.password(f"{env_var} (stored in .env, leave empty to skip)")
+        env_pairs = {env_var: api_key}
+    models, source = _fetch_models(provider, api_key)
+    return _pick_model(provider, models, source), env_pairs
+
+
+def _oauth_provider(ctx, provider: str) -> tuple[str, dict[str, str]]:
     auth_attr, default_model = _OAUTH_PROVIDERS[provider]
     try:
         from bos.cli.commands import auth as auth_module
@@ -237,8 +285,25 @@ def _provider_step(ctx, model: str | None, yes: bool) -> tuple[str | None, dict[
         click.echo(f"Authentication failed ({exc.message}) — continuing; run `boscli auth {provider}` later.", err=True)
     except Exception as exc:  # OAuth flows talk to the network; never abort init on failure
         click.echo(f"Authentication failed ({exc}) — continuing; run `boscli auth {provider}` later.", err=True)
-    model = click.prompt("Model id", default=default_model)
-    return model, {}
+    return prompts.text("Model id", default=default_model), {}
+
+
+def _pick_model(provider: str, models: list[str], source: str) -> str:
+    recommended = list(_RECOMMENDED_MODELS.get(provider, ()))
+    ordered = recommended + [m for m in models if m not in recommended]
+    if not ordered:
+        ordered = [_DEFAULT_MODEL]
+    notes = {
+        "live": f"models live from your {provider} account",
+        "catalog": "models from the litellm catalog (may be stale)",
+        "curated": "built-in recommended models (could not reach the provider)",
+    }
+    click.echo(f"  {notes[source]}")
+    if recommended:
+        click.echo(f"  recommended: {recommended[0]}")
+    return prompts.autocomplete(
+        "Model id (type to filter, or enter a custom id)", ordered, default=ordered[0]
+    )
 
 
 def _api_key_env_pairs(model: str, yes: bool) -> dict[str, str]:

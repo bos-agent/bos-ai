@@ -314,3 +314,46 @@ def test_fetch_models_curated_fallback(monkeypatch):
     models, source = s._fetch_models("anthropic", None)
     assert source == "curated"
     assert models == list(s._RECOMMENDED_MODELS["anthropic"])
+
+
+def test_provider_step_interactive_existing_key(monkeypatch):
+    from bos.cli import prompts
+    from bos.cli.commands import scaffolding as s
+
+    for _, env in s._PROVIDER_KEY_ENV:
+        monkeypatch.delenv(env, raising=False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "live-key")
+    monkeypatch.setattr(prompts, "is_interactive", lambda: True)
+    monkeypatch.setattr(prompts, "select", lambda *a, **k: "anthropic")
+    monkeypatch.setattr(s, "_fetch_models", lambda p, key: (["anthropic/claude-sonnet-4-6"], "live"))
+    monkeypatch.setattr(prompts, "autocomplete", lambda *a, **k: "anthropic/claude-sonnet-4-6")
+
+    model, env_pairs = s._provider_step(None, None, False)
+    assert model == "anthropic/claude-sonnet-4-6"
+    assert env_pairs == {}  # key already in env, never copied into .env
+
+
+def test_provider_step_interactive_prompts_for_missing_key(monkeypatch):
+    from bos.cli import prompts
+    from bos.cli.commands import scaffolding as s
+
+    for _, env in s._PROVIDER_KEY_ENV:
+        monkeypatch.delenv(env, raising=False)
+    monkeypatch.setattr(prompts, "is_interactive", lambda: True)
+    monkeypatch.setattr(prompts, "select", lambda *a, **k: "openai")
+    monkeypatch.setattr(prompts, "password", lambda *a, **k: "typed-key")
+    monkeypatch.setattr(s, "_fetch_models", lambda p, key: (["openai/gpt-4.1"], "live"))
+    monkeypatch.setattr(prompts, "autocomplete", lambda *a, **k: "openai/gpt-4.1")
+
+    model, env_pairs = s._provider_step(None, None, False)
+    assert model == "openai/gpt-4.1"
+    assert env_pairs == {"OPENAI_API_KEY": "typed-key"}
+
+
+def test_provider_step_interactive_skip(monkeypatch):
+    from bos.cli import prompts
+    from bos.cli.commands import scaffolding as s
+
+    monkeypatch.setattr(prompts, "is_interactive", lambda: True)
+    monkeypatch.setattr(prompts, "select", lambda *a, **k: "__skip__")
+    assert s._provider_step(None, None, False) == (None, {})
