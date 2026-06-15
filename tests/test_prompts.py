@@ -35,3 +35,15 @@ def test_select_fallback_default_index(monkeypatch):
     choices = [Choice("a", "Apple"), Choice("b", "Banana")]
     assert prompts.select("pick", choices, default="b") == "b"
     assert captured["default"] == 2
+
+
+def test_select_interactive_arrow_down(monkeypatch):
+    monkeypatch.setattr(prompts, "is_interactive", lambda: True)
+    from prompt_toolkit.input.defaults import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    choices = [Choice("a", "Apple"), Choice("b", "Banana"), Choice("c", "Cherry")]
+    with create_pipe_input() as inp:
+        inp.send_text("\x1b[B\r")  # down arrow, then Enter
+        result = prompts.select("pick", choices, _input=inp, _output=DummyOutput())
+    assert result == "b"

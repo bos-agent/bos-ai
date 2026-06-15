@@ -47,3 +47,71 @@ def _select_fallback(message: str, selectables: list[Choice], default):
             default_n = i
     n = click.prompt("Choice", type=click.IntRange(1, len(selectables)), default=default_n)
     return selectables[int(n) - 1].value
+
+
+def _select_interactive(message: str, choices: list[Choice], selectables: list[Choice], default, _input, _output):
+    from prompt_toolkit.application import Application
+    from prompt_toolkit.key_binding import KeyBindings
+    from prompt_toolkit.layout import Layout
+    from prompt_toolkit.layout.containers import HSplit, Window
+    from prompt_toolkit.layout.controls import FormattedTextControl
+
+    pos = 0
+    if default is not None:
+        for i, choice in enumerate(selectables):
+            if choice.value == default:
+                pos = i
+                break
+
+    def get_text():
+        current = selectables[pos].value
+        lines = []
+        for choice in choices:
+            if not choice.selectable:
+                lines.append(("class:sep", f"    {choice.label}\n"))
+                continue
+            selected = choice.value == current
+            cursor = "❯ " if selected else "  "
+            style = "class:cursor" if selected else ""
+            text = f"{cursor}{choice.label}"
+            if choice.annotation:
+                text += f"    {choice.annotation}"
+            lines.append((style, text + "\n"))
+        return lines
+
+    kb = KeyBindings()
+
+    @kb.add("up")
+    def _(event):
+        nonlocal pos
+        pos = (pos - 1) % len(selectables)
+
+    @kb.add("down")
+    def _(event):
+        nonlocal pos
+        pos = (pos + 1) % len(selectables)
+
+    @kb.add("enter")
+    def _(event):
+        event.app.exit(result=selectables[pos].value)
+
+    @kb.add("c-c")
+    def _(event):
+        event.app.exit(exception=KeyboardInterrupt)
+
+    click.echo(message)
+    kwargs = {}
+    if _input is not None:
+        kwargs["input"] = _input
+    if _output is not None:
+        kwargs["output"] = _output
+    app = Application(
+        layout=Layout(HSplit([Window(FormattedTextControl(get_text), always_hide_cursor=True)])),
+        key_bindings=kb,
+        full_screen=False,
+        **kwargs,
+    )
+    try:
+        return app.run()
+    except KeyboardInterrupt:
+        raise click.Abort()
