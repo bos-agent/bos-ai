@@ -107,7 +107,7 @@ def init(
     project_name = workspace_path.name or "bos-project"
 
     if purpose is None:
-        purpose = _DEFAULT_PURPOSE if yes else click.prompt("What is this agent project for?", default=_DEFAULT_PURPOSE)
+        purpose = _DEFAULT_PURPOSE if yes else prompts.text("What is this agent project for?", default=_DEFAULT_PURPOSE)
     if archetype is None:
         archetype = "assistant" if yes else _prompt_archetype()
 
@@ -175,7 +175,7 @@ def init(
 
     if init_git is None:
         default_git = not _inside_git_repo(workspace_path)
-        init_git = default_git if yes else click.confirm("Initialize a git repository?", default=default_git)
+        init_git = default_git if yes else prompts.confirm("Initialize a git repository?", default=default_git)
     if init_git:
         _git_init(workspace_path)
 
@@ -192,7 +192,6 @@ def init(
 
 
 def _prompt_archetype() -> str:
-    click.echo("Choose a starting topology:")
     descriptions = {
         "assistant": "single agent with memory and skills",
         "team": "a coordinator agent that delegates to specialists",
@@ -200,10 +199,8 @@ def _prompt_archetype() -> str:
         "telegram-bot": "an agent wired to a Telegram channel",
         "package": "an installable Python extension package (tools, channels, providers)",
     }
-    for i, name in enumerate(ARCHETYPES, start=1):
-        click.echo(f"  {i}. {name} — {descriptions[name]}")
-    choice = click.prompt("Archetype", type=click.IntRange(1, len(ARCHETYPES)), default=1)
-    return ARCHETYPES[choice - 1]
+    choices = [prompts.Choice(name, name, descriptions[name]) for name in ARCHETYPES]
+    return prompts.select("Choose a starting topology:", choices, default=ARCHETYPES[0])
 
 
 def _provider_step(ctx, model: str | None, yes: bool) -> tuple[str | None, dict[str, str]]:
