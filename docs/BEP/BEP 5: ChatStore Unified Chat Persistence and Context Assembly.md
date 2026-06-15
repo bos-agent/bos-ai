@@ -718,6 +718,80 @@ The implementation should land as one atomic PR that keeps the repository green 
 
 ---
 
+## Amendment (2026-06-15): Revision-Window Reads
+
+**Driver.** BEP 10 (Platform-Managed Memory) and BEP 11 (Async Tasks & Scheduling) run off-turn
+consolidation **incrementally**: a consumer remembers a per-chat **watermark** (last-handled revision)
+and, on each run, processes only the turns committed *after* it. The current `ChatStore` exposes
+`get_messages(chat_id, active_only=…)` but no way to read by revision, so a consumer cannot ask "what's
+new since revision *r*?" This amendment adds that read. It is **additive and non-breaking** — pure reads
+over the revision data the store already maintains; no storage-format change.
+
+### Existing revision model (reused, not introduced)
+
+A monotonic per-turn revision already exists:
+
+- `commit_turn()` returns `ChatCommit.revision: int` (`contract.py:134-140`).
+- Implementations stamp each committed message with `metadata["chat_revision"]` and increment per turn
+  (`in_memory.py:77-120`, helper `_chat_revision`).
+- The actor already carries `base_revision` / `committed_revision` (`actor.py:45,52,410-413`).
+
+`revision` is therefore a stable, already-persisted cursor. The amendment only surfaces it for reading.
+
+### New protocol methods
+
+```python
+@runtime_checkable
+class ChatStore(Protocol):
+    ...
+    # ── Revision cursors (BEP 5 amendment) ──
+    async def get_revision(self, chat_id: str) -> int: ...
+    async def get_messages_since(self, chat_id: str, *, revision: int) -> list[Message]: ...
+```
+
+#### `get_revision(chat_id) -> int`
+
+Return the chat's **current head revision** — the max `chat_revision` across the full append log
+(equivalently, the `revision` of the most recent `commit_turn`). Returns `0` for an empty/unknown chat.
+This is the value a consumer records as its watermark after a successful run.
+
+#### `get_messages_since(chat_id, *, revision) -> list[Message]`
+
+Return raw `Message` objects committed **after** `revision` — those with `chat_revision > revision`, in
+commit order. Semantics:
+
+- A `revision` at or beyond the head returns `[]` (nothing new → the scan enqueues no job, BEP 10 §4).
+- Reads the **full** log, not the active-summary window: consolidation provenance (`source_turn_ids`)
+  needs the actual turns, not a compacted view. It does **not** apply tool-noise filtering (like
+  `get_messages`, raw access); the consumer filters if it wishes.
+- Concurrent-read safe and point-in-time consistent, per the existing Concurrency section.
+
+This is the **`get_messages_since`** referenced by BEP 11 §5; it replaces the earlier
+`get_messages_until` sketch (consumers always read forward from a watermark, never bounded above).
+
+### Non-goals (still deferred)
+
+- A bounded `get_window(from, to)` — not needed while consumers always read watermark→head.
+- A general "checkpoint by consumer name" facility — the watermark is the **consumer's** state (e.g. the
+  memory plugin's store, BEP 10 source-of-truth table), not `ChatStore`'s. `ChatStore` only exposes the
+  cursor and the forward read.
+
+### Implementation notes
+
+- **InMem** (`in_memory.py`): `get_revision` reuses `_chat_revision(self._messages[chat_id])`;
+  `get_messages_since` filters by `metadata["chat_revision"] > revision`.
+- **Jsonl**: same predicate over the append log; `get_revision` is the last record's `chat_revision`
+  (or a tail read), avoiding a full scan where the format allows.
+
+### Test plan additions
+
+13. **Revision cursor** — `get_revision` returns `0` for unknown chats and the latest `commit_turn`
+    revision otherwise; monotonic across turns.
+14. **Incremental read** — `get_messages_since(r)` returns exactly the post-`r` turns in order; `[]` at
+    or beyond head; spans summary boundaries (full log, unfiltered); consistent under concurrent commit.
+
+---
+
 ## Revision History
 
 | Date | Change | Intention |
@@ -725,3 +799,4 @@ The implementation should land as one atomic PR that keeps the repository green 
 | 2026-05-20 | Initial draft | Propose merging `MessageStore` + consolidation behavior into a unified `ChatStore`. |
 | 2026-05-20 | Revised per consolidated review | Narrow scope to persistence + context assembly. Consolidator stays harness-level. `get_context()` is pure read. |
 | 2026-05-22 | Revised after independent post-revision reviews | Remove misleading `max_tokens`; add per-call filter mode, filtered compaction input, explicit summary boundary semantics, provider-safe tool signatures, structured token/chat metadata, NamedAgent formatting hook, aborted-turn semantics, and dev-mode breaking migration stance. |
+| 2026-06-15 | Amendment: revision-window reads | Add `get_revision` + `get_messages_since` (additive, non-breaking) so BEP 10/11 off-turn consolidation can read unprocessed turns from a per-chat watermark; reuse the existing `ChatCommit.revision`/`chat_revision` model. |
