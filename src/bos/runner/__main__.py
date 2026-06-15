@@ -47,6 +47,7 @@ def main() -> None:
     from bos.config import Workspace, resolve_config_source
     from bos.gateway.state import GatewayRunDir
     from bos.runner import start
+    from bos.runner.proc import acquire_singleton_lock
 
     if args.config:
         config_path, bos_dir, config = resolve_config_source(args.config)
@@ -72,6 +73,16 @@ def main() -> None:
         format="%(asctime)s %(levelname)-8s %(name)s %(message)s",
         stream=sys.stderr,
     )
+
+    # Singleton guard: only one gateway may run per workspace run dir. The lock
+    # is held for this process's lifetime and released automatically on exit or
+    # crash (the OS drops the flock), so a second runner — however it was
+    # launched (duplicate `gateway start`, an `ask` auto-start racing an
+    # existing gateway) — refuses rather than starting a second poller.
+    singleton_lock = acquire_singleton_lock(rd)
+    if singleton_lock is None:
+        logger.error("Another BOS gateway already running for %s — exiting.", ws.bos_dir)
+        sys.exit(0)
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)

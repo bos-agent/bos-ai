@@ -6,6 +6,7 @@ The final gateway runtime stores lifecycle files through
   gateway.pid   — PID of the local gateway launcher process
   gateway.state — JSON status (runtime, pid/container_id, gateway, actors, channels, …)
   gateway.log   — stdout/stderr of the gateway subprocess
+  gateway.lock  — advisory flock held by the live gateway process (singleton guard)
 """
 
 from __future__ import annotations
@@ -87,8 +88,38 @@ def _docker_container_is_running(container_id: str) -> bool:
     return proc.stdout.strip().lower() == "true"
 
 
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # The PID exists but is owned by another user — alive, but almost
+        # certainly not our gateway (PID reuse). Let _pid_is_gateway decide.
+        return True
+
+
+def _pid_is_gateway(pid: int) -> bool:
+    """Best-effort check that *pid* is actually a ``bos.runner`` process.
+
+    Guards against PID reuse: a stale recorded PID may have been recycled by an
+    unrelated process, which would otherwise make ``is_running`` report a
+    phantom gateway and block startup forever. On platforms without a readable
+    ``/proc`` we cannot verify, so we assume True and rely on the flock guard.
+    """
+    cmdline_path = Path("/proc") / str(pid) / "cmdline"
+    try:
+        raw = cmdline_path.read_bytes()
+    except FileNotFoundError:
+        return False  # process gone between checks
+    except OSError:
+        return True  # /proc unavailable/unreadable — cannot disprove; assume ours
+    return b"bos.runner" in raw or (b"bos" in raw and b"runner" in raw)
+
+
 def is_running(rd: LifecycleRunDir) -> bool:
-    """Return True if the recorded process or container is alive."""
+    """Return True if the recorded process or container is alive *and ours*."""
     state = read_state(rd)
     if state.get("runtime") == "docker":
         container_id = state.get("container_id")
@@ -97,11 +128,53 @@ def is_running(rd: LifecycleRunDir) -> bool:
     pid = _read_pid(rd)
     if pid is None:
         return False
-    try:
-        os.kill(pid, 0)
-        return True
-    except (ProcessLookupError, PermissionError):
+    return _pid_alive(pid) and _pid_is_gateway(pid)
+
+
+def reap_stale(rd: LifecycleRunDir) -> bool:
+    """Remove leftover pid/state files when no live gateway owns them.
+
+    Handles the case where a gateway process was killed (or crashed) without
+    cleaning up — a stale ``gateway.pid``/``gateway.state`` must not block a
+    fresh start or hand a stale endpoint to ``boscli ask``. No-op (returns
+    False) when a gateway is actually running.
+    """
+    if is_running(rd):
         return False
+    cleaned = False
+    for path in (rd.pid_file, rd.state_file):
+        try:
+            path.unlink()
+            cleaned = True
+        except FileNotFoundError:
+            pass
+        except OSError:
+            pass
+    return cleaned
+
+
+def acquire_singleton_lock(rd: LifecycleRunDir):
+    """Acquire the exclusive, non-blocking gateway lock for this run dir.
+
+    Returns an open file object that MUST be kept referenced for the process
+    lifetime (closing it, or the process exiting/crashing, releases the lock).
+    Returns None if another live gateway already holds the lock. On platforms
+    without ``fcntl`` (e.g. Windows) locking is unsupported and a no-op handle
+    is returned so callers proceed unguarded.
+    """
+    rd.ensure()
+    try:
+        import fcntl
+    except ImportError:
+        return rd.lock_file.open("w")  # locking unsupported; behave as before
+
+    handle = rd.lock_file.open("w")
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        return None
+    return handle
 
 
 def kill_process(rd: LifecycleRunDir, sig: int = signal.SIGTERM) -> None:

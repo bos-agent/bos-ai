@@ -458,7 +458,14 @@ def start(ctx, foreground: bool, docker: bool, workspace_dir: str | None):
     ws.resolve_agents()
     ws.bootstrap_platform()
 
-    from bos.runner.proc import is_running, read_state, run_docker_foreground, start_background, start_docker
+    from bos.runner.proc import (
+        is_running,
+        read_state,
+        reap_stale,
+        run_docker_foreground,
+        start_background,
+        start_docker,
+    )
     from bos.runner.runner import start as start_gateway
 
     if is_running(rd):
@@ -466,6 +473,12 @@ def start(ctx, foreground: bool, docker: bool, workspace_dir: str | None):
         identifier = state.get("container_id") if state.get("runtime") == "docker" else state.get("pid")
         click.echo(f"Gateway is already running ({state.get('runtime', 'process')} {identifier}).", err=True)
         raise SystemExit(1)
+
+    # No live gateway: clear any leftover pid/state from a process that was
+    # killed or crashed without cleaning up, so it neither blocks the start nor
+    # leaves a stale endpoint behind for `boscli ask`.
+    if reap_stale(rd):
+        click.echo("Cleared stale gateway pid/state from a previous run.", err=True)
 
     runtime = ws.get_runtime_config(force_kind="docker" if docker else None)
 
