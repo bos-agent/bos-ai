@@ -116,18 +116,21 @@ def _render_turn_event(event: TurnEvent) -> str | None:
     label = _turn_event_label(event)
 
     if event.event_type == "llm" and event.detail == "thinking":
-        meta = event.metadata or {}
-        iteration = meta.get("iteration")
-        max_iter = meta.get("max_iterations")
-        if iteration and max_iter:
-            return f"[{label}] {iteration}/{max_iter}"
-        return f"[{label}] thinking"
+        # The per-iteration "thinking" tick carries only the iteration counter.
+        # Returning None leaves the status message untouched so the last real
+        # reasoning/tool content stays visible instead of flashing "[main] 3/80".
+        return None
 
     if event.event_type == "llm" and event.detail in ("reasoning", "thinking_content"):
-        preview = (event.content or "")[:200].replace("\n", " ")
+        preview = (event.content or "").strip().replace("\n", " ")
+        if not preview:
+            return None
+        preview = preview[:200] + ("…" if len(preview) > 200 else "")
         return f"[{label}] {preview}"
+
+    if event.event_type == "llm" and event.detail == "tool_calls" and event.tool_calls:
         tool_names = ", ".join(tc["name"] for tc in event.tool_calls)
-        return f"{label} is using: {tool_names}"
+        return f"[{label}] using: {tool_names}"
 
     if event.event_type == "tool" and event.detail == "tool_result":
         preview = str(event.content or "").strip().replace("\n", " ")

@@ -1,4 +1,5 @@
 import asyncio
+import json
 
 import pytest
 
@@ -139,9 +140,40 @@ def test_render_turn_event_suppresses_thinking():
         turn_id="turn-1",
         agent_name="main",
         detail="thinking",
+        metadata={"iteration": 3, "max_iterations": 80},
     )
 
-    assert _render_turn_event(event) == "[main] thinking"
+    # The per-iteration tick (which only carries the iteration counter) is
+    # suppressed so the status never shows "[main] 3/80".
+    assert _render_turn_event(event) is None
+
+
+def test_render_turn_event_shows_reasoning_content():
+    event = TurnEvent(
+        event_type="llm",
+        phase="start",
+        chat_id="chat-1",
+        turn_id="turn-1",
+        agent_name="main",
+        detail="thinking_content",
+        content="Let me check the README first\nthen list the files",
+    )
+
+    assert _render_turn_event(event) == "[main] Let me check the README first then list the files"
+
+
+def test_render_turn_event_shows_tool_calls():
+    event = TurnEvent(
+        event_type="llm",
+        phase="finish",
+        chat_id="chat-1",
+        turn_id="turn-1",
+        agent_name="main",
+        detail="tool_calls",
+        tool_calls=[{"name": "GlobSearch"}, {"name": "ReadFile"}],
+    )
+
+    assert _render_turn_event(event) == "[main] using: GlobSearch, ReadFile"
 
 
 def test_render_turn_event_formats_tool_result():
@@ -173,7 +205,7 @@ async def test_forward_replies_uses_transient_status_message_then_final_reply():
 
     async def fake_api_call(method: str, payload: dict):
         calls.append((method, payload))
-        if method == "sendMessage" and payload["text"] == "[main] thinking":
+        if method == "sendMessage" and payload["text"] == "[main] checking the docs":
             return {"ok": True, "result": {"message_id": 99}}
         return {"ok": True, "result": True}
 
@@ -184,7 +216,18 @@ async def test_forward_replies_uses_transient_status_message_then_final_reply():
             Envelope(
                 sender="agent@main",
                 recipient="channel@telegram:daily",
-                content='{"event_type":"llm","phase":"start","chat_id":"chat-a","turn_id":"turn-1","agent_name":"main","detail":"thinking","timestamp":"2026-04-20T00:00:00"}',
+                content=json.dumps(
+                    {
+                        "event_type": "llm",
+                        "phase": "start",
+                        "chat_id": "chat-a",
+                        "turn_id": "turn-1",
+                        "agent_name": "main",
+                        "detail": "thinking_content",
+                        "content": "checking the docs",
+                        "timestamp": "2026-04-20T00:00:00",
+                    }
+                ),
                 content_type=MessageType.TURN_EVENT,
                 chat_id="chat-a",
                 metadata=metadata,
@@ -207,7 +250,7 @@ async def test_forward_replies_uses_transient_status_message_then_final_reply():
     await asyncio.gather(task, return_exceptions=True)
 
     assert calls == [
-        ("sendMessage", {"chat_id": "42", "text": "[main] thinking"}),
+        ("sendMessage", {"chat_id": "42", "text": "[main] checking the docs"}),
         ("deleteMessage", {"chat_id": "42", "message_id": 99}),
         ("sendMessage", {"chat_id": "42", "text": "final answer"}),
     ]
