@@ -153,6 +153,24 @@ def reap_stale(rd: LifecycleRunDir) -> bool:
     return cleaned
 
 
+def lock_still_owned(rd: LifecycleRunDir, handle) -> bool:
+    """Return True if *handle* still locks the live ``gateway.lock`` inode.
+
+    ``flock`` binds to an inode, not a path. If the lock file is unlinked and
+    recreated — a stale run dir wiped by hand, or a racing starter — the handle
+    keeps locking an orphaned inode while a fresh process can lock the new file,
+    so both would believe they are the singleton. Comparing the handle's inode
+    to the file currently at the path detects that divergence. Returns False if
+    either stat fails (file gone), which callers treat as lost ownership.
+    """
+    try:
+        held = os.fstat(handle.fileno())
+        on_disk = os.stat(rd.lock_file)
+    except OSError:
+        return False
+    return (held.st_dev, held.st_ino) == (on_disk.st_dev, on_disk.st_ino)
+
+
 def acquire_singleton_lock(rd: LifecycleRunDir):
     """Acquire the exclusive, non-blocking gateway lock for this run dir.
 
@@ -168,13 +186,22 @@ def acquire_singleton_lock(rd: LifecycleRunDir):
     except ImportError:
         return rd.lock_file.open("w")  # locking unsupported; behave as before
 
-    handle = rd.lock_file.open("w")
-    try:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
+    # Lock, then confirm the inode we locked is still the file at the path. If a
+    # racing starter replaced the file between open() and flock(), our lock is on
+    # an orphaned inode — drop it and retry against the current file. A bounded
+    # retry converges: either we lock the live file, or another holder owns it
+    # and flock fails.
+    for _ in range(5):
+        handle = rd.lock_file.open("w")
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            handle.close()
+            return None
+        if lock_still_owned(rd, handle):
+            return handle
         handle.close()
-        return None
-    return handle
+    return None
 
 
 def kill_process(rd: LifecycleRunDir, sig: int = signal.SIGTERM) -> None:
