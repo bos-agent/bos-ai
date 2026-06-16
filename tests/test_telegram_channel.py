@@ -5,14 +5,18 @@ import pytest
 
 from bos.core import MailBox, Message
 from bos.extensions.channels.telegram import (
+    TELEGRAM_ATTACHMENT_THRESHOLD,
     TELEGRAM_MESSAGE_LIMIT,
+    TELEGRAM_STATUS_PREVIEW_LIMIT,
     TelegramChannel,
     TelegramSettings,
     _conversation_id_for_telegram_chat,
+    _env_int,
     _extract_inbound_message,
     _normalize_command,
     _render_turn_event,
     _split_message,
+    _truncate_bytes,
 )
 from bos.extensions.chat_stores.in_memory import InMemChatStore
 from bos.gateway import ActorDescriptor, ActorResolver, ChannelConversationRef, ChannelRuntimeContext, ChatCoordinator
@@ -162,6 +166,51 @@ def test_render_turn_event_shows_reasoning_content():
     assert _render_turn_event(event) == "[main] Let me check the README first then list the files"
 
 
+def test_env_int_reads_override_and_falls_back(monkeypatch):
+    monkeypatch.setenv("BOS_TG_TEST_LIMIT", "256")
+    assert _env_int("BOS_TG_TEST_LIMIT", 512) == 256
+
+    monkeypatch.delenv("BOS_TG_TEST_LIMIT", raising=False)
+    assert _env_int("BOS_TG_TEST_LIMIT", 512) == 512
+
+    monkeypatch.setenv("BOS_TG_TEST_LIMIT", "not-an-int")
+    assert _env_int("BOS_TG_TEST_LIMIT", 512) == 512
+
+
+def test_truncate_bytes_caps_at_limit_with_ellipsis():
+    assert _truncate_bytes("short", 64) == "short"
+    long = "a" * 100
+    out = _truncate_bytes(long, TELEGRAM_STATUS_PREVIEW_LIMIT)
+    assert out.endswith("…")
+    assert len(out.removesuffix("…").encode("utf-8")) <= TELEGRAM_STATUS_PREVIEW_LIMIT
+
+
+def test_truncate_bytes_does_not_split_multibyte_char():
+    # 32 two-byte chars = 64 bytes exactly; a 65th would be cut mid-budget.
+    text = "é" * 40
+    out = _truncate_bytes(text, TELEGRAM_STATUS_PREVIEW_LIMIT)
+    # Must still decode cleanly (no lone continuation byte) and stay within limit.
+    assert out.encode("utf-8").decode("utf-8") == out
+    assert len(out.removesuffix("…").encode("utf-8")) <= TELEGRAM_STATUS_PREVIEW_LIMIT
+
+
+def test_render_turn_event_truncates_reasoning_to_64_bytes():
+    event = TurnEvent(
+        event_type="llm",
+        phase="start",
+        chat_id="chat-1",
+        turn_id="turn-1",
+        agent_name="main",
+        detail="thinking_content",
+        content="x" * 500,
+    )
+
+    rendered = _render_turn_event(event)
+    preview = rendered.removeprefix("[main] ")
+    assert preview.endswith("…")
+    assert len(preview.removesuffix("…").encode("utf-8")) <= TELEGRAM_STATUS_PREVIEW_LIMIT
+
+
 def test_render_turn_event_shows_tool_calls():
     event = TurnEvent(
         event_type="llm",
@@ -257,6 +306,93 @@ async def test_forward_replies_uses_transient_status_message_then_final_reply():
 
 
 @pytest.mark.asyncio
+async def test_forward_replies_sends_long_reply_as_document():
+    channel = _channel()
+    channel._chat_to_telegram_chat["chat-a"] = "42"
+    channel._conversation_to_telegram_chat["tg_chat:42"] = "42"
+
+    api_calls: list[tuple[str, dict]] = []
+    documents: list[tuple[str, str]] = []
+
+    async def fake_api_call(method: str, payload: dict):
+        api_calls.append((method, payload))
+        return {"ok": True, "result": True}
+
+    async def fake_send_document(telegram_chat_id: str, content: str):
+        documents.append((telegram_chat_id, content))
+
+    channel._api_call = fake_api_call  # type: ignore[method-assign]
+    channel._send_document = fake_send_document  # type: ignore[method-assign]
+
+    metadata = {"channel": {"channel_id": "telegram:daily", "channel_conversation_id": "tg_chat:42"}}
+    long_text = "x" * (TELEGRAM_ATTACHMENT_THRESHOLD + 1)
+    mailbox = FakeMailbox(
+        [
+            Envelope(
+                sender="agent@main",
+                recipient="channel@telegram:daily",
+                content=long_text,
+                content_type=MessageType.MESSAGE,
+                chat_id="chat-a",
+                metadata=metadata,
+            ),
+        ]
+    )
+
+    task = asyncio.create_task(channel._forward_replies(mailbox))
+    await asyncio.sleep(0)
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+
+    assert documents == [("42", long_text)]
+    # The long reply went out as a document, never as an inline sendMessage.
+    assert all(method != "sendMessage" for method, _ in api_calls)
+
+
+@pytest.mark.asyncio
+async def test_forward_replies_sends_short_reply_inline():
+    channel = _channel()
+    channel._chat_to_telegram_chat["chat-a"] = "42"
+    channel._conversation_to_telegram_chat["tg_chat:42"] = "42"
+
+    sent: list[dict] = []
+    documents: list[tuple[str, str]] = []
+
+    async def fake_api_call(method: str, payload: dict):
+        if method == "sendMessage":
+            sent.append(payload)
+        return {"ok": True, "result": True}
+
+    async def fake_send_document(telegram_chat_id: str, content: str):
+        documents.append((telegram_chat_id, content))
+
+    channel._api_call = fake_api_call  # type: ignore[method-assign]
+    channel._send_document = fake_send_document  # type: ignore[method-assign]
+
+    metadata = {"channel": {"channel_id": "telegram:daily", "channel_conversation_id": "tg_chat:42"}}
+    mailbox = FakeMailbox(
+        [
+            Envelope(
+                sender="agent@main",
+                recipient="channel@telegram:daily",
+                content="short answer",
+                content_type=MessageType.MESSAGE,
+                chat_id="chat-a",
+                metadata=metadata,
+            ),
+        ]
+    )
+
+    task = asyncio.create_task(channel._forward_replies(mailbox))
+    await asyncio.sleep(0)
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+
+    assert documents == []
+    assert sent == [{"chat_id": "42", "text": "short answer"}]
+
+
+@pytest.mark.asyncio
 async def test_set_status_message_does_not_spam_on_edit_failure():
     """A failed editMessageText must keep the single status message, not send a new one.
 
@@ -326,13 +462,20 @@ async def test_poll_updates_uses_chat_coordinator_cursor_and_channel_metadata():
 
 
 @pytest.mark.asyncio
-async def test_poll_updates_rejects_stale_telegram_cursor_instead_of_spoofing_current_revision():
+async def test_poll_updates_catches_up_stale_cursor_then_forwards_message():
+    """A stale channel cursor must self-heal, not dead-end the user.
+
+    Telegram clients can't 'refresh', so when the cursor falls behind the channel
+    pushes the missed reply, resyncs to the current revision, and forwards the
+    user's message — instead of replying 'retry after refreshing'.
+    """
     store = InMemChatStore()
     channel = _channel(store)
     channel._bot_username = "BosBot"
     mailbox = FakeSendMailbox()
     ref = ChannelConversationRef("telegram:daily", "tg_chat:42")
     channel._runtime.chat_coordinator.set_cursor(ref, "chat-a", observed_revision=0)
+    channel._conversation_to_telegram_chat["tg_chat:42"] = "42"
     await store.commit_turn(
         "chat-a",
         [Message(llm_message={"role": "assistant", "content": "new elsewhere"})],
@@ -366,10 +509,12 @@ async def test_poll_updates_rejects_stale_telegram_cursor_instead_of_spoofing_cu
     with pytest.raises(asyncio.CancelledError):
         await channel._poll_updates(mailbox)
 
-    assert mailbox.sent == []
-    assert send_message_calls
-    assert send_message_calls[0]["chat_id"] == "42"
-    assert "new messages" in send_message_calls[0]["text"]
+    # The missed assistant reply was pushed to the client (no refresh notice).
+    assert send_message_calls == [{"chat_id": "42", "text": "new elsewhere"}]
+    # The user's message was forwarded with the resynced base revision.
+    assert len(mailbox.sent) == 1
+    assert mailbox.sent[0].content == "hello"
+    assert mailbox.sent[0].metadata["base_revision"] == 1
 
 
 @pytest.mark.asyncio
