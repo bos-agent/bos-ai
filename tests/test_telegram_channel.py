@@ -17,6 +17,7 @@ from bos.extensions.channels.telegram import (
     _render_turn_event,
     _split_message,
     _truncate_bytes,
+    _unsupported_message_chat_id,
 )
 from bos.extensions.chat_stores.in_memory import InMemChatStore
 from bos.gateway import ActorDescriptor, ActorResolver, ChannelConversationRef, ChannelRuntimeContext, ChatCoordinator
@@ -126,6 +127,68 @@ def test_split_message_respects_limit():
     assert len(parts) == 2
     assert "".join(parts).replace("\n", "") == text.replace("\n", "")
     assert all(len(part) <= TELEGRAM_MESSAGE_LIMIT for part in parts)
+
+
+def test_unsupported_message_chat_id_flags_media():
+    voice = {"message": {"chat": {"id": 42}, "voice": {"file_id": "abc"}}}
+    assert _unsupported_message_chat_id(voice) == "42"
+
+    photo = {"message": {"chat": {"id": 7}, "photo": [{"file_id": "x"}], "caption": "   "}}
+    assert _unsupported_message_chat_id(photo) == "7"
+
+
+def test_unsupported_message_chat_id_ignores_text_and_service_updates():
+    # Text messages are handled normally — not "unsupported".
+    text = {"message": {"chat": {"id": 42}, "text": "hello"}}
+    assert _unsupported_message_chat_id(text) is None
+
+    # A photo with a real caption is usable text — handled normally.
+    captioned = {"message": {"chat": {"id": 42}, "photo": [{"file_id": "x"}], "caption": "look"}}
+    assert _unsupported_message_chat_id(captioned) is None
+
+    # Service updates (no user media) must not trigger a nudge.
+    service = {"message": {"chat": {"id": 42}, "new_chat_members": [{"id": 1}]}}
+    assert _unsupported_message_chat_id(service) is None
+
+    assert _unsupported_message_chat_id({"edited_channel_post": {"chat": {"id": 1}}}) is None
+
+
+@pytest.mark.asyncio
+async def test_poll_updates_nudges_on_unsupported_format():
+    store = InMemChatStore()
+    channel = _channel(store)
+    channel._bot_username = "BosBot"
+    mailbox = FakeSendMailbox()
+
+    send_calls: list[dict] = []
+    get_updates_calls = 0
+
+    async def fake_api_call(method: str, payload: dict):
+        nonlocal get_updates_calls
+        if method == "getUpdates":
+            get_updates_calls += 1
+            if get_updates_calls == 1:
+                return {
+                    "ok": True,
+                    "result": [{"update_id": 1, "message": {"chat": {"id": 42}, "voice": {"file_id": "v"}}}],
+                }
+            raise asyncio.CancelledError()
+        if method == "sendMessage":
+            send_calls.append(payload)
+            return {"ok": True, "result": True}
+        raise AssertionError(f"unexpected Telegram method {method}")
+
+    channel._api_call = fake_api_call  # type: ignore[method-assign]
+
+    with pytest.raises(asyncio.CancelledError):
+        await channel._poll_updates(mailbox)
+
+    # The voice message was never forwarded to an actor...
+    assert mailbox.sent == []
+    # ...but the sender got a text nudge explaining the limitation.
+    assert len(send_calls) == 1
+    assert send_calls[0]["chat_id"] == "42"
+    assert "text" in send_calls[0]["text"].lower()
 
 
 def test_conversation_id_for_telegram_chat():

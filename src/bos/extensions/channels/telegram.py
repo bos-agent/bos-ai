@@ -116,6 +116,45 @@ def _extract_inbound_message(update: dict[str, Any], *, bot_username: str | None
     }
 
 
+# Message fields that carry user content this channel can't read (no text/caption).
+# Used to tell genuine media apart from service updates (e.g. new_chat_members),
+# so we only nudge the sender when they actually sent something we can't process.
+_UNSUPPORTED_CONTENT_KEYS = (
+    "voice",
+    "audio",
+    "photo",
+    "video",
+    "video_note",
+    "document",
+    "sticker",
+    "animation",
+    "contact",
+    "location",
+    "poll",
+    "dice",
+)
+
+
+def _unsupported_message_chat_id(update: dict[str, Any]) -> str | None:
+    """Return the chat id of an inbound user message we can't read, else None.
+
+    Distinguishes real media (voice, photo, …) from non-message/service updates
+    so the channel can nudge the sender instead of dropping it in silence.
+    """
+    message = update.get("message") or update.get("edited_message")
+    if not isinstance(message, dict):
+        return None
+    telegram_chat_id = (message.get("chat") or {}).get("id")
+    if telegram_chat_id is None:
+        return None
+    text = message.get("text") or message.get("caption")
+    if isinstance(text, str) and text.strip():
+        return None  # has usable text — handled normally
+    if not any(key in message for key in _UNSUPPORTED_CONTENT_KEYS):
+        return None  # service/other update, not user media
+    return str(telegram_chat_id)
+
+
 def _assistant_text(message: dict[str, Any]) -> str | None:
     """Extract user-facing assistant text from a hydrated chat message, if any."""
     if message.get("is_summary"):
@@ -316,6 +355,11 @@ class TelegramChannel(BaseChannel[TelegramSettings]):
 
                     inbound = _extract_inbound_message(update, bot_username=self._bot_username)
                     if inbound is None:
+                        unsupported_chat = _unsupported_message_chat_id(update)
+                        if unsupported_chat is not None and (
+                            not self._allowed_chat_ids or unsupported_chat in self._allowed_chat_ids
+                        ):
+                            await self._notify_unsupported(unsupported_chat)
                         continue
                     telegram_chat_id = inbound["telegram_chat_id"]
                     if self._allowed_chat_ids and telegram_chat_id not in self._allowed_chat_ids:
@@ -406,6 +450,21 @@ class TelegramChannel(BaseChannel[TelegramSettings]):
                 await self._deliver_text(telegram_chat_id, text)
         self._runtime.chat_coordinator.mark_observed(chat_id=chat_id, ref=ref, revision=preflight.current_revision)
         return preflight.current_revision
+
+    async def _notify_unsupported(self, telegram_chat_id: str) -> None:
+        try:
+            await self._api_call(
+                "sendMessage",
+                {
+                    "chat_id": telegram_chat_id,
+                    "text": (
+                        "I can only read text messages right now — I can't process voice, photos, "
+                        "or other attachments yet. Please send your message as text."
+                    ),
+                },
+            )
+        except Exception as exc:
+            logger.warning("Telegram unsupported-format notice failed for chat_id=%s: %s", telegram_chat_id, exc)
 
     async def _send_preflight_rejection(self, telegram_chat_id: str, preflight) -> None:
         if preflight.stale:
