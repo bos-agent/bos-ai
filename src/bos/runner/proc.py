@@ -245,10 +245,13 @@ def start_background(
     env: dict | None = None,
     cwd: Path | str | None = None,
 ) -> int:
-    """Launch *argv* as a detached background process.
+    """Launch *argv* as a detached background process and return its PID.
 
-    Stdout/stderr are redirected to the log file. The PID is written to
-    *rd.pid_file* and returned.
+    Stdout/stderr are redirected to the log file. The PID file is intentionally
+    NOT written here: the spawned gateway records it itself only after winning
+    the singleton lock. Writing it eagerly would let a refused start (one that
+    loses the lock and exits) clobber the live gateway's pid file, divorcing
+    ``stop``/``restart`` from the process that actually holds the lock.
     """
     rd.ensure()
     merged_env = {**os.environ, **(env or {})}
@@ -263,7 +266,6 @@ def start_background(
         env=merged_env,
         cwd=cwd,
     )
-    rd.pid_file.write_text(str(proc.pid))
     return proc.pid
 
 

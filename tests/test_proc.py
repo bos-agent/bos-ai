@@ -9,6 +9,7 @@ from bos.runner.proc import (
     is_running,
     lock_still_owned,
     reap_stale,
+    start_background,
     stop_gateway,
     write_state,
 )
@@ -129,6 +130,24 @@ def test_acquire_singleton_lock_recovers_after_lock_file_deleted(tmp_path):
 
     first.close()
     second.close()
+
+
+def test_start_background_does_not_clobber_live_pid_file(tmp_path, monkeypatch):
+    rd = GatewayRunDir(tmp_path / ".bos")
+    rd.ensure()
+    rd.pid_file.write_text("726902")  # a live gateway already recorded here
+
+    class _FakeProc:
+        pid = 999001
+
+    monkeypatch.setattr("bos.runner.proc.subprocess.Popen", lambda *a, **k: _FakeProc())
+
+    pid = start_background(["python", "-m", "bos.runner"], rd)
+
+    assert pid == 999001
+    # The spawned (not-yet-locked) child must NOT overwrite the live gateway's
+    # pid file — only a child that wins the singleton lock records its own PID.
+    assert rd.pid_file.read_text() == "726902"
 
 
 def test_is_running_false_for_dead_pid(tmp_path):
