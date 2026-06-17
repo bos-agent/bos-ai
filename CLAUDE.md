@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to AI coding agent while working with code in this repository.
 
 ## Tooling
 
@@ -15,88 +15,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Repo Layout
 
 ```
-src/bos/
-  cli/          - Click CLI entrypoints (boscli project, gateway, ask, tui, auth)
-                  and the project scaffolding engine (cli/scaffold/, BEP 9)
-  config/       - Workspace discovery, TOML config loading, agent resolution
-  core/         - Runtime primitives: Agent, AgentActor, AgentHarness,
-                  ExtensionPoint, ToolRegistry, contracts, LLM client
-  extensions/   - Channel, provider, tool, store, interceptor implementations
-  protocol/     - Message envelope, content types, turn events
-  runner/       - Runtime assembly: wires harness + actor + channels in-process
-tests/           - pytest coverage mirroring the above
-docs/architecture/ - Design docs for core, config, protocol, runner
+src/            - BOS source code
+tests/          - pytest coverage mirroring the above
+docs/BEP/       - BOS enhancement proposals. design decisions for BOS system.
+pyproject.toml  - BOS project configuration
 ```
-
-## Architecture
-
-### Extension Points (the core pattern)
-
-The framework is built around named `ExtensionPoint` registries. Core extension points (defined in `src/bos/core/contract.py`) use the `ep_` prefix; extension points defined by plugins use the `pep_` prefix (plugin extension point). This is a naming convention, not enforced by the runtime — follow it for any new plugin-defined extension point. Every `ExtensionPoint` requires a unique name and self-registers in a class-level lookup (`ExtensionPoint.lookup`), which is how `[exts.<name>]` config sections resolve — any registered name is configurable, whatever its prefix. A duplicate name raises at construction time (crashes startup). Names with a leading underscore are private: excluded from the lookup and the uniqueness check, for internal containers such as per-agent local tool registries.
-
-Core extension points:
-
-| EP | Protocol | Purpose |
-|---|---|---|
-| `ep_tool` | async fn → str | LLM-callable tools |
-| `ep_provider` | async fn → LLMResponse | Model backends (litellm by default) |
-| `ep_agent` | fn (sync/async) → agent spec dict | Agent spec factories, invoked once at bootstrap |
-| `ep_channel` | `Channel` protocol (`.run(mailbox)`) | External interfaces (HTTP, Telegram) |
-| `ep_mail_route` | `MailRoute` protocol | Message transport between actors |
-| `ep_chat_store` | `ChatStore` factory | Chat persistence + context assembly |
-| `ep_consolidator` | `Consolidator` protocol | Chat history summarization |
-| `ep_turn_interceptor` | `TurnInterceptor` protocol | Turn lifecycle hooks |
-| `ep_plugin` | `HarnessPlugin` protocol | Harness plugins |
-
-Plugin-defined extension points:
-
-| EP | Defined in | Purpose |
-|---|---|---|
-| `pep_memory_backend` | `bos.plugins.memory` | Long-term memory persistence backends |
-| `pep_skills_loader` | `bos.plugins.skills` | Skill discovery and loading |
-
-Third-party packages can also ship skills declaratively (no code) via the `bos.skills` entry-point group: the entry point names a package whose directory contains skills, expanded where the `__builtin__` sentinel appears in SkillsPlugin `skill_dirs`.
-
-Extensions register via decorator (e.g., `@ep_tool(name="...", description="...", parameters={...})`) or via TOML config in `[platform.extensions]`.
-
-### Agent Lifecycle
-
-1. **Config loading** (`src/bos/config/workspace.py`): `Workspace` resolves `.bos/config.toml` via upward directory search → `BOS_DIR` env var. Inline agents in TOML load first, then external agents from `agent_dirs/` (`.toml` or `.md` files, alphabetical), with last-wins deduplication.
-
-2. **Bootstrap** (`bootstrap_platform()`): Loads extensions, registers all named agents into the `AgentRegistry`.
-
-3. **Harness** (`AgentHarness` in `src/bos/core/harness.py`): Lifecycle container for shared services (mail route, message store, memory store, consolidator, skills loader, interceptors, LLM client). Created via `async with workspace.harness() as harness:`.
-
-4. **Runner** (`src/bos/runner/runner.py`): Creates the `AgentActor` bound to the main agent's mailbox address (`agent@main`), then runs actor + channels concurrently via `asyncio.TaskGroup`.
-
-### AgentActor (`src/bos/core/actor.py`)
-
-The actor is the concurrency spine. It polls its bound `MailBox` for messages, maintains per-`chat_id` session state (pending/interrupt buffers, generation counters), and drives the `Agent.ask()` loop in a per-chat task. It handles interrupt/abort semantics and merges multiple pending messages from the same chat.
-
-### Agent (`src/bos/core/agent.py`)
-
-The turn loop implementation. Each `ask()` call:
-1. Loads chat history, builds system prompt (base + memories + tools + skills + subagents + system info)
-2. Calls interceptor hooks at each stage: `prepare` → `before_llm` → LLM call → `after_llm` → tool calls + `after_tool` → repeat → `final_response`
-3. Emits `TurnEvent` objects through an optional `EventSink`
-4. Supports interrupt callbacks for the actor to inject messages mid-turn
-5. Registers three local tools: `AskSubagent`, `UpdateMemory`, `LoadSkill`
-
-### Messaging (`src/bos/protocol/`)
-
-`Envelope` carries messages with sender, content, content_type (MESSAGE, COMMAND, INTERRUPT_MESSAGE, INTERRUPT_ABORT, TURN_EVENT, SYSTEM, etc.), chat_id, and metadata. `MailRoute.bind(address)` returns a `MailBox`; actors and channels communicate exclusively through mailboxes.
-
-### Agent Configuration
-
-Agents are capabilities-deny by default. Omitted `tools`, `skills`, `memories`, `subagents` = empty allow-lists. Use `"*"` to allow all. `exclude_*` lists subtract from allow-lists. `_default` is the fallback agent name when none is configured.
-
-### Channel Configuration
-
-Channels target `agent@main` directly. Channel-to-channel routing is not supported. Each channel gets its own mailbox via `mail_route.bind(channel_bind_address)`. In Docker mode, HttpChannel host is normalized to `0.0.0.0`.
 
 ## Working Notes
 
-- Keep package boundaries explicit. If config loading changes, check `README.md` and `docs/architecture/*.md`.
 - Prefer small, reversible diffs. Extend existing patterns before adding new abstractions.
 - Pull request titles must follow semantic/conventional format (`feat(config): ...`, `fix(runner): ...`).
 - `uv run ruff check src tests` is a useful signal but the repo may contain pre-existing lint findings.
@@ -104,8 +30,24 @@ Channels target `agent@main` directly. Channel-to-channel routing is not support
 
 ## BEP Process
 
-- BOS Enhancement Proposals live in `docs/BEP/` and capture accepted design direction before broad architectural changes.
-- When reviewing a BEP, first clarify scope, responsibility boundaries, source-of-truth decisions, and explicit non-goals. Resolve ambiguous ownership before implementation planning.
+BOS Enhancement Proposals live in `docs/BEP/` and capture accepted design direction before broad architectural changes.
+
+### Authoring — a BEP must cover these (the parts agents most often miss)
+
+- **End state, not just mechanism.** Describe the finished system through concrete flows for *every* audience it touches — end-user, admin/operator, and background/automated — not only the internal mechanics. If a flow has no story (e.g. how an operator inspects, triggers, or recovers), the design is incomplete.
+- **Runtime shape.** Say what each new thing *is* at runtime — process / actor / job / service / function — where it runs, its lifecycle, and who invokes it. "An agent that does X" with no runtime form is a gap, not a design.
+- **Ownership and source of truth, per concern.** For every piece of state, config, and write path, name the single owner. Separate generic platform mechanism from domain policy, and never let a domain BEP grow a private scheduler / queue / LLM-call / event-bus. If you need infra that isn't this BEP's subject, extract it into its own BEP and depend on it.
+- **Layered, dependency-ordered plan.** Decompose into layers and sequence bottom-up so each step rests on something already built. Never presume a caller, trigger, store, config key, or service that does not yet exist — make each such prerequisite its own explicit step.
+- **Ground every claim in the code.** Verify each referenced symbol, file, protocol method, config key, and schema against the actual repo (e.g. confirm `[exts.<ep>.<impl>]` keys resolve; confirm a method exists or is explicitly added). Assumed-but-absent APIs and wrong config keys are the most common defect.
+- **Distinguish look-alikes; define interactions.** Avoid name collisions between similar concepts (e.g. a summarizer vs a writer). When several mechanisms overlap, state how they interact and at what point each applies.
+- **Precise vocabulary; no overclaiming.** Use exact terms ("reliable with graceful drain" ≠ "crash-safe durable"). Every acceptance criterion must state its preconditions. Don't promise guarantees the design cannot keep.
+- **Name breaking-change fallout.** When changing or removing a contract, enumerate affected call sites, tests, and external/third-party impact, and state the compatibility stance explicitly.
+- **Honest, per-track readiness.** Declare cross-BEP dependencies up front and gate readiness on them; mark which tracks are implementable now vs blocked. Do not label a BEP "ready" when a dependency is still a stub.
+- **Clean structure.** Consistent section numbering, an explicit Non-Goals section, and a revision history.
+
+### Reviewing / updating
+
+- When reviewing, first clarify scope, responsibility boundaries, source-of-truth decisions, and explicit non-goals. Resolve ambiguous ownership before implementation planning.
 - Keep BEPs aligned with the intended end design, not transitional compatibility, unless compatibility is explicitly required.
 - After discussion, update the BEP with concrete decisions, config/API shapes, lifecycle rules, and remaining open issues. Remove stale or contradictory text instead of leaving historical alternatives in place.
 - Before implementing a BEP, make a short implementation plan and re-check it against the BEP so implementation agents do not infer behavior from outdated wording.
