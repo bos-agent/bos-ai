@@ -71,9 +71,11 @@ def main() -> None:
         sys.stdout = _TeeStream(sys.stdout, mirrored_log)
         sys.stderr = _TeeStream(sys.stderr, mirrored_log)
 
-    # Configure logging to include timestamps
+    # Configure logging to include timestamps. BOS_LOG_LEVEL overrides the default
+    # so operators can raise verbosity (e.g. DEBUG) without code changes.
+    _level_name = (os.environ.get("BOS_LOG_LEVEL") or "INFO").strip().upper()
     logging.basicConfig(
-        level=logging.INFO,
+        level=getattr(logging, _level_name, logging.INFO),
         format="%(asctime)s %(levelname)-8s %(name)s %(message)s",
         stream=sys.stderr,
     )
