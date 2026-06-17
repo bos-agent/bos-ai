@@ -46,7 +46,9 @@ class Gateway:
         )
         if harness.chat_store is None or harness.mail_route is None:
             raise RuntimeError("Gateway requires an active AgentHarness with chat_store and mail_route services.")
-        self.chat_coordinator = ChatCoordinator(harness.chat_store)
+        self.chat_coordinator = ChatCoordinator(
+            harness.chat_store, cursor_path=GatewayRunDir(workspace.bos_dir).cursors_file
+        )
         self.actor_manager = ActorManager(
             workspace=workspace,
             harness=harness,

@@ -6,6 +6,26 @@ from bos.gateway import ChannelConversationRef, ChatCoordinationError, ChatCoord
 from bos.protocol import MessageType
 
 
+def test_cursors_persist_and_restore_across_instances(tmp_path):
+    path = tmp_path / "chat_cursors.json"
+    ref = ChannelConversationRef("lark+main", "lark_chat:oc_42")
+
+    first = ChatCoordinator(InMemChatStore(), cursor_path=path)
+    first.set_cursor(ref, "chat-a", observed_revision=3)
+
+    # A fresh coordinator (as after a gateway restart) restores the mapping.
+    restored = ChatCoordinator(InMemChatStore(), cursor_path=path)
+    assert restored.get_cursor(ref) == "chat-a"
+    assert restored.observed_revision(chat_id="chat-a", ref=ref) == 3
+
+
+def test_cursors_without_path_do_not_persist(tmp_path):
+    ref = ChannelConversationRef("lark+main", "lark_chat:oc_42")
+    coordinator = ChatCoordinator(InMemChatStore())
+    coordinator.set_cursor(ref, "chat-a", observed_revision=1)
+    assert not (tmp_path / "chat_cursors.json").exists()
+
+
 @pytest.mark.asyncio
 async def test_prepare_send_rejects_stale_ref_with_missing_messages():
     store = InMemChatStore()
