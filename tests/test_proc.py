@@ -1,8 +1,18 @@
+import os
 import signal
 
 from bos.config.workspace import AgentRuntimeConfig, Workspace, resolve_config_source
 from bos.gateway.state import GatewayRunDir, read_gateway_state, write_gateway_state
-from bos.runner.proc import build_docker_argv, is_running, stop_gateway, write_state
+from bos.runner.proc import (
+    acquire_singleton_lock,
+    build_docker_argv,
+    is_running,
+    lock_still_owned,
+    reap_stale,
+    start_background,
+    stop_gateway,
+    write_state,
+)
 
 
 def test_is_running_checks_docker_container_state(tmp_path, monkeypatch):
@@ -68,6 +78,105 @@ def test_build_docker_argv_preserves_preset_config_arg(tmp_path, monkeypatch):
 
     assert "BOS_CONFIG=default" in argv
     assert argv[-2:] == ["--config", "default"]
+
+
+def test_singleton_lock_blocks_a_second_holder(tmp_path):
+    rd = GatewayRunDir(tmp_path / ".bos")
+
+    first = acquire_singleton_lock(rd)
+    assert first is not None
+    # A second acquisition for the same run dir must be refused while held.
+    assert acquire_singleton_lock(rd) is None
+
+    first.close()
+    # Once released, the lock is acquirable again.
+    again = acquire_singleton_lock(rd)
+    assert again is not None
+    again.close()
+
+
+def test_lock_still_owned_detects_recreated_lock_file(tmp_path):
+    rd = GatewayRunDir(tmp_path / ".bos")
+
+    handle = acquire_singleton_lock(rd)
+    assert handle is not None
+    assert lock_still_owned(rd, handle) is True
+
+    # An external wipe + recreate leaves the handle locking an orphaned inode.
+    rd.lock_file.unlink()
+    assert lock_still_owned(rd, handle) is False  # file gone
+    rd.lock_file.write_text("")  # fresh inode at the same path
+    assert lock_still_owned(rd, handle) is False  # different inode
+
+    handle.close()
+
+
+def test_acquire_singleton_lock_recovers_after_lock_file_deleted(tmp_path):
+    rd = GatewayRunDir(tmp_path / ".bos")
+
+    first = acquire_singleton_lock(rd)
+    assert first is not None
+
+    # The lock file is wiped externally; `first` now locks an orphaned inode.
+    rd.lock_file.unlink()
+
+    # A fresh acquire succeeds against the recreated file and owns the path...
+    second = acquire_singleton_lock(rd)
+    assert second is not None
+    assert lock_still_owned(rd, second) is True
+    # ...while the orphaned `first` no longer owns it — the signal the live
+    # gateway's watchdog uses to stand down instead of double-polling.
+    assert lock_still_owned(rd, first) is False
+
+    first.close()
+    second.close()
+
+
+def test_start_background_does_not_clobber_live_pid_file(tmp_path, monkeypatch):
+    rd = GatewayRunDir(tmp_path / ".bos")
+    rd.ensure()
+    rd.pid_file.write_text("726902")  # a live gateway already recorded here
+
+    class _FakeProc:
+        pid = 999001
+
+    monkeypatch.setattr("bos.runner.proc.subprocess.Popen", lambda *a, **k: _FakeProc())
+
+    pid = start_background(["python", "-m", "bos.runner"], rd)
+
+    assert pid == 999001
+    # The spawned (not-yet-locked) child must NOT overwrite the live gateway's
+    # pid file — only a child that wins the singleton lock records its own PID.
+    assert rd.pid_file.read_text() == "726902"
+
+
+def test_is_running_false_for_dead_pid(tmp_path):
+    rd = GatewayRunDir(tmp_path / ".bos")
+    rd.ensure()
+    rd.pid_file.write_text("999999")  # not a live process
+    assert is_running(rd) is False
+
+
+def test_is_running_false_for_reused_non_gateway_pid(tmp_path):
+    rd = GatewayRunDir(tmp_path / ".bos")
+    rd.ensure()
+    # A live PID that is not a bos.runner (this test process) must not register
+    # as a running gateway — guards against PID reuse blocking a fresh start.
+    rd.pid_file.write_text(str(os.getpid()))
+    assert is_running(rd) is False
+
+
+def test_reap_stale_clears_leftover_files(tmp_path):
+    rd = GatewayRunDir(tmp_path / ".bos")
+    rd.ensure()
+    rd.pid_file.write_text("999999")
+    rd.state_file.write_text('{"gateway": {"host": "127.0.0.1", "port": 12345}}')
+
+    assert reap_stale(rd) is True
+    assert not rd.pid_file.exists()
+    assert not rd.state_file.exists()
+    # Idempotent: nothing left to clean.
+    assert reap_stale(rd) is False
 
 
 def test_gateway_state_merge_preserves_container_metadata(tmp_path):

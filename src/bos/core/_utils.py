@@ -76,10 +76,39 @@ async def _apply_async(fn: Callable, params: dict[str, Any]) -> Any:
     return await result if inspect.isawaitable(result) else result
 
 
+_THINK_RE = re.compile(r"<think>[\s\S]*?</think>")
+# Multi-actor history attribution labels assistant turns ("[assistant: Main]",
+# "[assistant Main said]"). Thinking models tend to parrot the format they see
+# in history straight back into their own reply.
+_ECHOED_LABEL_RE = re.compile(r"\[assistant(?::[^\]\n]*|\s[^\]\n]*?\ssaid)\]")
+# A leading "[thought: ...]" chain-of-thought prefix some models emit inline.
+_LEADING_THOUGHT_RE = re.compile(r"^\s*\[thought:[^\]]*\]\s*", re.IGNORECASE)
+
+
 def _strip_think(text: str | None) -> str | None:
     if not text:
         return None
-    return re.sub(r"<think>[\s\S]*?</think>", "", text).strip() or None
+    return _THINK_RE.sub("", text).strip() or None
+
+
+def _strip_reply_artifacts(text: str | None, *, strip_labels: bool = False) -> str | None:
+    """Clean reasoning/attribution noise a model leaks into a user-facing reply.
+
+    - removes ``<think>...</think>`` blocks
+    - when *strip_labels* (multi-actor chats), drops everything up to and
+      including the last parroted ``[assistant: X]`` / ``[assistant X said]``
+      label, which also discards any ``[thought: ...]`` that preceded it
+    - removes a leading ``[thought: ...]`` chain-of-thought prefix
+    """
+    if not text:
+        return None
+    text = _THINK_RE.sub("", text)
+    if strip_labels:
+        labels = list(_ECHOED_LABEL_RE.finditer(text))
+        if labels:
+            text = text[labels[-1].end() :]
+    text = _LEADING_THOUGHT_RE.sub("", text)
+    return text.strip() or None
 
 
 def _safe_format(template: str, **kwargs: Any) -> str:

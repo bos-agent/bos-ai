@@ -26,6 +26,7 @@ from ._utils import (
     _pick_collection,
     _read_text,
     _safe_format,
+    _strip_reply_artifacts,
     _strip_think,
     _xml_attr,
 )
@@ -144,6 +145,7 @@ __all__ = [
     "_pick_collection",
     "_read_text",
     "_safe_format",
+    "_strip_reply_artifacts",
     "_strip_think",
     "_get_bos_home",
     "_xml_attr",
