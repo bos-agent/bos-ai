@@ -149,3 +149,14 @@ display_name = "Main"
 # display_name = "Telegram"
 # target_actor = "main"
 # settings = { bot_id = "123456", token_env = "TELEGRAM_BOT_TOKEN" }
+
+# Lark / Feishu bot over the lark-oapi WebSocket long connection (no public URL
+# needed). Install the optional dependency: uv pip install 'bos-ai[lark]'.
+# Enable the "im.message.receive_v1" event and "Use long connection to receive
+# events" in the Lark developer console.
+# [[runtime.channels]]
+# type = "LarkChannel"
+# channel_id = "lark:main"
+# display_name = "Lark"
+# target_actor = "main"
+# settings = { app_id_env = "LARK_APP_ID", app_secret_env = "LARK_APP_SECRET" }

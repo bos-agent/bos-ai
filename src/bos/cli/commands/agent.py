@@ -459,6 +459,7 @@ def start(ctx, foreground: bool, docker: bool, workspace_dir: str | None):
     ws.bootstrap_platform()
 
     from bos.runner.proc import (
+        _pid_alive,
         is_running,
         read_state,
         reap_stale,
@@ -523,6 +524,14 @@ def start(ctx, foreground: bool, docker: bool, workspace_dir: str | None):
             ident = container_id[:12] if container_id else pid
             click.echo(f"Gateway started ({state.get('runtime', runtime.kind)} {ident}) · http://{host}:{port}")
             return
+        # No endpoint yet: if the spawned process has already exited (lost the singleton
+        # lock, crashed at startup, …), surface it now instead of waiting out the timeout.
+        if pid and runtime.kind == "process" and not _pid_alive(int(pid)):
+            click.echo(
+                f"Gateway process {pid} exited during startup — check {rd.log_file} for the cause.",
+                err=True,
+            )
+            raise SystemExit(1)
 
     ident = container_id[:12] if container_id else pid
     click.echo(f"Gateway started ({runtime.kind} {ident}) — endpoint not yet available (check boscli gateway status)")
@@ -648,7 +657,12 @@ def restart(ctx):
     if is_running(rd):
         state = read_state(rd)
         ctx.invoke(stop)
-        time.sleep(0.5)
+        # Wait for the old process to fully release the run dir (and its lock)
+        # before starting again, so the fresh gateway doesn't race a still-exiting
+        # one and lose the singleton lock.
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and is_running(rd):
+            time.sleep(0.1)
         ctx.invoke(start, docker=state.get("runtime") == "docker")
         return
 

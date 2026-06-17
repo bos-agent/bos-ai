@@ -1,12 +1,18 @@
 from __future__ import annotations
 
+import json
+import logging
+import os
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from bos.core import ChatStore
 from bos.protocol import MessageType
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -44,12 +50,14 @@ class ChatCoordinationError(RuntimeError):
 
 
 class ChatCoordinator:
-    def __init__(self, chat_store: ChatStore) -> None:
+    def __init__(self, chat_store: ChatStore, *, cursor_path: Path | None = None) -> None:
         self._chat_store = chat_store
+        self._cursor_path = cursor_path
         self._cursors: dict[ChannelConversationRef, str] = {}
         self._observed: dict[tuple[ChannelConversationRef, str], int] = {}
         self._active_turns: dict[str, ActiveTurn] = {}
         self._revision_cache: dict[str, int] = {}
+        self._load_cursors()
 
     def get_cursor(self, ref: ChannelConversationRef) -> str | None:
         return self._cursors.get(ref)
@@ -163,6 +171,48 @@ class ChatCoordinator:
     def mark_observed(self, *, chat_id: str, ref: ChannelConversationRef, revision: int) -> None:
         self._observed[(ref, chat_id)] = revision
         self._revision_cache[chat_id] = max(self._revision_cache.get(chat_id, 0), revision)
+        self._persist_cursors()
+
+    def _load_cursors(self) -> None:
+        """Restore persisted cursors so channels resume their chat across restarts."""
+        if self._cursor_path is None or not self._cursor_path.exists():
+            return
+        try:
+            entries = json.loads(self._cursor_path.read_text(encoding="utf-8"))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to read chat cursors from %s: %s", self._cursor_path, exc)
+            return
+        for entry in entries or []:
+            try:
+                ref = ChannelConversationRef(entry["channel_id"], entry["channel_conversation_id"])
+                chat_id = str(entry["chat_id"])
+                revision = int(entry.get("observed_revision", 0))
+            except (KeyError, TypeError, ValueError):
+                continue
+            self._cursors[ref] = chat_id
+            self._observed[(ref, chat_id)] = revision
+            self._revision_cache[chat_id] = max(self._revision_cache.get(chat_id, 0), revision)
+
+    def _persist_cursors(self) -> None:
+        """Write the current cursors (one entry per channel conversation) atomically."""
+        if self._cursor_path is None:
+            return
+        entries = [
+            {
+                "channel_id": ref.channel_id,
+                "channel_conversation_id": ref.channel_conversation_id,
+                "chat_id": chat_id,
+                "observed_revision": self._observed.get((ref, chat_id), 0),
+            }
+            for ref, chat_id in self._cursors.items()
+        ]
+        try:
+            self._cursor_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._cursor_path.with_name(f".{self._cursor_path.name}.{os.getpid()}.tmp")
+            tmp.write_text(json.dumps(entries), encoding="utf-8")
+            tmp.replace(self._cursor_path)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to persist chat cursors to %s: %s", self._cursor_path, exc)
 
     async def hydrate(self, *, chat_id: str, from_revision: int | None = None) -> list[dict[str, Any]]:
         messages = await self._chat_store.get_messages(chat_id, active_only=False)

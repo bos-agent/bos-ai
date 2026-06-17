@@ -28,6 +28,12 @@ class GatewayRunDir:
         return self.root / "gateway.state"
 
     @property
+    def cursors_file(self) -> Path:
+        """Persisted channel-conversation → chat_id cursors, so persistent channels
+        (Telegram, Lark, …) resume their existing chat after a gateway restart."""
+        return self.root / "chat_cursors.json"
+
+    @property
     def log_file(self) -> Path:
         return self.root / "gateway.log"
 
