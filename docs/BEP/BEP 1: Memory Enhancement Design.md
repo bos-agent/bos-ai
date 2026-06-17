@@ -1,6 +1,12 @@
 # Memory Enhancement Design
 
-Status: **design** — contract and tool surface finalized, ready for implementation planning.
+Status: **superseded-in-part by [BEP 10](BEP%2010%3A%20Platform-Managed%20Memory%20and%20the%20Consolidation%20Agent.md)** (2026-06-13).
+The two-tier maxim/memory model, `pep_memory_backend`, maxim scopes, and the markdown default are
+**retained**. The **agent tool surface** (`Remember`/`Forget`/`ReviseMaxim` as agent tools) and the
+"agent freely creates and manages memory" stance are **replaced**: under BEP 10 the agent is
+**read-only** (`Recall` + auto-recall + in-context index) and all writes are performed off-turn by the
+platform consolidation agent (`optimize()`). Sections below that describe agent-driven writes are
+annotated inline and should be read through BEP 10.
 
 ---
 
@@ -12,11 +18,15 @@ Memory in BOS AI has two cognitive roles:
 |---|---|---|
 | **Cognitive role** | Deeply held principles that drive behavior and decisions | Episodic/semantic records that inform decisions |
 | **Change rate** | Deliberate, slow, curated | Frequent, incremental, accumulated |
-| **Load pattern** | Injected into system prompt every turn | Queried on demand via tool call |
-| **Authority** | Operator-configured keys, agent-curated content | Agent freely creates and manages |
+| **Load pattern** | Injected into system prompt (per-session snapshot, BEP 10 §5) | Queried on demand via `Recall` / auto-recall |
+| **Authority** | Operator-configured keys; content written **off-turn** by `optimize()` (BEP 10 §4) | Created/curated **off-turn** by `optimize()`; agent reads only |
 | **Filter** | `maxims = ["user", "soul"]` in agent config | No allow-list on write; filter on recall |
 
 Both are backed by a single extension. The distinction is access temperature, not storage.
+
+> **Superseded note (BEP 10):** the original "Authority" row read "agent-curated content" / "Agent
+> freely creates and manages." Under BEP 10 the agent does **not** write memory — all writes are
+> off-turn. The table above reflects the BEP 10 stance.
 
 ## Extension Point: `ep_memory`
 
@@ -83,6 +93,12 @@ exclude_maxims = ["tasks"]
 The `memories` field is deprecated and mapped to the new field during a transition period.
 
 ## Agent Tools
+
+> **Superseded by [BEP 10](BEP%2010%3A%20Platform-Managed%20Memory%20and%20the%20Consolidation%20Agent.md) §3.**
+> The agent surface is now **read-only**: only `Recall` is registered. `Remember` and `Forget` are no
+> longer agent tools (their backend operations are called off-turn by `optimize()`), and `ReviseMaxim`
+> is removed. The `Recall` design below still applies; the `Remember`/`Forget` subsections are retained
+> only as the backend-operation contract the consolidation agent uses.
 
 Three tools, routing to maxims or memories based on parameters:
 
@@ -167,6 +183,14 @@ Each maxim header includes its scope description so the agent understands what c
 Memories (cold) are never injected into the system prompt. They only appear when the agent calls `Recall`.
 
 ## Memory Usage Prompt
+
+> **Superseded by [BEP 10](BEP%2010%3A%20Platform-Managed%20Memory%20and%20the%20Consolidation%20Agent.md) §3/§9.**
+> This prompt teaches the agent to *write* memory (Remember/Forget/maxim merges), which the agent no
+> longer does. The agent-facing prompt under BEP 10 covers reading only (`Recall` + the in-context
+> index). The write-side guidance below is repurposed as input for the **off-turn consolidation
+> agent's** prompt — and, per BEP 10 §9, note this prompt was never wired into the running code
+> (`_MEMORY_PROMPT_SECTION` is used instead); any version should be measured against the §9 eval, not
+> shipped blind.
 
 The following prompt is injected into the system prompt to teach the agent how to use its memory effectively:
 
@@ -291,3 +315,4 @@ This lets the same tool surface back completely different memory philosophies:
 | Date | Change | Intention |
 |---|---|---|
 | 2026-05-02 | Initial design drafted | Capture memory enhancement vision after researching Hermes and OpenClaw role models |
+| 2026-06-13 | Superseded-in-part by BEP 10 | Mark the agent tool surface and agent-driven writes as replaced by BEP 10 (read-only agent, off-turn consolidation); retain two-tier model, backend EP, maxim scopes, and markdown default |
