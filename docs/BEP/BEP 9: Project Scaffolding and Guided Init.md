@@ -131,7 +131,7 @@ $ boscli project doctor
 ✓ config         config.toml parses and validates (BEP 6 schema)
 ✓ paths          agent_dirs, extensions, skills dirs exist
 ✓ agents         3 agent specs load (researcher.md, poet.md, inline main)
-✗ env            TELEGRAM_BOT_TOKEN referenced by channel 'telegram:main' but unset
+✗ env            TELEGRAM_BOT_TOKEN referenced by channel 'telegram+main' but unset
 ✓ credentials    codex_auth.default.json present
 ✓ gateway        port 5920 free (no gateway running for this project)
 - model probe    skipped (use --probe)
@@ -200,6 +200,7 @@ The single most important scaffold file: the moment a user sees their own regist
 ```python
 """Project-local tools. Any @ep_tool in this directory is auto-discovered
 via [platform.extensions] = [..., "./extensions"]."""
+
 from bos.core import ep_tool
 
 

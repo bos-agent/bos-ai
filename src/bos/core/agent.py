@@ -22,7 +22,7 @@ from ._utils import (
     _compact,
     _create_extension_instance,
     _pick_collection,
-    _strip_think,
+    _strip_reply_artifacts,
     _xml_attr,
 )
 from .contract import (
@@ -548,7 +548,9 @@ class Agent:
                 )
                 if not response.tool_calls:
                     # finalize the response if there is no tool call required
-                    final_content = _strip_think(response.content)
+                    final_content = _strip_reply_artifacts(
+                        response.content, strip_labels=self._history_attribution
+                    )
                     if response.finish_reason == "error":
                         logger.error("Error in LLM response: %s", response.finish_reason)
                         final_content = final_content or "(LLM responds error)"

@@ -145,7 +145,7 @@ display_name = "Main"
 # Persistent channels use the gateway channel constructor contract.
 # [[runtime.channels]]
 # type = "TelegramChannel"
-# channel_id = "telegram:main"
+# channel_id = "telegram+main"
 # display_name = "Telegram"
 # target_actor = "main"
 # settings = { bot_id = "123456", token_env = "TELEGRAM_BOT_TOKEN" }

@@ -31,6 +31,10 @@ class GatewayRunDir:
     def log_file(self) -> Path:
         return self.root / "gateway.log"
 
+    @property
+    def lock_file(self) -> Path:
+        return self.root / "gateway.lock"
+
     def ensure(self) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
 

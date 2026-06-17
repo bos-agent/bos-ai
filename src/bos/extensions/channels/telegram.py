@@ -10,7 +10,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
 
-from aiohttp import ClientSession
+from aiohttp import ClientSession, FormData
 
 from bos.core import BaseChannel, MailBox, ep_channel
 from bos.gateway import ChannelConversationRef, ChannelRuntimeContext
@@ -18,7 +18,32 @@ from bos.protocol import Envelope, MessageType, TurnEvent
 
 logger = logging.getLogger(__name__)
 
-TELEGRAM_MESSAGE_LIMIT = 4096
+
+def _env_int(name: str, default: int) -> int:
+    """Read an int tunable from an env var of the same name, falling back to default."""
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        logger.warning("Invalid integer for %s=%r; using default %d", name, raw, default)
+        return default
+
+
+TELEGRAM_MESSAGE_LIMIT = _env_int("TELEGRAM_MESSAGE_LIMIT", 4096)
+# Final replies longer than this (UTF-8 bytes) are sent as a document attachment
+# instead of inline text, so long answers don't flood the chat as message chunks.
+TELEGRAM_ATTACHMENT_THRESHOLD = _env_int("TELEGRAM_ATTACHMENT_THRESHOLD", 1024)
+# Max UTF-8 bytes for an intermediate turn-event status preview.
+TELEGRAM_STATUS_PREVIEW_LIMIT = _env_int("TELEGRAM_STATUS_PREVIEW_LIMIT", 64)
+
+
+def _truncate_bytes(text: str, limit: int) -> str:
+    encoded = text.encode("utf-8")
+    if len(encoded) <= limit:
+        return text
+    return encoded[:limit].decode("utf-8", errors="ignore").rstrip() + "…"
 
 
 @dataclass(frozen=True)
@@ -91,6 +116,65 @@ def _extract_inbound_message(update: dict[str, Any], *, bot_username: str | None
     }
 
 
+# Message fields that carry user content this channel can't read (no text/caption).
+# Used to tell genuine media apart from service updates (e.g. new_chat_members),
+# so we only nudge the sender when they actually sent something we can't process.
+_UNSUPPORTED_CONTENT_KEYS = (
+    "voice",
+    "audio",
+    "photo",
+    "video",
+    "video_note",
+    "document",
+    "sticker",
+    "animation",
+    "contact",
+    "location",
+    "poll",
+    "dice",
+)
+
+
+def _unsupported_message_chat_id(update: dict[str, Any]) -> str | None:
+    """Return the chat id of an inbound user message we can't read, else None.
+
+    Distinguishes real media (voice, photo, …) from non-message/service updates
+    so the channel can nudge the sender instead of dropping it in silence.
+    """
+    message = update.get("message") or update.get("edited_message")
+    if not isinstance(message, dict):
+        return None
+    telegram_chat_id = (message.get("chat") or {}).get("id")
+    if telegram_chat_id is None:
+        return None
+    text = message.get("text") or message.get("caption")
+    if isinstance(text, str) and text.strip():
+        return None  # has usable text — handled normally
+    if not any(key in message for key in _UNSUPPORTED_CONTENT_KEYS):
+        return None  # service/other update, not user media
+    return str(telegram_chat_id)
+
+
+def _assistant_text(message: dict[str, Any]) -> str | None:
+    """Extract user-facing assistant text from a hydrated chat message, if any."""
+    if message.get("is_summary"):
+        return None
+    llm = message.get("llm_message")
+    if not isinstance(llm, dict) or llm.get("role") != "assistant":
+        return None
+    content = llm.get("content")
+    if isinstance(content, str):
+        return content.strip() or None
+    if isinstance(content, list):
+        parts = [
+            block["text"]
+            for block in content
+            if isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str)
+        ]
+        return "".join(parts).strip() or None
+    return None
+
+
 def _selected_chat_from_command_result(env: Envelope) -> str | None:
     if env.content_type != MessageType.COMMAND_RESULT:
         return None
@@ -116,22 +200,24 @@ def _render_turn_event(event: TurnEvent) -> str | None:
     label = _turn_event_label(event)
 
     if event.event_type == "llm" and event.detail == "thinking":
-        meta = event.metadata or {}
-        iteration = meta.get("iteration")
-        max_iter = meta.get("max_iterations")
-        if iteration and max_iter:
-            return f"[{label}] {iteration}/{max_iter}"
-        return f"[{label}] thinking"
+        # The per-iteration "thinking" tick carries only the iteration counter.
+        # Returning None leaves the status message untouched so the last real
+        # reasoning/tool content stays visible instead of flashing "[main] 3/80".
+        return None
 
     if event.event_type == "llm" and event.detail in ("reasoning", "thinking_content"):
-        preview = (event.content or "")[:200].replace("\n", " ")
-        return f"[{label}] {preview}"
+        preview = (event.content or "").strip().replace("\n", " ")
+        if not preview:
+            return None
+        return f"[{label}] {_truncate_bytes(preview, TELEGRAM_STATUS_PREVIEW_LIMIT)}"
+
+    if event.event_type == "llm" and event.detail == "tool_calls" and event.tool_calls:
         tool_names = ", ".join(tc["name"] for tc in event.tool_calls)
-        return f"{label} is using: {tool_names}"
+        return f"[{label}] using: {_truncate_bytes(tool_names, TELEGRAM_STATUS_PREVIEW_LIMIT)}"
 
     if event.event_type == "tool" and event.detail == "tool_result":
         preview = str(event.content or "").strip().replace("\n", " ")
-        preview = preview[:120] + ("…" if len(preview) > 120 else "")
+        preview = _truncate_bytes(preview, TELEGRAM_STATUS_PREVIEW_LIMIT)
         return f"{label} finished {event.tool_name or 'tool'}: {preview}"
 
     if event.detail == "max_iteration":
@@ -214,6 +300,32 @@ class TelegramChannel(BaseChannel[TelegramSettings]):
             raise RuntimeError(f"Telegram API {method} failed: {data}")
         return data
 
+    async def _send_document(self, telegram_chat_id: str, content: str) -> None:
+        """Upload a long reply as a Markdown document attachment.
+
+        sendDocument needs multipart/form-data, so this bypasses _api_call
+        (which posts JSON) and talks to the session directly.
+        """
+        if self._session is None:
+            raise RuntimeError("Telegram session is not initialized.")
+        form = FormData()
+        form.add_field("chat_id", str(telegram_chat_id))
+        form.add_field(
+            "document",
+            content.encode("utf-8"),
+            filename="response.md",
+            content_type="text/markdown",
+        )
+        try:
+            async with self._session.post("sendDocument", data=form, timeout=self._poll_timeout + 10) as resp:
+                data = await resp.json()
+            if not data.get("ok"):
+                raise RuntimeError(f"Telegram API sendDocument failed: {data}")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("Telegram sendDocument failed for chat_id=%s: %s", telegram_chat_id, exc)
+
     async def _get_bot_username(self) -> str | None:
         try:
             data = await self._api_call("getMe", {})
@@ -243,6 +355,11 @@ class TelegramChannel(BaseChannel[TelegramSettings]):
 
                     inbound = _extract_inbound_message(update, bot_username=self._bot_username)
                     if inbound is None:
+                        unsupported_chat = _unsupported_message_chat_id(update)
+                        if unsupported_chat is not None and (
+                            not self._allowed_chat_ids or unsupported_chat in self._allowed_chat_ids
+                        ):
+                            await self._notify_unsupported(unsupported_chat)
                         continue
                     telegram_chat_id = inbound["telegram_chat_id"]
                     if self._allowed_chat_ids and telegram_chat_id not in self._allowed_chat_ids:
@@ -267,6 +384,19 @@ class TelegramChannel(BaseChannel[TelegramSettings]):
                         base_revision=observed_revision,
                         content_type=inbound["content_type"],
                     )
+                    if preflight.stale:
+                        # The channel cursor fell behind: the agent committed
+                        # messages this channel never delivered. A Telegram client
+                        # has no way to "refresh", so do it for them — push the
+                        # missed replies, resync the cursor, and retry the send
+                        # instead of dead-ending with a retry-after-refresh notice.
+                        observed_revision = await self._catch_up(telegram_chat_id, chat_id, ref, preflight)
+                        preflight = await self._runtime.chat_coordinator.prepare_send(
+                            chat_id=chat_id,
+                            ref=ref,
+                            base_revision=observed_revision,
+                            content_type=inbound["content_type"],
+                        )
                     if not preflight.ok:
                         await self._send_preflight_rejection(telegram_chat_id, preflight)
                         continue
@@ -308,11 +438,38 @@ class TelegramChannel(BaseChannel[TelegramSettings]):
                 logger.warning("Telegram polling error: %s", exc)
                 await asyncio.sleep(2)
 
+    async def _catch_up(self, telegram_chat_id: str, chat_id: str, ref: ChannelConversationRef, preflight) -> int:
+        """Deliver replies the channel missed and resync its cursor to the current revision.
+
+        Returns the revision the cursor was advanced to, so the caller can retry the
+        send with a matching base_revision.
+        """
+        for message in preflight.missing_messages or []:
+            text = _assistant_text(message)
+            if text:
+                await self._deliver_text(telegram_chat_id, text)
+        self._runtime.chat_coordinator.mark_observed(chat_id=chat_id, ref=ref, revision=preflight.current_revision)
+        return preflight.current_revision
+
+    async def _notify_unsupported(self, telegram_chat_id: str) -> None:
+        try:
+            await self._api_call(
+                "sendMessage",
+                {
+                    "chat_id": telegram_chat_id,
+                    "text": (
+                        "I can only read text messages right now — I can't process voice, photos, "
+                        "or other attachments yet. Please send your message as text."
+                    ),
+                },
+            )
+        except Exception as exc:
+            logger.warning("Telegram unsupported-format notice failed for chat_id=%s: %s", telegram_chat_id, exc)
+
     async def _send_preflight_rejection(self, telegram_chat_id: str, preflight) -> None:
         if preflight.stale:
             text = (
-                "This chat has new messages. "
-                f"Please retry after refreshing to revision {preflight.current_revision}."
+                f"This chat has new messages. Please retry after refreshing to revision {preflight.current_revision}."
             )
         else:
             text = "A response is already in progress for this chat."
@@ -356,14 +513,21 @@ class TelegramChannel(BaseChannel[TelegramSettings]):
                     if (ref := self._ref_from_env(env)) is not None:
                         self._runtime.chat_coordinator.mark_observed(chat_id=env.chat_id, ref=ref, revision=revision)
 
-            for part in _split_message(content):
-                try:
-                    await self._api_call("sendMessage", {"chat_id": telegram_chat_id, "text": part})
-                except asyncio.CancelledError:
-                    raise
-                except Exception as exc:
-                    logger.warning("Telegram sendMessage failed for chat_id=%s: %s", telegram_chat_id, exc)
-                    break
+            await self._deliver_text(telegram_chat_id, content)
+
+    async def _deliver_text(self, telegram_chat_id: str, text: str) -> None:
+        """Send a final reply, as a document attachment if it exceeds the byte threshold."""
+        if len(text.encode("utf-8")) > TELEGRAM_ATTACHMENT_THRESHOLD:
+            await self._send_document(telegram_chat_id, text)
+            return
+        for part in _split_message(text):
+            try:
+                await self._api_call("sendMessage", {"chat_id": telegram_chat_id, "text": part})
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning("Telegram sendMessage failed for chat_id=%s: %s", telegram_chat_id, exc)
+                break
 
     def _resolve_telegram_chat_id(self, env: Envelope) -> str | None:
         if (ref := self._ref_from_env(env)) is not None:
@@ -392,16 +556,22 @@ class TelegramChannel(BaseChannel[TelegramSettings]):
 
         message_id = self._chat_to_status_message_id.get(chat_id)
         if message_id is not None:
+            # Overwrite the single status message in place. If the edit fails
+            # (Telegram rate-limits editMessageText, transient error), keep the
+            # existing message and skip this update — do NOT fall through to
+            # sendMessage, which would spam a new message per failed edit and
+            # leave every intermediate status in the chat.
             try:
                 await self._api_call(
                     "editMessageText",
                     {"chat_id": telegram_chat_id, "message_id": message_id, "text": text},
                 )
                 self._chat_to_status_text[chat_id] = text
-                return
             except Exception as exc:
                 logger.debug("Telegram editMessageText failed for chat_id=%s: %s", chat_id, exc)
+            return
 
+        # No status message yet for this chat — create the one we will edit.
         try:
             data = await self._api_call("sendMessage", {"chat_id": telegram_chat_id, "text": text})
         except Exception as exc:

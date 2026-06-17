@@ -700,12 +700,12 @@ def gen_channel(kind: str):
 
     ws = _discover_project()
     config_file = ws.config_file
-    channel_id = f"{kind}:main"
+    channel_id = f"{kind}+main"
     if any(ch.channel_id == channel_id for ch in ws.config.runtime.channels):
         raise click.ClickException(f"Channel {channel_id!r} is already configured.")
 
     snippet = (
-        '\n[[runtime.channels]]\ntype = "TelegramChannel"\nchannel_id = "telegram:main"\n'
+        '\n[[runtime.channels]]\ntype = "TelegramChannel"\nchannel_id = "telegram+main"\n'
         'display_name = "Telegram"\ntarget_actor = "main"\nsettings = { token_env = "TELEGRAM_BOT_TOKEN" }'
     )
     try:
