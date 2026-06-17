@@ -59,14 +59,14 @@ class LifecycleBus(Protocol):
 ```
 
 - **v1 event kinds are minimal:** `turn_complete` (every committed turn) and `session_close`. There is
-  **no** `session_open`/`session_start` event — `session_phase` (new/resumed/continuing) lives on
-  `TurnContext.metadata` (BEP 10 §6) and is read at turn time; nothing needs a session-open *event*.
-  There is **no** `every_n_turns` (removed: tool-call iterations are not semantic checkpoints).
+  **no** `session_open`/`session_start` event — BEP 10's memory projection is rebuilt per turn (§5), so
+  nothing needs a session-open signal. There is **no** `every_n_turns` (removed: tool-call iterations are
+  not semantic checkpoints).
 - **Subscriber-failure isolation (decided):** a subscriber exception is caught and logged; fan-out
   continues. One plugin cannot break another's delivery.
 - **Single-producer for now, generalizable later.** When a domain event with a non-actor producer
-  actually lands (e.g. a future mid-session maxim refresh on a memory-changed signal — deferred in
-  BEP 10 §5), this generalizes to a multi-producer `EventBus`. Not built speculatively.
+  actually lands (e.g. a file-watcher, an inbound webhook, or a consolidation-completed signal), this
+  generalizes to a multi-producer `EventBus`. Not built speculatively.
 
 ## 2. `JobRunner` — off-critical-path task execution
 
@@ -218,7 +218,7 @@ persistent/daemon job runner.
 
 ## Implementation note (BEP 10 path)
 
-BEP 10 §12 sequences these as phases 4–6 (L3 `LifecycleBus`, L2 `BackgroundLLM`, L4 `JobRunner`),
+BEP 10 §11 sequences these as phases 4–6 (L3 `LifecycleBus`, L2 `BackgroundLLM`, L4 `JobRunner`),
 parallelizable with the memory read-path work and landing before the consolidation handler (L5). v1 is
 deliberately minimal: in-process, no cron, no persistent store, two event kinds, three triggers.
 
