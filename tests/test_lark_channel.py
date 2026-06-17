@@ -6,11 +6,13 @@ import pytest
 
 from bos.core import MailBox, Message
 from bos.extensions.channels.lark import (
+    LARK_ATTACHMENT_THRESHOLD,
     LARK_MESSAGE_LIMIT,
     LarkChannel,
     LarkSettings,
     _conversation_id_for_lark_chat,
     _extract_inbound_message,
+    _resolve_domain,
     _selected_chat_from_command_result,
     _split_message,
     _strip_mentions,
@@ -178,6 +180,18 @@ def test_conversation_id_for_lark_chat():
 
 def test_identity_key_uses_app_id():
     assert _channel().identity_key == "lark:app:cli_app"
+
+
+def test_resolve_domain_maps_aliases_and_urls():
+    lark = SimpleNamespace(
+        FEISHU_DOMAIN="https://open.feishu.cn",
+        LARK_DOMAIN="https://open.larksuite.com",
+    )
+    assert _resolve_domain(lark, "") == "https://open.feishu.cn"
+    assert _resolve_domain(lark, "feishu") == "https://open.feishu.cn"
+    assert _resolve_domain(lark, "lark") == "https://open.larksuite.com"
+    assert _resolve_domain(lark, "LarkSuite") == "https://open.larksuite.com"
+    assert _resolve_domain(lark, "https://open.larksuite.com") == "https://open.larksuite.com"
 
 
 def test_selected_chat_from_command_result():
@@ -410,3 +424,188 @@ async def test_forward_replies_updates_cursor_from_new_result():
     assert channel._runtime.chat_coordinator.get_cursor(ref) == "chat-b"
     assert "chat-a" not in channel._chat_to_lark_chat
     assert channel._chat_to_lark_chat["chat-b"] == "oc_42"
+
+
+# ── outbound: attachment threshold + acknowledgement reaction ──────────────────
+
+
+@pytest.mark.asyncio
+async def test_deliver_text_under_threshold_sends_inline():
+    channel = _channel()
+    texts: list[tuple[str, str]] = []
+    files: list[tuple[str, str, str]] = []
+    channel._send_text_sync = lambda cid, t: texts.append((cid, t))  # type: ignore[method-assign]
+    channel._send_file_sync = lambda cid, c, fn: files.append((cid, c, fn))  # type: ignore[method-assign]
+
+    await channel._deliver_text("oc_1", "short reply")
+
+    assert texts == [("oc_1", "short reply")]
+    assert files == []
+
+
+@pytest.mark.asyncio
+async def test_deliver_text_over_threshold_sends_file():
+    channel = _channel()
+    texts: list[tuple[str, str]] = []
+    files: list[tuple[str, str, str]] = []
+    channel._send_text_sync = lambda cid, t: texts.append((cid, t))  # type: ignore[method-assign]
+    channel._send_file_sync = lambda cid, c, fn: files.append((cid, c, fn))  # type: ignore[method-assign]
+
+    big = "x" * (LARK_ATTACHMENT_THRESHOLD + 1)
+    await channel._deliver_text("oc_1", big)
+
+    assert texts == []
+    assert files == [("oc_1", big, "response.md")]
+
+
+@pytest.mark.asyncio
+async def test_deliver_text_falls_back_to_inline_when_file_send_fails():
+    channel = _channel()
+    texts: list[tuple[str, str]] = []
+
+    def boom(cid, c, fn):
+        raise RuntimeError("upload failed")
+
+    channel._send_text_sync = lambda cid, t: texts.append((cid, t))  # type: ignore[method-assign]
+    channel._send_file_sync = boom  # type: ignore[method-assign]
+
+    big = "x" * (LARK_ATTACHMENT_THRESHOLD + 1)
+    await channel._deliver_text("oc_1", big)
+
+    assert texts == [("oc_1", big)]
+
+
+@pytest.mark.asyncio
+async def test_handle_inbound_reacts_to_acknowledge_receipt():
+    channel = _channel()
+    reactions: list[tuple[str, str]] = []
+
+    def fake_add(mid, emoji):
+        reactions.append((mid, emoji))
+        return "rk_1"
+
+    channel._add_reaction_sync = fake_add  # type: ignore[method-assign]
+    mailbox = FakeSendMailbox()
+
+    await channel._handle_inbound(mailbox, _text_event("oc_42", "hello"))
+
+    assert len(mailbox.sent) == 1
+    assert reactions == [("om_x", "OnIt")]
+    # The reaction id is tracked against the dispatched chat for later removal.
+    chat_id = mailbox.sent[0].chat_id
+    assert channel._chat_to_ack_reaction[chat_id] == ("om_x", "rk_1")
+
+
+@pytest.mark.asyncio
+async def test_react_ack_disabled_when_emoji_empty():
+    channel = LarkChannel(
+        channel_id="lark:daily",
+        target_actor="main",
+        settings=LarkSettings(app_id="cli_app", app_secret="secret", ack_reaction=""),
+        runtime=_runtime(),
+    )
+    reactions: list[tuple[str, str]] = []
+    channel._add_reaction_sync = lambda mid, emoji: reactions.append((mid, emoji)) or "rk"  # type: ignore[method-assign]
+
+    await channel._react_ack("chat-x", "om_x")
+
+    assert reactions == []
+    assert channel._chat_to_ack_reaction == {}
+
+
+def _loop_recording_stop(calls: dict[str, bool]) -> asyncio.AbstractEventLoop:
+    """A fresh loop whose stop() also records the call (wrapping, not replacing —
+    run_until_complete relies on the real stop to terminate)."""
+    loop = asyncio.new_event_loop()
+    original_stop = loop.stop
+
+    def wrapped_stop() -> None:
+        calls["stopped"] = True
+        original_stop()
+
+    loop.stop = wrapped_stop  # type: ignore[method-assign]
+    return loop
+
+
+def test_ws_shutdown_disconnects_and_disables_reconnect():
+    calls: dict[str, bool] = {}
+
+    class FakeClient:
+        _auto_reconnect = True
+
+        async def _disconnect(self):
+            calls["disconnect"] = True
+
+    loop = _loop_recording_stop(calls)
+    try:
+        client = FakeClient()
+        loop.run_until_complete(LarkChannel._ws_shutdown(client, loop))
+    finally:
+        loop.close()
+
+    assert client._auto_reconnect is False
+    assert calls.get("disconnect") is True
+    assert calls.get("stopped") is True
+
+
+def test_ws_shutdown_without_client_just_stops():
+    calls: dict[str, bool] = {}
+    loop = _loop_recording_stop(calls)
+    try:
+        loop.run_until_complete(LarkChannel._ws_shutdown(None, loop))
+    finally:
+        loop.close()
+    assert calls.get("stopped") is True
+
+
+@pytest.mark.asyncio
+async def test_clear_ack_reaction_deletes_tracked_reaction():
+    channel = _channel()
+    deleted: list[tuple[str, str]] = []
+    channel._delete_reaction_sync = lambda mid, rid: deleted.append((mid, rid))  # type: ignore[method-assign]
+    channel._chat_to_ack_reaction["chat-a"] = ("om_x", "rk_1")
+
+    await channel._clear_ack_reaction("chat-a")
+
+    assert deleted == [("om_x", "rk_1")]
+    assert "chat-a" not in channel._chat_to_ack_reaction
+    # Idempotent: a second clear is a no-op.
+    await channel._clear_ack_reaction("chat-a")
+    assert deleted == [("om_x", "rk_1")]
+
+
+@pytest.mark.asyncio
+async def test_forward_replies_clears_ack_reaction_on_final_reply():
+    channel = _channel()
+    delivered = _capture_deliver(channel)
+    deleted: list[tuple[str, str]] = []
+    channel._delete_reaction_sync = lambda mid, rid: deleted.append((mid, rid))  # type: ignore[method-assign]
+    channel._conversation_to_lark_chat["lark_chat:oc_42"] = "oc_42"
+    channel._chat_to_lark_chat["chat-a"] = "oc_42"
+    channel._chat_to_ack_reaction["chat-a"] = ("om_x", "rk_1")
+
+    metadata = {"channel": {"channel_id": "lark:daily", "channel_conversation_id": "lark_chat:oc_42"}}
+    mailbox = FakeMailbox(
+        [
+            Envelope(
+                sender="agent@main",
+                recipient="channel@lark:daily",
+                content="final answer",
+                content_type=MessageType.MESSAGE,
+                chat_id="chat-a",
+                metadata=metadata,
+            ),
+        ]
+    )
+
+    task = asyncio.create_task(channel._forward_replies(mailbox))
+    for _ in range(50):  # clearing the reaction awaits a to_thread, so poll until delivered
+        await asyncio.sleep(0.01)
+        if delivered:
+            break
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+
+    assert delivered == [("oc_42", "final answer")]
+    assert deleted == [("om_x", "rk_1")]
+    assert "chat-a" not in channel._chat_to_ack_reaction

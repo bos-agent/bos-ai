@@ -18,6 +18,8 @@ wrapped in ``asyncio.to_thread``.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import io
 import json
 import logging
 import os
@@ -51,6 +53,10 @@ def _env_int(name: str, default: int) -> int:
 LARK_MESSAGE_LIMIT = _env_int("LARK_MESSAGE_LIMIT", 4000)
 # Bound the set of recently-seen event ids used to drop SDK redeliveries.
 LARK_DEDUP_CACHE_SIZE = _env_int("LARK_DEDUP_CACHE_SIZE", 4096)
+# Final replies longer than this (UTF-8 bytes) are sent as a file attachment instead
+# of inline text, so long answers don't flood the chat as message chunks (mirrors the
+# Telegram channel's document threshold).
+LARK_ATTACHMENT_THRESHOLD = _env_int("LARK_ATTACHMENT_THRESHOLD", 1024)
 
 
 @dataclass(frozen=True)
@@ -62,6 +68,15 @@ class LarkSettings:
     allowed_chat_ids: Iterable[str] | None = None
     default_chat_id: str | None = None
     log_level: str = "INFO"
+    # Open-platform domain. The lark-oapi SDK defaults to Feishu (open.feishu.cn);
+    # international Lark apps live on open.larksuite.com and otherwise fail to connect
+    # with "Incorrect domain name". Accepts "lark"/"larksuite", "feishu", or a full URL.
+    domain: str | None = None
+    # Emoji reacted onto the user's message when their message is accepted for handling,
+    # acknowledging receipt (in place of streaming intermediate turn events). The value is
+    # a Lark emoji_type key; empty disables the acknowledgement. Requires the
+    # im:message.reactions:write_only scope.
+    ack_reaction: str | None = "OnIt"
 
 
 def _conversation_id_for_lark_chat(lark_chat_id: str) -> str:
@@ -195,6 +210,22 @@ def _import_lark():
     return lark
 
 
+def _resolve_domain(lark: Any, value: str) -> str:
+    """Map a configured domain (alias or URL) to a concrete open-platform base URL.
+
+    Empty value → the SDK's Feishu default. ``lark``/``larksuite`` → larksuite.com,
+    ``feishu`` → feishu.cn; anything else is treated as a full URL.
+    """
+    if not value:
+        return lark.FEISHU_DOMAIN
+    alias = value.lower()
+    if alias in ("lark", "larksuite"):
+        return lark.LARK_DOMAIN
+    if alias == "feishu":
+        return lark.FEISHU_DOMAIN
+    return value
+
+
 @ep_channel(name="LarkChannel")
 class LarkChannel(BaseChannel[LarkSettings]):
     """Lark/Feishu bot channel using the lark-oapi WebSocket long connection."""
@@ -220,16 +251,22 @@ class LarkChannel(BaseChannel[LarkSettings]):
         self._app_id = (settings.app_id or _env(settings.app_id_env) or "").strip()
         self._app_secret = (settings.app_secret or _env(settings.app_secret_env) or "").strip()
         self._log_level = (settings.log_level or "INFO").strip().upper()
+        self._domain = (settings.domain or "").strip()
+        self._ack_reaction = (settings.ack_reaction or "").strip()
         self._allowed_chat_ids = {str(v) for v in (settings.allowed_chat_ids or [])}
         self._default_chat_id = str(settings.default_chat_id or "").strip()
 
         self._client: Any = None
+        self._ws_client: Any = None
         self._main_loop: asyncio.AbstractEventLoop | None = None
         self._ws_loop: asyncio.AbstractEventLoop | None = None
         self._ws_thread: threading.Thread | None = None
         self._inbound: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         self._conversation_to_lark_chat: dict[str, str] = {}
         self._chat_to_lark_chat: dict[str, str] = {}
+        # bos chat_id → (message_id, reaction_id) for the acknowledgement reaction, so it
+        # can be removed once the agent's final reply for that chat is delivered.
+        self._chat_to_ack_reaction: dict[str, tuple[str, str]] = {}
         self._seen_event_ids: deque[str] = deque(maxlen=LARK_DEDUP_CACHE_SIZE)
         self._seen_event_set: set[str] = set()
 
@@ -244,7 +281,10 @@ class LarkChannel(BaseChannel[LarkSettings]):
             )
 
         lark = _import_lark()
-        self._client = lark.Client.builder().app_id(self._app_id).app_secret(self._app_secret).build()
+        domain = _resolve_domain(lark, self._domain)
+        self._client = (
+            lark.Client.builder().app_id(self._app_id).app_secret(self._app_secret).domain(domain).build()
+        )
         self._main_loop = asyncio.get_running_loop()
         self._ws_thread = threading.Thread(target=self._run_ws, name=f"lark:ws:{self.channel_id}", daemon=True)
         self._ws_thread.start()
@@ -285,19 +325,53 @@ class LarkChannel(BaseChannel[LarkSettings]):
             .register_p2_im_message_receive_v1(self._on_message_event)
             .build()
         )
-        client = lark.ws.Client(self._app_id, self._app_secret, event_handler=handler, log_level=level)
+        domain = _resolve_domain(lark, self._domain)
+        client = lark.ws.Client(
+            self._app_id, self._app_secret, event_handler=handler, log_level=level, domain=domain
+        )
+        self._ws_client = client
         try:
             client.start()
-        except Exception as exc:  # noqa: BLE001 - loop is torn down on shutdown; just log
-            logger.info("LarkChannel WebSocket loop ended: %s", exc)
+        except BaseException as exc:  # noqa: BLE001 - shutdown cancels the SDK loop; never crash the thread
+            logger.debug("LarkChannel WebSocket loop ended: %s", exc)
+        finally:
+            with contextlib.suppress(Exception):
+                if not loop.is_closed():
+                    loop.close()
 
     def _stop_ws(self) -> None:
         loop = self._ws_loop
         if loop is not None and not loop.is_closed():
+            client = self._ws_client
             try:
-                loop.call_soon_threadsafe(loop.stop)
+                loop.call_soon_threadsafe(lambda: loop.create_task(self._ws_shutdown(client, loop)))
             except RuntimeError:
                 pass
+        thread = self._ws_thread
+        if thread is not None and thread.is_alive() and thread is not threading.current_thread():
+            # Let the WS loop unwind before we return, so the SDK's background
+            # coroutines don't get torn down by interpreter shutdown mid-flight.
+            thread.join(timeout=5)
+
+    @staticmethod
+    async def _ws_shutdown(client: Any, loop: asyncio.AbstractEventLoop) -> None:
+        """Gracefully stop the lark-oapi WS loop (runs on the WS thread's loop).
+
+        Reaching into the SDK internals is deliberate: ``ws.Client`` exposes no
+        public graceful stop, and bluntly stopping the loop leaves its background
+        recv/ping coroutines mid-await on a half-open SSL socket, which spews
+        "Event loop is closed" / "Bad file descriptor" tracebacks on exit. We
+        disable auto-reconnect, close the socket, then cancel the SDK loops.
+        """
+        if client is not None:
+            with contextlib.suppress(Exception):
+                client._auto_reconnect = False
+            with contextlib.suppress(Exception):
+                await client._disconnect()
+        for task in asyncio.all_tasks():
+            if task is not asyncio.current_task():
+                task.cancel()
+        loop.stop()
 
     def _on_message_event(self, data: Any) -> None:
         """SDK callback (runs on the WS thread) — marshal and hand off to the actor loop."""
@@ -348,6 +422,13 @@ class LarkChannel(BaseChannel[LarkSettings]):
                 logger.warning("Lark inbound handling error: %s", exc)
 
     async def _handle_inbound(self, mailbox: MailBox, event: dict[str, Any]) -> None:
+        logger.debug(
+            "Lark inbound event: id=%s chat_id=%s chat_type=%s message_type=%s",
+            event.get("event_id"),
+            event.get("chat_id"),
+            event.get("chat_type"),
+            event.get("message_type"),
+        )
         if self._is_duplicate(event.get("event_id")):
             return
 
@@ -426,6 +507,10 @@ class LarkChannel(BaseChannel[LarkSettings]):
             chat_id=chat_id,
             metadata=metadata,
         )
+        # Acknowledge receipt by reacting to the user's message — they have asked us not
+        # to stream intermediate turn events, so this is the only "we're on it" signal.
+        # The reaction is removed once the final reply for this chat is delivered.
+        await self._react_ack(chat_id, event.get("message_id"))
 
     def _is_duplicate(self, event_id: str | None) -> bool:
         if not event_id:
@@ -500,9 +585,17 @@ class LarkChannel(BaseChannel[LarkSettings]):
                 if (ref := self._ref_from_env(env)) is not None:
                     self._runtime.chat_coordinator.mark_observed(chat_id=env.chat_id, ref=ref, revision=revision)
 
+            # The reply is the end of handling this turn — drop the receipt reaction.
+            await self._clear_ack_reaction(env.chat_id)
             await self._deliver_text(lark_chat_id, content)
 
     async def _deliver_text(self, lark_chat_id: str, text: str) -> None:
+        # Long replies go out as a file attachment instead of flooding the chat as
+        # message chunks; fall back to inline text if the upload/send fails.
+        if len(text.encode("utf-8")) > LARK_ATTACHMENT_THRESHOLD and await self._deliver_document(
+            lark_chat_id, text
+        ):
+            return
         for part in _split_message(text):
             try:
                 await asyncio.to_thread(self._send_text_sync, lark_chat_id, part)
@@ -511,6 +604,46 @@ class LarkChannel(BaseChannel[LarkSettings]):
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Lark send failed for chat_id=%s: %s", lark_chat_id, exc)
                 break
+
+    async def _deliver_document(self, lark_chat_id: str, text: str) -> bool:
+        """Upload a long reply as a file attachment. Returns True on success."""
+        try:
+            await asyncio.to_thread(self._send_file_sync, lark_chat_id, text, "response.md")
+            return True
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Lark file send failed for chat_id=%s: %s", lark_chat_id, exc)
+            return False
+
+    async def _react_ack(self, chat_id: str, message_id: str | None) -> None:
+        """React to the user's message to acknowledge receipt (best-effort)."""
+        if not message_id or not self._ack_reaction:
+            return
+        try:
+            reaction_id = await asyncio.to_thread(self._add_reaction_sync, message_id, self._ack_reaction)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Lark reaction failed for message_id=%s: %s", message_id, exc)
+            return
+        if reaction_id:
+            self._chat_to_ack_reaction[chat_id] = (message_id, reaction_id)
+
+    async def _clear_ack_reaction(self, chat_id: str | None) -> None:
+        """Remove the receipt reaction once the turn is answered (best-effort)."""
+        if not chat_id:
+            return
+        entry = self._chat_to_ack_reaction.pop(chat_id, None)
+        if entry is None:
+            return
+        message_id, reaction_id = entry
+        try:
+            await asyncio.to_thread(self._delete_reaction_sync, message_id, reaction_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Lark reaction delete failed for message_id=%s: %s", message_id, exc)
 
     def _send_text_sync(self, lark_chat_id: str, text: str) -> None:
         """Send one text message via the synchronous lark-oapi HTTP client."""
@@ -534,6 +667,100 @@ class LarkChannel(BaseChannel[LarkSettings]):
             logger.warning(
                 "Lark message.create failed for chat_id=%s: code=%s msg=%s",
                 lark_chat_id,
+                getattr(response, "code", "?"),
+                getattr(response, "msg", "?"),
+            )
+
+    def _send_file_sync(self, lark_chat_id: str, content: str, filename: str) -> None:
+        """Upload text as a file and send it as a Lark file message (raises on failure)."""
+        _import_lark()
+        from lark_oapi.api.im.v1 import (
+            CreateFileRequest,
+            CreateFileRequestBody,
+            CreateMessageRequest,
+            CreateMessageRequestBody,
+        )
+
+        file_request = (
+            CreateFileRequest.builder()
+            .request_body(
+                CreateFileRequestBody.builder()
+                .file_type("stream")
+                .file_name(filename)
+                .file(io.BytesIO(content.encode("utf-8")))
+                .build()
+            )
+            .build()
+        )
+        file_response = self._client.im.v1.file.create(file_request)
+        if not file_response.success() or file_response.data is None:
+            raise RuntimeError(
+                f"file upload failed: code={getattr(file_response, 'code', '?')} "
+                f"msg={getattr(file_response, 'msg', '?')}"
+            )
+
+        request = (
+            CreateMessageRequest.builder()
+            .receive_id_type("chat_id")
+            .request_body(
+                CreateMessageRequestBody.builder()
+                .receive_id(lark_chat_id)
+                .msg_type("file")
+                .content(json.dumps({"file_key": file_response.data.file_key}))
+                .build()
+            )
+            .build()
+        )
+        response = self._client.im.v1.message.create(request)
+        if not response.success():
+            raise RuntimeError(
+                f"file message send failed: code={getattr(response, 'code', '?')} "
+                f"msg={getattr(response, 'msg', '?')}"
+            )
+
+    def _add_reaction_sync(self, message_id: str, emoji: str) -> str | None:
+        """Add an emoji reaction to a message; return its reaction_id (or None on failure)."""
+        _import_lark()
+        from lark_oapi.api.im.v1 import (
+            CreateMessageReactionRequest,
+            CreateMessageReactionRequestBody,
+            Emoji,
+        )
+
+        request = (
+            CreateMessageReactionRequest.builder()
+            .message_id(message_id)
+            .request_body(
+                CreateMessageReactionRequestBody.builder()
+                .reaction_type(Emoji.builder().emoji_type(emoji).build())
+                .build()
+            )
+            .build()
+        )
+        response = self._client.im.v1.message_reaction.create(request)
+        if not response.success():
+            logger.warning(
+                "Lark reaction create failed for message_id=%s emoji=%s: code=%s msg=%s",
+                message_id,
+                emoji,
+                getattr(response, "code", "?"),
+                getattr(response, "msg", "?"),
+            )
+            return None
+        return getattr(response.data, "reaction_id", None)
+
+    def _delete_reaction_sync(self, message_id: str, reaction_id: str) -> None:
+        """Remove a reaction via the synchronous lark-oapi HTTP client."""
+        _import_lark()
+        from lark_oapi.api.im.v1 import DeleteMessageReactionRequest
+
+        request = DeleteMessageReactionRequest.builder().message_id(message_id).reaction_id(reaction_id).build()
+        response = self._client.im.v1.message_reaction.delete(request)
+        if not response.success():
+            logger.warning(
+                "Lark reaction delete failed for message_id=%s reaction_id=%s: code=%s msg=%s",
+                message_id,
+                reaction_id,
                 getattr(response, "code", "?"),
                 getattr(response, "msg", "?"),
             )
