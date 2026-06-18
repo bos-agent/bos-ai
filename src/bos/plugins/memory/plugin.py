@@ -88,7 +88,12 @@ class MemoryHarnessPlugin:
         return "MemoryPlugin"
 
     def default_config(self) -> Mapping[str, Any]:
-        return {"maxims": ["user", "soul", "identity", "rules"], "scope": "workspace", "backend": "_default"}
+        return {
+            "maxims": ["user", "soul", "identity", "rules"],
+            "scope": "workspace",
+            "backend": "_default",
+            "retrieval": {"auto_recall": True, "index_in_prompt": True, "index_max": 50, "top_k": 5},
+        }
 
     async def setup(self, services: PluginServices) -> None:
         self._services = services
@@ -118,7 +123,14 @@ class MemoryHarnessPlugin:
 
             backend = ScopedMemory(backend, scope)
         maxim_keys = set(config.get("maxims", []))
-        return MemoryAgentPlugin(backend, maxim_keys)
+        retrieval = dict(config.get("retrieval", {}))
+        return MemoryAgentPlugin(
+            backend, maxim_keys,
+            index_in_prompt=retrieval.get("index_in_prompt", True),
+            index_max=retrieval.get("index_max", 50),
+            auto_recall=retrieval.get("auto_recall", True),
+            top_k=retrieval.get("top_k", 5),
+        )
 
     async def teardown(self) -> None:
         from bos.core._utils import _aclose

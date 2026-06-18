@@ -270,6 +270,33 @@ class TestAutoRecall:
         assert plugin_off.get_interceptors() == []
 
 
+class TestHarnessConfig:
+    def test_default_config_has_retrieval_block(self):
+        from bos.plugins.memory.plugin import MemoryHarnessPlugin
+
+        cfg = MemoryHarnessPlugin().default_config()
+        assert cfg["retrieval"]["index_max"] == 50
+        assert cfg["retrieval"]["auto_recall"] is True
+        assert cfg["retrieval"]["top_k"] == 5
+
+    @pytest.mark.asyncio
+    async def test_bind_passes_retrieval_into_agent_plugin(self, tmp_path):
+        from bos.core.contract import PluginServices
+        from bos.plugins.memory.plugin import MemoryHarnessPlugin
+
+        h = MemoryHarnessPlugin()
+        await h.setup(PluginServices(
+            bos_dir=tmp_path, workspace=tmp_path, llm=None, consolidator=None, subagents=None,
+        ))
+        agent_plugin = h.bind({
+            "maxims": ["user"], "scope": "workspace", "backend": "in_memory",
+            "retrieval": {"index_max": 7, "auto_recall": False, "top_k": 3, "index_in_prompt": True},
+        })
+        assert agent_plugin._index_max == 7
+        assert agent_plugin._auto_recall is False
+        assert agent_plugin._top_k == 3
+
+
 class TestSystemPromptIntegration:
     @pytest.mark.asyncio
     async def test_maxims_injected_into_prompt(self):
