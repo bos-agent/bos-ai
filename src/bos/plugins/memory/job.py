@@ -1,0 +1,59 @@
+"""MemoryConsolidationJob — BEP 11 Job for off-turn memory consolidation."""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass
+from typing import Literal
+
+from bos.core.contract import ChatStore
+
+from ._watermark import WatermarkStore
+from .consolidator import ConsolidationPolicy, MemoryConsolidationRequest, MemoryConsolidator
+from .operation_service import DefaultMemoryOperationService
+from .scoped_memory import MemoryBackend
+
+logger = logging.getLogger(__name__)
+
+TriggerName = Literal["session_close", "idle", "manual"]
+
+
+@dataclass
+class MemoryConsolidationJob:
+    scope: str
+    chat_id: str
+    actor_name: str | None
+    base_revision: int
+    trigger: TriggerName
+    policy: ConsolidationPolicy
+    chat_store: ChatStore
+    backend: MemoryBackend
+    consolidator: MemoryConsolidator
+    operation_service: DefaultMemoryOperationService
+    watermarks: WatermarkStore
+    maxim_keys: set[str]
+
+    @property
+    def key(self) -> str:
+        return f"consolidate:{self.scope}:{self.chat_id}:{self.base_revision}:{self.trigger}"
+
+    async def run(self) -> None:
+        watermark = await self.watermarks.get(self.scope, self.chat_id)
+        if self.base_revision <= watermark:
+            logger.info(
+                "consolidation skipped (no new turns) chat=%s rev=%d wm=%d",
+                self.chat_id, self.base_revision, watermark,
+            )
+            return
+        transcript = await self.chat_store.get_messages_since(self.chat_id, revision=watermark)
+        candidates = await self.backend.search_memories("", top_k=10_000)
+        active_maxims = {key: await self.backend.get_maxim(key) for key in self.maxim_keys}
+        request = MemoryConsolidationRequest(
+            chat_id=self.chat_id, actor_name=self.actor_name, scope=self.scope,
+            base_revision=self.base_revision, trigger=self.trigger,
+            transcript_window=transcript, raw_appends=[], candidate_memories=candidates,
+            active_maxims=active_maxims, policy=self.policy,
+        )
+        ops = await self.consolidator.propose(request)
+        await self.operation_service.apply(ops, dry_run=not self.policy.auto_apply)
+        await self.watermarks.set(self.scope, self.chat_id, self.base_revision)

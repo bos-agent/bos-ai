@@ -7,6 +7,7 @@ from .consolidator import (  # noqa: E402
     MemoryConsolidationRequest,
     MemoryConsolidator,
 )
+from .job import MemoryConsolidationJob  # noqa: E402
 from .operation_service import (  # noqa: E402
     AuditRecord,
     DefaultMemoryOperationService,
@@ -22,6 +23,7 @@ __all__ = [
     "DefaultMemoryConsolidator",
     "DefaultMemoryOperationService",
     "MemoryAgentPlugin",
+    "MemoryConsolidationJob",
     "MemoryConsolidationRequest",
     "MemoryConsolidator",
     "MemoryBackend",
