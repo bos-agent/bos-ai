@@ -93,6 +93,7 @@ class HarnessConfig(BaseModel):
     consolidator: str = "_default"
     chat_store: str = "_default"
     mail_route: str = "_default"
+    job_runner: str = "_default"
     interceptors: list[str] = Field(default_factory=list)
 
 

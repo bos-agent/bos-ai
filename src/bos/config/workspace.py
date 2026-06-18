@@ -642,6 +642,7 @@ class Workspace:
             consolidator=kwargs.get("consolidator", "_default"),
             chat_store=kwargs.get("chat_store", "_default"),
             mail_route=kwargs.get("mail_route", "_default"),
+            job_runner=kwargs.get("job_runner", "_default"),
             interceptors=kwargs.get("interceptors", []),
         )
 

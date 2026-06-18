@@ -112,6 +112,7 @@ class AgentHarness:
         consolidator: str = "_default",
         chat_store: str = "_default",
         mail_route: str = "_default",
+        job_runner: str = "_default",
         interceptors: list[str] | None = None,
     ) -> None:
         self._bos_root = Path(bos_dir).expanduser().resolve()
@@ -120,6 +121,7 @@ class AgentHarness:
         self._consolidator_impl = consolidator
         self._chat_store_impl = chat_store
         self._mail_route_impl = mail_route
+        self._job_runner_impl = job_runner
         self._interceptors_impl = interceptors or []
 
         self._owned: list[Any] = []
@@ -129,6 +131,9 @@ class AgentHarness:
         self.consolidator: Consolidator | None = None
         self.interceptor: ChainInterceptor | None = None
         self.llm: LLMClient | None = None
+        self.events = None  # type: ignore[assignment]  # LifecycleBus | None
+        self.jobs = None  # type: ignore[assignment]    # JobRunner | None
+        self.background_llm = None  # type: ignore[assignment]  # BackgroundLLM | None
 
         # Plugin state
         self._harness_plugins: dict[str, HarnessPlugin] = {}
