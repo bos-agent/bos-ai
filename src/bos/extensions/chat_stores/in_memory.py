@@ -204,6 +204,16 @@ class InMemChatStore:
             return messages
         return self._active_messages(messages)
 
+    async def get_revision(self, chat_id: str) -> int:
+        async with self._get_lock(chat_id):
+            messages = list(self._messages.get(chat_id, []))
+        return self._chat_revision(messages)
+
+    async def get_messages_since(self, chat_id: str, *, revision: int) -> list[Message]:
+        async with self._get_lock(chat_id):
+            messages = list(self._messages.get(chat_id, []))
+        return [m for m in messages if int(m.metadata.get("chat_revision", 0) or 0) > revision]
+
     async def list_chats(self) -> dict[str, ChatMeta]:
         result: dict[str, ChatMeta] = {}
         for chat_id, messages in self._messages.items():

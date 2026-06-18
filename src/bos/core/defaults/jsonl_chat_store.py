@@ -258,6 +258,14 @@ class JsonlChatStore:
             return messages
         return self._active_messages(messages)
 
+    async def get_revision(self, chat_id: str) -> int:
+        messages = await asyncio.to_thread(self._read_messages_sync, chat_id)
+        return self._chat_revision(messages)
+
+    async def get_messages_since(self, chat_id: str, *, revision: int) -> list[Message]:
+        messages = await asyncio.to_thread(self._read_messages_sync, chat_id)
+        return [m for m in messages if int(m.metadata.get("chat_revision", 0) or 0) > revision]
+
     async def list_chats(self) -> dict[str, ChatMeta]:
         def _scan() -> dict[str, ChatMeta]:
             if not self._dir.exists():
