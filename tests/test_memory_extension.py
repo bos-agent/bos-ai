@@ -155,6 +155,61 @@ class TestForgetRemoved:
             await agent._invoke_tool("Forget", entry_id="x")
 
 
+class TestInContextIndex:
+    @pytest.mark.asyncio
+    async def test_index_rendered_in_prompt(self):
+        store = InMemMemoryExtension()
+        await store.ingest_memory("deploys happen on Fridays", tags=["ops"], summary="Friday deploys")
+        agent = _create_memory_agent(memory=store, maxim_keys={"user"})
+        prompt = await agent._build_system_prompt()
+        assert "<memory_index>" in prompt
+        assert "Friday deploys" in prompt
+
+    @pytest.mark.asyncio
+    async def test_index_capped_by_index_max(self):
+        store = InMemMemoryExtension()
+        for i in range(5):
+            await store.ingest_memory(f"fact {i}", importance=i + 1)
+        plugin = MemoryAgentPlugin(store, {"user"}, index_max=2)
+        agent = create_test_agent(plugins=[plugin])
+        prompt = await agent._build_system_prompt()
+        # only the 2 highest-importance summaries appear
+        assert prompt.count("<index_entry") == 2
+
+
+class TestPerTurnMemoization:
+    @pytest.mark.asyncio
+    async def test_section_byte_identical_within_a_turn(self):
+        store = InMemMemoryExtension()
+        await store.set_maxim("user", "v1")
+        plugin = MemoryAgentPlugin(store, {"user"})
+
+        class _Ctx:
+            turn_id = "turn-A"
+
+        ctx = _Ctx()
+        first = await plugin.get_system_prompt_section(ctx)
+        await store.set_maxim("user", "v2-changed-mid-turn")  # backend mutates mid-turn
+        second = await plugin.get_system_prompt_section(ctx)
+        assert first == second  # cached: no mid-turn cache bust
+        assert "v2-changed-mid-turn" not in second
+
+    @pytest.mark.asyncio
+    async def test_new_turn_reflects_backend_change(self):
+        store = InMemMemoryExtension()
+        await store.set_maxim("user", "v1")
+        plugin = MemoryAgentPlugin(store, {"user"})
+
+        class _Ctx:
+            def __init__(self, tid):
+                self.turn_id = tid
+
+        first = await plugin.get_system_prompt_section(_Ctx("turn-A"))
+        await store.set_maxim("user", "v2")
+        second = await plugin.get_system_prompt_section(_Ctx("turn-B"))
+        assert "v1" in first and "v2" in second
+
+
 class TestSystemPromptIntegration:
     @pytest.mark.asyncio
     async def test_maxims_injected_into_prompt(self):

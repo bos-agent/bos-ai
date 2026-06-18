@@ -127,9 +127,19 @@ class MemoryHarnessPlugin:
 
 
 class MemoryAgentPlugin:
-    def __init__(self, backend: MemoryBackend, maxim_keys: set[str]) -> None:
+    def __init__(
+        self, backend: MemoryBackend, maxim_keys: set[str], *,
+        index_in_prompt: bool = True, index_max: int = 50,
+        auto_recall: bool = True, top_k: int = 5,
+    ) -> None:
         self._backend = backend
         self._maxim_keys = maxim_keys
+        self._index_in_prompt = index_in_prompt
+        self._index_max = index_max
+        self._auto_recall = auto_recall
+        self._top_k = top_k
+        self._cached_turn_id: str | None = None
+        self._cached_section: str | None = None
 
     @property
     def name(self) -> str:
@@ -241,22 +251,38 @@ class MemoryAgentPlugin:
                 return header + "\n\n".join(results) + footer
             return "Error: Provide either 'query' to search or 'entry_id' to fetch a specific entry."
 
-    async def get_system_prompt_section(self, context: TurnContext) -> str | None:
+    async def _render_section(self) -> str:
         sections = [_MEMORY_PROMPT_SECTION]
-        if not self._maxim_keys:
-            return "\n\n".join(sections)
-        items: list[str] = []
-        for key in sorted(self._maxim_keys):
-            content = await self._backend.get_maxim(key)
-            scope = _MAXIM_DESCRIPTIONS.get(key, "")
-            items.append(
-                f'<maxim name="{_xml_attr(key)}" scope="{_xml_attr(scope)}">\n{escape(content).strip()}\n</maxim>'
-            )
-        active_maxims = "<active_maxims>\n"
-        active_maxims += "\n".join(items)
-        active_maxims += "\n</active_maxims>"
-        sections.append(active_maxims)
+        if self._index_in_prompt:
+            index = await self._backend.list_index()
+            if index:
+                items = "\n".join(
+                    f'<index_entry id="{_xml_attr(ie.id)}" tags="{_xml_attr(",".join(ie.tags))}">'
+                    f"{escape(ie.summary).strip()}</index_entry>"
+                    for ie in index[: self._index_max]
+                )
+                sections.append(f"<memory_index>\n{items}\n</memory_index>")
+        if self._maxim_keys:
+            items = []
+            for key in sorted(self._maxim_keys):
+                content = await self._backend.get_maxim(key)
+                scope = _MAXIM_DESCRIPTIONS.get(key, "")
+                items.append(
+                    f'<maxim name="{_xml_attr(key)}" scope="{_xml_attr(scope)}">\n'
+                    f"{escape(content).strip()}\n</maxim>"
+                )
+            sections.append("<active_maxims>\n" + "\n".join(items) + "\n</active_maxims>")
         return "\n\n".join(sections)
+
+    async def get_system_prompt_section(self, context: TurnContext) -> str | None:
+        turn_id = getattr(context, "turn_id", None)
+        if turn_id is not None and turn_id == self._cached_turn_id:
+            return self._cached_section
+        section = await self._render_section()
+        if turn_id is not None:
+            self._cached_turn_id = turn_id
+            self._cached_section = section
+        return section
 
     def get_interceptors(self) -> Sequence[TurnInterceptor]:
         return []
