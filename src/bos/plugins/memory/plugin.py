@@ -100,8 +100,8 @@ class MemoryHarnessPlugin:
     async def setup(self, services: PluginServices) -> None:
         from pathlib import Path
 
-        from .consolidator import ConsolidationPolicy, DefaultMemoryConsolidator
         from ._watermark import WatermarkStore
+        from .consolidator import ConsolidationPolicy, DefaultMemoryConsolidator
         from .operation_service import DefaultMemoryOperationService
 
         self._services = services
