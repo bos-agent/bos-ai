@@ -7,7 +7,7 @@ import logging
 import os
 import time
 from pathlib import Path
-from typing import Any, AsyncGenerator
+from typing import TYPE_CHECKING, Any, AsyncGenerator
 from urllib.parse import urlencode
 
 import httpx
@@ -22,6 +22,9 @@ from bos.extensions.providers.google_oauth import (
     start_callback_server,
     wait_for_callback,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 logger = logging.getLogger("bos")
 
@@ -78,7 +81,7 @@ def _get_antigravity_headers() -> dict[str, str]:
 
 async def _discover_antigravity_project(
     access_token: str,
-    on_progress: Any | None = None,
+    on_progress: Callable[[str], None] | None = None,
 ) -> str:
     headers = {
         "Authorization": f"Bearer {access_token}",
@@ -130,14 +133,14 @@ async def _discover_antigravity_project(
     return _DEFAULT_PROJECT_ID
 
 
-def _progress(cb: Any | None, msg: str) -> None:
+def _progress(cb: Callable[[str], None] | None, msg: str) -> None:
     if callable(cb):
         cb(msg)
 
 
 async def login_antigravity(
-    on_auth: Any | None = None,
-    on_progress: Any | None = None,
+    on_auth: Callable[[str, str], None] | None = None,
+    on_progress: Callable[[str], None] | None = None,
 ) -> OAuthCredentials:
     verifier, challenge = generate_pkce()
 

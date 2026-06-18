@@ -6,7 +6,7 @@ import json
 import logging
 import uuid
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from bos.protocol import Envelope, MessageContent, MessageType, TurnEvent
 
@@ -15,6 +15,9 @@ from .chat_state import ChatState, ChatStateError
 from .contract import MailBox
 from .events import MailboxEventSink
 from .harness import CURRENT_MAILBOX
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
 
 logger = logging.getLogger(__name__)
 
@@ -88,7 +91,7 @@ class AgentActor:
 
     def __init__(
         self, agent: Agent, mailbox: MailBox, chat_state: ChatState | None = None,
-        *, lifecycle_emitter: Any = None,
+        *, lifecycle_emitter: Callable[..., Awaitable[None]] | None = None,
     ):
         self._address = mailbox.address
         self._agent = agent

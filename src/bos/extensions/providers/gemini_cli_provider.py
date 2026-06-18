@@ -11,7 +11,7 @@ import logging
 import os
 import time
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlencode
 
 import httpx
@@ -38,6 +38,9 @@ from bos.extensions.providers.google_oauth import (
     start_callback_server,
     wait_for_callback,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 logger = logging.getLogger("bos")
 
@@ -71,8 +74,8 @@ def _get_gemini_cli_headers() -> dict[str, str]:
 
 
 async def login_gemini_cli(
-    on_auth: Any | None = None,
-    on_progress: Any | None = None,
+    on_auth: Callable[[str, str], None] | None = None,
+    on_progress: Callable[[str], None] | None = None,
 ) -> OAuthCredentials:
     """Interactive OAuth login for the Gemini CLI provider."""
     verifier, challenge = generate_pkce()
