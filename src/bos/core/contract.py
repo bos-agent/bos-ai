@@ -254,6 +254,48 @@ class LifecycleBus(Protocol):
 # ── BEP 11 §3: Background LLM ──────────────────────────────────────────────
 
 
+# ── BEP 11 §2: Job runner ──────────────────────────────────────────────────
+
+JobTrigger = Literal["session_close", "idle", "manual"]
+JobStatus = Literal["queued", "running", "succeeded", "failed", "cancelled"]
+
+
+@runtime_checkable
+class Job(Protocol):
+    key: str
+    async def run(self) -> None: ...
+
+
+@dataclass(frozen=True)
+class JobRecord:
+    id: str
+    key: str
+    status: JobStatus
+    error: str | None
+    submitted_at: str
+    finished_at: str | None
+
+
+@runtime_checkable
+class JobRunner(Protocol):
+    async def submit(self, job: Job) -> str: ...
+    def bind_trigger(
+        self, trigger: JobTrigger,
+        factory: Callable[[LifecycleEvent | None], Job | None],
+    ) -> None: ...
+    async def drain(self, *, timeout: float) -> None: ...
+    async def status(self, job_id: str) -> JobStatus: ...
+    async def list(self, *, filter: dict | None = None) -> list[JobRecord]: ...
+    async def retry(self, job_id: str) -> None: ...
+    async def cancel(self, job_id: str) -> None: ...
+
+
+ep_job_runner = ExtensionPoint(
+    name="ep_job_runner",
+    description="Off-critical-path job runner implementations (BEP 11 §2).",
+)
+
+
 @runtime_checkable
 class BackgroundLLM(Protocol):
     async def ask(
