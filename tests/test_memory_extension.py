@@ -147,24 +147,12 @@ class TestRecallTool:
         assert "No memories found" in result
 
 
-class TestForgetTool:
+class TestForgetRemoved:
     @pytest.mark.asyncio
-    async def test_forget_by_entry_id(self):
-        store = InMemMemoryExtension()
-        eid = await store.ingest_memory("forgettable fact")
-        agent = _create_memory_agent(memory=store)
-        result = await agent._invoke_tool("Forget", entry_id=eid)
-        assert "forgotten" in result
-        assert await store.get_memory(eid) is None
-
-    @pytest.mark.asyncio
-    async def test_forget_by_query(self):
-        store = InMemMemoryExtension()
-        await store.ingest_memory("project alpha details")
-        await store.ingest_memory("project alpha timeline")
-        agent = _create_memory_agent(memory=store)
-        result = await agent._invoke_tool("Forget", query="project alpha")
-        assert "Forgot 2" in result
+    async def test_forget_tool_not_registered(self):
+        agent = _create_memory_agent()
+        with pytest.raises(Exception):
+            await agent._invoke_tool("Forget", entry_id="x")
 
 
 class TestSystemPromptIntegration:

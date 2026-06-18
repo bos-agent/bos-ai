@@ -49,7 +49,7 @@ task outcomes that may matter in future conversations.
 - Do not store facts derivable from the current repository state.
 - Do not store transient task-planning details; use task tools for those.
 - Prefer a small set of high-signal entries over many low-signal entries.
-- When a memory is clearly stale or superseded, use Forget to remove it.""",
+- To retract a fact, Remember a negation; off-turn curation invalidates the stale entry.""",
     "Recall": """Retrieve information from episodic memory.
 
 Use query to search for relevant memories, or entry_id to fetch a specific memory in full after
@@ -59,15 +59,6 @@ Guidelines:
 - Recall when the user references prior conversations, preferences, or remembered context.
 - Prefer current files, tests, and git history for facts about the repository.
 - Verify any memory-derived file, symbol, or behavior claim before acting on it.""",
-    "Forget": """Remove information from episodic memory.
-
-Use entry_id to remove one specific memory, or query to remove all matching memories. Prefer
-entry_id when possible so unrelated memories are not removed accidentally.
-
-Guidelines:
-- Use when the user asks you to forget remembered information or when a memory is clearly stale.
-- Search with Recall first if you need to identify the exact memory.
-- Do not use Forget for current task state; update tasks instead.""",
     "ReviseMaxim": """Append a revision note to a maxim. Existing content is preserved.
 
 ### Maxims
@@ -85,7 +76,7 @@ Use memory tools for durable context that should help in future conversations, n
 - Treat recalled memories as context, not proof; verify repository facts against current files or git state.
 - Use Remember for stable user preferences, recurring feedback, non-obvious project context, and useful outcomes.
 - Do not remember facts that are derivable from the current repository, transient plans, or ordinary task progress.
-- Use Forget when the user asks you to forget something or when a memory is clearly stale or superseded.
+- To stop using something, Remember it as a negation (e.g. "X is no longer true"); curation removes it off-turn — there is no destructive delete.
 - Use ReviseMaxim only for compact, high-priority maxims that should remain visible every turn.
 </memory_workflow>"""
 
@@ -249,40 +240,6 @@ class MemoryAgentPlugin:
                 footer = '\n\nUse Recall(entry_id="...") to fetch the full content of any entry.'
                 return header + "\n\n".join(results) + footer
             return "Error: Provide either 'query' to search or 'entry_id' to fetch a specific entry."
-
-        @registry(
-            name="Forget",
-            description=(
-                "Remove information from your memory. Use with an 'entry_id' to remove a specific "
-                "memory. Use with a 'query' to search and remove all matching memories."
-            ),
-            usage=_MEMORY_TOOL_USAGE["Forget"],
-            parameters={
-                "type": "object",
-                "properties": {
-                    "entry_id": {"type": "string", "description": "ID of a specific memory entry to remove."},
-                    "query": {"type": "string", "description": "Search query — all matching memories will be removed."},
-                },
-                "required": [],
-            },
-        )
-        async def forget(entry_id: str | None = None, query: str | None = None) -> str:
-            if entry_id:
-                await backend.forget_memory(entry_id)
-                return f"(Memory entry {entry_id} forgotten.)"
-            if query:
-                entries = await backend.search_memories(query, top_k=20)
-                if not entries:
-                    return f"(No memories found for '{query}' — nothing to forget.)"
-                count = len(entries)
-                for e in entries:
-                    await backend.forget_memory(e.id)
-                return (
-                    f"(Forgot {count} memory entries matching '{query}'. "
-                    f"If the user asked you to stop referencing something, consider using "
-                    f'Remember(key="user", content="...") to record why you forgot it.)'
-                )
-            return "Error: Provide either 'entry_id' or 'query' to forget."
 
     async def get_system_prompt_section(self, context: TurnContext) -> str | None:
         sections = [_MEMORY_PROMPT_SECTION]
