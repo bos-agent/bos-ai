@@ -104,3 +104,87 @@ class TestSubmitAndDrain:
             assert records and "kaboom" in (records[0].error or "")
         finally:
             await runner.drain(timeout=0.0)
+
+
+class TestTriggers:
+    @pytest.mark.asyncio
+    async def test_session_close_factory_enqueues_a_job(self):
+        bus = DefaultLifecycleBus()
+        runner = InProcJobRunner(bus, max_concurrency=1, idle_after=300)
+        await runner.start()
+        try:
+            log: list[str] = []
+
+            def factory(event):
+                return _RecJob(key=f"closed:{event.chat_id}:r{event.base_revision}", log=log)
+
+            runner.bind_trigger("session_close", factory)
+            await bus.emit(LifecycleEvent(
+                kind="session_close", chat_id="c1", actor_name="A",
+                base_revision=7, payload={},
+            ))
+            await runner.drain(timeout=1.0)
+            assert log == ["closed:c1:r7"]
+        finally:
+            await runner.drain(timeout=0.0)
+
+    @pytest.mark.asyncio
+    async def test_idle_timer_fires_after_idle_after(self):
+        bus = DefaultLifecycleBus()
+        runner = InProcJobRunner(bus, max_concurrency=1, idle_after=0.05)
+        await runner.start()
+        try:
+            log: list[str] = []
+
+            def factory(event):
+                return _RecJob(key=f"idle:{event.chat_id}", log=log)
+
+            runner.bind_trigger("idle", factory)
+            await bus.emit(LifecycleEvent(
+                kind="turn_complete", chat_id="c1", actor_name="A",
+                base_revision=1, payload={},
+            ))
+            await asyncio.sleep(0.20)
+            await runner.drain(timeout=0.5)
+            assert log == ["idle:c1"]
+        finally:
+            await runner.drain(timeout=0.0)
+
+    @pytest.mark.asyncio
+    async def test_idle_timer_resets_on_subsequent_turn(self):
+        bus = DefaultLifecycleBus()
+        runner = InProcJobRunner(bus, max_concurrency=1, idle_after=0.10)
+        await runner.start()
+        try:
+            log: list[str] = []
+            runner.bind_trigger("idle", lambda e: _RecJob(key="idle1", log=log))
+            await bus.emit(LifecycleEvent(
+                kind="turn_complete", chat_id="c1", actor_name="A", base_revision=1, payload={},
+            ))
+            await asyncio.sleep(0.05)
+            await bus.emit(LifecycleEvent(
+                kind="turn_complete", chat_id="c1", actor_name="A", base_revision=2, payload={},
+            ))
+            await asyncio.sleep(0.05)
+            assert log == []
+            await asyncio.sleep(0.15)
+            await runner.drain(timeout=0.5)
+            assert log == ["idle1"]
+        finally:
+            await runner.drain(timeout=0.0)
+
+    @pytest.mark.asyncio
+    async def test_factory_returning_none_is_skipped(self):
+        bus = DefaultLifecycleBus()
+        runner = InProcJobRunner(bus, max_concurrency=1, idle_after=300)
+        await runner.start()
+        try:
+            log: list[str] = []
+            runner.bind_trigger("session_close", lambda e: None)
+            await bus.emit(LifecycleEvent(
+                kind="session_close", chat_id="c1", actor_name="A", base_revision=1, payload={},
+            ))
+            await runner.drain(timeout=0.2)
+            assert log == []
+        finally:
+            await runner.drain(timeout=0.0)
