@@ -285,4 +285,8 @@ class MemoryAgentPlugin:
         return section
 
     def get_interceptors(self) -> Sequence[TurnInterceptor]:
-        return []
+        if not self._auto_recall:
+            return []
+        from .auto_recall import AutoRecallInterceptor
+
+        return [AutoRecallInterceptor(self._backend, top_k=self._top_k)]

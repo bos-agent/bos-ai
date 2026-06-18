@@ -210,6 +210,66 @@ class TestPerTurnMemoization:
         assert "v1" in first and "v2" in second
 
 
+class TestAutoRecall:
+    @pytest.mark.asyncio
+    async def test_interceptor_injects_ephemeral_hits(self):
+        from bos.plugins.memory.auto_recall import AutoRecallInterceptor
+
+        store = InMemMemoryExtension()
+        eid = await store.ingest_memory("user prefers PostgreSQL 16", tags=["db"])
+        interceptor = AutoRecallInterceptor(store, top_k=5)
+
+        class _Ctx:
+            turn_id = "t1"
+            chat_id = "c1"
+            current = [{"role": "user", "content": "what database do I like? postgresql?"}]
+
+            def __init__(self):
+                self.metadata = {}
+                self.ephemeral_set = {}
+
+            def set_ephemeral_message(self, key, msg):
+                self.ephemeral_set[key] = msg
+
+        ctx = _Ctx()
+        await interceptor.intercept("prepare", ctx)
+        assert "memory_auto_recall" in ctx.ephemeral_set
+        assert "PostgreSQL" in str(ctx.ephemeral_set["memory_auto_recall"])
+        assert eid in ctx.metadata["recalled"]
+
+    @pytest.mark.asyncio
+    async def test_interceptor_only_runs_on_prepare(self):
+        from bos.plugins.memory.auto_recall import AutoRecallInterceptor
+
+        store = InMemMemoryExtension()
+        await store.ingest_memory("postgresql fact")
+        interceptor = AutoRecallInterceptor(store, top_k=5)
+
+        class _Ctx:
+            turn_id = "t1"
+            chat_id = "c1"
+            current = [{"role": "user", "content": "postgresql"}]
+
+            def __init__(self):
+                self.metadata = {}
+                self.ephemeral_set = {}
+
+            def set_ephemeral_message(self, key, msg):
+                self.ephemeral_set[key] = msg
+
+        ctx = _Ctx()
+        await interceptor.intercept("before_llm", ctx)  # not "prepare"
+        assert ctx.ephemeral_set == {}
+
+    @pytest.mark.asyncio
+    async def test_plugin_registers_interceptor_when_enabled(self):
+        store = InMemMemoryExtension()
+        plugin = MemoryAgentPlugin(store, {"user"}, auto_recall=True)
+        assert len(plugin.get_interceptors()) == 1
+        plugin_off = MemoryAgentPlugin(store, {"user"}, auto_recall=False)
+        assert plugin_off.get_interceptors() == []
+
+
 class TestSystemPromptIntegration:
     @pytest.mark.asyncio
     async def test_maxims_injected_into_prompt(self):
