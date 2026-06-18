@@ -148,6 +148,18 @@ class MemoryHarnessPlugin:
         ):
             services.jobs.bind_trigger("session_close", self._make_consolidation_job_factory())
 
+        # Recall-log flush (BEP 10 §6): subscribe on turn_complete when auto_recall is on
+        # OR when consolidation is enabled (both want fresh last_used signal).
+        retrieval_cfg = dict(cfg.get("retrieval", {}))
+        if services.events is not None and (
+            retrieval_cfg.get("auto_recall", True) or self._policy.enabled
+        ):
+            from .recall_flush import RecallFlushSubscriber
+
+            services.events.subscribe(
+                "turn_complete", RecallFlushSubscriber(self._operation_service).handle,
+            )
+
     def _make_consolidation_job_factory(self):
         from .job import MemoryConsolidationJob
 

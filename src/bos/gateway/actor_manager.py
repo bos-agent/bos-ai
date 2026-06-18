@@ -54,9 +54,14 @@ class CoordinatedActor(AgentActor):
         if getattr(self, "_lifecycle_bus", None) is not None and result.status == "completed":
             from bos.core.contract import LifecycleEvent
 
+            recalled: list[str] = []
+            current_ctx = getattr(self._agent, "_current_context", None)
+            if current_ctx is not None:
+                recalled = list(current_ctx.metadata.get("recalled", []) or [])
             await self._lifecycle_bus.emit(LifecycleEvent(
                 kind="turn_complete", chat_id=ctx.chat_id, actor_name=ctx.actor_name,
-                base_revision=result.committed_revision, payload={},
+                base_revision=result.committed_revision,
+                payload={"recalled": recalled} if recalled else {},
             ))
         if result.status in ("aborted", "error") and ctx.reply_recipient:
             # Aborted and errored turns never send a reply envelope, but the
