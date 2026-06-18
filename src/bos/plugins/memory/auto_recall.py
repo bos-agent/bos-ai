@@ -16,8 +16,13 @@ if TYPE_CHECKING:
 _EPHEMERAL_KEY = "memory_auto_recall"
 
 InterceptStage = Literal[
-    "prepare", "before_llm", "after_llm", "after_tool",
-    "final_response", "max_iteration", "error",
+    "prepare",
+    "before_llm",
+    "after_llm",
+    "after_tool",
+    "final_response",
+    "max_iteration",
+    "error",
 ]
 
 
@@ -41,7 +46,7 @@ class AutoRecallInterceptor:
         self._backend = backend
         self._top_k = top_k
 
-    async def intercept(self, stage: InterceptStage, context: "TurnContext") -> None:
+    async def intercept(self, stage: InterceptStage, context: TurnContext) -> None:
         if stage != "prepare":
             return
         query = _incoming_text(context).strip()
@@ -50,9 +55,7 @@ class AutoRecallInterceptor:
         hits = await self._backend.search_memories(query, top_k=self._top_k)
         if not hits:
             return
-        items = "\n".join(
-            f'<recalled id="{escape(h.id)}">{escape(h.content[:300])}</recalled>' for h in hits
-        )
+        items = "\n".join(f'<recalled id="{escape(h.id)}">{escape(h.content[:300])}</recalled>' for h in hits)
         block = f"<auto_recall>\nPossibly-relevant memories (context, not proof):\n{items}\n</auto_recall>"
         context.set_ephemeral_message(_EPHEMERAL_KEY, {"role": "user", "content": block})
         recalled: list[str] = context.metadata.setdefault("recalled", [])
