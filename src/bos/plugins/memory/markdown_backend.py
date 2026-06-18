@@ -116,8 +116,13 @@ class MarkdownMemoryBackend:
     # ── capture + read ──
 
     async def ingest_memory(
-        self, content: str, *, tags: list[str] | None = None, importance: int = 5,
-        summary: str | None = None, source_turn_ids: list[str] | None = None,
+        self,
+        content: str,
+        *,
+        tags: list[str] | None = None,
+        importance: int = 5,
+        summary: str | None = None,
+        source_turn_ids: list[str] | None = None,
     ) -> str:
         entry_id = uuid.uuid4().hex[:12]
         meta = dict(_DEFAULT_META)
@@ -125,8 +130,11 @@ class MarkdownMemoryBackend:
         meta["summary"] = summary
         meta["source_turn_ids"] = list(source_turn_ids or [])
         entry = MemoryEntry(
-            id=entry_id, content=content, tags=list(tags or []),
-            created_at=datetime.now().isoformat(), metadata=meta,
+            id=entry_id,
+            content=content,
+            tags=list(tags or []),
+            created_at=datetime.now().isoformat(),
+            metadata=meta,
         )
         await asyncio.to_thread(self._write_entry, entry)
         return entry_id
@@ -148,7 +156,11 @@ class MarkdownMemoryBackend:
         return out
 
     async def search_memories(
-        self, query: str, *, top_k: int = 5, include_invalid: bool = False,
+        self,
+        query: str,
+        *,
+        top_k: int = 5,
+        include_invalid: bool = False,
     ) -> list[MemoryEntry]:
         def _search() -> list[MemoryEntry]:
             tokens = re.findall(r"\w+", query.lower())
@@ -179,8 +191,15 @@ class MarkdownMemoryBackend:
     # ── curation writes ──
 
     async def update_memory(
-        self, entry_id: str, *, content=None, tags=None, importance=None,
-        summary=None, links=None, last_used=None,
+        self,
+        entry_id: str,
+        *,
+        content=None,
+        tags=None,
+        importance=None,
+        summary=None,
+        links=None,
+        last_used=None,
     ) -> None:
         def _update() -> None:
             entry = self._file_to_entry(self._memories_dir / f"{entry_id}.md")

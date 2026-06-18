@@ -140,8 +140,13 @@ async def _search_tavily(
         "search_depth": str(config.get("search_depth", "basic")),
     }
     for key in (
-        "include_answer", "include_raw_content", "include_images",
-        "topic", "days", "include_domains", "exclude_domains",
+        "include_answer",
+        "include_raw_content",
+        "include_images",
+        "topic",
+        "days",
+        "include_domains",
+        "exclude_domains",
     ):
         if key in config and config[key] is not None:
             payload[key] = config[key]

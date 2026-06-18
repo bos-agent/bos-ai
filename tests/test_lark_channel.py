@@ -343,18 +343,16 @@ async def test_forward_replies_delivers_final_reply():
     channel._chat_to_lark_chat["chat-a"] = "oc_42"
 
     metadata = {"channel": {"channel_id": "lark:daily", "channel_conversation_id": "lark_chat:oc_42"}}
-    mailbox = FakeMailbox(
-        [
-            Envelope(
-                sender="agent@main",
-                recipient="channel@lark:daily",
-                content="final answer",
-                content_type=MessageType.MESSAGE,
-                chat_id="chat-a",
-                metadata=metadata,
-            ),
-        ]
-    )
+    mailbox = FakeMailbox([
+        Envelope(
+            sender="agent@main",
+            recipient="channel@lark:daily",
+            content="final answer",
+            content_type=MessageType.MESSAGE,
+            chat_id="chat-a",
+            metadata=metadata,
+        ),
+    ])
 
     task = asyncio.create_task(channel._forward_replies(mailbox))
     await asyncio.sleep(0)
@@ -373,18 +371,16 @@ async def test_forward_replies_skips_turn_events():
     channel._chat_to_lark_chat["chat-a"] = "oc_42"
 
     metadata = {"channel": {"channel_id": "lark:daily", "channel_conversation_id": "lark_chat:oc_42"}}
-    mailbox = FakeMailbox(
-        [
-            Envelope(
-                sender="agent@main",
-                recipient="channel@lark:daily",
-                content=json.dumps({"event_type": "llm", "detail": "thinking_content", "content": "x"}),
-                content_type=MessageType.TURN_EVENT,
-                chat_id="chat-a",
-                metadata=metadata,
-            ),
-        ]
-    )
+    mailbox = FakeMailbox([
+        Envelope(
+            sender="agent@main",
+            recipient="channel@lark:daily",
+            content=json.dumps({"event_type": "llm", "detail": "thinking_content", "content": "x"}),
+            content_type=MessageType.TURN_EVENT,
+            chat_id="chat-a",
+            metadata=metadata,
+        ),
+    ])
 
     task = asyncio.create_task(channel._forward_replies(mailbox))
     await asyncio.sleep(0)
@@ -402,18 +398,16 @@ async def test_forward_replies_updates_cursor_from_new_result():
     channel._chat_to_lark_chat["chat-a"] = "oc_42"
 
     metadata = {"channel": {"channel_id": "lark:daily", "channel_conversation_id": "lark_chat:oc_42"}}
-    mailbox = FakeMailbox(
-        [
-            Envelope(
-                sender="agent@main",
-                recipient="channel@lark:daily",
-                content='{"name":"new","ok":true,"chat_id":"chat-b"}',
-                content_type=MessageType.COMMAND_RESULT,
-                chat_id="chat-a",
-                metadata=metadata,
-            ),
-        ]
-    )
+    mailbox = FakeMailbox([
+        Envelope(
+            sender="agent@main",
+            recipient="channel@lark:daily",
+            content='{"name":"new","ok":true,"chat_id":"chat-b"}',
+            content_type=MessageType.COMMAND_RESULT,
+            chat_id="chat-a",
+            metadata=metadata,
+        ),
+    ])
 
     task = asyncio.create_task(channel._forward_replies(mailbox))
     await asyncio.sleep(0)
@@ -585,18 +579,16 @@ async def test_forward_replies_clears_ack_reaction_on_final_reply():
     channel._chat_to_ack_reaction["chat-a"] = ("om_x", "rk_1")
 
     metadata = {"channel": {"channel_id": "lark:daily", "channel_conversation_id": "lark_chat:oc_42"}}
-    mailbox = FakeMailbox(
-        [
-            Envelope(
-                sender="agent@main",
-                recipient="channel@lark:daily",
-                content="final answer",
-                content_type=MessageType.MESSAGE,
-                chat_id="chat-a",
-                metadata=metadata,
-            ),
-        ]
-    )
+    mailbox = FakeMailbox([
+        Envelope(
+            sender="agent@main",
+            recipient="channel@lark:daily",
+            content="final answer",
+            content_type=MessageType.MESSAGE,
+            chat_id="chat-a",
+            metadata=metadata,
+        ),
+    ])
 
     task = asyncio.create_task(channel._forward_replies(mailbox))
     for _ in range(50):  # clearing the reaction awaits a to_thread, so poll until delivered

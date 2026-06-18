@@ -21,14 +21,21 @@ async def _setup_plugin(tmp_path, *, consolidation_enabled=False):
     class _StubLLM:
         async def complete(self, messages, **kwargs):
             from bos.core.llm import LLMResponse
+
             return LLMResponse(content='{"operations": []}')
 
     blm = DefaultBackgroundLLM(_StubLLM())
     chat_store = InMemChatStore()
     svc = PluginServices(
-        bos_dir=tmp_path, workspace=tmp_path, llm=_StubLLM(),
-        consolidator=None, subagents=None, chat_store=chat_store,
-        events=bus, jobs=runner, background_llm=blm,
+        bos_dir=tmp_path,
+        workspace=tmp_path,
+        llm=_StubLLM(),
+        consolidator=None,
+        subagents=None,
+        chat_store=chat_store,
+        events=bus,
+        jobs=runner,
+        background_llm=blm,
     )
     h = MemoryHarnessPlugin()
     cfg = h.default_config()
@@ -57,10 +64,15 @@ async def test_consolidation_disabled_does_not_bind_trigger(tmp_path):
     try:
         from bos.core.contract import LifecycleEvent
 
-        await runner._bus.emit(LifecycleEvent(
-            kind="session_close", chat_id="c1", actor_name=None,
-            base_revision=1, payload={},
-        ))
+        await runner._bus.emit(
+            LifecycleEvent(
+                kind="session_close",
+                chat_id="c1",
+                actor_name=None,
+                base_revision=1,
+                payload={},
+            )
+        )
         await runner.drain(timeout=0.2)
         assert (await runner.list()) == []
     finally:
@@ -74,12 +86,19 @@ async def test_consolidation_enabled_binds_session_close(tmp_path):
         from bos.core.contract import LifecycleEvent, Message
 
         await h._services.chat_store.commit_turn(
-            "c1", [Message(llm_message={"role": "user", "content": "hi"})], turn_id="t1",
+            "c1",
+            [Message(llm_message={"role": "user", "content": "hi"})],
+            turn_id="t1",
         )
-        await runner._bus.emit(LifecycleEvent(
-            kind="session_close", chat_id="c1", actor_name="A",
-            base_revision=1, payload={},
-        ))
+        await runner._bus.emit(
+            LifecycleEvent(
+                kind="session_close",
+                chat_id="c1",
+                actor_name="A",
+                base_revision=1,
+                payload={},
+            )
+        )
         await runner.drain(timeout=1.0)
         recs = await runner.list()
         assert len(recs) == 1
@@ -93,8 +112,11 @@ async def test_run_consolidation_now_returns_audit_records(tmp_path):
     h, runner = await _setup_plugin(tmp_path, consolidation_enabled=True)
     try:
         from bos.core.contract import Message
+
         await h._services.chat_store.commit_turn(
-            "c1", [Message(llm_message={"role": "user", "content": "I prefer dark mode"})], turn_id="t1",
+            "c1",
+            [Message(llm_message={"role": "user", "content": "I prefer dark mode"})],
+            turn_id="t1",
         )
         records = await h.run_consolidation_now("c1", dry_run=True)
         assert records == []

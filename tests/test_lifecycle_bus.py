@@ -10,8 +10,11 @@ from bos.core.defaults.lifecycle import DefaultLifecycleBus
 
 def _event(kind="turn_complete", chat_id="c1", actor_name="A", base_revision=1, payload=None):
     return LifecycleEvent(
-        kind=kind, chat_id=chat_id, actor_name=actor_name,
-        base_revision=base_revision, payload=payload or {},
+        kind=kind,
+        chat_id=chat_id,
+        actor_name=actor_name,
+        base_revision=base_revision,
+        payload=payload or {},
     )
 
 

@@ -1,6 +1,6 @@
 """End-to-end BEP 10 off-turn consolidation:
-   commit turns → emit session_close → consolidator proposes ADD → operation
-   service applies (auto_apply=True) → fact is queryable in a fresh harness."""
+commit turns → emit session_close → consolidator proposes ADD → operation
+service applies (auto_apply=True) → fact is queryable in a fresh harness."""
 
 import json
 
@@ -17,6 +17,7 @@ class _CannedLLM:
 
     async def complete(self, messages, **kwargs):
         from bos.core.llm import LLMResponse
+
         return LLMResponse(content=json.dumps(self._payload))
 
 
@@ -33,15 +34,23 @@ async def test_mid_chat_fact_persists_into_next_session(tmp_path):
     runner = InProcJobRunner(bus, max_concurrency=1, idle_after=300)
     await runner.start()
     chat_store = InMemChatStore()
-    canned = _CannedLLM({"operations": [
-        {"op": "ADD", "reason": "stable user preference",
-         "content": "user prefers dark mode", "importance": 8},
-    ]})
+    canned = _CannedLLM({
+        "operations": [
+            {"op": "ADD", "reason": "stable user preference", "content": "user prefers dark mode", "importance": 8},
+        ]
+    })
     blm = DefaultBackgroundLLM(canned)
 
     services = PluginServices(
-        bos_dir=tmp_path, workspace=tmp_path, llm=canned, consolidator=None, subagents=None,
-        chat_store=chat_store, events=bus, jobs=runner, background_llm=blm,
+        bos_dir=tmp_path,
+        workspace=tmp_path,
+        llm=canned,
+        consolidator=None,
+        subagents=None,
+        chat_store=chat_store,
+        events=bus,
+        jobs=runner,
+        background_llm=blm,
     )
 
     plugin = MemoryHarnessPlugin()
@@ -53,14 +62,23 @@ async def test_mid_chat_fact_persists_into_next_session(tmp_path):
     await plugin.setup(services)
 
     try:
-        await chat_store.commit_turn("c1", [
-            Message(llm_message={"role": "user", "content": "I always prefer dark mode"}),
-        ], turn_id="t1")
+        await chat_store.commit_turn(
+            "c1",
+            [
+                Message(llm_message={"role": "user", "content": "I always prefer dark mode"}),
+            ],
+            turn_id="t1",
+        )
         head = await chat_store.get_revision("c1")
-        await bus.emit(LifecycleEvent(
-            kind="session_close", chat_id="c1", actor_name=None,
-            base_revision=head, payload={},
-        ))
+        await bus.emit(
+            LifecycleEvent(
+                kind="session_close",
+                chat_id="c1",
+                actor_name=None,
+                base_revision=head,
+                payload={},
+            )
+        )
         await runner.drain(timeout=2.0)
 
         hits = await plugin._backend.search_memories("dark mode")

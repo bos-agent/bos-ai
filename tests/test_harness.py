@@ -140,14 +140,14 @@ async def test_harness_binds_subagent_plugin_bindings_from_validated_config(tmp_
         AgentRegistry._registry.update(snapshot)
 
 
-
 @pytest.mark.asyncio
 async def test_harness_create_agent_defaults_to_no_capabilities(tmp_path):
     bos_dir = tmp_path / ".bos"
     bos_dir.mkdir()
 
     async with AgentHarness(
-        bos_dir=bos_dir, workspace=tmp_path,
+        bos_dir=bos_dir,
+        workspace=tmp_path,
     ) as harness:
         agent = await harness.create_agent()
 
@@ -360,8 +360,9 @@ async def test_registered_agent_defaults_to_no_capabilities(tmp_path):
         AgentRegistry.register(name=agent_name, description="Locked", system_prompt="Stay locked down.")
 
         async with AgentHarness(
-            bos_dir=bos_dir, workspace=tmp_path,
-            ) as harness:
+            bos_dir=bos_dir,
+            workspace=tmp_path,
+        ) as harness:
             agent = await harness.create_agent(agent_name)
 
             assert agent._tools == []
@@ -385,8 +386,9 @@ async def test_registered_agent_star_capabilities_enable_all(tmp_path):
         )
 
         async with AgentHarness(
-            bos_dir=bos_dir, workspace=tmp_path,
-            ) as harness:
+            bos_dir=bos_dir,
+            workspace=tmp_path,
+        ) as harness:
             agent = await harness.create_agent(agent_name)
             tool_names = {tool_def["function"]["name"] for tool_def in agent._get_tool_defs()}
 
@@ -517,7 +519,7 @@ Use this skill to search YouTube.
     load_result = await agent._local_tools.invoke("LoadSkill", {"name": "youtube-searcher"})
 
     assert "<skills_workflow>" in skills_prompt
-    assert 'Use the exact name attribute from available_skills as the LoadSkill name.' in skills_prompt
+    assert "Use the exact name attribute from available_skills as the LoadSkill name." in skills_prompt
     assert '<skill name="youtube-searcher">Search YouTube.</skill>' in skills_prompt
     assert "youtube-searcher-display-name" not in skills_prompt
     assert "Search YouTube." in skills_prompt
@@ -1340,7 +1342,6 @@ def test_bootstrap_platform_does_not_require_consolidator_model(tmp_path, monkey
 
 
 @pytest.mark.asyncio
-
 @pytest.mark.asyncio
 async def test_harness_closes_custom_consolidator(tmp_path):
     bos_dir = tmp_path / ".bos"
@@ -1348,14 +1349,19 @@ async def test_harness_closes_custom_consolidator(tmp_path):
     consolidator = CloseTrackingConsolidator()
 
     from bos.core.registry import Extension
-    ep_consolidator.register(Extension(
-        name="_close_test",
-        fn=lambda model=None, llm=None, **kw: consolidator,
-    ))
+
+    ep_consolidator.register(
+        Extension(
+            name="_close_test",
+            fn=lambda model=None, llm=None, **kw: consolidator,
+        )
+    )
 
     try:
         async with AgentHarness(
-            bos_dir=bos_dir, workspace=tmp_path, consolidator="_close_test",
+            bos_dir=bos_dir,
+            workspace=tmp_path,
+            consolidator="_close_test",
         ):
             pass
     finally:
@@ -1427,14 +1433,18 @@ async def test_agent_auto_compaction_passes_message_objects(monkeypatch):
     monkeypatch.setattr(store, "get_context", fake_get_context)
 
     import asyncio
+
     compaction_locks: dict[str, asyncio.Lock] = {}
+
     def get_compaction_lock(chat_id: str) -> asyncio.Lock:
         if chat_id not in compaction_locks:
             compaction_locks[chat_id] = asyncio.Lock()
         return compaction_locks[chat_id]
 
     agent = create_test_agent(
-        chat_store=store, consolidator=consolidator, max_tokens=1,
+        chat_store=store,
+        consolidator=consolidator,
+        max_tokens=1,
         chat_compaction_lock=get_compaction_lock,
     )
 
@@ -1463,7 +1473,8 @@ async def test_agent_emits_task_state_events(monkeypatch):
                 content="",
                 tool_calls=[
                     ToolCallRequest(
-                        id="tc1", name="TaskCreate",
+                        id="tc1",
+                        name="TaskCreate",
                         arguments={
                             "tasks": [
                                 {"subject": "Task 1", "description": "First task"},
@@ -1479,7 +1490,8 @@ async def test_agent_emits_task_state_events(monkeypatch):
                 content="",
                 tool_calls=[
                     ToolCallRequest(
-                        id="tc3", name="TaskUpdate",
+                        id="tc3",
+                        name="TaskUpdate",
                         arguments={"updates": [{"taskId": captured_task_id[0], "status": "in_progress"}]},
                     ),
                 ],
@@ -1529,12 +1541,10 @@ async def test_cache_hint_offsets_for_ephemeral_messages():
 
     @ep_provider(name=provider_name)
     async def provider(messages, model=None, tools=None, **kwargs):
-        calls.append(
-            {
-                "messages": messages,
-                "cache_control_injection_points": kwargs.get("cache_control_injection_points"),
-            }
-        )
+        calls.append({
+            "messages": messages,
+            "cache_control_injection_points": kwargs.get("cache_control_injection_points"),
+        })
         if len(calls) == 1:
             return LLMResponse(
                 content="",
@@ -1592,12 +1602,10 @@ async def test_task_plugin_injects_current_tasks_as_ephemeral_user_context():
 
     @ep_provider(name=provider_name)
     async def provider(messages, model=None, tools=None, **kwargs):
-        calls.append(
-            {
-                "messages": messages,
-                "cache_control_injection_points": kwargs.get("cache_control_injection_points"),
-            }
-        )
+        calls.append({
+            "messages": messages,
+            "cache_control_injection_points": kwargs.get("cache_control_injection_points"),
+        })
         if len(calls) == 1:
             return LLMResponse(
                 content="",

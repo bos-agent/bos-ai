@@ -101,19 +101,16 @@ Use for non-trivial work when alignment matters before implementation. Capture t
 outcome, user-visible value, appetite, constraints, current evidence, shaped solution, step
 breakdown, verification, non-goals, risks, and any open questions. If open questions remain, set
 status to needs_input and end the turn by asking those questions in normal assistant text.""",
-
     "PlanUpdate": """Update the current structured plan.
 
 Use this as planning evolves across turns: incorporate user answers, record new evidence from
 read-only inspection, move status from needs_input to approved/in_progress, or refine the
 breakdown and verification. List fields replace the previous list when provided; omit fields you
 do not want to change.""",
-
     "PlanGet": """Return the current structured plan for this conversation.
 
 Use before resuming a multi-turn plan if the visible prompt context is insufficient or when you
 need the exact structured state.""",
-
     "PlanClear": """Clear the current structured plan for this conversation.
 
 Use when the work is completed, abandoned, or superseded by a new unrelated objective.""",

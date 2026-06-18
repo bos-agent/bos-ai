@@ -72,8 +72,10 @@ class TestBackgroundLLM:
         blm = DefaultBackgroundLLM(stub)
         await blm.ask(
             messages=[{"role": "user", "content": "x"}],
-            model="anthropic/claude-3", reasoning_effort="low",
-            tools=[{"name": "t"}], metadata={"k": "v"},
+            model="anthropic/claude-3",
+            reasoning_effort="low",
+            tools=[{"name": "t"}],
+            metadata={"k": "v"},
         )
         kwargs = stub.calls[0]["kwargs"]
         assert kwargs["model"] == "anthropic/claude-3"

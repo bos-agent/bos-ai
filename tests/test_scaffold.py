@@ -17,9 +17,7 @@ def _scaffold(tmp_path, archetype, *, dotbos=True, model="anthropic/claude-sonne
     specialists = _fallback_specialists(PURPOSE)
     context = _build_context("my-agent", PURPOSE, archetype, model, dotbos, specialists)
     agent_files = _specialist_files(specialists, PURPOSE) if archetype == "team" else {}
-    return scaffold_workspace(
-        tmp_path, archetype, context, dotbos=dotbos, env_content="X=1\n", agent_files=agent_files
-    )
+    return scaffold_workspace(tmp_path, archetype, context, dotbos=dotbos, env_content="X=1\n", agent_files=agent_files)
 
 
 @pytest.mark.parametrize("archetype", [a for a in ARCHETYPES if a != "package"])

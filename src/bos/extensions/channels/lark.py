@@ -282,9 +282,7 @@ class LarkChannel(BaseChannel[LarkSettings]):
 
         lark = _import_lark()
         domain = _resolve_domain(lark, self._domain)
-        self._client = (
-            lark.Client.builder().app_id(self._app_id).app_secret(self._app_secret).domain(domain).build()
-        )
+        self._client = lark.Client.builder().app_id(self._app_id).app_secret(self._app_secret).domain(domain).build()
         self._main_loop = asyncio.get_running_loop()
         self._ws_thread = threading.Thread(target=self._run_ws, name=f"lark:ws:{self.channel_id}", daemon=True)
         self._ws_thread.start()
@@ -321,14 +319,13 @@ class LarkChannel(BaseChannel[LarkSettings]):
 
         level = getattr(lark.LogLevel, self._log_level, lark.LogLevel.INFO)
         handler = (
-            lark.EventDispatcherHandler.builder("", "")
+            lark.EventDispatcherHandler
+            .builder("", "")
             .register_p2_im_message_receive_v1(self._on_message_event)
             .build()
         )
         domain = _resolve_domain(lark, self._domain)
-        client = lark.ws.Client(
-            self._app_id, self._app_secret, event_handler=handler, log_level=level, domain=domain
-        )
+        client = lark.ws.Client(self._app_id, self._app_secret, event_handler=handler, log_level=level, domain=domain)
         self._ws_client = client
         try:
             client.start()
@@ -567,9 +564,7 @@ class LarkChannel(BaseChannel[LarkSettings]):
                 ref = self._ref_from_env(env)
                 if ref is not None:
                     current_revision = await self._runtime.chat_coordinator.current_revision(selected_chat_id)
-                    self._runtime.chat_coordinator.set_cursor(
-                        ref, selected_chat_id, observed_revision=current_revision
-                    )
+                    self._runtime.chat_coordinator.set_cursor(ref, selected_chat_id, observed_revision=current_revision)
                 if env.chat_id and env.chat_id != selected_chat_id:
                     self._chat_to_lark_chat.pop(env.chat_id, None)
                 self._chat_to_lark_chat[selected_chat_id] = lark_chat_id
@@ -592,9 +587,7 @@ class LarkChannel(BaseChannel[LarkSettings]):
     async def _deliver_text(self, lark_chat_id: str, text: str) -> None:
         # Long replies go out as a file attachment instead of flooding the chat as
         # message chunks; fall back to inline text if the upload/send fails.
-        if len(text.encode("utf-8")) > LARK_ATTACHMENT_THRESHOLD and await self._deliver_document(
-            lark_chat_id, text
-        ):
+        if len(text.encode("utf-8")) > LARK_ATTACHMENT_THRESHOLD and await self._deliver_document(lark_chat_id, text):
             return
         for part in _split_message(text):
             try:
@@ -651,10 +644,12 @@ class LarkChannel(BaseChannel[LarkSettings]):
         from lark_oapi.api.im.v1 import CreateMessageRequest, CreateMessageRequestBody
 
         request = (
-            CreateMessageRequest.builder()
+            CreateMessageRequest
+            .builder()
             .receive_id_type("chat_id")
             .request_body(
-                CreateMessageRequestBody.builder()
+                CreateMessageRequestBody
+                .builder()
                 .receive_id(lark_chat_id)
                 .msg_type("text")
                 .content(json.dumps({"text": text}, ensure_ascii=False))
@@ -682,9 +677,11 @@ class LarkChannel(BaseChannel[LarkSettings]):
         )
 
         file_request = (
-            CreateFileRequest.builder()
+            CreateFileRequest
+            .builder()
             .request_body(
-                CreateFileRequestBody.builder()
+                CreateFileRequestBody
+                .builder()
                 .file_type("stream")
                 .file_name(filename)
                 .file(io.BytesIO(content.encode("utf-8")))
@@ -700,10 +697,12 @@ class LarkChannel(BaseChannel[LarkSettings]):
             )
 
         request = (
-            CreateMessageRequest.builder()
+            CreateMessageRequest
+            .builder()
             .receive_id_type("chat_id")
             .request_body(
-                CreateMessageRequestBody.builder()
+                CreateMessageRequestBody
+                .builder()
                 .receive_id(lark_chat_id)
                 .msg_type("file")
                 .content(json.dumps({"file_key": file_response.data.file_key}))
@@ -714,8 +713,7 @@ class LarkChannel(BaseChannel[LarkSettings]):
         response = self._client.im.v1.message.create(request)
         if not response.success():
             raise RuntimeError(
-                f"file message send failed: code={getattr(response, 'code', '?')} "
-                f"msg={getattr(response, 'msg', '?')}"
+                f"file message send failed: code={getattr(response, 'code', '?')} msg={getattr(response, 'msg', '?')}"
             )
 
     def _add_reaction_sync(self, message_id: str, emoji: str) -> str | None:
@@ -728,10 +726,12 @@ class LarkChannel(BaseChannel[LarkSettings]):
         )
 
         request = (
-            CreateMessageReactionRequest.builder()
+            CreateMessageReactionRequest
+            .builder()
             .message_id(message_id)
             .request_body(
-                CreateMessageReactionRequestBody.builder()
+                CreateMessageReactionRequestBody
+                .builder()
                 .reaction_type(Emoji.builder().emoji_type(emoji).build())
                 .build()
             )

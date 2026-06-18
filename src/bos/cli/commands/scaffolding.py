@@ -87,9 +87,7 @@ _RECOMMENDED_MODELS: dict[str, tuple[str, ...]] = {
 @click.option("--no-generate", is_flag=True, default=False, help="Skip LLM generation of team specialists.")
 @click.option("--name", "pkg_name_opt", default=None, help="Package name (package archetype; default: dir name).")
 @click.pass_context
-def init(
-    ctx, directory, archetype, model, purpose, yes, minimal, flat, init_git, no_probe, no_generate, pkg_name_opt
-):
+def init(ctx, directory, archetype, model, purpose, yes, minimal, flat, init_git, no_probe, no_generate, pkg_name_opt):
     """Initialize a BOS project with a guided, runnable baseline."""
     workspace_path = Path(directory).expanduser().resolve()
     dotbos = not flat
@@ -158,9 +156,7 @@ def init(
             click.echo(f"Config validates ✓ · credential probe ✓ ({detail})")
         else:
             click.echo(f"Config validates ✓ · credential probe ✗ — {detail}", err=True)
-            click.echo(
-                "  The project was still created; fix credentials and run `boscli doctor --probe`.", err=True
-            )
+            click.echo("  The project was still created; fix credentials and run `boscli doctor --probe`.", err=True)
     else:
         click.echo("Config validates ✓ · credential probe skipped")
 
@@ -466,9 +462,7 @@ def _fetch_models(provider: str, api_key: str | None) -> tuple[list[str], str]:
     if api_key:
         logging.getLogger("LiteLLM").setLevel(logging.ERROR)  # silence the 401/empty warning
         try:
-            live = litellm.get_valid_models(
-                check_provider_endpoint=True, custom_llm_provider=provider, api_key=api_key
-            )
+            live = litellm.get_valid_models(check_provider_endpoint=True, custom_llm_provider=provider, api_key=api_key)
         except Exception:
             live = []
         live = [_qualify(provider, m) for m in live]

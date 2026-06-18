@@ -22,9 +22,7 @@ def filter_tool_noise(messages: list[Message], *, mode: ToolNoiseFilter) -> list
                 content = llm.get("content", "")
                 if not content or (isinstance(content, str) and not content.strip()):
                     continue
-                result.append(_message_with_llm(
-                    msg, {"role": "assistant", "content": content}
-                ))
+                result.append(_message_with_llm(msg, {"role": "assistant", "content": content}))
             else:
                 result.append(msg)
             continue
@@ -49,16 +47,20 @@ def filter_tool_noise(messages: list[Message], *, mode: ToolNoiseFilter) -> list
 
             if content and (isinstance(content, str) and content.strip()):
                 new_content = f"{content}\n{sig_text}" if isinstance(content, str) else content
-                result.append(_message_with_llm(
-                    msg,
-                    {"role": "assistant", "content": new_content},
-                ))
+                result.append(
+                    _message_with_llm(
+                        msg,
+                        {"role": "assistant", "content": new_content},
+                    )
+                )
             else:
                 # No meaningful content — emit signature as a standalone message
-                result.append(_message_with_llm(
-                    msg,
-                    {"role": "assistant", "content": sig_text},
-                ))
+                result.append(
+                    _message_with_llm(
+                        msg,
+                        {"role": "assistant", "content": sig_text},
+                    )
+                )
         else:
             result.append(msg)
     return result

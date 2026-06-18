@@ -1,4 +1,5 @@
 """Tests for resolve_config_source with BEP6 config format."""
+
 from bos.config.workspace import Workspace, resolve_config_source
 
 

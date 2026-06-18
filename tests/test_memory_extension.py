@@ -78,7 +78,6 @@ class TestInMemBackend:
         assert results == []
 
 
-
 class TestRememberTool:
     @pytest.mark.asyncio
     async def test_remember_memory_ingest(self):
@@ -308,11 +307,19 @@ class TestHarnessConfig:
         from bos.plugins.memory.plugin import MemoryHarnessPlugin
 
         h = MemoryHarnessPlugin()
-        await h.setup(PluginServices(
-            bos_dir=tmp_path, workspace=tmp_path, llm=None, consolidator=None, subagents=None,
-        ))
+        await h.setup(
+            PluginServices(
+                bos_dir=tmp_path,
+                workspace=tmp_path,
+                llm=None,
+                consolidator=None,
+                subagents=None,
+            )
+        )
         agent_plugin = h.bind({
-            "maxims": ["user"], "scope": "workspace", "backend": "in_memory",
+            "maxims": ["user"],
+            "scope": "workspace",
+            "backend": "in_memory",
             "retrieval": {"index_max": 7, "auto_recall": False, "top_k": 3, "index_in_prompt": True},
         })
         assert agent_plugin._index_max == 7

@@ -90,8 +90,12 @@ class AgentActor:
     """
 
     def __init__(
-        self, agent: Agent, mailbox: MailBox, chat_state: ChatState | None = None,
-        *, lifecycle_emitter: Callable[..., Awaitable[None]] | None = None,
+        self,
+        agent: Agent,
+        mailbox: MailBox,
+        chat_state: ChatState | None = None,
+        *,
+        lifecycle_emitter: Callable[..., Awaitable[None]] | None = None,
     ):
         self._address = mailbox.address
         self._agent = agent
@@ -603,8 +607,4 @@ class AgentActor:
 
     def _execution_is_current(self, chat_id: str, generation: int) -> bool:
         session = self._sessions.get(chat_id)
-        return (
-            session is not None
-            and session.execution.generation == generation
-            and session.execution.task is not None
-        )
+        return session is not None and session.execution.generation == generation and session.execution.task is not None

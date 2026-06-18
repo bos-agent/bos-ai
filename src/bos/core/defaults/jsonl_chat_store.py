@@ -65,9 +65,7 @@ class JsonlChatStore:
                 messages.append(
                     Message(
                         llm_message=raw.get("llm_message", {}),
-                        created_at=datetime.fromisoformat(raw["created_at"])
-                        if "created_at" in raw
-                        else datetime.now(),
+                        created_at=datetime.fromisoformat(raw["created_at"]) if "created_at" in raw else datetime.now(),
                         turn_id=raw.get("turn_id"),
                         is_summary=raw.get("is_summary", False),
                         metadata=raw.get("metadata", {}),
@@ -148,9 +146,7 @@ class JsonlChatStore:
 
     # ── ChatStore protocol ────────────────────────────────────────
 
-    async def commit_turn(
-        self, chat_id: str, messages: list[Message], *, turn_id: str
-    ) -> ChatCommit:
+    async def commit_turn(self, chat_id: str, messages: list[Message], *, turn_id: str) -> ChatCommit:
         pending = list(messages)
         if not pending:
             raise ValueError("commit_turn() requires at least one message.")

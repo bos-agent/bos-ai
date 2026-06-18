@@ -78,9 +78,7 @@ class GatewayClient:
         self._channel_id = (channel_id or address or uuid.uuid4().hex).strip()
         self._api_key = api_key
         self._workdir = workdir or None
-        self._chat_id = (
-            chat_id.strip() if isinstance(chat_id, str) and chat_id else None
-        )
+        self._chat_id = chat_id.strip() if isinstance(chat_id, str) and chat_id else None
         self._current_revision = 0
         self._session: Any = None
         self._ws: Any = None

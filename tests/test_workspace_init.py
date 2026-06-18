@@ -1,4 +1,5 @@
 """Tests for workspace discovery and initialization with BEP6 config."""
+
 import pytest
 
 from bos.config.workspace import Workspace, WorkspaceResolutionError, initialize_workspace
@@ -97,9 +98,7 @@ def test_workspace_loads_from_bos_toml(tmp_path, monkeypatch):
     monkeypatch.delenv("BOS_CONFIG", raising=False)
     workspace = tmp_path / "project"
     workspace.mkdir()
-    (workspace / "bos.toml").write_text(
-        '[platform]\nextensions = ["bos.exts"]\n', encoding="utf-8"
-    )
+    (workspace / "bos.toml").write_text('[platform]\nextensions = ["bos.exts"]\n', encoding="utf-8")
 
     ws = Workspace.from_discovery(workspace)
 

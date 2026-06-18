@@ -185,8 +185,7 @@ class SubagentAgentPlugin:
             available = dict(list(available.items())[:limit])
         available_subagents = "<available_subagents>\n"
         available_subagents += "\n".join(
-            f'<agent role="{_xml_attr(name)}">{escape(desc or "")}</agent>'
-            for name, desc in available.items()
+            f'<agent role="{_xml_attr(name)}">{escape(desc or "")}</agent>' for name, desc in available.items()
         )
         available_subagents += "\n</available_subagents>"
         sections.append(available_subagents)

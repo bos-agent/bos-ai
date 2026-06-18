@@ -39,15 +39,32 @@ class TestHarnessServices:
         order: list[str] = []
 
         class _SpyJobRunner:
-            async def start(self): pass
-            async def drain(self, *, timeout): order.append("drain")
-            def bind_trigger(self, *a, **kw): pass
-            async def submit(self, job): return "x"
-            async def status(self, jid): return "queued"
-            async def list(self, *, filter=None): return []
-            async def retry(self, jid): pass
-            async def cancel(self, jid): pass
-            async def aclose(self): order.append("aclose")
+            async def start(self):
+                pass
+
+            async def drain(self, *, timeout):
+                order.append("drain")
+
+            def bind_trigger(self, *a, **kw):
+                pass
+
+            async def submit(self, job):
+                return "x"
+
+            async def status(self, jid):
+                return "queued"
+
+            async def list(self, *, filter=None):
+                return []
+
+            async def retry(self, jid):
+                pass
+
+            async def cancel(self, jid):
+                pass
+
+            async def aclose(self):
+                order.append("aclose")
 
         h = AgentHarness(bos_dir=tmp_path, workspace=tmp_path)
         await h.__aenter__()
@@ -83,8 +100,11 @@ class TestTurnCompleteEmission:
         actor._mailbox = None
 
         ctx = ActorTurnContext(
-            chat_id="c1", actor_name="A", actor_address="A@local",
-            turn_id="t1", reply_recipient="user",
+            chat_id="c1",
+            actor_name="A",
+            actor_address="A@local",
+            turn_id="t1",
+            reply_recipient="user",
         )
         await actor._on_turn_finished(ctx, ActorTurnResult(status="completed", committed_revision=4))
         assert len(seen) == 1
@@ -111,8 +131,11 @@ class TestTurnCompleteEmission:
         actor._chat_coordinator = _DummyCoordinator()
         actor._mailbox = _NoopMailbox()
         ctx = ActorTurnContext(
-            chat_id="c1", actor_name="A", actor_address="A@local",
-            turn_id="t1", reply_recipient="",
+            chat_id="c1",
+            actor_name="A",
+            actor_address="A@local",
+            turn_id="t1",
+            reply_recipient="",
         )
         await actor._on_turn_finished(ctx, ActorTurnResult(status="aborted"))
         await actor._on_turn_finished(ctx, ActorTurnResult(status="error"))
@@ -121,11 +144,13 @@ class TestTurnCompleteEmission:
 
 
 class _DummyCoordinator:
-    def end_turn(self, **kw): pass
+    def end_turn(self, **kw):
+        pass
 
 
 class _NoopMailbox:
-    async def send(self, *a, **kw): pass
+    async def send(self, *a, **kw):
+        pass
 
 
 class _StubAgent:
@@ -177,6 +202,7 @@ class TestE2E:
                 def __init__(self, key, rev):
                     self.key = key
                     self._rev = rev
+
                 async def run(self):
                     log.append(self._rev)
 
@@ -186,10 +212,15 @@ class TestE2E:
                 return _RecJob(key=f"{event.chat_id}:{event.base_revision}", rev=event.base_revision or 0)
 
             h.jobs.bind_trigger("session_close", factory)
-            await h.events.emit(LifecycleEvent(
-                kind="session_close", chat_id="c1", actor_name="A",
-                base_revision=42, payload={},
-            ))
+            await h.events.emit(
+                LifecycleEvent(
+                    kind="session_close",
+                    chat_id="c1",
+                    actor_name="A",
+                    base_revision=42,
+                    payload={},
+                )
+            )
             await h.jobs.drain(timeout=1.0)
             # restart so harness __aexit__ can drain cleanly
             await h.jobs.start()

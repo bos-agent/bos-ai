@@ -9,8 +9,14 @@ from bos.plugins.memory import MemoryEntry, MemoryIndexEntry, pep_memory_backend
 from bos.plugins.memory.scoped_memory import RequestedBy
 
 _DEFAULT_META = {
-    "importance": 5, "valid": True, "invalidated_at": None, "invalidated_by": None,
-    "last_used": None, "links": [], "source_turn_ids": [], "summary": None,
+    "importance": 5,
+    "valid": True,
+    "invalidated_at": None,
+    "invalidated_by": None,
+    "last_used": None,
+    "links": [],
+    "source_turn_ids": [],
+    "summary": None,
 }
 
 
@@ -28,15 +34,24 @@ class InMemMemoryExtension:
         self._maxims[key.lower()] = content
 
     async def ingest_memory(
-        self, content: str, *, tags=None, importance: int = 5, summary=None, source_turn_ids=None,
+        self,
+        content: str,
+        *,
+        tags=None,
+        importance: int = 5,
+        summary=None,
+        source_turn_ids=None,
     ) -> str:
         self._counter += 1
         entry_id = f"mem_{self._counter}"
         meta = dict(_DEFAULT_META)
         meta.update(importance=importance, summary=summary, source_turn_ids=list(source_turn_ids or []))
         self._memories[entry_id] = MemoryEntry(
-            id=entry_id, content=content, tags=list(tags or []),
-            created_at=datetime.now().isoformat(), metadata=meta,
+            id=entry_id,
+            content=content,
+            tags=list(tags or []),
+            created_at=datetime.now().isoformat(),
+            metadata=meta,
         )
         return entry_id
 
@@ -65,14 +80,23 @@ class InMemMemoryExtension:
         entries.sort(key=lambda e: (e.metadata.get("importance", 5), e.created_at), reverse=True)
         return [
             MemoryIndexEntry(
-                id=e.id, tags=e.tags,
+                id=e.id,
+                tags=e.tags,
                 summary=e.metadata.get("summary") or (e.content[:80] + ("…" if len(e.content) > 80 else "")),
             )
             for e in entries
         ]
 
     async def update_memory(
-        self, entry_id: str, *, content=None, tags=None, importance=None, summary=None, links=None, last_used=None,
+        self,
+        entry_id: str,
+        *,
+        content=None,
+        tags=None,
+        importance=None,
+        summary=None,
+        links=None,
+        last_used=None,
     ) -> None:
         e = self._memories.get(entry_id)
         if e is None:

@@ -85,7 +85,11 @@ class _HarnessSubagentRuntime:
         self._harness = harness
 
     async def ask(
-        self, role: str, message: str, *, parent: ToolContext,
+        self,
+        role: str,
+        message: str,
+        *,
+        parent: ToolContext,
         agent_cfg: dict[str, Any] | None = None,
     ) -> str:
         child_chat_id = self._harness._make_subagent_chat_id(parent.chat_id, role)
@@ -329,6 +333,7 @@ class AgentHarness:
     async def _create_consolidator(self) -> Consolidator:
         cfg = {"model": os.getenv("BOS_CONSOLIDATOR_MODEL"), "llm": self.llm}
         from . import __dict__ as core_exports
+
         instance = await core_exports["ep_consolidator"].invoke(self._consolidator_impl, cfg)
         if instance is not None:
             self._owned.append(instance)

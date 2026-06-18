@@ -45,7 +45,7 @@ ep_tool = ToolRegistry(
         )
         async def echo(message: str) -> str:
             ...
-    """
+    """,
 )
 
 ep_provider = ExtensionPoint(
@@ -56,7 +56,7 @@ ep_provider = ExtensionPoint(
 
         async def my_provider(messages: list[dict], **kwargs: Any) -> LLMResponse:
             ...
-    """
+    """,
 )
 
 ep_agent = ExtensionPoint(
@@ -76,7 +76,7 @@ ep_agent = ExtensionPoint(
                 "model": "gemini-2.5-flash",
                 "tools": {"enabled": ["GetWeather"]},
             }
-    """
+    """,
 )
 
 
@@ -190,7 +190,7 @@ ep_consolidator = ExtensionPoint(
     name="ep_consolidator",
     description="""
         Content consolidator. A factory that creates consolidators implementing the Consolidator protocol.
-    """
+    """,
 )
 
 
@@ -263,6 +263,7 @@ JobStatus = Literal["queued", "running", "succeeded", "failed", "cancelled"]
 @runtime_checkable
 class Job(Protocol):
     key: str
+
     async def run(self) -> None: ...
 
 
@@ -280,7 +281,8 @@ class JobRecord:
 class JobRunner(Protocol):
     async def submit(self, job: Job) -> str: ...
     def bind_trigger(
-        self, trigger: JobTrigger,
+        self,
+        trigger: JobTrigger,
         factory: Callable[[LifecycleEvent | None], Job | None],
     ) -> None: ...
     async def drain(self, *, timeout: float) -> None: ...
@@ -299,7 +301,10 @@ ep_job_runner = ExtensionPoint(
 @runtime_checkable
 class BackgroundLLM(Protocol):
     async def ask(
-        self, *, messages: list[dict[str, Any]], model: str | None = None,
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        model: str | None = None,
         reasoning_effort: ReasoningEffort | None = None,
         tools: list[dict[str, Any]] | None = None,
         response_schema: dict[str, Any] | None = None,

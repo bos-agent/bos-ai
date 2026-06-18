@@ -18,6 +18,7 @@ class _StubBLM:
         import json as _json
 
         from bos.core.llm import LLMResponse
+
         return LLMResponse(content=_json.dumps(self._payload))
 
 
@@ -33,18 +34,30 @@ class TestJobRun:
         await chat_store.commit_turn("c1", [_msg("user", "I prefer dark mode", turn_id="t1")], turn_id="t1")
         wm = WatermarkStore(tmp_path / "wm.json")
         op_svc = DefaultMemoryOperationService(
-            backend, audit_path=tmp_path / "audit.jsonl", maxim_keys={"user"},
+            backend,
+            audit_path=tmp_path / "audit.jsonl",
+            maxim_keys={"user"},
         )
-        blm = _StubBLM({"operations": [
-            {"op": "ADD", "reason": "stable preference", "content": "prefers dark mode", "importance": 7},
-        ]})
+        blm = _StubBLM({
+            "operations": [
+                {"op": "ADD", "reason": "stable preference", "content": "prefers dark mode", "importance": 7},
+            ]
+        })
         consolidator = DefaultMemoryConsolidator(blm, maxim_keys={"user"})
         head = await chat_store.get_revision("c1")
         job = MemoryConsolidationJob(
-            scope="workspace", chat_id="c1", actor_name=None, base_revision=head,
-            trigger="manual", policy=ConsolidationPolicy(auto_apply=False),
-            chat_store=chat_store, backend=backend, consolidator=consolidator,
-            operation_service=op_svc, watermarks=wm, maxim_keys={"user"},
+            scope="workspace",
+            chat_id="c1",
+            actor_name=None,
+            base_revision=head,
+            trigger="manual",
+            policy=ConsolidationPolicy(auto_apply=False),
+            chat_store=chat_store,
+            backend=backend,
+            consolidator=consolidator,
+            operation_service=op_svc,
+            watermarks=wm,
+            maxim_keys={"user"},
         )
         await job.run()
         # dry-run: no entries actually created
@@ -62,18 +75,30 @@ class TestJobRun:
         await chat_store.commit_turn("c1", [_msg("user", "I prefer dark mode")], turn_id="t1")
         wm = WatermarkStore(tmp_path / "wm.json")
         op_svc = DefaultMemoryOperationService(
-            backend, audit_path=tmp_path / "audit.jsonl", maxim_keys={"user"},
+            backend,
+            audit_path=tmp_path / "audit.jsonl",
+            maxim_keys={"user"},
         )
-        blm = _StubBLM({"operations": [
-            {"op": "ADD", "reason": "stable preference", "content": "prefers dark mode", "importance": 7},
-        ]})
+        blm = _StubBLM({
+            "operations": [
+                {"op": "ADD", "reason": "stable preference", "content": "prefers dark mode", "importance": 7},
+            ]
+        })
         consolidator = DefaultMemoryConsolidator(blm, maxim_keys={"user"})
         head = await chat_store.get_revision("c1")
         job = MemoryConsolidationJob(
-            scope="workspace", chat_id="c1", actor_name=None, base_revision=head,
-            trigger="manual", policy=ConsolidationPolicy(auto_apply=True),
-            chat_store=chat_store, backend=backend, consolidator=consolidator,
-            operation_service=op_svc, watermarks=wm, maxim_keys={"user"},
+            scope="workspace",
+            chat_id="c1",
+            actor_name=None,
+            base_revision=head,
+            trigger="manual",
+            policy=ConsolidationPolicy(auto_apply=True),
+            chat_store=chat_store,
+            backend=backend,
+            consolidator=consolidator,
+            operation_service=op_svc,
+            watermarks=wm,
+            maxim_keys={"user"},
         )
         await job.run()
         assert (await backend.search_memories("dark"))[0].content == "prefers dark mode"
@@ -86,7 +111,9 @@ class TestJobRun:
         await chat_store.commit_turn("c1", [_msg("user", "msg")], turn_id="t1")
         wm = WatermarkStore(tmp_path / "wm.json")
         op_svc = DefaultMemoryOperationService(
-            backend, audit_path=tmp_path / "audit.jsonl", maxim_keys={"user"},
+            backend,
+            audit_path=tmp_path / "audit.jsonl",
+            maxim_keys={"user"},
         )
 
         class _RaisingConsolidator:
@@ -95,10 +122,18 @@ class TestJobRun:
 
         head = await chat_store.get_revision("c1")
         job = MemoryConsolidationJob(
-            scope="workspace", chat_id="c1", actor_name=None, base_revision=head,
-            trigger="manual", policy=ConsolidationPolicy(auto_apply=True),
-            chat_store=chat_store, backend=backend, consolidator=_RaisingConsolidator(),
-            operation_service=op_svc, watermarks=wm, maxim_keys={"user"},
+            scope="workspace",
+            chat_id="c1",
+            actor_name=None,
+            base_revision=head,
+            trigger="manual",
+            policy=ConsolidationPolicy(auto_apply=True),
+            chat_store=chat_store,
+            backend=backend,
+            consolidator=_RaisingConsolidator(),
+            operation_service=op_svc,
+            watermarks=wm,
+            maxim_keys={"user"},
         )
         with pytest.raises(RuntimeError, match="network down"):
             await job.run()
@@ -107,14 +142,22 @@ class TestJobRun:
     @pytest.mark.asyncio
     async def test_idempotency_key_includes_scope_chat_revision_trigger(self, tmp_path):
         op_svc = DefaultMemoryOperationService(
-            InMemMemoryExtension(), audit_path=tmp_path / "audit.jsonl", maxim_keys={"user"},
+            InMemMemoryExtension(),
+            audit_path=tmp_path / "audit.jsonl",
+            maxim_keys={"user"},
         )
         job = MemoryConsolidationJob(
-            scope="workspace", chat_id="c1", actor_name=None, base_revision=4,
-            trigger="manual", policy=ConsolidationPolicy(),
-            chat_store=InMemChatStore(), backend=InMemMemoryExtension(),
+            scope="workspace",
+            chat_id="c1",
+            actor_name=None,
+            base_revision=4,
+            trigger="manual",
+            policy=ConsolidationPolicy(),
+            chat_store=InMemChatStore(),
+            backend=InMemMemoryExtension(),
             consolidator=DefaultMemoryConsolidator(_StubBLM({"operations": []}), maxim_keys={"user"}),
-            operation_service=op_svc, watermarks=WatermarkStore(tmp_path / "wm.json"),
+            operation_service=op_svc,
+            watermarks=WatermarkStore(tmp_path / "wm.json"),
             maxim_keys={"user"},
         )
         assert job.key == "consolidate:workspace:c1:4:manual"

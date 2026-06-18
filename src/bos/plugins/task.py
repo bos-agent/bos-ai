@@ -126,17 +126,15 @@ def _render_current_tasks(task_list: _TaskList) -> str:
     for task in sorted(task_list.tasks.values(), key=lambda t: t.created_at):
         blocked_by = ",".join(task.blocked_by)
         blocks = ",".join(task.blocks)
-        lines.extend(
-            [
-                (
-                    f'<task id="{_xml_attr(task.id)}" status="{_xml_attr(task.status)}" '
-                    f'blocked_by="{_xml_attr(blocked_by)}" blocks="{_xml_attr(blocks)}">'
-                ),
-                f"<subject>{escape(task.subject)}</subject>",
-                f"<description>{escape(task.description)}</description>",
-                "</task>",
-            ]
-        )
+        lines.extend([
+            (
+                f'<task id="{_xml_attr(task.id)}" status="{_xml_attr(task.status)}" '
+                f'blocked_by="{_xml_attr(blocked_by)}" blocks="{_xml_attr(blocks)}">'
+            ),
+            f"<subject>{escape(task.subject)}</subject>",
+            f"<description>{escape(task.description)}</description>",
+            "</task>",
+        ])
     lines.append("</current_tasks>")
     return "\n".join(lines)
 
@@ -150,8 +148,12 @@ class TaskEventInterceptor:
     async def intercept(
         self,
         stage: Literal[
-            "prepare", "before_llm", "after_llm", "after_tool",
-            "final_response", "max_iteration",
+            "prepare",
+            "before_llm",
+            "after_llm",
+            "after_tool",
+            "final_response",
+            "max_iteration",
         ],
         context: TurnContext,
     ) -> None:
@@ -211,7 +213,6 @@ Use proactively when:
 - A task requires 3 or more distinct steps or actions
 - The task is non-trivial and needs careful planning
 - The user provides multiple tasks (numbered or comma-separated)""",
-
     "TaskUpdate": """Update status, metadata, or dependencies for one or more tasks.
 
 Batch related changes into a single call — e.g. mark the finished task completed and the next
@@ -224,12 +225,10 @@ pending -> in_progress -> completed
 IMPORTANT: Only mark completed when implementation and relevant verification are both done.
 If tests fail, errors remain, verification was skipped, or implementation is partial, keep
 in_progress and record the blocker or next action.""",
-
     "TaskList": """List all tasks with status and blockers. Use to:
 - Check overall progress
 - Find the next available task (pending, not blocked)
 - See which tasks are blocked and why""",
-
     "TaskGet": """Fetch full details of a task including description and dependency state.
 Use before starting work on a task to verify its blockedBy list is empty.""",
 }

@@ -388,10 +388,7 @@ def _invoke_agent_factories() -> dict[str, dict[str, Any]]:
     for name in ep_agent.describe():
         result = asyncio.run(ep_agent.invoke(name))
         if not isinstance(result, dict):
-            raise ValueError(
-                f"ep_agent factory `{name}` must return an agent spec dict, "
-                f"got {type(result).__name__}"
-            )
+            raise ValueError(f"ep_agent factory `{name}` must return an agent spec dict, got {type(result).__name__}")
         try:
             validated = AgentConfig.model_validate(result)
         except ValidationError as exc:
@@ -772,12 +769,10 @@ class Workspace:
             return None
         return (self.bos_dir / Path(platform.envfile).expanduser()).resolve()
 
-
     @staticmethod
     def _validate_actor_name(name: str) -> None:
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]*", name):
             raise ValueError(f"Invalid actor name {name!r}; expected a mention-safe actor identity.")
-
 
     def _resolve_platform_agents(
         self,

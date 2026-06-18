@@ -125,7 +125,10 @@ def test_turn_context_merge_keeps_structured_message_parts_in_order():
 
     context.add_message({"role": "user", "content": [{"type": "text", "text": "first"}]})
     context.add_message(
-        {"role": "user", "content": [{"type": "image", "source": {"kind": "url", "value": "https://example.test/cat.png"}}]},
+        {
+            "role": "user",
+            "content": [{"type": "image", "source": {"kind": "url", "value": "https://example.test/cat.png"}}],
+        },
         merge=True,
     )
 
@@ -172,12 +175,10 @@ async def test_default_consolidator_preserves_structured_message_content_in_prom
             captured["kwargs"] = kwargs
             return LLMResponse(content="Structured content summary.")
 
-    summary = await LLMConsolidator(llm=FakeLLM(), model="test/consolidator").consolidate(
-        [
-            Message(llm_message={"role": "user", "content": _structured_message_content()}),
-            Message(llm_message={"role": "assistant", "content": "Processed."}),
-        ]
-    )
+    summary = await LLMConsolidator(llm=FakeLLM(), model="test/consolidator").consolidate([
+        Message(llm_message={"role": "user", "content": _structured_message_content()}),
+        Message(llm_message={"role": "assistant", "content": "Processed."}),
+    ])
 
     assert summary == "Structured content summary."
     assert captured["kwargs"] == {"model": "test/consolidator"}
@@ -264,15 +265,13 @@ def test_default_provider_normalization_accepts_path_backed_image_parts(tmp_path
     image_bytes = _png_bytes()
     image_path.write_bytes(image_bytes)
 
-    normalized = _normalize_litellm_message(
-        {
-            "role": "user",
-            "content": [
-                {"type": "text", "text": "Describe this image."},
-                {"type": "image", "source": {"kind": "path", "value": str(image_path)}},
-            ],
-        }
-    )
+    normalized = _normalize_litellm_message({
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "Describe this image."},
+            {"type": "image", "source": {"kind": "path", "value": str(image_path)}},
+        ],
+    })
 
     image_part = normalized["content"][1]
 
@@ -322,12 +321,10 @@ def test_codex_conversion_accepts_path_backed_image_parts(tmp_path):
     image_bytes = _png_bytes()
     image_path.write_bytes(image_bytes)
 
-    converted = convert_codex_user_message(
-        [
-            {"type": "text", "text": "Describe this image."},
-            {"type": "image", "source": {"kind": "path", "value": str(image_path)}},
-        ]
-    )
+    converted = convert_codex_user_message([
+        {"type": "text", "text": "Describe this image."},
+        {"type": "image", "source": {"kind": "path", "value": str(image_path)}},
+    ])
 
     image_part = converted["content"][1]
 
@@ -344,16 +341,14 @@ def test_codex_conversion_rejects_reserved_file_and_pdf_parts():
         ValueError,
         match="File/PDF inputs are reserved in phase 1 and are not yet supported.",
     ):
-        convert_codex_user_message(
-            [
-                {"type": "text", "text": "Summarize the attachment."},
-                {
-                    "type": "file",
-                    "mime_type": "application/pdf",
-                    "source": {"kind": "path", "value": "/tmp/example.pdf"},
-                },
-            ]
-        )
+        convert_codex_user_message([
+            {"type": "text", "text": "Summarize the attachment."},
+            {
+                "type": "file",
+                "mime_type": "application/pdf",
+                "source": {"kind": "path", "value": "/tmp/example.pdf"},
+            },
+        ])
 
 
 def test_antigravity_conversion_rejects_structured_multimodal_input():

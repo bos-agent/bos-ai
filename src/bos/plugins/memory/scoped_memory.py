@@ -40,20 +40,35 @@ class MemoryBackend(Protocol):
 
     # capture (raw append) + read
     async def ingest_memory(
-        self, content: str, *, tags: list[str] | None = None, importance: int = 5,
-        summary: str | None = None, source_turn_ids: list[str] | None = None,
+        self,
+        content: str,
+        *,
+        tags: list[str] | None = None,
+        importance: int = 5,
+        summary: str | None = None,
+        source_turn_ids: list[str] | None = None,
     ) -> str: ...
     async def get_memory(self, entry_id: str, *, include_invalid: bool = False) -> MemoryEntry | None: ...
     async def search_memories(
-        self, query: str, *, top_k: int = 5, include_invalid: bool = False,
+        self,
+        query: str,
+        *,
+        top_k: int = 5,
+        include_invalid: bool = False,
     ) -> list[MemoryEntry]: ...
     async def list_index(self) -> list[MemoryIndexEntry]: ...
 
     # curation writes (driven by the L1 operation service)
     async def update_memory(
-        self, entry_id: str, *, content: str | None = None, tags: list[str] | None = None,
-        importance: int | None = None, summary: str | None = None,
-        links: list[str] | None = None, last_used: str | None = None,
+        self,
+        entry_id: str,
+        *,
+        content: str | None = None,
+        tags: list[str] | None = None,
+        importance: int | None = None,
+        summary: str | None = None,
+        links: list[str] | None = None,
+        last_used: str | None = None,
     ) -> None: ...
     async def invalidate_memory(self, entry_id: str, *, requested_by: RequestedBy) -> None: ...
     async def restore_memory(self, entry_id: str) -> None: ...
@@ -89,13 +104,21 @@ class ScopedMemory:
         await self._inner.set_maxim(self._maxim_key(key), content)
 
     async def ingest_memory(
-        self, content: str, *, tags: list[str] | None = None, importance: int = 5,
-        summary: str | None = None, source_turn_ids: list[str] | None = None,
+        self,
+        content: str,
+        *,
+        tags: list[str] | None = None,
+        importance: int = 5,
+        summary: str | None = None,
+        source_turn_ids: list[str] | None = None,
     ) -> str:
         scoped_tags = [*(tags or []), self._scope_tag()]
         return await self._inner.ingest_memory(
-            content, tags=scoped_tags, importance=importance,
-            summary=summary, source_turn_ids=source_turn_ids,
+            content,
+            tags=scoped_tags,
+            importance=importance,
+            summary=summary,
+            source_turn_ids=source_turn_ids,
         )
 
     async def get_memory(self, entry_id: str, *, include_invalid: bool = False) -> MemoryEntry | None:
@@ -103,10 +126,16 @@ class ScopedMemory:
         return entry if entry is not None and self._is_visible(entry) else None
 
     async def search_memories(
-        self, query: str, *, top_k: int = 5, include_invalid: bool = False,
+        self,
+        query: str,
+        *,
+        top_k: int = 5,
+        include_invalid: bool = False,
     ) -> list[MemoryEntry]:
         entries = await self._inner.search_memories(
-            query, top_k=max(top_k * 4, 20), include_invalid=include_invalid,
+            query,
+            top_k=max(top_k * 4, 20),
+            include_invalid=include_invalid,
         )
         return [e for e in entries if self._is_visible(e)][:top_k]
 

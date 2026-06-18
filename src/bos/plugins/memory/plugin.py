@@ -151,13 +151,12 @@ class MemoryHarnessPlugin:
         # Recall-log flush (BEP 10 §6): subscribe on turn_complete when auto_recall is on
         # OR when consolidation is enabled (both want fresh last_used signal).
         retrieval_cfg = dict(cfg.get("retrieval", {}))
-        if services.events is not None and (
-            retrieval_cfg.get("auto_recall", True) or self._policy.enabled
-        ):
+        if services.events is not None and (retrieval_cfg.get("auto_recall", True) or self._policy.enabled):
             from .recall_flush import RecallFlushSubscriber
 
             services.events.subscribe(
-                "turn_complete", RecallFlushSubscriber(self._operation_service).handle,
+                "turn_complete",
+                RecallFlushSubscriber(self._operation_service).handle,
             )
 
     def _make_consolidation_job_factory(self):
@@ -167,11 +166,17 @@ class MemoryHarnessPlugin:
             if event is None:
                 return None
             return MemoryConsolidationJob(
-                scope=self._scope, chat_id=event.chat_id, actor_name=event.actor_name,
-                base_revision=int(event.base_revision or 0), trigger="session_close",
-                policy=self._policy, chat_store=self._services.chat_store,
-                backend=self._backend, consolidator=self._consolidator,
-                operation_service=self._operation_service, watermarks=self._watermarks,
+                scope=self._scope,
+                chat_id=event.chat_id,
+                actor_name=event.actor_name,
+                base_revision=int(event.base_revision or 0),
+                trigger="session_close",
+                policy=self._policy,
+                chat_store=self._services.chat_store,
+                backend=self._backend,
+                consolidator=self._consolidator,
+                operation_service=self._operation_service,
+                watermarks=self._watermarks,
                 maxim_keys=self._maxim_keys,
             )
 
@@ -185,7 +190,8 @@ class MemoryHarnessPlugin:
         policy = self._policy
         if dry_run is not None:
             policy = ConsolidationPolicy(
-                enabled=policy.enabled, retention_days=policy.retention_days,
+                enabled=policy.enabled,
+                retention_days=policy.retention_days,
                 auto_apply=not dry_run,
             )
         rev = await self._services.chat_store.get_revision(chat_id)
@@ -193,12 +199,18 @@ class MemoryHarnessPlugin:
             return []
         before = len(await self._operation_service.audit())
         job = MemoryConsolidationJob(
-            scope=self._scope, chat_id=chat_id, actor_name=None,
-            base_revision=rev, trigger="manual", policy=policy,
-            chat_store=self._services.chat_store, backend=self._backend,
+            scope=self._scope,
+            chat_id=chat_id,
+            actor_name=None,
+            base_revision=rev,
+            trigger="manual",
+            policy=policy,
+            chat_store=self._services.chat_store,
+            backend=self._backend,
             consolidator=self._consolidator,
             operation_service=self._operation_service,
-            watermarks=self._watermarks, maxim_keys=self._maxim_keys,
+            watermarks=self._watermarks,
+            maxim_keys=self._maxim_keys,
         )
         await job.run()
         return (await self._operation_service.audit())[before:]
@@ -230,7 +242,8 @@ class MemoryHarnessPlugin:
         maxim_keys = set(config.get("maxims", []))
         retrieval = dict(config.get("retrieval", {}))
         return MemoryAgentPlugin(
-            backend, maxim_keys,
+            backend,
+            maxim_keys,
             index_in_prompt=retrieval.get("index_in_prompt", True),
             index_max=retrieval.get("index_max", 50),
             auto_recall=retrieval.get("auto_recall", True),
@@ -245,9 +258,14 @@ class MemoryHarnessPlugin:
 
 class MemoryAgentPlugin:
     def __init__(
-        self, backend: MemoryBackend, maxim_keys: set[str], *,
-        index_in_prompt: bool = True, index_max: int = 50,
-        auto_recall: bool = True, top_k: int = 5,
+        self,
+        backend: MemoryBackend,
+        maxim_keys: set[str],
+        *,
+        index_in_prompt: bool = True,
+        index_max: int = 50,
+        auto_recall: bool = True,
+        top_k: int = 5,
     ) -> None:
         self._backend = backend
         self._maxim_keys = maxim_keys
@@ -385,8 +403,7 @@ class MemoryAgentPlugin:
                 content = await self._backend.get_maxim(key)
                 scope = _MAXIM_DESCRIPTIONS.get(key, "")
                 items.append(
-                    f'<maxim name="{_xml_attr(key)}" scope="{_xml_attr(scope)}">\n'
-                    f"{escape(content).strip()}\n</maxim>"
+                    f'<maxim name="{_xml_attr(key)}" scope="{_xml_attr(scope)}">\n{escape(content).strip()}\n</maxim>'
                 )
             sections.append("<active_maxims>\n" + "\n".join(items) + "\n</active_maxims>")
         return "\n\n".join(sections)

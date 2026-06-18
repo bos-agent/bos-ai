@@ -221,15 +221,13 @@ class ChatCoordinator:
             revision = self._message_revision(message.metadata)
             if from_revision is not None and revision <= from_revision:
                 continue
-            result.append(
-                {
-                    "llm_message": message.llm_message,
-                    "metadata": dict(message.metadata),
-                    "turn_id": message.turn_id,
-                    "created_at": message.created_at.isoformat(),
-                    "is_summary": message.is_summary,
-                }
-            )
+            result.append({
+                "llm_message": message.llm_message,
+                "metadata": dict(message.metadata),
+                "turn_id": message.turn_id,
+                "created_at": message.created_at.isoformat(),
+                "is_summary": message.is_summary,
+            })
         return result
 
     def active_turn_status(self, chat_id: str) -> dict[str, Any] | None:

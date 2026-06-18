@@ -17,10 +17,15 @@ class TestRecallFlush:
         e2 = await b.ingest_memory("another fact")
         svc = DefaultMemoryOperationService(b, audit_path=tmp_path / "audit.jsonl", maxim_keys={"user"})
         sub = RecallFlushSubscriber(svc)
-        await sub.handle(LifecycleEvent(
-            kind="turn_complete", chat_id="c1", actor_name="A",
-            base_revision=1, payload={"recalled": [e1, e2]},
-        ))
+        await sub.handle(
+            LifecycleEvent(
+                kind="turn_complete",
+                chat_id="c1",
+                actor_name="A",
+                base_revision=1,
+                payload={"recalled": [e1, e2]},
+            )
+        )
         assert (await b.get_memory(e1)).metadata["last_used"] is not None
         assert (await b.get_memory(e2)).metadata["last_used"] is not None
 
@@ -30,9 +35,21 @@ class TestRecallFlush:
         svc = DefaultMemoryOperationService(b, audit_path=tmp_path / "audit.jsonl", maxim_keys={"user"})
         sub = RecallFlushSubscriber(svc)
         # must not raise on missing or empty recalled list
-        await sub.handle(LifecycleEvent(
-            kind="turn_complete", chat_id="c1", actor_name="A", base_revision=1, payload={},
-        ))
-        await sub.handle(LifecycleEvent(
-            kind="turn_complete", chat_id="c1", actor_name="A", base_revision=1, payload={"recalled": []},
-        ))
+        await sub.handle(
+            LifecycleEvent(
+                kind="turn_complete",
+                chat_id="c1",
+                actor_name="A",
+                base_revision=1,
+                payload={},
+            )
+        )
+        await sub.handle(
+            LifecycleEvent(
+                kind="turn_complete",
+                chat_id="c1",
+                actor_name="A",
+                base_revision=1,
+                payload={"recalled": []},
+            )
+        )

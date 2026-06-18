@@ -14,13 +14,13 @@ from bos.cli.commands.memory import memory as memory_cmd
 def _seeded_workspace(tmp_path, monkeypatch):
     """Build a minimal workspace with the in_memory memory backend selected."""
     (tmp_path / "bos.toml").write_text(
-        '[bos]\n'
+        "[bos]\n"
         'workspace = "."\n'
-        '\n'
-        '[harness]\n'
+        "\n"
+        "[harness]\n"
         'chat_store = "_default"\n'
-        '\n'
-        '[exts.ep_plugin.MemoryPlugin]\n'
+        "\n"
+        "[exts.ep_plugin.MemoryPlugin]\n"
         'backend = "in_memory"\n',
         encoding="utf-8",
     )

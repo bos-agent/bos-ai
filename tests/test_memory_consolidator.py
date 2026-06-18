@@ -18,9 +18,16 @@ class TestStructural:
         pol = ConsolidationPolicy(enabled=True, retention_days=30, auto_apply=True)
         assert pol.auto_apply is True
         req = MemoryConsolidationRequest(
-            chat_id="c1", actor_name="A", scope="workspace", base_revision=4,
-            trigger="manual", transcript_window=[], raw_appends=[],
-            candidate_memories=[], active_maxims={}, policy=pol,
+            chat_id="c1",
+            actor_name="A",
+            scope="workspace",
+            base_revision=4,
+            trigger="manual",
+            transcript_window=[],
+            raw_appends=[],
+            candidate_memories=[],
+            active_maxims={},
+            policy=pol,
         )
         assert req.chat_id == "c1"
         assert hasattr(MemoryConsolidator, "propose")
@@ -45,16 +52,24 @@ class TestDefaultConsolidator:
             MemoryConsolidationRequest,
         )
 
-        payload = {"operations": [
-            {"op": "ADD", "reason": "stable preference", "content": "likes dark mode", "importance": 7},
-            {"op": "NOOP", "reason": "considered, declined"},
-        ]}
+        payload = {
+            "operations": [
+                {"op": "ADD", "reason": "stable preference", "content": "likes dark mode", "importance": 7},
+                {"op": "NOOP", "reason": "considered, declined"},
+            ]
+        }
         blm = _StubBackgroundLLM(payload)
         c = DefaultMemoryConsolidator(blm, maxim_keys={"user"})
         req = MemoryConsolidationRequest(
-            chat_id="c1", actor_name=None, scope="workspace", base_revision=1,
-            trigger="manual", transcript_window=[], raw_appends=[],
-            candidate_memories=[], active_maxims={"user": ""},
+            chat_id="c1",
+            actor_name=None,
+            scope="workspace",
+            base_revision=1,
+            trigger="manual",
+            transcript_window=[],
+            raw_appends=[],
+            candidate_memories=[],
+            active_maxims={"user": ""},
             policy=ConsolidationPolicy(),
         )
         ops = await c.propose(req)
@@ -73,9 +88,16 @@ class TestDefaultConsolidator:
         blm = _StubBackgroundLLM({"operations": []})
         c = DefaultMemoryConsolidator(blm, maxim_keys={"user"})
         req = MemoryConsolidationRequest(
-            chat_id="c1", actor_name=None, scope="workspace", base_revision=1,
-            trigger="manual", transcript_window=[], raw_appends=[],
-            candidate_memories=[], active_maxims={}, policy=ConsolidationPolicy(),
+            chat_id="c1",
+            actor_name=None,
+            scope="workspace",
+            base_revision=1,
+            trigger="manual",
+            transcript_window=[],
+            raw_appends=[],
+            candidate_memories=[],
+            active_maxims={},
+            policy=ConsolidationPolicy(),
         )
         await c.propose(req)
         sent_schema = blm.calls[0]["response_schema"]
@@ -98,7 +120,10 @@ class TestDefaultConsolidator:
         blm = _StubBackgroundLLM({"operations": []})
         c = DefaultMemoryConsolidator(blm, maxim_keys={"user"})
         req = MemoryConsolidationRequest(
-            chat_id="c1", actor_name=None, scope="workspace", base_revision=1,
+            chat_id="c1",
+            actor_name=None,
+            scope="workspace",
+            base_revision=1,
             trigger="manual",
             transcript_window=[Message(llm_message={"role": "user", "content": "I prefer dark mode"})],
             raw_appends=[],

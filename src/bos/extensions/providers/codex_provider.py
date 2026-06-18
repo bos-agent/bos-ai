@@ -39,9 +39,7 @@ async def codex_complete(
     if not auth_file:
         import os
 
-        auth_file = os.environ.get("BOS_CODEX_AUTH_FILE") or str(
-            _get_bos_home() / "auth" / "codex_auth.default.json"
-        )
+        auth_file = os.environ.get("BOS_CODEX_AUTH_FILE") or str(_get_bos_home() / "auth" / "codex_auth.default.json")
 
     from oauth_cli_kit import get_token as get_codex_token
     from oauth_cli_kit.storage import FileTokenStorage
@@ -142,14 +140,12 @@ def _convert_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if not name:
             continue
         params = fn.get("parameters") or {}
-        converted.append(
-            {
-                "type": "function",
-                "name": name,
-                "description": fn.get("description") or "",
-                "parameters": params if isinstance(params, dict) else {},
-            }
-        )
+        converted.append({
+            "type": "function",
+            "name": name,
+            "description": fn.get("description") or "",
+            "parameters": params if isinstance(params, dict) else {},
+        })
     return converted
 
 
@@ -172,42 +168,36 @@ def _convert_messages(messages: list[dict[str, Any]]) -> tuple[str, list[dict[st
         if role == "assistant":
             # Handle text first.
             if isinstance(content, str) and content:
-                input_items.append(
-                    {
-                        "type": "message",
-                        "role": "assistant",
-                        "content": [{"type": "output_text", "text": content}],
-                        "status": "completed",
-                        "id": f"msg_{idx}",
-                    }
-                )
+                input_items.append({
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": content}],
+                    "status": "completed",
+                    "id": f"msg_{idx}",
+                })
             # Then handle tool calls.
             for tool_call in msg.get("tool_calls", []) or []:
                 fn = tool_call.get("function") or {}
                 call_id, item_id = _split_tool_call_id(tool_call.get("id"))
                 call_id = call_id or f"call_{idx}"
                 item_id = item_id or f"fc_{idx}"
-                input_items.append(
-                    {
-                        "type": "function_call",
-                        "id": item_id,
-                        "call_id": call_id,
-                        "name": fn.get("name"),
-                        "arguments": fn.get("arguments") or "{}",
-                    }
-                )
+                input_items.append({
+                    "type": "function_call",
+                    "id": item_id,
+                    "call_id": call_id,
+                    "name": fn.get("name"),
+                    "arguments": fn.get("arguments") or "{}",
+                })
             continue
 
         if role == "tool":
             call_id, _ = _split_tool_call_id(msg.get("tool_call_id"))
             output_text = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
-            input_items.append(
-                {
-                    "type": "function_call_output",
-                    "call_id": call_id,
-                    "output": output_text,
-                }
-            )
+            input_items.append({
+                "type": "function_call_output",
+                "call_id": call_id,
+                "output": output_text,
+            })
             continue
 
     return system_prompt, input_items
@@ -225,13 +215,11 @@ def _convert_user_message(content: Any) -> dict[str, Any]:
                 converted.append({"type": "input_text", "text": item.get("text", "")})
             elif item.get("type") == "image":
                 source = item.get("source") or {}
-                converted.append(
-                    {
-                        "type": "input_image",
-                        "image_url": image_source_to_model_url(source),
-                        "detail": "auto",
-                    }
-                )
+                converted.append({
+                    "type": "input_image",
+                    "image_url": image_source_to_model_url(source),
+                    "detail": "auto",
+                })
             elif item.get("type") == "file":
                 raise ValueError("File/PDF inputs are reserved in phase 1 and are not yet supported.")
             elif item.get("type") == "image_url":

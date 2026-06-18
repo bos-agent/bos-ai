@@ -1,5 +1,3 @@
-
-
 def test_runner_start_bootstraps_gateway(monkeypatch):
     import asyncio
 

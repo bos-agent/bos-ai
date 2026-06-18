@@ -126,8 +126,7 @@ class TurnContext:
                 return content
             if isinstance(content, list):
                 return "".join(
-                    part.get("text", "") for part in content
-                    if isinstance(part, dict) and part.get("type") == "text"
+                    part.get("text", "") for part in content if isinstance(part, dict) and part.get("type") == "text"
                 )
             return str(content)
         return ""
@@ -537,7 +536,10 @@ class Agent:
                 ctx.set_system_prompt(await self._build_system_prompt())
                 await _run_interceptor("before_llm")
                 await _emit_event(
-                    "llm", "start", stage="before_llm", detail="thinking",
+                    "llm",
+                    "start",
+                    stage="before_llm",
+                    detail="thinking",
                     metadata={"iteration": iteration, "max_iterations": self._max_iterations},
                 )
 
@@ -572,9 +574,7 @@ class Agent:
                 )
                 if not response.tool_calls:
                     # finalize the response if there is no tool call required
-                    final_content = _strip_reply_artifacts(
-                        response.content, strip_labels=self._history_attribution
-                    )
+                    final_content = _strip_reply_artifacts(response.content, strip_labels=self._history_attribution)
                     if response.finish_reason == "error":
                         logger.error("Error in LLM response: %s", response.finish_reason)
                         final_content = final_content or "(LLM responds error)"

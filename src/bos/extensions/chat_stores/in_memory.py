@@ -103,9 +103,7 @@ class InMemChatStore:
 
     # ── ChatStore protocol ────────────────────────────────────────
 
-    async def commit_turn(
-        self, chat_id: str, messages: list[Message], *, turn_id: str
-    ) -> ChatCommit:
+    async def commit_turn(self, chat_id: str, messages: list[Message], *, turn_id: str) -> ChatCommit:
         pending = list(messages)
         if not pending:
             raise ValueError("commit_turn() requires at least one message.")

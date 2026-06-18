@@ -75,7 +75,7 @@ class ActorResolver:
             if match is not None:
                 mentioned = match.group(1)
                 target_actor = self._resolve_name(mentioned)
-                cleaned = stripped[match.end():]
+                cleaned = stripped[match.end() :]
         elif isinstance(out_metadata.get("target_actor"), str):
             target_actor = out_metadata["target_actor"]
 

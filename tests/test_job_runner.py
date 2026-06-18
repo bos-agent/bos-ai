@@ -32,6 +32,7 @@ class TestStructural:
             JobTrigger,
             ep_job_runner,
         )
+
         assert "session_close" in JobTrigger.__args__
         assert "manual" in JobTrigger.__args__
         assert "queued" in JobStatus.__args__
@@ -39,8 +40,9 @@ class TestStructural:
         assert hasattr(JobRunner, "submit")
         assert hasattr(JobRunner, "drain")
         assert ep_job_runner.name == "ep_job_runner"
-        rec = JobRecord(id="x", key="k", status="queued", error=None,
-                        submitted_at="2026-06-17T00:00:00", finished_at=None)
+        rec = JobRecord(
+            id="x", key="k", status="queued", error=None, submitted_at="2026-06-17T00:00:00", finished_at=None
+        )
         assert rec.id == "x"
 
 
@@ -95,6 +97,7 @@ class TestSubmitAndDrain:
     async def test_failed_job_records_error(self):
         class _Boom:
             key = "boom"
+
             async def run(self):
                 raise RuntimeError("kaboom")
 
@@ -124,10 +127,15 @@ class TestTriggers:
                 return _RecJob(key=f"closed:{event.chat_id}:r{event.base_revision}", log=log)
 
             runner.bind_trigger("session_close", factory)
-            await bus.emit(LifecycleEvent(
-                kind="session_close", chat_id="c1", actor_name="A",
-                base_revision=7, payload={},
-            ))
+            await bus.emit(
+                LifecycleEvent(
+                    kind="session_close",
+                    chat_id="c1",
+                    actor_name="A",
+                    base_revision=7,
+                    payload={},
+                )
+            )
             await runner.drain(timeout=1.0)
             assert log == ["closed:c1:r7"]
         finally:
@@ -145,10 +153,15 @@ class TestTriggers:
                 return _RecJob(key=f"idle:{event.chat_id}", log=log)
 
             runner.bind_trigger("idle", factory)
-            await bus.emit(LifecycleEvent(
-                kind="turn_complete", chat_id="c1", actor_name="A",
-                base_revision=1, payload={},
-            ))
+            await bus.emit(
+                LifecycleEvent(
+                    kind="turn_complete",
+                    chat_id="c1",
+                    actor_name="A",
+                    base_revision=1,
+                    payload={},
+                )
+            )
             await asyncio.sleep(0.20)
             await runner.drain(timeout=0.5)
             assert log == ["idle:c1"]
@@ -163,13 +176,25 @@ class TestTriggers:
         try:
             log: list[str] = []
             runner.bind_trigger("idle", lambda e: _RecJob(key="idle1", log=log))
-            await bus.emit(LifecycleEvent(
-                kind="turn_complete", chat_id="c1", actor_name="A", base_revision=1, payload={},
-            ))
+            await bus.emit(
+                LifecycleEvent(
+                    kind="turn_complete",
+                    chat_id="c1",
+                    actor_name="A",
+                    base_revision=1,
+                    payload={},
+                )
+            )
             await asyncio.sleep(0.05)
-            await bus.emit(LifecycleEvent(
-                kind="turn_complete", chat_id="c1", actor_name="A", base_revision=2, payload={},
-            ))
+            await bus.emit(
+                LifecycleEvent(
+                    kind="turn_complete",
+                    chat_id="c1",
+                    actor_name="A",
+                    base_revision=2,
+                    payload={},
+                )
+            )
             await asyncio.sleep(0.05)
             assert log == []
             await asyncio.sleep(0.15)
@@ -186,9 +211,15 @@ class TestTriggers:
         try:
             log: list[str] = []
             runner.bind_trigger("session_close", lambda e: None)
-            await bus.emit(LifecycleEvent(
-                kind="session_close", chat_id="c1", actor_name="A", base_revision=1, payload={},
-            ))
+            await bus.emit(
+                LifecycleEvent(
+                    kind="session_close",
+                    chat_id="c1",
+                    actor_name="A",
+                    base_revision=1,
+                    payload={},
+                )
+            )
             await runner.drain(timeout=0.2)
             assert log == []
         finally:

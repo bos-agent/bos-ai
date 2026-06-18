@@ -226,7 +226,6 @@ def _ensure_gateway_endpoint(ctx, rd: GatewayRunDir, workspace_dir: str | None) 
     )
 
 
-
 def _preview(value: Any, limit: int = 120) -> str:
     text = str(value or "").replace("\n", " ").strip()
     if len(text) <= limit:

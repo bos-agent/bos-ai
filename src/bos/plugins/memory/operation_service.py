@@ -125,8 +125,11 @@ class DefaultMemoryOperationService:
         entry_id = op.target_id
         if op.op == "ADD":
             entry_id = await self._backend.ingest_memory(
-                op.content, tags=op.tags, importance=op.importance or 5,
-                summary=op.summary, source_turn_ids=op.source_turn_ids,
+                op.content,
+                tags=op.tags,
+                importance=op.importance or 5,
+                summary=op.summary,
+                source_turn_ids=op.source_turn_ids,
             )
         elif op.op == "UPDATE":
             if op.maxim_key is not None:
@@ -134,8 +137,12 @@ class DefaultMemoryOperationService:
                 entry_id = None
             else:
                 await self._backend.update_memory(
-                    op.target_id, content=op.content, tags=op.tags,
-                    importance=op.importance, summary=op.summary, links=op.links,
+                    op.target_id,
+                    content=op.content,
+                    tags=op.tags,
+                    importance=op.importance,
+                    summary=op.summary,
+                    links=op.links,
                 )
         elif op.op == "INVALIDATE":
             await self._backend.invalidate_memory(op.target_id, requested_by=op.requested_by)

@@ -23,15 +23,20 @@ class DefaultBackgroundLLM:
         self._max_retries = max_retries
 
     async def ask(
-        self, *, messages: list[dict[str, Any]], model: str | None = None,
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        model: str | None = None,
         reasoning_effort: ReasoningEffort | None = None,
         tools: list[dict[str, Any]] | None = None,
         response_schema: dict[str, Any] | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> LLMResponse:
         kwargs: dict[str, Any] = {
-            "model": model, "reasoning_effort": reasoning_effort,
-            "tools": tools, "metadata": metadata,
+            "model": model,
+            "reasoning_effort": reasoning_effort,
+            "tools": tools,
+            "metadata": metadata,
         }
         if response_schema is not None:
             kwargs["response_schema"] = response_schema

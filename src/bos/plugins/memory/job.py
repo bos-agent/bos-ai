@@ -42,17 +42,25 @@ class MemoryConsolidationJob:
         if self.base_revision <= watermark:
             logger.info(
                 "consolidation skipped (no new turns) chat=%s rev=%d wm=%d",
-                self.chat_id, self.base_revision, watermark,
+                self.chat_id,
+                self.base_revision,
+                watermark,
             )
             return
         transcript = await self.chat_store.get_messages_since(self.chat_id, revision=watermark)
         candidates = await self.backend.search_memories("", top_k=10_000)
         active_maxims = {key: await self.backend.get_maxim(key) for key in self.maxim_keys}
         request = MemoryConsolidationRequest(
-            chat_id=self.chat_id, actor_name=self.actor_name, scope=self.scope,
-            base_revision=self.base_revision, trigger=self.trigger,
-            transcript_window=transcript, raw_appends=[], candidate_memories=candidates,
-            active_maxims=active_maxims, policy=self.policy,
+            chat_id=self.chat_id,
+            actor_name=self.actor_name,
+            scope=self.scope,
+            base_revision=self.base_revision,
+            trigger=self.trigger,
+            transcript_window=transcript,
+            raw_appends=[],
+            candidate_memories=candidates,
+            active_maxims=active_maxims,
+            policy=self.policy,
         )
         ops = await self.consolidator.propose(request)
         await self.operation_service.apply(ops, dry_run=not self.policy.auto_apply)

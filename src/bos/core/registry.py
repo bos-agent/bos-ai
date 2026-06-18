@@ -55,9 +55,7 @@ class ExtensionPoint:
         self.describe = lambda: {k: v.description for k, v in self._extensions.items()}
         if not name.startswith("_"):
             if name in ExtensionPoint._by_name:
-                raise ValueError(
-                    f"Duplicate extension point name `{name}`; extension point names must be unique"
-                )
+                raise ValueError(f"Duplicate extension point name `{name}`; extension point names must be unique")
             ExtensionPoint._by_name[name] = self
 
     @classmethod

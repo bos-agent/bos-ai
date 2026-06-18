@@ -46,8 +46,11 @@ class TestMarkdownMetadataAndSoftDelete:
     async def test_metadata_roundtrips(self, tmp_path):
         b = _backend(tmp_path)
         eid = await b.ingest_memory(
-            "deploys on Fridays", tags=["ops"], importance=8,
-            summary="Friday deploys", source_turn_ids=["t1", "t2"],
+            "deploys on Fridays",
+            tags=["ops"],
+            importance=8,
+            summary="Friday deploys",
+            source_turn_ids=["t1", "t2"],
         )
         e = await b.get_memory(eid)
         assert e.metadata["importance"] == 8

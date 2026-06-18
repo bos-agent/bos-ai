@@ -40,8 +40,11 @@ def _parse_duration(value: str | int | float) -> float:
 @ep_job_runner(name="_default")
 class InProcJobRunner:
     def __init__(
-        self, bus: LifecycleBus | None = None, *,
-        max_concurrency: int = 2, idle_after: str | int | float = 300,
+        self,
+        bus: LifecycleBus | None = None,
+        *,
+        max_concurrency: int = 2,
+        idle_after: str | int | float = 300,
     ) -> None:
         self._bus = bus
         self._max_concurrency = max(1, int(max_concurrency))
@@ -63,8 +66,7 @@ class InProcJobRunner:
         self._started = True
         self._draining.clear()
         self._workers = [
-            asyncio.create_task(self._worker(i), name=f"job-runner-worker-{i}")
-            for i in range(self._max_concurrency)
+            asyncio.create_task(self._worker(i), name=f"job-runner-worker-{i}") for i in range(self._max_concurrency)
         ]
 
     async def drain(self, *, timeout: float) -> None:
@@ -74,9 +76,7 @@ class InProcJobRunner:
         worker's next iteration and any in-flight task raises CancelledError."""
         loop = asyncio.get_event_loop()
         deadline = loop.time() + max(0.0, float(timeout))
-        while self._queue.qsize() > 0 or any(
-            self._record_status_running(rec) for rec in self._records.values()
-        ):
+        while self._queue.qsize() > 0 or any(self._record_status_running(rec) for rec in self._records.values()):
             remaining = deadline - loop.time()
             if remaining <= 0:
                 break
@@ -104,15 +104,20 @@ class InProcJobRunner:
             logger.info("submit during drain; job %s will likely be dropped", job.key)
         job_id = uuid.uuid4().hex
         self._records[job_id] = JobRecord(
-            id=job_id, key=job.key, status="queued", error=None,
-            submitted_at=datetime.now().isoformat(), finished_at=None,
+            id=job_id,
+            key=job.key,
+            status="queued",
+            error=None,
+            submitted_at=datetime.now().isoformat(),
+            finished_at=None,
         )
         self._inflight_by_key[job.key] = job_id
         await self._queue.put((job_id, job))
         return job_id
 
     def bind_trigger(
-        self, trigger: JobTrigger,
+        self,
+        trigger: JobTrigger,
         factory: Callable[[LifecycleEvent | None], Job | None],
     ) -> None:
         self._trigger_factories[trigger] = factory
@@ -154,7 +159,8 @@ class InProcJobRunner:
     @staticmethod
     def _with(rec: JobRecord, **changes: Any) -> JobRecord:
         return JobRecord(
-            id=rec.id, key=changes.get("key", rec.key),
+            id=rec.id,
+            key=changes.get("key", rec.key),
             status=changes.get("status", rec.status),
             error=changes.get("error", rec.error),
             submitted_at=rec.submitted_at,
@@ -166,7 +172,8 @@ class InProcJobRunner:
             job_id, job = await self._queue.get()
             if self._draining.is_set():
                 self._records[job_id] = self._with(
-                    self._records[job_id], status="cancelled",
+                    self._records[job_id],
+                    status="cancelled",
                     finished_at=datetime.now().isoformat(),
                 )
                 self._inflight_by_key.pop(job.key, None)
@@ -175,14 +182,17 @@ class InProcJobRunner:
             try:
                 await job.run()
                 self._records[job_id] = self._with(
-                    self._records[job_id], status="succeeded",
+                    self._records[job_id],
+                    status="succeeded",
                     finished_at=datetime.now().isoformat(),
                 )
             except Exception as e:
                 logger.exception("job %s (%s) failed", job_id, job.key)
                 self._records[job_id] = self._with(
-                    self._records[job_id], status="failed",
-                    error=str(e), finished_at=datetime.now().isoformat(),
+                    self._records[job_id],
+                    status="failed",
+                    error=str(e),
+                    finished_at=datetime.now().isoformat(),
                 )
             finally:
                 self._inflight_by_key.pop(job.key, None)
@@ -203,7 +213,8 @@ class InProcJobRunner:
             existing.cancel()
         loop = asyncio.get_event_loop()
         self._idle_timers[event.chat_id] = loop.call_later(
-            self._idle_after, lambda: asyncio.create_task(self._fire_idle(event)),
+            self._idle_after,
+            lambda: asyncio.create_task(self._fire_idle(event)),
         )
 
     async def _fire_idle(self, event: LifecycleEvent) -> None:

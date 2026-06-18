@@ -133,7 +133,6 @@ def test_gateway_runtime_rejects_http_channel_config():
         ws.resolve_gateway_channels()
 
 
-
 def test_gateway_runtime_rejects_legacy_runtime_agent():
     with pytest.raises(Exception, match="runtime.agent"):
         Workspace(".", ".bos", {"runtime": {"agent": "main", "actors": {"main": {"agent": "main"}}}})

@@ -139,17 +139,20 @@ class DefaultMemoryConsolidator:
         out: list[MemoryOperation] = []
         for raw in ops_in:
             try:
-                out.append(MemoryOperation(
-                    op=raw["op"], reason=raw["reason"],
-                    source_turn_ids=list(raw.get("source_turn_ids", [])),
-                    target_id=raw.get("target_id"),
-                    content=raw.get("content"),
-                    summary=raw.get("summary"),
-                    tags=raw.get("tags"),
-                    importance=raw.get("importance"),
-                    maxim_key=raw.get("maxim_key"),
-                    requested_by=raw.get("requested_by", "consolidator"),
-                ))
+                out.append(
+                    MemoryOperation(
+                        op=raw["op"],
+                        reason=raw["reason"],
+                        source_turn_ids=list(raw.get("source_turn_ids", [])),
+                        target_id=raw.get("target_id"),
+                        content=raw.get("content"),
+                        summary=raw.get("summary"),
+                        tags=raw.get("tags"),
+                        importance=raw.get("importance"),
+                        maxim_key=raw.get("maxim_key"),
+                        requested_by=raw.get("requested_by", "consolidator"),
+                    )
+                )
             except (KeyError, TypeError):
                 logger.warning("consolidator: dropping malformed op %r", raw)
         return out

@@ -35,7 +35,9 @@ class TestDataContracts:
 
         rec = AuditRecord(
             op=MemoryOperation(op="NOOP", reason="declined"),
-            result="noop", entry_id=None, at="2026-06-17T00:00:00",
+            result="noop",
+            entry_id=None,
+            at="2026-06-17T00:00:00",
         )
         assert rec.result == "noop"
         assert rec.error is None
@@ -49,7 +51,9 @@ from bos.plugins.memory.operation_service import (  # noqa: E402
 
 def _svc(tmp_path, backend, maxim_keys=("user", "soul", "identity", "rules")):
     return DefaultMemoryOperationService(
-        backend, audit_path=tmp_path / "audit.jsonl", maxim_keys=set(maxim_keys),
+        backend,
+        audit_path=tmp_path / "audit.jsonl",
+        maxim_keys=set(maxim_keys),
     )
 
 
@@ -85,9 +89,9 @@ class TestApply:
         b = InMemMemoryExtension()
         eid = await b.ingest_memory("stale fact")
         svc = _svc(tmp_path, b)
-        recs = await svc.apply(
-            [MemoryOperation(op="INVALIDATE", reason="user said stop", target_id=eid, requested_by="user")]
-        )
+        recs = await svc.apply([
+            MemoryOperation(op="INVALIDATE", reason="user said stop", target_id=eid, requested_by="user")
+        ])
         assert recs[0].result == "applied"
         assert await b.get_memory(eid) is None
         assert (await b.get_memory(eid, include_invalid=True)).metadata["invalidated_by"] == "user"
@@ -112,9 +116,7 @@ class TestApply:
         b = InMemMemoryExtension()
         eid = await b.ingest_memory("a durable pattern")
         svc = _svc(tmp_path, b)
-        recs = await svc.apply(
-            [MemoryOperation(op="PROMOTE", reason="x", target_id=eid, maxim_key="bogus")]
-        )
+        recs = await svc.apply([MemoryOperation(op="PROMOTE", reason="x", target_id=eid, maxim_key="bogus")])
         assert recs[0].result == "rejected"
 
     @pytest.mark.asyncio
@@ -158,10 +160,14 @@ class TestMaximCompact:
         b = InMemMemoryExtension()
         await b.set_maxim("user", "old long content\n[2026-01-01 10:00] note A\n[2026-01-02 11:00] note B")
         svc = _svc(tmp_path, b)
-        recs = await svc.apply([MemoryOperation(
-            op="UPDATE", reason="compact maxim notes",
-            maxim_key="user", content="compacted prose: A and B",
-        )])
+        recs = await svc.apply([
+            MemoryOperation(
+                op="UPDATE",
+                reason="compact maxim notes",
+                maxim_key="user",
+                content="compacted prose: A and B",
+            )
+        ])
         assert recs[0].result == "applied"
         assert await b.get_maxim("user") == "compacted prose: A and B"
 
@@ -169,18 +175,27 @@ class TestMaximCompact:
     async def test_update_maxim_unknown_key_rejected(self, tmp_path):
         b = InMemMemoryExtension()
         svc = _svc(tmp_path, b)
-        recs = await svc.apply([MemoryOperation(
-            op="UPDATE", reason="x", maxim_key="bogus", content="x",
-        )])
+        recs = await svc.apply([
+            MemoryOperation(
+                op="UPDATE",
+                reason="x",
+                maxim_key="bogus",
+                content="x",
+            )
+        ])
         assert recs[0].result == "rejected"
 
     @pytest.mark.asyncio
     async def test_update_maxim_requires_content(self, tmp_path):
         b = InMemMemoryExtension()
         svc = _svc(tmp_path, b)
-        recs = await svc.apply([MemoryOperation(
-            op="UPDATE", reason="x", maxim_key="user",
-        )])
+        recs = await svc.apply([
+            MemoryOperation(
+                op="UPDATE",
+                reason="x",
+                maxim_key="user",
+            )
+        ])
         assert recs[0].result == "rejected"
 
     @pytest.mark.asyncio
@@ -188,7 +203,13 @@ class TestMaximCompact:
         b = InMemMemoryExtension()
         eid = await b.ingest_memory("a fact")
         svc = _svc(tmp_path, b)
-        recs = await svc.apply([MemoryOperation(
-            op="UPDATE", reason="x", maxim_key="user", target_id=eid, content="y",
-        )])
+        recs = await svc.apply([
+            MemoryOperation(
+                op="UPDATE",
+                reason="x",
+                maxim_key="user",
+                target_id=eid,
+                content="y",
+            )
+        ])
         assert recs[0].result == "rejected"
