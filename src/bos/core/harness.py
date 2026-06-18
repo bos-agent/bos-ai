@@ -18,9 +18,12 @@ from ._utils import (
 from .agent import Agent, ChainInterceptor
 from .contract import (
     AgentPlugin,
+    BackgroundLLM,
     ChatStore,
     Consolidator,
     HarnessPlugin,
+    JobRunner,
+    LifecycleBus,
     MailBox,
     MailRoute,
     PluginServices,
@@ -131,9 +134,9 @@ class AgentHarness:
         self.consolidator: Consolidator | None = None
         self.interceptor: ChainInterceptor | None = None
         self.llm: LLMClient | None = None
-        self.events = None  # type: ignore[assignment]  # LifecycleBus | None
-        self.jobs = None  # type: ignore[assignment]    # JobRunner | None
-        self.background_llm = None  # type: ignore[assignment]  # BackgroundLLM | None
+        self.events: LifecycleBus | None = None
+        self.jobs: JobRunner | None = None
+        self.background_llm: BackgroundLLM | None = None
 
         # Plugin state
         self._harness_plugins: dict[str, HarnessPlugin] = {}
