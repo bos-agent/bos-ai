@@ -86,12 +86,16 @@ class AgentActor:
     Messages arriving during an active turn are rejected immediately.
     """
 
-    def __init__(self, agent: Agent, mailbox: MailBox, chat_state: ChatState | None = None):
+    def __init__(
+        self, agent: Agent, mailbox: MailBox, chat_state: ChatState | None = None,
+        *, lifecycle_emitter: Any = None,
+    ):
         self._address = mailbox.address
         self._agent = agent
         self._mailbox = mailbox
         self._chat_state = chat_state or ChatState()
         self._sessions: dict[str, SessionState] = {}
+        self._lifecycle_emitter = lifecycle_emitter
         self._command_tasks: set[asyncio.Task] = set()
 
     async def aclose(self) -> None:
@@ -202,6 +206,12 @@ class AgentActor:
         if task is not None:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+        emitter = getattr(self, "_lifecycle_emitter", None)
+        if emitter is not None:
+            try:
+                await emitter(chat_id=chat_id, actor_name=self._actor_name())
+            except Exception:
+                logger.exception("session_close emitter raised")
 
     def _spawn_command_task(self, env: Envelope) -> None:
         task = asyncio.create_task(self._handle_command(env))

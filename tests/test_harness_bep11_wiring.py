@@ -126,3 +126,35 @@ class _DummyCoordinator:
 
 class _NoopMailbox:
     async def send(self, *a, **kw): pass
+
+
+class _StubAgent:
+    name = "A"
+
+
+class TestSessionCloseEmission:
+    @pytest.mark.asyncio
+    async def test_retire_session_emits_session_close(self):
+        from bos.core.actor import AgentActor, SessionState
+
+        seen = []
+
+        async def emitter(*, chat_id, actor_name):
+            seen.append((chat_id, actor_name))
+
+        actor = AgentActor.__new__(AgentActor)
+        actor._sessions = {"c1": SessionState(chat_id="c1")}
+        actor._lifecycle_emitter = emitter
+        actor._agent = _StubAgent()
+        actor._address = "agent@A"
+        await actor.retire_session("c1")
+        assert seen == [("c1", "A")]
+
+    @pytest.mark.asyncio
+    async def test_retire_session_no_emitter_is_silent(self):
+        from bos.core.actor import AgentActor, SessionState
+
+        actor = AgentActor.__new__(AgentActor)
+        actor._sessions = {"c1": SessionState(chat_id="c1")}
+        # no _lifecycle_emitter attribute at all — must not raise
+        await actor.retire_session("c1")

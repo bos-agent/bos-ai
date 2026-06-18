@@ -165,10 +165,23 @@ class ActorManager:
         agent = await self.harness.create_agent(record.config.agent, agent_cfg=agent_cfg)
         mailbox = self.harness.mail_route.bind(record.config.address)
         record.mailbox = mailbox
+        bus = getattr(self.harness, "events", None)
+
+        async def _emit_close(*, chat_id: str, actor_name: str | None) -> None:
+            if bus is None:
+                return
+            from bos.core.contract import LifecycleEvent
+
+            await bus.emit(LifecycleEvent(
+                kind="session_close", chat_id=chat_id, actor_name=actor_name,
+                base_revision=None, payload={},
+            ))
+
         record.actor = CoordinatedActor(
             agent, mailbox,
             chat_coordinator=self.chat_coordinator,
-            lifecycle_bus=getattr(self.harness, "events", None),
+            lifecycle_bus=bus,
+            lifecycle_emitter=_emit_close,
         )
         record.status = "running"
         record.error = None
