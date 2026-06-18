@@ -179,7 +179,12 @@ class ActorManager:
         record.mailbox = mailbox
         bus = getattr(self.harness, "events", None)
 
-        async def _emit_close(*, chat_id: str, actor_name: str | None) -> None:
+        async def _emit_close(
+            *,
+            chat_id: str,
+            actor_name: str | None,
+            base_revision: int | None,
+        ) -> None:
             if bus is None:
                 return
             from bos.core.contract import LifecycleEvent
@@ -189,7 +194,7 @@ class ActorManager:
                     kind="session_close",
                     chat_id=chat_id,
                     actor_name=actor_name,
-                    base_revision=None,
+                    base_revision=base_revision,
                     payload={},
                 )
             )

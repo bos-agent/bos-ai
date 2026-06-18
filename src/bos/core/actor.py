@@ -28,6 +28,10 @@ class SessionExecution:
     generation: int = 0
     reply_recipient: str | None = None
     reply_chat_id: str | None = None
+    # Most recent ChatCommit.revision the actor observed for this session.
+    # `retire_session` forwards it to the lifecycle emitter so session_close
+    # carries a real base_revision without an out-of-band chat_store lookup.
+    last_committed_revision: int | None = None
 
 
 @dataclass
@@ -216,7 +220,11 @@ class AgentActor:
         emitter = getattr(self, "_lifecycle_emitter", None)
         if emitter is not None:
             try:
-                await emitter(chat_id=chat_id, actor_name=self._actor_name())
+                await emitter(
+                    chat_id=chat_id,
+                    actor_name=self._actor_name(),
+                    base_revision=session.execution.last_committed_revision,
+                )
             except Exception:
                 logger.exception("session_close emitter raised")
 
@@ -334,6 +342,9 @@ class AgentActor:
             def _observe_commit(commit: Any) -> None:
                 nonlocal committed_revision
                 committed_revision = getattr(commit, "revision", None)
+                session_now = self._sessions.get(chat_id)
+                if session_now is not None and committed_revision is not None:
+                    session_now.execution.last_committed_revision = committed_revision
 
             response = await self._agent.ask(
                 chat_id,

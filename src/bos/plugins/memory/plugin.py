@@ -163,13 +163,14 @@ class MemoryHarnessPlugin:
         from .job import MemoryConsolidationJob
 
         def factory(event):
-            if event is None:
+            # No event, or session ended without committing any turn -> nothing to consolidate.
+            if event is None or event.base_revision is None:
                 return None
             return MemoryConsolidationJob(
                 scope=self._scope,
                 chat_id=event.chat_id,
                 actor_name=event.actor_name,
-                base_revision=int(event.base_revision or 0),
+                base_revision=int(event.base_revision),
                 trigger="session_close",
                 policy=self._policy,
                 chat_store=self._services.chat_store,

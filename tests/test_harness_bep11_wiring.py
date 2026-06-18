@@ -159,13 +159,14 @@ class _StubAgent:
 
 class TestSessionCloseEmission:
     @pytest.mark.asyncio
-    async def test_retire_session_emits_session_close(self):
+    async def test_retire_session_emits_session_close_with_none_revision_when_empty(self):
+        """A session that never committed a turn closes with base_revision=None."""
         from bos.core.actor import AgentActor, SessionState
 
         seen = []
 
-        async def emitter(*, chat_id, actor_name):
-            seen.append((chat_id, actor_name))
+        async def emitter(*, chat_id, actor_name, base_revision):
+            seen.append((chat_id, actor_name, base_revision))
 
         actor = AgentActor.__new__(AgentActor)
         actor._sessions = {"c1": SessionState(chat_id="c1")}
@@ -173,7 +174,27 @@ class TestSessionCloseEmission:
         actor._agent = _StubAgent()
         actor._address = "agent@A"
         await actor.retire_session("c1")
-        assert seen == [("c1", "A")]
+        assert seen == [("c1", "A", None)]
+
+    @pytest.mark.asyncio
+    async def test_retire_session_forwards_last_committed_revision(self):
+        """When the session has observed a commit, retire_session forwards that revision."""
+        from bos.core.actor import AgentActor, SessionState
+
+        seen = []
+
+        async def emitter(*, chat_id, actor_name, base_revision):
+            seen.append((chat_id, actor_name, base_revision))
+
+        actor = AgentActor.__new__(AgentActor)
+        session = SessionState(chat_id="c1")
+        session.execution.last_committed_revision = 7
+        actor._sessions = {"c1": session}
+        actor._lifecycle_emitter = emitter
+        actor._agent = _StubAgent()
+        actor._address = "agent@A"
+        await actor.retire_session("c1")
+        assert seen == [("c1", "A", 7)]
 
     @pytest.mark.asyncio
     async def test_retire_session_no_emitter_is_silent(self):
@@ -183,6 +204,38 @@ class TestSessionCloseEmission:
         actor._sessions = {"c1": SessionState(chat_id="c1")}
         # no _lifecycle_emitter attribute at all — must not raise
         await actor.retire_session("c1")
+
+
+class TestSessionCloseFactoryGuard:
+    @pytest.mark.asyncio
+    async def test_factory_returns_none_when_event_has_no_revision(self, tmp_path):
+        """An empty-session session_close (base_revision=None) → factory returns
+        None → JobRunner does not enqueue a no-op consolidation job."""
+        from bos.core.contract import LifecycleEvent
+        from bos.core.harness import AgentHarness
+        from bos.plugins.memory.plugin import MemoryHarnessPlugin
+
+        async with AgentHarness(bos_dir=tmp_path, workspace=tmp_path) as h:
+            plugin = MemoryHarnessPlugin()
+            plugin._cfg = {
+                **plugin.default_config(),
+                "backend": "in_memory",
+                "consolidation": {"enabled": True, "retention_days": 30, "auto_apply": False},
+            }
+            await plugin.setup(h._plugin_services)
+            await h.events.emit(
+                LifecycleEvent(
+                    kind="session_close",
+                    chat_id="c-empty",
+                    actor_name="A",
+                    base_revision=None,
+                    payload={},
+                )
+            )
+            await h.jobs.drain(timeout=0.5)
+            await h.jobs.start()
+            # No job was enqueued for the empty session
+            assert (await h.jobs.list()) == []
 
 
 class TestE2E:
