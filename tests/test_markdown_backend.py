@@ -25,3 +25,17 @@ class TestMarkdownRegression:
         assert "db" in entry.tags
         hits = await b.search_memories("postgresql")
         assert [h.id for h in hits] == [eid]
+
+
+class TestMemoryEntryDefaults:
+    def test_metadata_defaults_to_dict(self):
+        from bos.plugins.memory.scoped_memory import MemoryEntry
+
+        e = MemoryEntry(id="x", content="c")
+        assert e.metadata == {}
+
+    def test_index_entry_shape(self):
+        from bos.plugins.memory.scoped_memory import MemoryIndexEntry
+
+        ie = MemoryIndexEntry(id="x", tags=["a"], summary="one line")
+        assert (ie.id, ie.tags, ie.summary) == ("x", ["a"], "one line")
