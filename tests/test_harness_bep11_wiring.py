@@ -158,3 +158,39 @@ class TestSessionCloseEmission:
         actor._sessions = {"c1": SessionState(chat_id="c1")}
         # no _lifecycle_emitter attribute at all — must not raise
         await actor.retire_session("c1")
+
+
+class TestE2E:
+    @pytest.mark.asyncio
+    async def test_plugin_can_bind_trigger_and_receive_event(self, tmp_path):
+        """A consumer binds 'session_close' on the JobRunner, emits an event
+        via the bus, the bound factory builds a Job, the runner runs it,
+        the side effect is observable. This is the BEP 10 consolidation flow's
+        contract."""
+        from bos.core.contract import LifecycleEvent
+        from bos.core.harness import AgentHarness
+
+        async with AgentHarness(bos_dir=tmp_path, workspace=tmp_path) as h:
+            log: list[int] = []
+
+            class _RecJob:
+                def __init__(self, key, rev):
+                    self.key = key
+                    self._rev = rev
+                async def run(self):
+                    log.append(self._rev)
+
+            def factory(event):
+                if event is None:
+                    return None
+                return _RecJob(key=f"{event.chat_id}:{event.base_revision}", rev=event.base_revision or 0)
+
+            h.jobs.bind_trigger("session_close", factory)
+            await h.events.emit(LifecycleEvent(
+                kind="session_close", chat_id="c1", actor_name="A",
+                base_revision=42, payload={},
+            ))
+            await h.jobs.drain(timeout=1.0)
+            # restart so harness __aexit__ can drain cleanly
+            await h.jobs.start()
+            assert log == [42]

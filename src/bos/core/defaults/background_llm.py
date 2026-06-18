@@ -51,7 +51,8 @@ class DefaultBackgroundLLM:
                 if attempt >= self._max_retries:
                     raise ValueError(f"BackgroundLLM response failed schema validation: {last_error}")
                 attempt += 1
-                messages = [*messages, {
-                    "role": "user",
-                    "content": f"Previous response failed schema validation: {last_error}. Reply ONLY with JSON matching the schema.",
-                }]
+                hint = (
+                    f"Previous response failed schema validation: {last_error}. "
+                    f"Reply ONLY with JSON matching the schema."
+                )
+                messages = [*messages, {"role": "user", "content": hint}]

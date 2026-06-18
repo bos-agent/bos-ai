@@ -25,7 +25,12 @@ class _RecJob:
 class TestStructural:
     def test_types_exist(self):
         from bos.core.contract import (
-            Job, JobRecord, JobRunner, JobStatus, JobTrigger, ep_job_runner,
+            Job,
+            JobRecord,
+            JobRunner,
+            JobStatus,
+            JobTrigger,
+            ep_job_runner,
         )
         assert "session_close" in JobTrigger.__args__
         assert "manual" in JobTrigger.__args__

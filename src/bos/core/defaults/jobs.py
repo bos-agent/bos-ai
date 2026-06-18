@@ -14,7 +14,13 @@ from datetime import datetime
 from typing import Any
 
 from bos.core.contract import (
-    Job, JobRecord, JobStatus, JobTrigger, LifecycleBus, LifecycleEvent, ep_job_runner,
+    Job,
+    JobRecord,
+    JobStatus,
+    JobTrigger,
+    LifecycleBus,
+    LifecycleEvent,
+    ep_job_runner,
 )
 
 logger = logging.getLogger(__name__)
