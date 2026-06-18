@@ -94,11 +94,102 @@ class MemoryHarnessPlugin:
             "scope": "workspace",
             "backend": "_default",
             "retrieval": {"auto_recall": True, "index_in_prompt": True, "index_max": 50, "top_k": 5},
+            "consolidation": {"enabled": False, "retention_days": 30, "auto_apply": False},
         }
 
     async def setup(self, services: PluginServices) -> None:
+        from pathlib import Path
+
+        from .consolidator import ConsolidationPolicy, DefaultMemoryConsolidator
+        from ._watermark import WatermarkStore
+        from .operation_service import DefaultMemoryOperationService
+
         self._services = services
-        self._backend: MemoryBackend | None = None
+        cfg = getattr(self, "_cfg", None) or dict(self.default_config())
+        self._cfg = cfg
+
+        # Eager backend (was lazy at bind() time; consolidation needs it at setup)
+        backend_name = cfg.get("backend", "_default")
+        backend_ext = pep_memory_backend.get(backend_name)
+        if backend_ext is None:
+            raise ValueError(f"MemoryPlugin: unknown backend {backend_name!r}")
+        self._backend: MemoryBackend = backend_ext.fn(bos_dir=services.bos_dir)
+
+        # L1 operation service + audit log under the memory store dir
+        memory_dir = Path(services.bos_dir) / "memory"
+        memory_dir.mkdir(parents=True, exist_ok=True)
+        self._maxim_keys = set(cfg.get("maxims", []))
+        self._operation_service = DefaultMemoryOperationService(
+            self._backend,
+            audit_path=memory_dir / "audit.jsonl",
+            maxim_keys=self._maxim_keys,
+        )
+        self._watermarks = WatermarkStore(memory_dir / "watermarks.json")
+        self._consolidator = (
+            DefaultMemoryConsolidator(services.background_llm, maxim_keys=self._maxim_keys)
+            if services.background_llm is not None
+            else None
+        )
+
+        cons_cfg = dict(cfg.get("consolidation", {}))
+        self._policy = ConsolidationPolicy(
+            enabled=bool(cons_cfg.get("enabled", False)),
+            retention_days=int(cons_cfg.get("retention_days", 30)),
+            auto_apply=bool(cons_cfg.get("auto_apply", False)),
+        )
+        self._scope = cfg.get("scope") or "workspace"
+
+        if (
+            self._policy.enabled
+            and services.events is not None
+            and services.jobs is not None
+            and services.background_llm is not None
+            and services.chat_store is not None
+        ):
+            services.jobs.bind_trigger("session_close", self._make_consolidation_job_factory())
+
+    def _make_consolidation_job_factory(self):
+        from .job import MemoryConsolidationJob
+
+        def factory(event):
+            if event is None:
+                return None
+            return MemoryConsolidationJob(
+                scope=self._scope, chat_id=event.chat_id, actor_name=event.actor_name,
+                base_revision=int(event.base_revision or 0), trigger="session_close",
+                policy=self._policy, chat_store=self._services.chat_store,
+                backend=self._backend, consolidator=self._consolidator,
+                operation_service=self._operation_service, watermarks=self._watermarks,
+                maxim_keys=self._maxim_keys,
+            )
+
+        return factory
+
+    async def run_consolidation_now(self, chat_id: str, *, dry_run: bool | None = None):
+        """Build and run a consolidation job synchronously (admin "run now")."""
+        from .consolidator import ConsolidationPolicy
+        from .job import MemoryConsolidationJob
+
+        policy = self._policy
+        if dry_run is not None:
+            policy = ConsolidationPolicy(
+                enabled=policy.enabled, retention_days=policy.retention_days,
+                auto_apply=not dry_run,
+            )
+        rev = await self._services.chat_store.get_revision(chat_id)
+        if rev == 0:
+            return []
+        before = len(await self._operation_service.audit())
+        job = MemoryConsolidationJob(
+            scope=self._scope, chat_id=chat_id, actor_name=None,
+            base_revision=rev, trigger="manual", policy=policy,
+            chat_store=self._services.chat_store, backend=self._backend,
+            consolidator=self._consolidator,
+            operation_service=self._operation_service,
+            watermarks=self._watermarks, maxim_keys=self._maxim_keys,
+        )
+        await job.run()
+        return (await self._operation_service.audit())[before:]
 
     def validate_config(self, config: Mapping[str, Any]) -> None:
         maxims = config.get("maxims", [])
@@ -111,13 +202,14 @@ class MemoryHarnessPlugin:
             raise ValueError("MemoryPlugin: 'scope' must not be empty")
 
     def bind(self, config: Mapping[str, Any]) -> AgentPlugin:
-        if self._backend is None:
+        backend = self._backend
+        if backend is None:
+            # Defensive — setup() should have constructed this; fall back to lazy.
             backend_name = config.get("backend", "_default")
             backend_ext = pep_memory_backend.get(backend_name)
             if backend_ext is None:
                 raise ValueError(f"MemoryPlugin: unknown backend {backend_name!r}")
-            self._backend = backend_ext.fn(bos_dir=self._services.bos_dir)
-        backend = self._backend
+            backend = self._backend = backend_ext.fn(bos_dir=self._services.bos_dir)
         scope = config.get("scope")
         if scope and scope != "workspace":
             from .scoped_memory import ScopedMemory
