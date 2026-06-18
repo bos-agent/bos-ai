@@ -75,12 +75,24 @@ class DefaultMemoryOperationService:
 
     def _validate(self, op: MemoryOperation) -> str | None:
         """Return an error string if invalid, else None."""
-        if op.op in ("ADD",) and not op.content:
+        if op.op == "ADD" and not op.content:
             return "ADD requires content"
-        if op.op in ("UPDATE", "INVALIDATE", "PROMOTE", "LINK") and not op.target_id:
+        # UPDATE has two flavors: entry-targeted (target_id) and maxim-targeted (maxim_key).
+        if op.op == "UPDATE":
+            if op.maxim_key is not None and op.target_id is not None:
+                return "UPDATE: maxim_key and target_id are mutually exclusive"
+            if op.maxim_key is not None:
+                if op.maxim_key not in self._maxim_keys:
+                    return f"UPDATE maxim_key {op.maxim_key!r} not in allowed set"
+                if not op.content:
+                    return "UPDATE on a maxim requires content"
+            else:
+                if not op.target_id:
+                    return "UPDATE requires target_id (or maxim_key for maxim rewrite)"
+                if op.content is None and op.tags is None and op.importance is None:
+                    return "UPDATE requires at least one of content/tags/importance"
+        if op.op in ("INVALIDATE", "PROMOTE", "LINK") and not op.target_id:
             return f"{op.op} requires target_id"
-        if op.op == "UPDATE" and op.content is None and op.tags is None and op.importance is None:
-            return "UPDATE requires at least one of content/tags/importance"
         if op.op == "PROMOTE":
             if not op.maxim_key:
                 return "PROMOTE requires maxim_key"
@@ -104,8 +116,8 @@ class DefaultMemoryOperationService:
             return await self._record(op, "rejected", None, error=err)
         if op.op == "NOOP":
             return await self._record(op, "noop", None)
-        # target existence check for ops that need it
-        if op.op in ("UPDATE", "INVALIDATE", "PROMOTE", "LINK"):
+        # target existence check for ops that need it (maxim-targeted UPDATE has no target_id)
+        if op.op in ("UPDATE", "INVALIDATE", "PROMOTE", "LINK") and op.target_id is not None:
             if await self._backend.get_memory(op.target_id, include_invalid=True) is None:
                 return await self._record(op, "rejected", op.target_id, error=f"target {op.target_id} not found")
         if dry_run:
@@ -117,10 +129,14 @@ class DefaultMemoryOperationService:
                 summary=op.summary, source_turn_ids=op.source_turn_ids,
             )
         elif op.op == "UPDATE":
-            await self._backend.update_memory(
-                op.target_id, content=op.content, tags=op.tags,
-                importance=op.importance, summary=op.summary, links=op.links,
-            )
+            if op.maxim_key is not None:
+                await self._backend.set_maxim(op.maxim_key, op.content)
+                entry_id = None
+            else:
+                await self._backend.update_memory(
+                    op.target_id, content=op.content, tags=op.tags,
+                    importance=op.importance, summary=op.summary, links=op.links,
+                )
         elif op.op == "INVALIDATE":
             await self._backend.invalidate_memory(op.target_id, requested_by=op.requested_by)
         elif op.op == "LINK":

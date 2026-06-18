@@ -150,3 +150,45 @@ class TestServiceHelpers:
         svc = _svc(tmp_path, b)
         await svc.restore(eid)
         assert await b.get_memory(eid) is not None
+
+
+class TestMaximCompact:
+    @pytest.mark.asyncio
+    async def test_update_with_maxim_key_rewrites_maxim(self, tmp_path):
+        b = InMemMemoryExtension()
+        await b.set_maxim("user", "old long content\n[2026-01-01 10:00] note A\n[2026-01-02 11:00] note B")
+        svc = _svc(tmp_path, b)
+        recs = await svc.apply([MemoryOperation(
+            op="UPDATE", reason="compact maxim notes",
+            maxim_key="user", content="compacted prose: A and B",
+        )])
+        assert recs[0].result == "applied"
+        assert await b.get_maxim("user") == "compacted prose: A and B"
+
+    @pytest.mark.asyncio
+    async def test_update_maxim_unknown_key_rejected(self, tmp_path):
+        b = InMemMemoryExtension()
+        svc = _svc(tmp_path, b)
+        recs = await svc.apply([MemoryOperation(
+            op="UPDATE", reason="x", maxim_key="bogus", content="x",
+        )])
+        assert recs[0].result == "rejected"
+
+    @pytest.mark.asyncio
+    async def test_update_maxim_requires_content(self, tmp_path):
+        b = InMemMemoryExtension()
+        svc = _svc(tmp_path, b)
+        recs = await svc.apply([MemoryOperation(
+            op="UPDATE", reason="x", maxim_key="user",
+        )])
+        assert recs[0].result == "rejected"
+
+    @pytest.mark.asyncio
+    async def test_update_maxim_and_target_id_mutually_exclusive(self, tmp_path):
+        b = InMemMemoryExtension()
+        eid = await b.ingest_memory("a fact")
+        svc = _svc(tmp_path, b)
+        recs = await svc.apply([MemoryOperation(
+            op="UPDATE", reason="x", maxim_key="user", target_id=eid, content="y",
+        )])
+        assert recs[0].result == "rejected"
