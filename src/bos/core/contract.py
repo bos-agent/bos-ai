@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -229,6 +229,26 @@ class TurnInterceptor(Protocol):
 @runtime_checkable
 class EventSink(Protocol):
     async def emit(self, event: TurnEvent) -> None: ...
+
+
+# ── BEP 11 §1: Lifecycle bus ───────────────────────────────────────────────
+
+LifecycleKind = Literal["turn_complete", "session_close"]
+
+
+@dataclass(frozen=True)
+class LifecycleEvent:
+    kind: LifecycleKind
+    chat_id: str
+    actor_name: str | None
+    base_revision: int | None
+    payload: dict[str, Any] = field(default_factory=dict)
+
+
+@runtime_checkable
+class LifecycleBus(Protocol):
+    def subscribe(self, kind: LifecycleKind, handler: Callable[[LifecycleEvent], Awaitable[None]]) -> None: ...
+    async def emit(self, event: LifecycleEvent) -> None: ...
 
 
 ep_mail_route = ExtensionPoint(
