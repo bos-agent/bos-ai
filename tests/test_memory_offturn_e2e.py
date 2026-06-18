@@ -62,6 +62,9 @@ async def test_mid_chat_fact_persists_into_next_session(tmp_path):
     await plugin.setup(services)
 
     try:
+        # Pre-bind the agent so the plugin has its bundle ready when session_close fires.
+        plugin.bind({**plugin._cfg, "agent_name": "alice"})
+
         await chat_store.commit_turn(
             "c1",
             [
@@ -74,15 +77,16 @@ async def test_mid_chat_fact_persists_into_next_session(tmp_path):
             LifecycleEvent(
                 kind="session_close",
                 chat_id="c1",
-                actor_name=None,
+                actor_name="alice",
                 base_revision=head,
                 payload={},
             )
         )
         await runner.drain(timeout=2.0)
 
-        hits = await plugin._backend.search_memories("dark mode")
+        bundle = plugin._for("alice")
+        hits = await bundle.backend.search_memories("dark mode")
         assert hits and hits[0].content == "user prefers dark mode"
-        assert await plugin._watermarks.get("workspace", "c1") == head
+        assert await bundle.watermarks.get("c1") == head
     finally:
         await runner.drain(timeout=0.0)

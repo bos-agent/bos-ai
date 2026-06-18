@@ -46,9 +46,8 @@ class TestJobRun:
         consolidator = DefaultMemoryConsolidator(blm, maxim_keys={"user"})
         head = await chat_store.get_revision("c1")
         job = MemoryConsolidationJob(
-            scope="workspace",
             chat_id="c1",
-            actor_name=None,
+            actor_name="test-agent",
             base_revision=head,
             trigger="manual",
             policy=ConsolidationPolicy(auto_apply=False),
@@ -63,7 +62,7 @@ class TestJobRun:
         # dry-run: no entries actually created
         assert await backend.search_memories("dark") == []
         # but watermark advanced
-        assert await wm.get("workspace", "c1") == head
+        assert await wm.get("c1") == head
         # and dry-run record is in audit
         audit = await op_svc.audit()
         assert audit and audit[0].result == "dry_run"
@@ -87,9 +86,8 @@ class TestJobRun:
         consolidator = DefaultMemoryConsolidator(blm, maxim_keys={"user"})
         head = await chat_store.get_revision("c1")
         job = MemoryConsolidationJob(
-            scope="workspace",
             chat_id="c1",
-            actor_name=None,
+            actor_name="test-agent",
             base_revision=head,
             trigger="manual",
             policy=ConsolidationPolicy(auto_apply=True),
@@ -102,7 +100,7 @@ class TestJobRun:
         )
         await job.run()
         assert (await backend.search_memories("dark"))[0].content == "prefers dark mode"
-        assert await wm.get("workspace", "c1") == head
+        assert await wm.get("c1") == head
 
     @pytest.mark.asyncio
     async def test_watermark_does_not_advance_on_failure(self, tmp_path):
@@ -122,9 +120,8 @@ class TestJobRun:
 
         head = await chat_store.get_revision("c1")
         job = MemoryConsolidationJob(
-            scope="workspace",
             chat_id="c1",
-            actor_name=None,
+            actor_name="test-agent",
             base_revision=head,
             trigger="manual",
             policy=ConsolidationPolicy(auto_apply=True),
@@ -137,19 +134,18 @@ class TestJobRun:
         )
         with pytest.raises(RuntimeError, match="network down"):
             await job.run()
-        assert await wm.get("workspace", "c1") == 0  # not advanced
+        assert await wm.get("c1") == 0  # not advanced
 
     @pytest.mark.asyncio
-    async def test_idempotency_key_includes_scope_chat_revision_trigger(self, tmp_path):
+    async def test_idempotency_key_includes_actor_chat_revision_trigger(self, tmp_path):
         op_svc = DefaultMemoryOperationService(
             InMemMemoryExtension(),
             audit_path=tmp_path / "audit.jsonl",
             maxim_keys={"user"},
         )
         job = MemoryConsolidationJob(
-            scope="workspace",
             chat_id="c1",
-            actor_name=None,
+            actor_name="test-agent",
             base_revision=4,
             trigger="manual",
             policy=ConsolidationPolicy(),
@@ -160,4 +156,4 @@ class TestJobRun:
             watermarks=WatermarkStore(tmp_path / "wm.json"),
             maxim_keys={"user"},
         )
-        assert job.key == "consolidate:workspace:c1:4:manual"
+        assert job.key == "consolidate:test-agent:c1:4:manual"

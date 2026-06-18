@@ -20,7 +20,6 @@ class TestStructural:
         req = MemoryConsolidationRequest(
             chat_id="c1",
             actor_name="A",
-            scope="workspace",
             base_revision=4,
             trigger="manual",
             transcript_window=[],
@@ -63,7 +62,6 @@ class TestDefaultConsolidator:
         req = MemoryConsolidationRequest(
             chat_id="c1",
             actor_name=None,
-            scope="workspace",
             base_revision=1,
             trigger="manual",
             transcript_window=[],
@@ -90,7 +88,6 @@ class TestDefaultConsolidator:
         req = MemoryConsolidationRequest(
             chat_id="c1",
             actor_name=None,
-            scope="workspace",
             base_revision=1,
             trigger="manual",
             transcript_window=[],
@@ -122,7 +119,6 @@ class TestDefaultConsolidator:
         req = MemoryConsolidationRequest(
             chat_id="c1",
             actor_name=None,
-            scope="workspace",
             base_revision=1,
             trigger="manual",
             transcript_window=[Message(llm_message={"role": "user", "content": "I prefer dark mode"})],

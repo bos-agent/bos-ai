@@ -29,8 +29,7 @@ class ConsolidationPolicy:
 @dataclass(frozen=True)
 class MemoryConsolidationRequest:
     chat_id: str
-    actor_name: str | None
-    scope: str
+    actor_name: str
     base_revision: int
     trigger: JobTriggerName
     transcript_window: list[Message]
@@ -111,7 +110,7 @@ def _render_user_prompt(request: MemoryConsolidationRequest) -> str:
         for key, text in request.active_maxims.items():
             lines.append(f"[maxim={key}] {text}")
     lines.append("\n## Policy")
-    lines.append(f"scope={request.scope} trigger={request.trigger} auto_apply={request.policy.auto_apply}")
+    lines.append(f"actor={request.actor_name} trigger={request.trigger} auto_apply={request.policy.auto_apply}")
     return "\n".join(lines)
 
 

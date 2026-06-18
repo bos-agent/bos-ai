@@ -307,6 +307,7 @@ class TestHarnessConfig:
         from bos.plugins.memory.plugin import MemoryHarnessPlugin
 
         h = MemoryHarnessPlugin()
+        h._cfg = {**h.default_config(), "backend": "in_memory"}
         await h.setup(
             PluginServices(
                 bos_dir=tmp_path,
@@ -318,8 +319,7 @@ class TestHarnessConfig:
         )
         agent_plugin = h.bind({
             "maxims": ["user"],
-            "scope": "workspace",
-            "backend": "in_memory",
+            "agent_name": "alice",
             "retrieval": {"index_max": 7, "auto_recall": False, "top_k": 3, "index_in_prompt": True},
         })
         assert agent_plugin._index_max == 7

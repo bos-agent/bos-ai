@@ -290,6 +290,10 @@ class AgentHarness:
 
             plugin_binding = bindings.get(pname, {})
             cfg = dict(hp.default_config()) | (plugin_binding if isinstance(plugin_binding, dict) else {})
+            # Inject the resolved agent identity so per-actor plugins
+            # (e.g. MemoryPlugin) can key state by it. Mirrors Agent's
+            # `self._name = agent_name or kind` resolution (agent.py:345).
+            cfg["agent_name"] = agent_cfg.get("agent_name") or agent_cfg.get("kind") or "default"
             hp.validate_config(cfg)
             try:
                 agent_plugin = hp.bind(cfg)
@@ -297,7 +301,7 @@ class AgentHarness:
                 logger.error(
                     "Failed to bind plugin %r for agent %r",
                     pname,
-                    agent_cfg.get("agent_name") or "unknown",
+                    cfg["agent_name"],
                     exc_info=True,
                 )
                 raise

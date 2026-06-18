@@ -56,7 +56,9 @@ def test_consolidate_dry_run_prints_summary(tmp_path, monkeypatch):
     runner = CliRunner()
     result = runner.invoke(memory_cmd, ["consolidate", "--chat", "c1", "--dry-run"])
     assert result.exit_code == 0
-    assert "consolidat" in result.output.lower() or "no turns" in result.output.lower()
+    # CLI prints either a per-chat summary or a "no chat" hint
+    out = result.output.lower()
+    assert "applied=" in out or "no turns" in out or "(specify" in out
 
 
 def test_restore_missing_entry_is_safe(tmp_path, monkeypatch):
