@@ -43,15 +43,25 @@ class TestInMemBackend:
         assert "infra" in results[0].tags
 
     @pytest.mark.asyncio
-    async def test_inmem_memory_get_and_forget(self):
+    async def test_inmem_metadata_and_invalidate(self):
         store = InMemMemoryExtension()
-        eid = await store.ingest_memory("test fact", tags=["test"])
+        eid = await store.ingest_memory("fact", tags=["t"], importance=7, summary="s")
         entry = await store.get_memory(eid)
-        assert entry is not None
-        assert entry.content == "test fact"
-
-        await store.forget_memory(eid)
+        assert entry.metadata["importance"] == 7
+        assert entry.metadata["valid"] is True
+        await store.invalidate_memory(eid, requested_by="user")
         assert await store.get_memory(eid) is None
+        assert (await store.get_memory(eid, include_invalid=True)).metadata["valid"] is False
+        await store.restore_memory(eid)
+        assert await store.get_memory(eid) is not None
+
+    @pytest.mark.asyncio
+    async def test_inmem_list_index_orders_by_importance(self):
+        store = InMemMemoryExtension()
+        a = await store.ingest_memory("a", importance=2, summary="A")
+        b = await store.ingest_memory("b", importance=9, summary="B")
+        idx = await store.list_index()
+        assert [ie.id for ie in idx] == [b, a]
 
     @pytest.mark.asyncio
     async def test_inmem_search_returns_top_k(self):
@@ -67,10 +77,6 @@ class TestInMemBackend:
         results = await store.search_memories("nonexistent")
         assert results == []
 
-    @pytest.mark.asyncio
-    async def test_optimize_is_noop(self):
-        store = InMemMemoryExtension()
-        await store.optimize()
 
 
 class TestRememberTool:
