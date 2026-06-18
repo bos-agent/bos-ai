@@ -448,6 +448,9 @@ class PluginServices:
     consolidator: Consolidator
     subagents: SubagentRuntime
     chat_store: ChatStore | None = None
+    events: LifecycleBus | None = None
+    jobs: JobRunner | None = None
+    background_llm: BackgroundLLM | None = None
 
 
 @runtime_checkable

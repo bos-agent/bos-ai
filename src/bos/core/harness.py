@@ -155,6 +155,17 @@ class AgentHarness:
         self.consolidator = await self._create_consolidator()
         self.interceptor = ChainInterceptor(self._interceptors_impl)
 
+        # BEP 11 services: in-process LifecycleBus, JobRunner, BackgroundLLM.
+        from bos.core.contract import ep_job_runner
+        from bos.core.defaults.background_llm import DefaultBackgroundLLM
+        from bos.core.defaults.lifecycle import DefaultLifecycleBus
+
+        self.events = DefaultLifecycleBus()
+        self.jobs = await ep_job_runner.invoke(self._job_runner_impl, {"bus": self.events})
+        await self.jobs.start()
+        self._owned.append(self.jobs)
+        self.background_llm = DefaultBackgroundLLM(self.llm)
+
         # Build plugin services
         self._plugin_services = PluginServices(
             bos_dir=self._bos_root,
@@ -163,12 +174,22 @@ class AgentHarness:
             chat_store=self.chat_store,
             consolidator=self.consolidator,
             subagents=_HarnessSubagentRuntime(self),
+            events=self.events,
+            jobs=self.jobs,
+            background_llm=self.background_llm,
         )
 
         self._token = CURRENT_HARNESS.set(self)
         return self
 
     async def __aexit__(self, *exc) -> None:
+        # Drain BEP 11 JobRunner first — gives in-flight jobs a bounded window
+        # while BackgroundLLM/ChatStore are still alive (BEP 11 §4).
+        if self.jobs is not None:
+            try:
+                await self.jobs.drain(timeout=5.0)
+            except Exception:
+                logger.exception("Error draining JobRunner")
         await _aclose(self.interceptor)
         # Teardown harness plugins in reverse setup order
         for hp in reversed(list(self._harness_plugins.values())):
