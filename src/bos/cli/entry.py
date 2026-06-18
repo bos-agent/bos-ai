@@ -17,6 +17,7 @@ _LAZY_COMMANDS: dict[str, str] = {
     "gateway": "bos.cli.commands.agent:gateway",
     "ask": "bos.cli.commands.agent:ask",
     "tui": "bos.cli.commands.agent:tui",
+    "memory": "bos.cli.commands.memory:memory",
 }
 
 if os.environ.get("BOS_DEV"):
