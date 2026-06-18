@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -150,7 +151,7 @@ class MarkdownMemoryBackend:
         self, query: str, *, top_k: int = 5, include_invalid: bool = False,
     ) -> list[MemoryEntry]:
         def _search() -> list[MemoryEntry]:
-            tokens = [t for t in query.lower().split() if t]
+            tokens = re.findall(r"\w+", query.lower())
             scored = []
             for e in self._all_entries(include_invalid=include_invalid):
                 text = (e.content + " " + " ".join(e.tags)).lower()

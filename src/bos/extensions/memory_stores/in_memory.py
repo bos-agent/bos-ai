@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timedelta
 
 from bos.plugins.memory import MemoryEntry, MemoryIndexEntry, pep_memory_backend
@@ -46,7 +47,7 @@ class InMemMemoryExtension:
         return e
 
     async def search_memories(self, query: str, *, top_k: int = 5, include_invalid: bool = False):
-        tokens = [t for t in query.lower().split() if t]
+        tokens = re.findall(r"\w+", query.lower())
         scored = []
         for e in self._memories.values():
             if not include_invalid and not e.metadata.get("valid", True):
