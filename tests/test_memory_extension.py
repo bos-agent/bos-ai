@@ -269,6 +269,29 @@ class TestAutoRecall:
         plugin_off = MemoryAgentPlugin(store, {"user"}, auto_recall=False)
         assert plugin_off.get_interceptors() == []
 
+    @pytest.mark.asyncio
+    async def test_interceptor_works_against_real_turn_context(self):
+        """Regression: production wraps user input in Message(llm_message={...}),
+        not raw dicts. The interceptor must extract the user text via
+        TurnContext.get_last_user_text() regardless of shape."""
+        from bos.core.agent import TurnContext
+        from bos.core.contract import Message
+        from bos.plugins.memory.auto_recall import AutoRecallInterceptor
+
+        store = InMemMemoryExtension()
+        eid = await store.ingest_memory("user prefers PostgreSQL 16", tags=["db"])
+        interceptor = AutoRecallInterceptor(store, top_k=5)
+
+        ctx = TurnContext(agent_name="A", chat_id="c1", turn_id="t1")
+        ctx.current = [Message(llm_message={"role": "user", "content": "what database do I like? postgresql?"})]
+        await interceptor.intercept("prepare", ctx)
+
+        # Ephemeral message was injected with the recall block
+        assert any("memory_auto_recall" == m.get("_ephemeral_key") for m in ctx.ephemeral)
+        block = next(m for m in ctx.ephemeral if m.get("_ephemeral_key") == "memory_auto_recall")
+        assert "PostgreSQL" in block["content"]
+        assert eid in ctx.metadata["recalled"]
+
 
 class TestHarnessConfig:
     def test_default_config_has_retrieval_block(self):

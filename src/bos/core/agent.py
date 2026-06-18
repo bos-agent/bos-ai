@@ -108,6 +108,30 @@ class TurnContext:
     def clear_ephemeral_message(self, key: str) -> None:
         self.ephemeral = [message for message in self.ephemeral if message.get("_ephemeral_key") != key]
 
+    def get_last_user_text(self) -> str:
+        """Return the most-recent user message's text from this turn's `current` messages.
+
+        Iterates `self.current` in reverse and returns the first user message's text
+        content. Multimodal content (a list of parts) is flattened to its text parts
+        concatenated; non-text parts are skipped. Returns "" if no user message is
+        present in this turn — interceptors use this on `prepare` to read the
+        incoming user message without depending on the underlying Message shape.
+        """
+        for message in reversed(self.current):
+            llm_msg = message.llm_message
+            if llm_msg.get("role") != "user":
+                continue
+            content = llm_msg.get("content", "")
+            if isinstance(content, str):
+                return content
+            if isinstance(content, list):
+                return "".join(
+                    part.get("text", "") for part in content
+                    if isinstance(part, dict) and part.get("type") == "text"
+                )
+            return str(content)
+        return ""
+
     @property
     def final_response(self) -> str:
         return self.final_content or self.current[-1].llm_message["content"] if self.current else "(no response)"
