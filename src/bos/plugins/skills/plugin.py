@@ -49,7 +49,7 @@ def _loader_cache_key(config: Mapping[str, Any]) -> tuple[str, tuple[str, ...]]:
 
 if TYPE_CHECKING:
     from bos.core.agent import TurnContext
-    from bos.core.contract import ToolContext
+    from bos.core.contract import Consolidator, ToolContext
 
 
 @dataclass(frozen=True)
@@ -57,7 +57,7 @@ class _SkillTestRuntime:
     """Harness services captured at bind time so TestSkill can build throwaway agents."""
 
     llm: Any
-    consolidator: Any
+    consolidator: Consolidator
     workspace: str
     loader_factory: Callable[[], Any]
     test_tools: Any = "*"  # "*" (all tools) or an explicit tool-name list

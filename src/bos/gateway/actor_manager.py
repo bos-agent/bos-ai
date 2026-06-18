@@ -15,7 +15,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from bos.config import Workspace
-    from bos.core import AgentHarness
+    from bos.core import AgentHarness, LifecycleBus
 
 logger = logging.getLogger(__name__)
 
@@ -24,8 +24,11 @@ class CoordinatedActor(AgentActor):
     """AgentActor variant that fences turns through ChatCoordinator hooks."""
 
     def __init__(
-        self, *args: Any, chat_coordinator: ChatCoordinator,
-        lifecycle_bus: Any = None, **kwargs: Any,
+        self,
+        *args: Any,
+        chat_coordinator: ChatCoordinator,
+        lifecycle_bus: LifecycleBus | None = None,
+        **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
         self._chat_coordinator = chat_coordinator
@@ -59,11 +62,15 @@ class CoordinatedActor(AgentActor):
             current_ctx = getattr(agent, "_current_context", None) if agent is not None else None
             if current_ctx is not None:
                 recalled = list(current_ctx.metadata.get("recalled", []) or [])
-            await self._lifecycle_bus.emit(LifecycleEvent(
-                kind="turn_complete", chat_id=ctx.chat_id, actor_name=ctx.actor_name,
-                base_revision=result.committed_revision,
-                payload={"recalled": recalled} if recalled else {},
-            ))
+            await self._lifecycle_bus.emit(
+                LifecycleEvent(
+                    kind="turn_complete",
+                    chat_id=ctx.chat_id,
+                    actor_name=ctx.actor_name,
+                    base_revision=result.committed_revision,
+                    payload={"recalled": recalled} if recalled else {},
+                )
+            )
         if result.status in ("aborted", "error") and ctx.reply_recipient:
             # Aborted and errored turns never send a reply envelope, but the
             # turn may have committed history and advanced the chat revision.
@@ -123,8 +130,7 @@ class ActorManager:
         self.chat_coordinator = chat_coordinator
         self._state_changed = state_changed
         self._actors = {
-            name: ManagedActor(name=name, config=config)
-            for name, config in workspace.resolve_gateway_actors().items()
+            name: ManagedActor(name=name, config=config) for name, config in workspace.resolve_gateway_actors().items()
         }
 
     @property
@@ -178,13 +184,19 @@ class ActorManager:
                 return
             from bos.core.contract import LifecycleEvent
 
-            await bus.emit(LifecycleEvent(
-                kind="session_close", chat_id=chat_id, actor_name=actor_name,
-                base_revision=None, payload={},
-            ))
+            await bus.emit(
+                LifecycleEvent(
+                    kind="session_close",
+                    chat_id=chat_id,
+                    actor_name=actor_name,
+                    base_revision=None,
+                    payload={},
+                )
+            )
 
         record.actor = CoordinatedActor(
-            agent, mailbox,
+            agent,
+            mailbox,
             chat_coordinator=self.chat_coordinator,
             lifecycle_bus=bus,
             lifecycle_emitter=_emit_close,
