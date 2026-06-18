@@ -58,3 +58,71 @@ class TestHarnessServices:
         finally:
             await h.__aexit__(None, None, None)
         assert order.index("drain") < order.index("aclose")
+
+
+class TestTurnCompleteEmission:
+    @pytest.mark.asyncio
+    async def test_turn_complete_emits_with_base_revision(self):
+        """When CoordinatedActor's _on_turn_finished sees status='completed',
+        a LifecycleEvent fires on the injected bus with the committed revision."""
+        from bos.core.actor import ActorTurnContext, ActorTurnResult
+        from bos.core.defaults.lifecycle import DefaultLifecycleBus
+        from bos.gateway.actor_manager import CoordinatedActor
+
+        seen = []
+        bus = DefaultLifecycleBus()
+
+        async def handler(e):
+            seen.append(e)
+
+        bus.subscribe("turn_complete", handler)
+
+        actor = CoordinatedActor.__new__(CoordinatedActor)
+        actor._lifecycle_bus = bus
+        actor._chat_coordinator = _DummyCoordinator()
+        actor._mailbox = None
+
+        ctx = ActorTurnContext(
+            chat_id="c1", actor_name="A", actor_address="A@local",
+            turn_id="t1", reply_recipient="user",
+        )
+        await actor._on_turn_finished(ctx, ActorTurnResult(status="completed", committed_revision=4))
+        assert len(seen) == 1
+        assert seen[0].kind == "turn_complete"
+        assert seen[0].chat_id == "c1"
+        assert seen[0].actor_name == "A"
+        assert seen[0].base_revision == 4
+
+    @pytest.mark.asyncio
+    async def test_turn_complete_skipped_when_not_completed(self):
+        from bos.core.actor import ActorTurnContext, ActorTurnResult
+        from bos.core.defaults.lifecycle import DefaultLifecycleBus
+        from bos.gateway.actor_manager import CoordinatedActor
+
+        seen = []
+        bus = DefaultLifecycleBus()
+
+        async def handler(e):
+            seen.append(e)
+
+        bus.subscribe("turn_complete", handler)
+        actor = CoordinatedActor.__new__(CoordinatedActor)
+        actor._lifecycle_bus = bus
+        actor._chat_coordinator = _DummyCoordinator()
+        actor._mailbox = _NoopMailbox()
+        ctx = ActorTurnContext(
+            chat_id="c1", actor_name="A", actor_address="A@local",
+            turn_id="t1", reply_recipient="",
+        )
+        await actor._on_turn_finished(ctx, ActorTurnResult(status="aborted"))
+        await actor._on_turn_finished(ctx, ActorTurnResult(status="error"))
+        await actor._on_turn_finished(ctx, ActorTurnResult(status="stale"))
+        assert seen == []
+
+
+class _DummyCoordinator:
+    def end_turn(self, **kw): pass
+
+
+class _NoopMailbox:
+    async def send(self, *a, **kw): pass

@@ -23,9 +23,13 @@ logger = logging.getLogger(__name__)
 class CoordinatedActor(AgentActor):
     """AgentActor variant that fences turns through ChatCoordinator hooks."""
 
-    def __init__(self, *args: Any, chat_coordinator: ChatCoordinator, **kwargs: Any) -> None:
+    def __init__(
+        self, *args: Any, chat_coordinator: ChatCoordinator,
+        lifecycle_bus: Any = None, **kwargs: Any,
+    ) -> None:
         super().__init__(*args, **kwargs)
         self._chat_coordinator = chat_coordinator
+        self._lifecycle_bus = lifecycle_bus
 
     async def _on_turn_started(self, ctx: ActorTurnContext) -> None:
         ref = _ctx_channel_ref(ctx)
@@ -47,6 +51,13 @@ class CoordinatedActor(AgentActor):
             turn_id=ctx.turn_id,
             committed_revision=result.committed_revision,
         )
+        if getattr(self, "_lifecycle_bus", None) is not None and result.status == "completed":
+            from bos.core.contract import LifecycleEvent
+
+            await self._lifecycle_bus.emit(LifecycleEvent(
+                kind="turn_complete", chat_id=ctx.chat_id, actor_name=ctx.actor_name,
+                base_revision=result.committed_revision, payload={},
+            ))
         if result.status in ("aborted", "error") and ctx.reply_recipient:
             # Aborted and errored turns never send a reply envelope, but the
             # turn may have committed history and advanced the chat revision.
@@ -154,7 +165,11 @@ class ActorManager:
         agent = await self.harness.create_agent(record.config.agent, agent_cfg=agent_cfg)
         mailbox = self.harness.mail_route.bind(record.config.address)
         record.mailbox = mailbox
-        record.actor = CoordinatedActor(agent, mailbox, chat_coordinator=self.chat_coordinator)
+        record.actor = CoordinatedActor(
+            agent, mailbox,
+            chat_coordinator=self.chat_coordinator,
+            lifecycle_bus=getattr(self.harness, "events", None),
+        )
         record.status = "running"
         record.error = None
         record.task = asyncio.create_task(self._run_record(record), name=f"bos-actor:{record.name}")
