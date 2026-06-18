@@ -55,7 +55,8 @@ class CoordinatedActor(AgentActor):
             from bos.core.contract import LifecycleEvent
 
             recalled: list[str] = []
-            current_ctx = getattr(self._agent, "_current_context", None)
+            agent = getattr(self, "_agent", None)
+            current_ctx = getattr(agent, "_current_context", None) if agent is not None else None
             if current_ctx is not None:
                 recalled = list(current_ctx.metadata.get("recalled", []) or [])
             await self._lifecycle_bus.emit(LifecycleEvent(
