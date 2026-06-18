@@ -251,6 +251,20 @@ class LifecycleBus(Protocol):
     async def emit(self, event: LifecycleEvent) -> None: ...
 
 
+# ── BEP 11 §3: Background LLM ──────────────────────────────────────────────
+
+
+@runtime_checkable
+class BackgroundLLM(Protocol):
+    async def ask(
+        self, *, messages: list[dict[str, Any]], model: str | None = None,
+        reasoning_effort: ReasoningEffort | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        response_schema: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> Any: ...
+
+
 ep_mail_route = ExtensionPoint(
     name="ep_mail_route",
     description="MailRoute. Used for message routing between agents. It should implement the MailRoute protocol.",
