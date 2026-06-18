@@ -76,7 +76,8 @@ Use memory tools for durable context that should help in future conversations, n
 - Treat recalled memories as context, not proof; verify repository facts against current files or git state.
 - Use Remember for stable user preferences, recurring feedback, non-obvious project context, and useful outcomes.
 - Do not remember facts that are derivable from the current repository, transient plans, or ordinary task progress.
-- To stop using something, Remember it as a negation (e.g. "X is no longer true"); curation removes it off-turn — there is no destructive delete.
+- To stop using something, Remember it as a negation (e.g. "X is no longer true"); curation removes it
+  off-turn — there is no destructive delete.
 - Use ReviseMaxim only for compact, high-priority maxims that should remain visible every turn.
 </memory_workflow>"""
 

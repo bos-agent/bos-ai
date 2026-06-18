@@ -1,13 +1,13 @@
 """MemoryPlugin — episodic memory, maxims, and memory backend extension point."""
 
 from . import markdown_backend  # noqa: E402
-from .plugin import MemoryAgentPlugin, MemoryHarnessPlugin, pep_memory_backend  # noqa: E402
 from .operation_service import (  # noqa: E402
     AuditRecord,
     DefaultMemoryOperationService,
     MemoryOperation,
     MemoryOperationService,
 )
+from .plugin import MemoryAgentPlugin, MemoryHarnessPlugin, pep_memory_backend  # noqa: E402
 from .scoped_memory import MemoryBackend, MemoryEntry, MemoryIndexEntry, RequestedBy  # noqa: E402
 
 __all__ = [
