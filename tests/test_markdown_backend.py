@@ -122,3 +122,21 @@ class TestMarkdownMetadataAndSoftDelete:
         assert e.tags == ["db"]
         assert e.metadata["valid"] is True
         assert e.metadata["importance"] == 5
+
+
+class TestRemovedMethods:
+    def test_protocol_has_no_optimize_or_forget(self):
+        from bos.plugins.memory.scoped_memory import MemoryBackend
+
+        names = set(dir(MemoryBackend))
+        assert "optimize" not in names
+        assert "forget_memory" not in names
+
+    def test_backends_have_no_optimize(self):
+        from bos.extensions.memory_stores.in_memory import InMemMemoryExtension
+        from bos.plugins.memory.markdown_backend import MarkdownMemoryBackend
+
+        assert not hasattr(InMemMemoryExtension, "optimize")
+        assert not hasattr(MarkdownMemoryBackend, "optimize")
+        assert not hasattr(InMemMemoryExtension, "forget_memory")
+        assert not hasattr(MarkdownMemoryBackend, "forget_memory")
