@@ -57,6 +57,46 @@ def _svc(tmp_path, backend, maxim_keys=("user", "soul", "identity", "rules")):
     )
 
 
+class TestAuditReadback:
+    @pytest.mark.asyncio
+    async def test_fresh_service_surfaces_audit_from_disk(self, tmp_path):
+        """Regression: audit() must read the durable JSONL, not only this
+        process's in-memory list. A freshly built service (e.g. a new `boscli
+        memory audit` run) starts with an empty _mem_audit but must still
+        surface rows written to audit.jsonl by an earlier process."""
+        b = InMemMemoryExtension()
+        eid = await b.ingest_memory("stale fact")
+        writer = _svc(tmp_path, b)
+        await writer.apply([
+            MemoryOperation(op="ADD", reason="durable pref", content="likes dark mode", importance=6),
+            MemoryOperation(op="INVALIDATE", reason="user said stop", target_id=eid, requested_by="user"),
+        ])
+
+        # A brand-new service over the same audit_path — _mem_audit is empty.
+        reader = _svc(tmp_path, b)
+        assert reader._mem_audit == []
+        recs = await reader.audit()
+        assert [r.op.op for r in recs] == ["ADD", "INVALIDATE"]
+        assert recs[0].op.reason == "durable pref"
+        assert recs[0].result == "applied"
+        assert recs[1].op.requested_by == "user"
+
+        # filter still applies over the hydrated records
+        only_add = await reader.audit(filter={"op": "ADD"})
+        assert [r.op.op for r in only_add] == ["ADD"]
+        only_applied = await reader.audit(filter={"result": "applied"})
+        assert {r.result for r in only_applied} == {"applied"}
+
+    @pytest.mark.asyncio
+    async def test_audit_falls_back_to_memory_when_no_log(self):
+        """With no audit_path configured, audit() returns the in-memory list."""
+        b = InMemMemoryExtension()
+        svc = DefaultMemoryOperationService(b, audit_path=None, maxim_keys={"user"})
+        await svc.apply([MemoryOperation(op="ADD", reason="x", content="y")])
+        recs = await svc.audit()
+        assert [r.op.op for r in recs] == ["ADD"]
+
+
 class TestApply:
     @pytest.mark.asyncio
     async def test_add_creates_entry_and_audits(self, tmp_path):

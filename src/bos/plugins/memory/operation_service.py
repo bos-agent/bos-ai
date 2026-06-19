@@ -4,7 +4,7 @@ for curation (BEP 10 §4). Raw agent appends bypass this service and write to L0
 from __future__ import annotations
 
 import asyncio
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime
 from typing import Literal, Protocol
 
@@ -185,8 +185,31 @@ class DefaultMemoryOperationService:
     async def restore(self, entry_id: str) -> None:
         await self._backend.restore_memory(entry_id)
 
+    @staticmethod
+    def _hydrate(row: dict) -> AuditRecord:
+        """Rebuild an AuditRecord from a JSONL row written by _record(). The row
+        flattens the MemoryOperation fields and prefixes record-level fields with
+        '_'. Unknown op keys (older/newer schema) are dropped so a stale log
+        never crashes the reader."""
+        op_field_names = {f.name for f in fields(MemoryOperation)}
+        op_fields = {k: v for k, v in row.items() if not k.startswith("_") and k in op_field_names}
+        op = MemoryOperation(**op_fields)
+        return AuditRecord(
+            op=op,
+            result=row.get("_result"),
+            entry_id=row.get("_entry_id"),
+            at=row.get("_at", ""),
+            error=row.get("_error"),
+        )
+
     async def audit(self, *, filter: dict | None = None) -> list[AuditRecord]:
-        records = list(self._mem_audit)
+        # The on-disk JSONL is the durable source of truth: _record() appends to
+        # it on every op, so it is a superset of this process's _mem_audit and is
+        # the only view that survives across processes (e.g. a fresh CLI run).
+        if self._log is not None:
+            records = [self._hydrate(row) for row in await self._log.read()]
+        else:
+            records = list(self._mem_audit)
         if filter:
             for key, val in filter.items():
                 records = [r for r in records if getattr(r.op, key, None) == val or getattr(r, key, None) == val]
