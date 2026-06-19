@@ -67,7 +67,7 @@ class CoordinatedActor(AgentActor):
             committed_revision=result.committed_revision,
         )
         recalled = self._recalled_per_turn.pop(ctx.turn_id, [])
-        if getattr(self, "_lifecycle_bus", None) is not None and result.status == "completed":
+        if self._lifecycle_bus is not None and result.status == "completed":
             from bos.core.contract import LifecycleEvent
 
             await self._lifecycle_bus.emit(

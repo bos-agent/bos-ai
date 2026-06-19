@@ -30,6 +30,7 @@ from .contract import (
     ChatStore,
     ContextResult,
     EventSink,
+    InterceptorStage,
     Message,
     ReasoningEffort,
     ToolContext,
@@ -239,7 +240,7 @@ class ChainInterceptor:
             for cfg in (interceptors or [])
             if isinstance(cfg, str) or (isinstance(cfg, dict) and "name" in cfg)
         ]
-        self._instances: list[TurnInterceptor] = [None] * len(self._configs)
+        self._instances: list[TurnInterceptor | None | Exception] = [None] * len(self._configs)
 
     async def aclose(self) -> None:
         for interceptor in self._instances:
@@ -247,14 +248,7 @@ class ChainInterceptor:
 
     async def intercept(
         self,
-        stage: Literal[
-            "prepare",
-            "before_llm",
-            "after_llm",
-            "after_tool",
-            "final_response",
-            "max_iteration",
-        ],
+        stage: InterceptorStage,
         context: TurnContext,
     ) -> None:
         for i, cfg in enumerate(self._configs):
@@ -264,8 +258,9 @@ class ChainInterceptor:
                 except Exception as e:
                     self._instances[i] = e
                     logger.error(f"Failed to create interceptor {cfg['name']}: {e}")
-            if isinstance(self._instances[i], TurnInterceptor):
-                await self._instances[i].intercept(stage, context)
+            inst = self._instances[i]
+            if isinstance(inst, TurnInterceptor):
+                await inst.intercept(stage, context)
 
 
 class _CompositePluginInterceptor:
@@ -282,14 +277,7 @@ class _CompositePluginInterceptor:
 
     async def intercept(
         self,
-        stage: Literal[
-            "prepare",
-            "before_llm",
-            "after_llm",
-            "after_tool",
-            "final_response",
-            "max_iteration",
-        ],
+        stage: InterceptorStage,
         context: TurnContext,
     ) -> None:
         for interceptor in self._plugin:
@@ -346,7 +334,7 @@ class Agent:
         self._local_tools = local_tools or ToolRegistry(f"_local_tools:{self._name}", "Agent-scoped local tools.")
         self._plugins = plugins
         self._plugins_prompt = plugins_prompt or {}
-        self._tool_noise_filter = tool_noise_filter
+        self._tool_noise_filter: ToolNoiseFilter | None = tool_noise_filter
         self._compaction_lock = chat_compaction_lock
         self._history_attribution = history_attribution
         self._workspace = str(workspace) if workspace else None
@@ -370,7 +358,7 @@ class Agent:
         self,
         chat_id: str,
         content: MessageContent,
-        interrupt: Callable[[], dict[str, Any] | Awaitable[dict[str, Any]]] | None = None,
+        interrupt: Callable[[], dict[str, Any] | Awaitable[dict[str, Any]] | None] | None = None,
         ctx_metadata: dict[str, Any] | None = None,
         llm_args: dict[str, Any] | None = None,
         event_sink: EventSink | None = None,
@@ -417,7 +405,7 @@ class Agent:
             cache_index -= 1
 
         def _cache_control_injection_points() -> list[dict[str, Any]]:
-            hints = [{"location": "message", "role": "system"}]
+            hints: list[dict[str, Any]] = [{"location": "message", "role": "system"}]
             if cache_index == 0:
                 return hints
             # ctx.ephemeral is appended after persisted/current messages in the
@@ -465,7 +453,7 @@ class Agent:
                     if inspect.isawaitable(result):
                         await result
 
-        async def _run_interceptor(stage: str):
+        async def _run_interceptor(stage: InterceptorStage):
             try:
                 await self._interceptor.intercept(stage, ctx)
             except AbortTurn:
@@ -823,7 +811,7 @@ class Agent:
             _pick_collection(all_tools, self._tools, self._exclude_tools),
             "tools",
         )
-        available_tools = {k: self._tools_usage.get(k, v).strip() for k, v in available_tools.items()}
+        available_tools = {k: (self._tools_usage.get(k, v) or "").strip() for k, v in available_tools.items()}
 
         if not available_tools:
             return "<available_tools>\n\n</available_tools>"

@@ -47,7 +47,7 @@ async def codex_complete(
     storage = FileTokenStorage(auth_file)
     token = await asyncio.to_thread(get_codex_token, storage=storage)
 
-    headers = _build_headers(token.account_id, token.access)
+    headers = _build_headers(token.account_id or "", token.access)
 
     body: dict[str, Any] = {
         "model": _strip_model_prefix(model),
@@ -309,7 +309,7 @@ async def _consume_sse(response: httpx.Response) -> tuple[str, list[ToolCallRequ
                 tool_calls.append(
                     ToolCallRequest(
                         id=f"{call_id}|{buf.get('id') or item.get('id') or 'fc_0'}",
-                        name=buf.get("name") or item.get("name"),
+                        name=buf.get("name") or item.get("name", ""),
                         arguments=args,
                     )
                 )

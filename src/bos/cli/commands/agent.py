@@ -135,10 +135,10 @@ def _runner_config_arg(ctx, ws: Workspace) -> str:
     return str(ws.config_file)
 
 
-def _daemon_workspace_dir(config_arg: str, bos_dir, workspace_override: str | None) -> str | os.PathLike[str]:
+def _daemon_workspace_dir(config_arg: str, bos_dir, workspace_override: str | None) -> str | Path:
     if workspace_override:
         return workspace_override
-    return bos_dir if _is_builtin_preset_arg(config_arg) else "."
+    return Path(bos_dir) if _is_builtin_preset_arg(config_arg) else "."
 
 
 def _is_builtin_preset_arg(config_arg: str) -> bool:

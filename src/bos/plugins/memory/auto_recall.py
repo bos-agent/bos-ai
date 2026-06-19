@@ -5,7 +5,7 @@ entry-ids; the actor accumulates these for the off-turn recall log."""
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, cast
 from xml.sax.saxutils import escape
 
 from bos.protocol import TurnEvent
@@ -34,7 +34,7 @@ def _incoming_text(context: "TurnContext") -> str:
     falls back to a raw-dict scan so unit tests that pass mock contexts still work."""
     getter = getattr(context, "get_last_user_text", None)
     if callable(getter):
-        return getter()
+        return cast(str, getter())
     # Fallback for test doubles whose `current` holds raw dicts rather than Messages.
     for msg in reversed(getattr(context, "current", []) or []):
         role = msg.get("role") if isinstance(msg, dict) else getattr(msg, "role", None)

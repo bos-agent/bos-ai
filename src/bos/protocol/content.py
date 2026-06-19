@@ -3,7 +3,7 @@ from __future__ import annotations
 import base64
 import mimetypes
 from pathlib import Path
-from typing import Any, Literal, TypeAlias, TypedDict
+from typing import Any, Literal, TypeAlias, TypedDict, cast
 
 from .message_types import MessageType
 
@@ -75,7 +75,9 @@ def validate_message_part(part: Any) -> None:
 
 def content_as_parts(content: MessageContent) -> list[dict[str, Any]]:
     validate_message_content(content)
-    return [{"type": "text", "text": content}] if isinstance(content, str) else list(content)
+    if isinstance(content, str):
+        return [{"type": "text", "text": content}]
+    return cast("list[dict[str, Any]]", list(content))
 
 
 def content_to_plain_text(content: Any) -> str:

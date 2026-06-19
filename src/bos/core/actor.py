@@ -73,7 +73,7 @@ class _RouteAwareMailboxEventSink(MailboxEventSink):
         self._channel_metadata = dict(channel_metadata or {})
 
     async def emit(self, event: TurnEvent) -> None:
-        metadata = {"turn_id": event.turn_id, "event_type": event.event_type}
+        metadata: dict[str, Any] = {"turn_id": event.turn_id, "event_type": event.event_type}
         if self._channel_metadata:
             metadata["channel"] = self._channel_metadata
         await self._mailbox.send(
@@ -597,7 +597,9 @@ class AgentActor:
             chat_id=env.chat_id,
         )
 
-    def _make_interrupt(self, chat_id: str, generation: int):
+    def _make_interrupt(
+        self, chat_id: str, generation: int
+    ) -> Callable[[], dict[str, Any] | None]:
         def _interrupt() -> dict[str, Any] | None:
             if not self._generation_is_current(chat_id, generation):
                 raise AbortTurn()

@@ -131,7 +131,7 @@ class JsonlChatStore:
         try:
             from litellm import token_counter
 
-            count = int(token_counter(model=model, messages=projected))
+            count = int(token_counter(model=model or "", messages=projected))
             return TokenEstimate(count=count, tokenizer_model=model, source="litellm")
         except Exception:
             pass

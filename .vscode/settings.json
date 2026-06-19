@@ -1,4 +1,6 @@
 {
   "python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python",
-  "python.useEnvironmentsExtension": false
+  "python.useEnvironmentsExtension": false,
+  "workbench.colorTheme": "Light Modern",
+  "python.analysis.typeCheckingMode": "basic"
 }

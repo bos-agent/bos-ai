@@ -57,10 +57,11 @@ class InMemChatStore:
         return result
 
     def _estimate(self, projected: list[dict[str, Any]], model: str | None) -> TokenEstimate:
+        # TODO duplicated logic from bos.core.defaults.jsonl_chat_store. should import from there.
         try:
             from litellm import token_counter
 
-            count = int(token_counter(model=model, messages=projected))
+            count = int(token_counter(model=model or "", messages=projected))
             return TokenEstimate(count=count, tokenizer_model=model, source="litellm")
         except Exception:
             pass

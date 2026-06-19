@@ -6,7 +6,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
-from aiohttp import web
+from aiohttp import BodyPartReader, web
 
 from bos.config.workspace import ResolvedGatewayConfig
 
@@ -15,8 +15,8 @@ StatusProvider = Callable[[], JsonDict]
 WSHandler = Callable[[web.Request], Awaitable[web.StreamResponse]]
 APP_API_KEY = web.AppKey("api_key", str)
 APP_GATEWAY_CONFIG = web.AppKey("gateway_config", ResolvedGatewayConfig)
-APP_STATUS_PROVIDER = web.AppKey("status_provider", object)
-APP_WS_HANDLER = web.AppKey("ws_handler", object)
+APP_STATUS_PROVIDER: web.AppKey[StatusProvider] = web.AppKey("status_provider")
+APP_WS_HANDLER: web.AppKey[WSHandler] = web.AppKey("ws_handler")
 
 
 def resolve_gateway_api_key(config: ResolvedGatewayConfig, environ: dict[str, str] | None = None) -> str | None:
@@ -75,7 +75,7 @@ async def _upload_image_handler(request: web.Request) -> web.Response:
     config: ResolvedGatewayConfig = request.app[APP_GATEWAY_CONFIG]
     reader = await request.multipart()
     file_field = await reader.next()
-    if file_field is None or file_field.name != "file":
+    if not isinstance(file_field, BodyPartReader) or file_field.name != "file":
         return web.json_response({"ok": False, "error": "Expected multipart field 'file'."}, status=400)
     try:
         data = await file_field.read()
@@ -90,7 +90,7 @@ async def _upload_image_handler(request: web.Request) -> web.Response:
         return web.json_response({"ok": False, "error": str(exc)}, status=400)
 
 
-async def _ws_handler(request: web.Request) -> web.Response:
+async def _ws_handler(request: web.Request) -> web.StreamResponse:
     handler = request.app.get(APP_WS_HANDLER)
     if handler is not None:
         return await handler(request)

@@ -120,7 +120,7 @@ class AgentHarness:
         chat_store: str = "_default",
         mail_route: str = "_default",
         job_runner: str = "_default",
-        interceptors: list[str] | None = None,
+        interceptors: list[str | dict[str, Any]] | None = None,
     ) -> None:
         self._bos_root = Path(bos_dir).expanduser().resolve()
         self._workspace = Path(workspace).expanduser().resolve()
@@ -158,6 +158,7 @@ class AgentHarness:
 
         self.mail_route = await self._create_and_own("ep_mail_route", MailRoute, None, impl=self._mail_route_impl)
         self.chat_store = await self._create_and_own("ep_chat_store", ChatStore, None, impl=self._chat_store_impl)
+        assert self.chat_store is not None  # ep_chat_store has a _default, so creation never returns None
         self.llm = LLMClient()
         self.consolidator = await self._create_consolidator()
         self.interceptor = ChainInterceptor(self._interceptors_impl)
@@ -169,6 +170,7 @@ class AgentHarness:
 
         self.events = DefaultLifecycleBus()
         self.jobs = await ep_job_runner.invoke(self._job_runner_impl, {"bus": self.events})
+        assert self.jobs is not None  # ep_job_runner has a _default, so creation never returns None
         await self.jobs.start()
         self._owned.append(self.jobs)
         self.background_llm = DefaultBackgroundLLM(self.llm)
@@ -216,7 +218,7 @@ class AgentHarness:
     async def create_agent(
         self,
         kind: str | None = None,
-        agent_cfg: dict[str, Any] = None,
+        agent_cfg: dict[str, Any] | None = None,
     ) -> Agent:
         if CURRENT_HARNESS.get(None) is None:
             raise RuntimeError("create_agent must be called within an active AgentHarness context.")
@@ -339,8 +341,9 @@ class AgentHarness:
         from . import __dict__ as core_exports
 
         instance = await core_exports["ep_consolidator"].invoke(self._consolidator_impl, cfg)
-        if instance is not None:
-            self._owned.append(instance)
+        if instance is None:
+            raise RuntimeError(f"Consolidator extension {self._consolidator_impl!r} could not be created")
+        self._owned.append(instance)
         return instance
 
     def _get_compaction_lock(self, chat_id: str) -> asyncio.Lock:

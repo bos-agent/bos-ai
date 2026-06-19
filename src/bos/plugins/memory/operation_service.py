@@ -122,8 +122,11 @@ class DefaultMemoryOperationService:
                 return await self._record(op, "rejected", op.target_id, error=f"target {op.target_id} not found")
         if dry_run:
             return await self._record(op, "dry_run", op.target_id)
+        # The asserts below restate guarantees already enforced by _validate() (and the
+        # target-existence check above); they narrow Optional fields for the type checker.
         entry_id = op.target_id
         if op.op == "ADD":
+            assert op.content is not None  # _validate: ADD requires content
             entry_id = await self._backend.ingest_memory(
                 op.content,
                 tags=op.tags,
@@ -133,9 +136,11 @@ class DefaultMemoryOperationService:
             )
         elif op.op == "UPDATE":
             if op.maxim_key is not None:
+                assert op.content is not None  # _validate: maxim UPDATE requires content
                 await self._backend.set_maxim(op.maxim_key, op.content)
                 entry_id = None
             else:
+                assert op.target_id is not None  # _validate: UPDATE requires target_id
                 await self._backend.update_memory(
                     op.target_id,
                     content=op.content,
@@ -145,13 +150,19 @@ class DefaultMemoryOperationService:
                     links=op.links,
                 )
         elif op.op == "INVALIDATE":
+            assert op.target_id is not None  # _validate: INVALIDATE requires target_id
             await self._backend.invalidate_memory(op.target_id, requested_by=op.requested_by)
         elif op.op == "LINK":
+            assert op.target_id is not None and op.links is not None  # _validate: LINK requires both
             existing = await self._backend.get_memory(op.target_id, include_invalid=True)
-            merged = list({*(existing.metadata.get("links") or []), *op.links})
+            assert existing is not None  # target existence checked above
+            prior_links: list[str] = existing.metadata.get("links") or []
+            merged = list({*prior_links, *op.links})
             await self._backend.update_memory(op.target_id, links=merged)
         elif op.op == "PROMOTE":
+            assert op.target_id is not None and op.maxim_key is not None  # _validate: PROMOTE requires both
             entry = await self._backend.get_memory(op.target_id, include_invalid=True)
+            assert entry is not None  # target existence checked above
             gist = (op.content or entry.content).strip()
             current = await self._backend.get_maxim(op.maxim_key)
             ts = self._now()[:16].replace("T", " ")

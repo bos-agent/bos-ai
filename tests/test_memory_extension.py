@@ -336,6 +336,7 @@ class TestHarnessConfig:
                 llm=None,
                 consolidator=None,
                 subagents=None,
+                chat_store=None,
             )
         )
         agent_plugin = h.bind({

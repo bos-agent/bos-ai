@@ -6,7 +6,7 @@ import inspect
 import json
 import logging
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -56,7 +56,7 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
     return base
 
 
-def _build_params(fn: Callable, params: dict[str, Any]) -> tuple[list[Any], dict[str, Any]]:
+def _build_params(fn: Callable, params: dict[str, Any]) -> tuple[tuple[Any, ...], dict[str, Any]]:
     sig = inspect.signature(fn)
     has_varkw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
     valid_params = params if has_varkw else {k: v for k, v in params.items() if k in sig.parameters}
@@ -125,7 +125,7 @@ def _xml_attr(value: str) -> str:
 
 def _load_json(source: Path | str, from_string: bool = False) -> dict[str, Any]:
     try:
-        return json.loads(source if from_string else Path(source).read_text(encoding="utf-8"))
+        return json.loads(str(source) if from_string else Path(source).read_text(encoding="utf-8"))
     except Exception:
         logger.warning("Failed to load JSON from %s", source, exc_info=True)
         return {}
@@ -145,8 +145,8 @@ def _resolve_path(path: str | Path = ".") -> Path:
 
 def _pick_collection(
     collection: dict[str, Any],
-    include: list[str] | None = None,
-    exclude: list[str] | None = None,
+    include: Collection[str] | None = None,
+    exclude: Collection[str] | None = None,
 ) -> dict[str, Any]:
     if include is not None:
         collection = {k: v for k, v in collection.items() if k in include}
@@ -155,7 +155,7 @@ def _pick_collection(
     return collection
 
 
-def _allowed(name: str, include: list[str] | None = None, exclude: list[str] | None = None) -> bool:
+def _allowed(name: str, include: Collection[str] | None = None, exclude: Collection[str] | None = None) -> bool:
     return (include is None or name in include) and (exclude is None or name not in exclude)
 
 
@@ -247,7 +247,7 @@ def _load_ext_modules(modules: list[str]) -> None:
 
 
 def _load_ext_paths(paths: list[str | Path]) -> None:
-    def _load_extension_module_file(path: Path) -> bool:
+    def _load_extension_module_file(path: Path) -> None:
         module_name = "agentloop_ext_" + str(abs(hash(str(path))))
         spec = importlib.util.spec_from_file_location(module_name, str(path))
         if spec and spec.loader:

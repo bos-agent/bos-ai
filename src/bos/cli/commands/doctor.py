@@ -10,6 +10,7 @@ import click
 
 from bos.cli.commands.scaffolding import _discover_project, _probe_model
 from bos.config import Workspace
+from bos.config.schema import AgentSection, PlatformConfig, RuntimeConfig
 
 _STATUS_MARK = {"ok": ("✓", "green"), "fail": ("✗", "red"), "warn": ("!", "yellow"), "skip": ("-", None)}
 
@@ -23,6 +24,7 @@ def doctor(do_probe: bool):
         ws = _discover_project()
     except click.ClickException:
         raise
+    assert ws.config_file is not None  # _discover_project raises if it could not be resolved
     results.append(("ok", "config", f"{ws.config_file.name} parses and validates"))
 
     results.append(_check_paths(ws))
@@ -51,7 +53,7 @@ def doctor(do_probe: bool):
 
 
 def _check_paths(ws: Workspace) -> tuple[str, str, str]:
-    platform = ws.config.platform
+    platform = ws.config.platform or PlatformConfig()
     missing: list[str] = []
     for raw in platform.agent_dirs:
         if not (ws.bos_dir / Path(raw).expanduser()).is_dir():
@@ -78,7 +80,8 @@ def _importable(module: str) -> bool:
 def _check_extension_imports(ws: Workspace) -> tuple[str, str, str]:
     """Module entries in [platform.extensions] and the project's own bos.exts
     entry points must be importable by this interpreter (BEP 9, package archetype)."""
-    missing = [e for e in ws.config.platform.extensions if not e.startswith((".", "/", "~")) and not _importable(e)]
+    platform = ws.config.platform or PlatformConfig()
+    missing = [e for e in platform.extensions if not e.startswith((".", "/", "~")) and not _importable(e)]
 
     pyproject = ws.workspace / "pyproject.toml"
     if pyproject.is_file():
@@ -109,9 +112,10 @@ def _check_agents(ws: Workspace) -> tuple[str, str, str]:
 
 
 def _effective_env(ws: Workspace) -> dict[str, str]:
+    platform = ws.config.platform or PlatformConfig()
     env_map: dict[str, str] = {k: v for k, v in os.environ.items()}
-    env_map.update(ws.config.platform.envs)
-    envfile = ws.config.platform.envfile
+    env_map.update(platform.envs)
+    envfile = platform.envfile
     if envfile:
         env_path = ws.bos_dir / Path(envfile).expanduser()
         if env_path.is_file():
@@ -122,9 +126,10 @@ def _effective_env(ws: Workspace) -> dict[str, str]:
 
 
 def _check_env(ws: Workspace, env_map: dict[str, str]) -> list[tuple[str, str, str]]:
+    runtime = ws.config.runtime or RuntimeConfig()
     results: list[tuple[str, str, str]] = []
     missing: list[str] = []
-    for channel in ws.config.runtime.channels:
+    for channel in runtime.channels:
         for key, value in channel.settings.items():
             if key.endswith("_env") and isinstance(value, str) and value and not env_map.get(value):
                 missing.append(f"{value} (channel {channel.channel_id!r})")
@@ -133,14 +138,14 @@ def _check_env(ws: Workspace, env_map: dict[str, str]) -> list[tuple[str, str, s
     else:
         results.append(("ok", "env", "all *_env references resolve"))
 
-    api_key_env = ws.config.runtime.gateway.api_key_env
+    api_key_env = runtime.gateway.api_key_env
     if api_key_env and not env_map.get(api_key_env):
         results.append(("warn", "gateway auth", f"{api_key_env} unset — gateway runs without an API key"))
     return results
 
 
 def _configured_model(ws: Workspace, env_map: dict[str, str]) -> str | None:
-    model = getattr(ws.config.agent.defaults, "model", None)
+    model = getattr((ws.config.agent or AgentSection()).defaults, "model", None)
     if not model:
         for spec in ws.config.agents.values():
             model = getattr(spec, "model", None)
@@ -192,7 +197,7 @@ def _check_gateway(ws: Workspace) -> tuple[str, str, str]:
         state = read_state(rd)
         return ("ok", "gateway", f"running ({state.get('runtime', 'process')} {state.get('pid', '?')})")
 
-    gateway = ws.config.runtime.gateway
+    gateway = (ws.config.runtime or RuntimeConfig()).gateway
     if not gateway.port:
         return ("ok", "gateway", "not running (dynamic port)")
     host = gateway.host if gateway.host not in ("0.0.0.0", "") else "127.0.0.1"

@@ -10,7 +10,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
 
-from aiohttp import ClientSession, FormData
+from aiohttp import ClientSession, ClientTimeout, FormData
 
 from bos.core import BaseChannel, MailBox, ep_channel
 from bos.gateway import ChannelConversationRef, ChannelRuntimeContext
@@ -294,7 +294,8 @@ class TelegramChannel(BaseChannel[TelegramSettings]):
     async def _api_call(self, method: str, payload: dict[str, Any]) -> dict[str, Any]:
         if self._session is None:
             raise RuntimeError("Telegram session is not initialized.")
-        async with self._session.post(method, json=payload, timeout=self._poll_timeout + 10) as resp:
+        timeout = ClientTimeout(total=self._poll_timeout + 10)
+        async with self._session.post(method, json=payload, timeout=timeout) as resp:
             data = await resp.json()
         if not data.get("ok"):
             raise RuntimeError(f"Telegram API {method} failed: {data}")
@@ -317,7 +318,8 @@ class TelegramChannel(BaseChannel[TelegramSettings]):
             content_type="text/markdown",
         )
         try:
-            async with self._session.post("sendDocument", data=form, timeout=self._poll_timeout + 10) as resp:
+            timeout = ClientTimeout(total=self._poll_timeout + 10)
+            async with self._session.post("sendDocument", data=form, timeout=timeout) as resp:
                 data = await resp.json()
             if not data.get("ok"):
                 raise RuntimeError(f"Telegram API sendDocument failed: {data}")

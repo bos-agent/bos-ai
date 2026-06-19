@@ -29,6 +29,11 @@ pep_memory_backend = ExtensionPoint(
 
 if TYPE_CHECKING:
     from bos.core.agent import TurnContext
+    from bos.core.contract import Job, LifecycleEvent
+
+    from ._watermark import WatermarkStore
+    from .consolidator import DefaultMemoryConsolidator
+    from .operation_service import DefaultMemoryOperationService
 
 MAXIM_LIMIT = 2048
 
@@ -89,9 +94,9 @@ class _PerAgentMemory:
     """All scoped-to-one-agent memory state (Ω: storage-level isolation)."""
 
     backend: MemoryBackend
-    op_service: "DefaultMemoryOperationService"  # noqa: F821
-    watermarks: "WatermarkStore"  # noqa: F821
-    consolidator: "DefaultMemoryConsolidator | None"  # noqa: F821
+    op_service: DefaultMemoryOperationService
+    watermarks: WatermarkStore
+    consolidator: DefaultMemoryConsolidator | None
 
 
 @ep_plugin(name="MemoryPlugin")
@@ -153,6 +158,7 @@ class MemoryHarnessPlugin:
         from .consolidator import DefaultMemoryConsolidator
         from .operation_service import DefaultMemoryOperationService
 
+        assert self._backend_ext is not None  # validated in setup(): unknown backend raises there
         backend = self._backend_ext.fn(
             bos_dir=self._services.bos_dir,
             store_dir=f"memory/agents/{agent_name}",
@@ -191,7 +197,7 @@ class MemoryHarnessPlugin:
     def _make_consolidation_job_factory(self):
         from .job import MemoryConsolidationJob
 
-        def factory(event):
+        def factory(event: LifecycleEvent | None) -> Job | None:
             if event is None or event.base_revision is None or not event.actor_name:
                 return None
             bundle = self._per_agent.get(event.actor_name)

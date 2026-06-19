@@ -9,6 +9,7 @@ import re
 import secrets
 import subprocess
 from pathlib import Path
+from typing import cast
 
 import click
 
@@ -21,6 +22,7 @@ from bos.cli.scaffold import (
     toml_multiline_text,
 )
 from bos.config import ConfigNotFoundError, Workspace, WorkspaceResolutionError, initialize_workspace
+from bos.config.schema import PlatformConfig, RuntimeConfig
 
 _DEFAULT_PURPOSE = "A general-purpose personal agent."
 _DEFAULT_AGENT_TOOLS = '["ReadFile", "GrepSearch", "GlobSearch"]'
@@ -196,7 +198,7 @@ def _prompt_archetype() -> str:
         "package": "an installable Python extension package (tools, channels, providers)",
     }
     choices = [prompts.Choice(name, name, descriptions[name]) for name in ARCHETYPES]
-    return prompts.select("Choose a starting topology:", choices, default=ARCHETYPES[0])
+    return cast(str, prompts.select("Choose a starting topology:", choices, default=ARCHETYPES[0]))
 
 
 def _provider_step(ctx, model: str | None, yes: bool) -> tuple[str | None, dict[str, str]]:
@@ -232,7 +234,8 @@ def _provider_step_interactive(ctx) -> tuple[str | None, dict[str, str]]:
     detected = _detect_provider_keys()
     choices = _provider_choices(detected)
     default = next(iter(detected)) if len(detected) == 1 else None
-    selection = prompts.select("Choose a model provider:", choices, default=default)
+    # Selectable rows all carry str values; separators (value=None) are never returned.
+    selection = cast(str, prompts.select("Choose a model provider:", choices, default=default))
     if selection == "__skip__":
         return None, {}
     if selection in _OAUTH_PROVIDERS:
@@ -632,11 +635,13 @@ def gen_agent(name: str, description: str | None, as_actor: bool):
     target.write_text(_render_agent_md(description, system_prompt), encoding="utf-8")
     click.echo(f"Created {target}")
 
-    if "./agents" not in ws.config.platform.agent_dirs and "agents" not in ws.config.platform.agent_dirs:
+    platform = ws.config.platform or PlatformConfig()
+    if "./agents" not in platform.agent_dirs and "agents" not in platform.agent_dirs:
         click.echo("Note: ./agents is not in [platform].agent_dirs — add this line for the file to load:", err=True)
         click.echo('  agent_dirs = ["./agents"]', err=True)
 
     if as_actor:
+        assert ws.config_file is not None  # _discover_project guarantees a resolved config file
         display = name.replace("-", " ").replace("_", " ").title()
         _append_actor(ws.config_file, name, display)
 
@@ -680,7 +685,7 @@ def gen_tool(name: str):
     target.write_text(content, encoding="utf-8")
     click.echo(f"Created {target}")
 
-    extensions = ws.config.platform.extensions
+    extensions = (ws.config.platform or PlatformConfig()).extensions
     if not any(entry in ("./extensions", "extensions") for entry in extensions):
         click.echo("Note: ./extensions is not in [platform].extensions — add this line for the file to load:", err=True)
         click.echo('  extensions = ["bos.exts", "./extensions"]', err=True)
@@ -693,9 +698,11 @@ def gen_channel(kind: str):
     import tomlkit
 
     ws = _discover_project()
+    assert ws.config_file is not None  # _discover_project guarantees a resolved config file
     config_file = ws.config_file
+    runtime_cfg = ws.config.runtime or RuntimeConfig()
     channel_id = f"{kind}+main"
-    if any(ch.channel_id == channel_id for ch in ws.config.runtime.channels):
+    if any(ch.channel_id == channel_id for ch in runtime_cfg.channels):
         raise click.ClickException(f"Channel {channel_id!r} is already configured.")
 
     snippet = (
@@ -709,7 +716,7 @@ def gen_channel(kind: str):
         entry["type"] = "TelegramChannel"
         entry["channel_id"] = channel_id
         entry["display_name"] = "Telegram"
-        entry["target_actor"] = str(ws.config.runtime.default_actor)
+        entry["target_actor"] = str(runtime_cfg.default_actor)
         settings = tomlkit.inline_table()
         settings["token_env"] = "TELEGRAM_BOT_TOKEN"
         entry["settings"] = settings
@@ -732,7 +739,7 @@ def gen_channel(kind: str):
 
 
 def _ensure_env_placeholder(ws: Workspace, env_name: str) -> None:
-    envfile = ws.config.platform.envfile or ".env"
+    envfile = (ws.config.platform or PlatformConfig()).envfile or ".env"
     env_path = ws.bos_dir / envfile
     existing = env_path.read_text(encoding="utf-8") if env_path.exists() else ""
     if any(line.split("=", 1)[0].strip() == env_name for line in existing.splitlines()):

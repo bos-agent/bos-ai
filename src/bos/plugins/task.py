@@ -6,12 +6,13 @@ import time
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any
 from xml.sax.saxutils import escape
 
 from bos.core._utils import _xml_attr
 from bos.core.contract import (
     AgentPlugin,
+    InterceptorStage,
     PluginServices,
     TurnInterceptor,
     ep_plugin,
@@ -147,14 +148,7 @@ class TaskEventInterceptor:
 
     async def intercept(
         self,
-        stage: Literal[
-            "prepare",
-            "before_llm",
-            "after_llm",
-            "after_tool",
-            "final_response",
-            "max_iteration",
-        ],
+        stage: InterceptorStage,
         context: TurnContext,
     ) -> None:
         if stage == "before_llm":

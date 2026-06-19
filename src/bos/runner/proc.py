@@ -354,6 +354,7 @@ def build_docker_argv(
 def _docker_runner_config_arg(workspace: Workspace, container_bos_dir: str, config_arg: str | None) -> str:
     if config_arg and not Path(config_arg).expanduser().is_file():
         return config_arg
+    assert workspace.config_file is not None  # docker config path requires a resolved config file
     return f"{container_bos_dir}/{workspace.config_file.name}"
 
 

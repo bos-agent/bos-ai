@@ -16,6 +16,9 @@ ToolNoiseFilter = Literal["keep_signatures", "strip_all", "keep_all"]
 TokenEstimateSource = Literal["litellm", "fallback", "fallback-error"]
 ToolResultStatus = Literal["success", "error", "unknown"]
 ReasoningEffort = Literal["low", "medium", "high"]
+InterceptorStage = Literal[
+    "prepare", "before_llm", "after_llm", "after_tool", "final_response", "max_iteration", "error"
+]
 
 
 @runtime_checkable
@@ -213,15 +216,7 @@ if TYPE_CHECKING:
 class TurnInterceptor(Protocol):
     async def intercept(
         self,
-        stage: Literal[
-            "prepare",
-            "before_llm",
-            "after_llm",
-            "after_tool",
-            "final_response",
-            "max_iteration",
-            "error",
-        ],
+        stage: InterceptorStage,
         context: TurnContext,
     ) -> None: ...
 
@@ -262,7 +257,8 @@ JobStatus = Literal["queued", "running", "succeeded", "failed", "cancelled"]
 
 @runtime_checkable
 class Job(Protocol):
-    key: str
+    @property
+    def key(self) -> str: ...
 
     async def run(self) -> None: ...
 
@@ -279,6 +275,7 @@ class JobRecord:
 
 @runtime_checkable
 class JobRunner(Protocol):
+    async def start(self) -> None: ...
     async def submit(self, job: Job) -> str: ...
     def bind_trigger(
         self,
@@ -379,7 +376,7 @@ class BaseChannel(Generic[SettingsT]):
     gateway-owned ``ChannelRuntimeContext``.
     """
 
-    SettingsType: ClassVar[type[SettingsT] | None] = None
+    SettingsType: ClassVar[type[Any] | None] = None
 
     def __init__(
         self,
@@ -452,7 +449,7 @@ class PluginServices:
     llm: Any  # LLMClient
     consolidator: Consolidator
     subagents: SubagentRuntime
-    chat_store: ChatStore | None = None
+    chat_store: ChatStore
     events: LifecycleBus | None = None
     jobs: JobRunner | None = None
     background_llm: BackgroundLLM | None = None
