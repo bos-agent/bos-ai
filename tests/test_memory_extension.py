@@ -194,6 +194,43 @@ class TestPerTurnMemoization:
         assert "v2-changed-mid-turn" not in second
 
     @pytest.mark.asyncio
+    async def test_revise_maxim_tool_visible_same_turn(self):
+        """Regression: a ReviseMaxim made by the agent mid-turn must show up on
+        a later iteration of the *same* turn — the per-turn cache is busted by
+        the agent's own write, unlike an external backend mutation."""
+        store = InMemMemoryExtension()
+        await store.set_maxim("user", "v1")
+        agent = _create_memory_agent(memory=store, maxim_keys={"user"})
+        plugin = agent._plugins[0]
+
+        class _Ctx:
+            turn_id = "turn-A"
+
+        ctx = _Ctx()
+        first = await plugin.get_system_prompt_section(ctx)
+        assert "v1" in first
+        await agent._invoke_tool("ReviseMaxim", key="user", content="now prefers v2")
+        second = await plugin.get_system_prompt_section(ctx)  # same turn_id
+        assert "now prefers v2" in second
+
+    @pytest.mark.asyncio
+    async def test_remember_tool_visible_same_turn(self):
+        """Regression: a Remember made by the agent mid-turn appears in the
+        memory_index on the next iteration of the same turn."""
+        store = InMemMemoryExtension()
+        agent = _create_memory_agent(memory=store, maxim_keys={"user"})
+        plugin = agent._plugins[0]
+
+        class _Ctx:
+            turn_id = "turn-A"
+
+        ctx = _Ctx()
+        await plugin.get_system_prompt_section(ctx)  # prime the cache
+        await agent._invoke_tool("Remember", content="deploys happen on Fridays")
+        second = await plugin.get_system_prompt_section(ctx)  # same turn_id
+        assert "deploys happen on Fridays" in second
+
+    @pytest.mark.asyncio
     async def test_new_turn_reflects_backend_change(self):
         store = InMemMemoryExtension()
         await store.set_maxim("user", "v1")

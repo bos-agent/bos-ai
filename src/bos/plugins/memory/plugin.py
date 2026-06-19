@@ -342,6 +342,9 @@ class MemoryAgentPlugin:
         )
         async def remember(content: str, tags: list[str] | None = None) -> str:
             entry_id = await backend.ingest_memory(content, tags=tags)
+            # The agent just changed its own memory; bust the per-turn section
+            # cache so a later iteration of this same turn sees the new entry.
+            self._invalidate_section_cache()
             tag_note = f" Tags: {tags}." if tags else ""
             return f"(Memory stored with entry_id: {entry_id}.{tag_note})"
 
@@ -375,6 +378,9 @@ class MemoryAgentPlugin:
                     f"{length} characters (limit {MAXIM_LIMIT}). "
                     f"Wait for a merge cycle or keep it shorter."
                 )
+            # Same-turn visibility: bust the cached section so the revised maxim
+            # is reflected on the next iteration of this turn.
+            self._invalidate_section_cache()
             return f"(Revision appended to maxim '{key}'. Total size: {length}/{MAXIM_LIMIT} characters.)"
 
         @registry(
@@ -446,6 +452,15 @@ class MemoryAgentPlugin:
                 )
             sections.append("<active_maxims>\n" + "\n".join(items) + "\n</active_maxims>")
         return "\n\n".join(sections)
+
+    def _invalidate_section_cache(self) -> None:
+        """Drop the per-turn section cache so the next get_system_prompt_section
+        re-renders. Called by the agent's own write tools (Remember/ReviseMaxim)
+        so a mid-turn memory edit is visible on the turn's next iteration. Note:
+        external/off-turn backend writes deliberately do NOT invalidate — the
+        section stays byte-stable within a turn for prompt-cache reuse."""
+        self._cached_turn_id = None
+        self._cached_section = None
 
     async def get_system_prompt_section(self, context: TurnContext) -> str | None:
         turn_id = getattr(context, "turn_id", None)
