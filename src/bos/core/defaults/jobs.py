@@ -54,6 +54,10 @@ class InProcJobRunner:
         self._inflight_by_key: dict[str, str] = {}  # key -> job_id
         self._workers: list[asyncio.Task] = []
         self._idle_timers: dict[str, asyncio.TimerHandle] = {}
+        # Strong refs to in-flight idle-fire tasks: asyncio keeps only a weak
+        # reference to a bare create_task() result, so without this the task
+        # could be GC'd mid-flight, dropping the idle consolidation silently.
+        self._idle_tasks: set[asyncio.Task] = set()
         self._trigger_factories: dict[JobTrigger, Callable[[LifecycleEvent | None], Job | None]] = {}
         self._started = False
         self._draining = asyncio.Event()
@@ -93,6 +97,14 @@ class InProcJobRunner:
         for timer in self._idle_timers.values():
             timer.cancel()
         self._idle_timers.clear()
+        # Cancel any idle-fire task already spawned (timer fired but submit not
+        # yet done); gather so its CancelledError is absorbed, not leaked.
+        if self._idle_tasks:
+            idle_tasks = list(self._idle_tasks)
+            for t in idle_tasks:
+                t.cancel()
+            await asyncio.gather(*idle_tasks, return_exceptions=True)
+            self._idle_tasks.clear()
         self._started = False
 
     # ── public API ──
@@ -241,8 +253,15 @@ class InProcJobRunner:
         loop = asyncio.get_event_loop()
         self._idle_timers[event.chat_id] = loop.call_later(
             self._idle_after,
-            lambda: asyncio.create_task(self._fire_idle(event)),
+            lambda: self._spawn_idle(event),
         )
+
+    def _spawn_idle(self, event: LifecycleEvent) -> None:
+        # Retain a strong reference until the task finishes (asyncio only holds a
+        # weak one), then drop it so the set does not grow unbounded.
+        task = asyncio.create_task(self._fire_idle(event))
+        self._idle_tasks.add(task)
+        task.add_done_callback(self._idle_tasks.discard)
 
     async def _fire_idle(self, event: LifecycleEvent) -> None:
         self._idle_timers.pop(event.chat_id, None)

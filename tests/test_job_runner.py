@@ -328,6 +328,35 @@ class TestTriggers:
             await runner.drain(timeout=0.0)
 
     @pytest.mark.asyncio
+    async def test_idle_fire_task_is_retained_and_runs(self):
+        """Regression: the idle-fire task spawned by the timer must be strongly
+        retained. asyncio keeps only a weak reference to a bare create_task()
+        result, so without a strong ref a GC pass before it runs could collect
+        it, silently dropping the idle consolidation."""
+        import gc
+
+        bus = DefaultLifecycleBus()
+        runner = InProcJobRunner(bus, max_concurrency=1, idle_after=300)
+        await runner.start()
+        try:
+            log: list[str] = []
+            runner.bind_trigger("idle", lambda e: _RecJob(key=f"idle:{e.chat_id}", log=log))
+            event = LifecycleEvent(
+                kind="turn_complete", chat_id="c1", actor_name="A", base_revision=1, payload={}
+            )
+            runner._spawn_idle(event)  # what the call_later timer callback invokes
+            # Pending fire-task is retained and survives a GC pass before it runs.
+            assert len(runner._idle_tasks) == 1
+            gc.collect()
+            assert len(runner._idle_tasks) == 1
+            await asyncio.sleep(0.02)  # let the fire-task run -> submit the job
+            assert runner._idle_tasks == set()  # done-callback cleaned it up
+            await runner.drain(timeout=1.0)
+            assert log == ["idle:c1"]
+        finally:
+            await runner.drain(timeout=0.0)
+
+    @pytest.mark.asyncio
     async def test_factory_returning_none_is_skipped(self):
         bus = DefaultLifecycleBus()
         runner = InProcJobRunner(bus, max_concurrency=1, idle_after=300)
