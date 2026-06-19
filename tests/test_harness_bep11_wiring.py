@@ -98,7 +98,6 @@ class TestTurnCompleteEmission:
         actor._lifecycle_bus = bus
         actor._chat_coordinator = _DummyCoordinator()
         actor._mailbox = None
-        actor._recalled_per_turn = {}
 
         ctx = ActorTurnContext(
             chat_id="c1",
@@ -113,6 +112,7 @@ class TestTurnCompleteEmission:
         assert seen[0].chat_id == "c1"
         assert seen[0].actor_name == "A"
         assert seen[0].base_revision == 4
+        assert seen[0].turn_id == "t1"
 
     @pytest.mark.asyncio
     async def test_turn_complete_skipped_when_not_completed(self):
@@ -131,7 +131,6 @@ class TestTurnCompleteEmission:
         actor._lifecycle_bus = bus
         actor._chat_coordinator = _DummyCoordinator()
         actor._mailbox = _NoopMailbox()
-        actor._recalled_per_turn = {}
         ctx = ActorTurnContext(
             chat_id="c1",
             actor_name="A",
@@ -164,47 +163,61 @@ class TestSessionCloseEmission:
     async def test_retire_session_emits_session_close_with_none_revision_when_empty(self):
         """A session that never committed a turn closes with base_revision=None."""
         from bos.core.actor import AgentActor, SessionState
+        from bos.core.defaults.lifecycle import DefaultLifecycleBus
 
         seen = []
+        bus = DefaultLifecycleBus()
 
-        async def emitter(*, chat_id, actor_name, base_revision):
-            seen.append((chat_id, actor_name, base_revision))
+        async def handler(e):
+            seen.append(e)
+
+        bus.subscribe("session_close", handler)
 
         actor = AgentActor.__new__(AgentActor)
         actor._sessions = {"c1": SessionState(chat_id="c1")}
-        actor._lifecycle_emitter = emitter
+        actor._lifecycle_bus = bus
         actor._agent = _StubAgent()
         actor._address = "agent@A"
         await actor.retire_session("c1")
-        assert seen == [("c1", "A", None)]
+        assert len(seen) == 1
+        assert seen[0].kind == "session_close"
+        assert (seen[0].chat_id, seen[0].actor_name, seen[0].base_revision) == ("c1", "A", None)
+        assert seen[0].turn_id is None
 
     @pytest.mark.asyncio
     async def test_retire_session_forwards_last_committed_revision(self):
         """When the session has observed a commit, retire_session forwards that revision."""
         from bos.core.actor import AgentActor, SessionState
+        from bos.core.defaults.lifecycle import DefaultLifecycleBus
 
         seen = []
+        bus = DefaultLifecycleBus()
 
-        async def emitter(*, chat_id, actor_name, base_revision):
-            seen.append((chat_id, actor_name, base_revision))
+        async def handler(e):
+            seen.append(e)
+
+        bus.subscribe("session_close", handler)
 
         actor = AgentActor.__new__(AgentActor)
         session = SessionState(chat_id="c1")
         session.execution.last_committed_revision = 7
         actor._sessions = {"c1": session}
-        actor._lifecycle_emitter = emitter
+        actor._lifecycle_bus = bus
         actor._agent = _StubAgent()
         actor._address = "agent@A"
         await actor.retire_session("c1")
-        assert seen == [("c1", "A", 7)]
+        assert len(seen) == 1
+        assert (seen[0].chat_id, seen[0].actor_name, seen[0].base_revision) == ("c1", "A", 7)
 
     @pytest.mark.asyncio
-    async def test_retire_session_no_emitter_is_silent(self):
+    async def test_retire_session_no_bus_is_silent(self):
         from bos.core.actor import AgentActor, SessionState
 
         actor = AgentActor.__new__(AgentActor)
         actor._sessions = {"c1": SessionState(chat_id="c1")}
-        # no _lifecycle_emitter attribute at all — must not raise
+        actor._agent = _StubAgent()
+        actor._address = "agent@A"
+        actor._lifecycle_bus = None  # no bus → emit is a silent no-op
         await actor.retire_session("c1")
 
 

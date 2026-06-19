@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING, Any
 
 from bos.config.workspace import ResolvedActorConfig
 from bos.core import ActorTurnContext, ActorTurnResult, AgentActor, MailBox
-from bos.core.events import HostChannelSink, MailboxEventSink
 from bos.protocol import MessageType
 
 from .chat_coordinator import ChannelConversationRef, ChatCoordinationError, ChatCoordinator
@@ -16,28 +15,26 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from bos.config import Workspace
-    from bos.core import AgentHarness, LifecycleBus
+    from bos.core import AgentHarness
 
 logger = logging.getLogger(__name__)
 
 
-_MEMORY_RECALL_EVENT_TYPE = "memory.recalled"
-
-
 class CoordinatedActor(AgentActor):
-    """AgentActor variant that fences turns through ChatCoordinator hooks."""
+    """AgentActor variant that fences turns through ChatCoordinator hooks.
+
+    Lifecycle events (turn_complete / session_close) are emitted generically by
+    the base AgentActor via its ``lifecycle_bus``; this subclass adds only the
+    coordinator fencing and channel re-sync, and is plugin-agnostic."""
 
     def __init__(
         self,
         *args: Any,
         chat_coordinator: ChatCoordinator,
-        lifecycle_bus: LifecycleBus | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
         self._chat_coordinator = chat_coordinator
-        self._lifecycle_bus = lifecycle_bus
-        self._recalled_per_turn: dict[str, list[str]] = {}
 
     async def _on_turn_started(self, ctx: ActorTurnContext) -> None:
         ref = _ctx_channel_ref(ctx)
@@ -53,32 +50,14 @@ class CoordinatedActor(AgentActor):
             base_revision=ctx.base_revision,
         )
 
-    def _build_host_sink(self, ctx: ActorTurnContext, mailbox_sink: MailboxEventSink) -> HostChannelSink:
-        sink = super()._build_host_sink(ctx, mailbox_sink)
-        buffer: list[str] = []
-        self._recalled_per_turn[ctx.turn_id] = buffer
-        sink.on(_MEMORY_RECALL_EVENT_TYPE, lambda e: buffer.extend(e.metadata.get("ids", ())))
-        return sink
-
     async def _on_turn_finished(self, ctx: ActorTurnContext, result: ActorTurnResult) -> None:
         self._chat_coordinator.end_turn(
             chat_id=ctx.chat_id,
             turn_id=ctx.turn_id,
             committed_revision=result.committed_revision,
         )
-        recalled = self._recalled_per_turn.pop(ctx.turn_id, [])
-        if self._lifecycle_bus is not None and result.status == "completed":
-            from bos.core.contract import LifecycleEvent
-
-            await self._lifecycle_bus.emit(
-                LifecycleEvent(
-                    kind="turn_complete",
-                    chat_id=ctx.chat_id,
-                    actor_name=ctx.actor_name,
-                    base_revision=result.committed_revision,
-                    payload={"recalled": recalled} if recalled else {},
-                )
-            )
+        # Base actor emits turn_complete on the lifecycle bus (completed turns).
+        await super()._on_turn_finished(ctx, result)
         if result.status in ("aborted", "error") and ctx.reply_recipient:
             # Aborted and errored turns never send a reply envelope, but the
             # turn may have committed history and advanced the chat revision.
@@ -187,32 +166,11 @@ class ActorManager:
         record.mailbox = mailbox
         bus = getattr(self.harness, "events", None)
 
-        async def _emit_close(
-            *,
-            chat_id: str,
-            actor_name: str | None,
-            base_revision: int | None,
-        ) -> None:
-            if bus is None:
-                return
-            from bos.core.contract import LifecycleEvent
-
-            await bus.emit(
-                LifecycleEvent(
-                    kind="session_close",
-                    chat_id=chat_id,
-                    actor_name=actor_name,
-                    base_revision=base_revision,
-                    payload={},
-                )
-            )
-
         record.actor = CoordinatedActor(
             agent,
             mailbox,
             chat_coordinator=self.chat_coordinator,
             lifecycle_bus=bus,
-            lifecycle_emitter=_emit_close,
         )
         record.status = "running"
         record.error = None

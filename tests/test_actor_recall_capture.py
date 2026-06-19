@@ -1,15 +1,19 @@
-"""End-to-end gateway-layer behavior for memory.recalled events.
+"""Recall capture/flush after the dependency inversion.
 
-The base AgentActor stays generic — it knows nothing about memory.recalled.
-CoordinatedActor (gateway) extends _build_host_sink to register a handler
-that buffers recalled ids per turn, then emits the turn_complete LifecycleEvent
-with those ids. This file verifies:
+The base AgentActor stays generic — it knows nothing about memory.recalled and
+emits a payload-free turn_complete LifecycleEvent on its bus. The memory plugin
+owns the recall ids end to end: its auto-recall interceptor records the surfaced
+ids into the per-agent bundle keyed by turn_id, and its turn_complete subscriber
+drains that buffer to flush last_used. The gateway is no longer involved.
 
-  * AgentActor still forwards client-facing events to the mailbox.
-  * AgentActor does NOT leak memory.recalled to client mailbox.
-  * CoordinatedActor's turn_complete LifecycleEvent carries this turn's
-    recalled ids and only this turn's, even when two chats overlap on the
-    same Agent (the cross-chat leak regression).
+This file verifies:
+
+  * AgentActor still forwards client-facing events but does NOT leak
+    memory.recalled to the client mailbox.
+  * CoordinatedActor emits a generic turn_complete (chat_id + turn_id, no
+    memory-specific payload).
+  * The plugin records recalled ids per turn and the turn_complete flush touches
+    only that turn's ids — even for two chats interleaved on one agent.
 """
 
 from __future__ import annotations
@@ -23,11 +27,11 @@ from conftest import InMemMailRoute, InMemMemoryExtension
 from test_event_sink import create_test_agent
 
 from bos.core import AgentActor, LLMResponse, ep_provider
-from bos.core.contract import LifecycleEvent
+from bos.core.contract import LifecycleEvent, Message, PluginServices
 from bos.core.defaults.lifecycle import DefaultLifecycleBus
 from bos.extensions.chat_stores.in_memory import InMemChatStore
 from bos.gateway import ChatCoordinator, CoordinatedActor
-from bos.plugins.memory.plugin import MemoryAgentPlugin
+from bos.plugins.memory.plugin import MemoryAgentPlugin, MemoryHarnessPlugin
 from bos.protocol import MessageType
 
 
@@ -96,15 +100,21 @@ async def _send_with_coordinated_metadata(client_mb, actor_addr: str, content: s
 
 
 @pytest.mark.asyncio
-async def test_coordinated_actor_emits_recalled_ids_in_turn_complete(stub_provider):
+async def test_coordinated_actor_emits_generic_turn_complete(stub_provider):
+    """turn_complete is a platform event now: it carries chat_id + turn_id and
+    no memory-specific payload. The gateway names no plugin."""
     backend = InMemMemoryExtension()
-    eid = await backend.ingest_memory("user prefers PostgreSQL 16", tags=["db"])
+    await backend.ingest_memory("user prefers PostgreSQL 16", tags=["db"])
 
     chat_store = InMemChatStore()
     coordinator = ChatCoordinator(chat_store)
     bus = DefaultLifecycleBus()
     events: list[LifecycleEvent] = []
-    bus.subscribe("turn_complete", lambda e: events.append(e) or asyncio.sleep(0))
+
+    async def _collect(e: LifecycleEvent) -> None:
+        events.append(e)
+
+    bus.subscribe("turn_complete", _collect)
 
     route = InMemMailRoute()
     actor_addr = f"agent@coord-{stub_provider}"
@@ -121,12 +131,10 @@ async def test_coordinated_actor_emits_recalled_ids_in_turn_complete(stub_provid
     task = asyncio.create_task(actor.run())
     try:
         await _send_with_coordinated_metadata(sender_mb, actor_addr, "postgresql?", chat_id="chat-coord")
-        # Wait for the final response envelope
         for _ in range(20):
             env = await asyncio.wait_for(sender_mb.receive(), timeout=2)
             if env.content_type == MessageType.MESSAGE:
                 break
-        # Give the bus a tick to deliver subscribers (DefaultLifecycleBus may dispatch async)
         await asyncio.sleep(0.05)
     finally:
         task.cancel()
@@ -134,67 +142,73 @@ async def test_coordinated_actor_emits_recalled_ids_in_turn_complete(stub_provid
 
     completed = [e for e in events if e.kind == "turn_complete"]
     assert completed, "no turn_complete event emitted"
-    assert completed[-1].payload.get("recalled") == [eid]
+    last = completed[-1]
+    assert last.chat_id == "chat-coord"
+    assert last.turn_id
+    assert "recalled" not in last.payload
+
+
+async def _make_harness_plugin(tmp_path, bus) -> MemoryHarnessPlugin:
+    services = PluginServices(
+        bos_dir=tmp_path,
+        workspace=tmp_path,
+        llm=None,
+        consolidator=None,
+        subagents=None,
+        chat_store=InMemChatStore(),
+        events=bus,
+        jobs=None,
+        background_llm=None,
+    )
+    plugin = MemoryHarnessPlugin()
+    plugin._cfg = {**plugin.default_config(), "backend": "in_memory"}
+    await plugin.setup(services)
+    return plugin
+
+
+def _query_ctx(chat_id: str, turn_id: str, query: str):
+    from bos.core.agent import TurnContext
+
+    ctx = TurnContext(agent_name="main", chat_id=chat_id, turn_id=turn_id, event_sink=None)
+    ctx.current = [Message(llm_message={"role": "user", "content": query})]
+    return ctx
 
 
 @pytest.mark.asyncio
-async def test_two_concurrent_chats_do_not_leak_recalled_ids_across_each_other(stub_provider):
-    """Regression: one Agent serving two chats concurrently. Each chat's
-    turn_complete must carry only its own recalled ids. Previously the agent
-    held _current_context as an instance attribute; whichever ask() ran last
-    clobbered it, so chat A's turn_complete could carry chat B's recalled ids
-    and the recall flush touched the wrong memories' last_used.
-    """
+async def test_plugin_records_recalled_per_turn_and_flush_touches_only_that_turn(tmp_path):
+    """The interceptor records surfaced ids into the bundle keyed by turn_id;
+    the turn_complete flush drains exactly that turn's ids. Two chats interleaved
+    on one agent must not cross-contaminate (the prior _current_context leak)."""
+    import bos.exts  # noqa: F401  — registers the in_memory backend
 
-    @ep_provider(name=f"{stub_provider}_slow")
-    async def _slow(messages, model=None, **kwargs):
-        await asyncio.sleep(0.05)
-        return LLMResponse(content="reply")
+    bus = DefaultLifecycleBus()
+    plugin = await _make_harness_plugin(tmp_path, bus)
 
-    try:
-        backend = InMemMemoryExtension()
-        eid_pg = await backend.ingest_memory("Alice loves PostgreSQL", tags=["db"])
-        eid_rs = await backend.ingest_memory("Bob writes Rust daily", tags=["lang"])
+    agent_plugin = plugin.bind({**plugin._cfg, "agent_name": "main"})
+    bundle = plugin._for("main")
+    eid_pg = await bundle.backend.ingest_memory("Alice loves PostgreSQL", tags=["db"])
+    eid_rs = await bundle.backend.ingest_memory("Bob writes Rust daily", tags=["lang"])
 
-        chat_store = InMemChatStore()
-        coordinator = ChatCoordinator(chat_store)
-        bus = DefaultLifecycleBus()
-        events: list[LifecycleEvent] = []
+    interceptor = agent_plugin.get_interceptors()[0]
+    await asyncio.gather(
+        interceptor.intercept("prepare", _query_ctx("chat-A", "t-A", "postgresql?")),
+        interceptor.intercept("prepare", _query_ctx("chat-B", "t-B", "rust?")),
+    )
 
-        async def _collect(event: LifecycleEvent) -> None:
-            events.append(event)
+    # Each turn's recall is isolated by turn_id.
+    assert bundle.recalled_by_turn == {"t-A": [eid_pg], "t-B": [eid_rs]}
 
-        bus.subscribe("turn_complete", _collect)
+    # Flushing turn A touches only PostgreSQL and drains only A's buffer.
+    await bus.emit(
+        LifecycleEvent(kind="turn_complete", chat_id="chat-A", actor_name="main", base_revision=1, turn_id="t-A")
+    )
+    assert (await bundle.backend.get_memory(eid_pg)).metadata["last_used"] is not None
+    assert (await bundle.backend.get_memory(eid_rs)).metadata["last_used"] is None
+    assert "t-A" not in bundle.recalled_by_turn and "t-B" in bundle.recalled_by_turn
 
-        route = InMemMailRoute()
-        actor_addr = f"agent@two-{stub_provider}"
-        sender_addr = f"channel@two-{stub_provider}"
-        actor_mb = route.bind(actor_addr)
-        sender_mb = route.bind(sender_addr)
-
-        plugin = MemoryAgentPlugin(backend, {"user"}, auto_recall=True, top_k=1)
-        agent = create_test_agent(
-            model=f"{stub_provider}_slow/two", agent_name="main", plugins=[plugin], chat_store=chat_store
-        )
-        actor = CoordinatedActor(agent, actor_mb, chat_coordinator=coordinator, lifecycle_bus=bus)
-
-        task = asyncio.create_task(actor.run())
-        try:
-            await _send_with_coordinated_metadata(sender_mb, actor_addr, "postgresql?", chat_id="chat-A")
-            await _send_with_coordinated_metadata(sender_mb, actor_addr, "rust?", chat_id="chat-B")
-            replies = 0
-            for _ in range(60):
-                env = await asyncio.wait_for(sender_mb.receive(), timeout=3)
-                if env.content_type == MessageType.MESSAGE:
-                    replies += 1
-                    if replies == 2:
-                        break
-            await asyncio.sleep(0.05)
-        finally:
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
-
-        by_chat = {e.chat_id: e.payload.get("recalled", []) for e in events if e.kind == "turn_complete"}
-        assert by_chat == {"chat-A": [eid_pg], "chat-B": [eid_rs]}, by_chat
-    finally:
-        ep_provider._extensions.pop(f"{stub_provider}_slow", None)
+    # Flushing turn B touches Rust.
+    await bus.emit(
+        LifecycleEvent(kind="turn_complete", chat_id="chat-B", actor_name="main", base_revision=1, turn_id="t-B")
+    )
+    assert (await bundle.backend.get_memory(eid_rs)).metadata["last_used"] is not None
+    assert bundle.recalled_by_turn == {}

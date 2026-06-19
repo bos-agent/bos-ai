@@ -237,6 +237,9 @@ class LifecycleEvent:
     chat_id: str
     actor_name: str | None
     base_revision: int | None
+    # The turn this event closes, for ``turn_complete``. ``None`` for
+    # ``session_close`` (which spans the whole session, not one turn).
+    turn_id: str | None = None
     payload: dict[str, Any] = field(default_factory=dict)
 
 

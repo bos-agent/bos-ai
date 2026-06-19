@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -28,6 +28,8 @@ pep_memory_backend = ExtensionPoint(
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from bos.core.agent import TurnContext
     from bos.core.contract import Job, LifecycleEvent
 
@@ -89,6 +91,12 @@ Use memory tools for durable context that should help in future conversations, n
 </memory_workflow>"""
 
 
+# Cap on in-flight per-turn recall buffers. A turn's entry is popped when its
+# turn_complete fires; only turns that never complete (errored/aborted) leak,
+# so a small FIFO bound keeps the map from growing without flushing.
+_RECALL_BUFFER_CAP = 512
+
+
 @dataclass
 class _PerAgentMemory:
     """All scoped-to-one-agent memory state (Ω: storage-level isolation)."""
@@ -97,6 +105,15 @@ class _PerAgentMemory:
     op_service: DefaultMemoryOperationService
     watermarks: WatermarkStore
     consolidator: DefaultMemoryConsolidator | None
+    # Recalled entry-ids surfaced during a turn, keyed by turn_id. The
+    # auto-recall interceptor fills it; the turn_complete flush drains it.
+    recalled_by_turn: dict[str, list[str]] = field(default_factory=dict)
+
+    def record_recalled(self, turn_id: str, ids: list[str]) -> None:
+        self.recalled_by_turn[turn_id] = list(ids)
+        while len(self.recalled_by_turn) > _RECALL_BUFFER_CAP:
+            # Drop the oldest still-unflushed turn (insertion-ordered dict).
+            del self.recalled_by_turn[next(iter(self.recalled_by_turn))]
 
 
 @ep_plugin(name="MemoryPlugin")
@@ -146,8 +163,9 @@ class MemoryHarnessPlugin:
             services.jobs.bind_trigger("session_close", self._make_consolidation_job_factory())
 
         # Recall-log flush (BEP 10 §6): on turn_complete, dispatch to the
-        # event.actor_name's op_service. We subscribe a single closure that
-        # looks the bundle up by name — no shared op_service to flush against.
+        # event.actor_name's bundle. The bundle holds the ids its own
+        # interceptor recorded this turn — the platform's turn_complete event
+        # is the generic trigger; it carries no memory-specific payload.
         retrieval_cfg = dict(cfg.get("retrieval", {}))
         if services.events is not None and (retrieval_cfg.get("auto_recall", True) or self._policy.enabled):
             services.events.subscribe("turn_complete", self._handle_turn_complete_flush)
@@ -192,7 +210,9 @@ class MemoryHarnessPlugin:
             # The actor was never bound (e.g., emit from a chat that never
             # ran through this harness). Nothing to flush.
             return
-        await RecallFlushSubscriber(bundle.op_service).handle(event)
+        turn_id = getattr(event, "turn_id", None)
+        recalled = bundle.recalled_by_turn.pop(turn_id, []) if turn_id else []
+        await RecallFlushSubscriber(bundle.op_service).flush(recalled, chat_id=event.chat_id)
 
     def _make_consolidation_job_factory(self):
         from .job import MemoryConsolidationJob
@@ -287,6 +307,7 @@ class MemoryHarnessPlugin:
             index_max=retrieval.get("index_max", 50),
             auto_recall=retrieval.get("auto_recall", True),
             top_k=retrieval.get("top_k", 5),
+            on_recalled=bundle.record_recalled,
         )
 
     async def teardown(self) -> None:
@@ -305,6 +326,7 @@ class MemoryAgentPlugin:
         index_max: int = 50,
         auto_recall: bool = True,
         top_k: int = 5,
+        on_recalled: Callable[[str, list[str]], None] | None = None,
     ) -> None:
         self._backend = backend
         self._maxim_keys = maxim_keys
@@ -312,6 +334,7 @@ class MemoryAgentPlugin:
         self._index_max = index_max
         self._auto_recall = auto_recall
         self._top_k = top_k
+        self._on_recalled = on_recalled
         self._cached_turn_id: str | None = None
         self._cached_section: str | None = None
 
@@ -477,4 +500,4 @@ class MemoryAgentPlugin:
             return []
         from .auto_recall import AutoRecallInterceptor
 
-        return [AutoRecallInterceptor(self._backend, top_k=self._top_k)]
+        return [AutoRecallInterceptor(self._backend, top_k=self._top_k, on_recalled=self._on_recalled)]

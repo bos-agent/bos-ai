@@ -13,6 +13,8 @@ from bos.protocol import TurnEvent
 from .scoped_memory import MemoryBackend
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from bos.core.agent import TurnContext
 
 _EPHEMERAL_KEY = "memory_auto_recall"
@@ -45,9 +47,18 @@ def _incoming_text(context: "TurnContext") -> str:
 
 
 class AutoRecallInterceptor:
-    def __init__(self, backend: MemoryBackend, *, top_k: int = 5) -> None:
+    def __init__(
+        self,
+        backend: MemoryBackend,
+        *,
+        top_k: int = 5,
+        on_recalled: Callable[[str, list[str]], None] | None = None,
+    ) -> None:
         self._backend = backend
         self._top_k = top_k
+        # Optional sink for the surfaced ids, keyed by turn so the off-turn
+        # recall flush can read them back without routing through the host.
+        self._on_recalled = on_recalled
 
     async def intercept(self, stage: InterceptStage, context: TurnContext) -> None:
         if stage != "prepare":
@@ -62,6 +73,12 @@ class AutoRecallInterceptor:
         block = f"<auto_recall>\nPossibly-relevant memories (context, not proof):\n{items}\n</auto_recall>"
         context.set_ephemeral_message(_EPHEMERAL_KEY, {"role": "user", "content": block})
 
+        ids = [h.id for h in hits]
+        if self._on_recalled is not None:
+            turn_id = getattr(context, "turn_id", "") or ""
+            if turn_id:
+                self._on_recalled(turn_id, ids)
+
         sink = getattr(context, "event_sink", None)
         if sink is None:
             return
@@ -72,6 +89,6 @@ class AutoRecallInterceptor:
                 chat_id=getattr(context, "chat_id", ""),
                 turn_id=getattr(context, "turn_id", ""),
                 agent_name=getattr(context, "agent_name", None),
-                metadata={"ids": [h.id for h in hits]},
+                metadata={"ids": ids},
             )
         )

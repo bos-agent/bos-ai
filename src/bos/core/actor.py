@@ -12,12 +12,12 @@ from bos.protocol import Envelope, MessageContent, MessageType, TurnEvent
 
 from .agent import AbortTurn, Agent
 from .chat_state import ChatState, ChatStateError
-from .contract import MailBox
+from .contract import LifecycleBus, LifecycleEvent, LifecycleKind, MailBox
 from .events import CLIENT_TURN_EVENT_TYPES, HostChannelSink, MailboxEventSink
 from .harness import CURRENT_MAILBOX
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Callable
 
 logger = logging.getLogger(__name__)
 
@@ -29,8 +29,8 @@ class SessionExecution:
     reply_recipient: str | None = None
     reply_chat_id: str | None = None
     # Most recent ChatCommit.revision the actor observed for this session.
-    # `retire_session` forwards it to the lifecycle emitter so session_close
-    # carries a real base_revision without an out-of-band chat_store lookup.
+    # `retire_session` emits session_close with it so the event carries a real
+    # base_revision without an out-of-band chat_store lookup.
     last_committed_revision: int | None = None
 
 
@@ -99,14 +99,14 @@ class AgentActor:
         mailbox: MailBox,
         chat_state: ChatState | None = None,
         *,
-        lifecycle_emitter: Callable[..., Awaitable[None]] | None = None,
+        lifecycle_bus: LifecycleBus | None = None,
     ):
         self._address = mailbox.address
         self._agent = agent
         self._mailbox = mailbox
         self._chat_state = chat_state or ChatState()
         self._sessions: dict[str, SessionState] = {}
-        self._lifecycle_emitter = lifecycle_emitter
+        self._lifecycle_bus = lifecycle_bus
         self._command_tasks: set[asyncio.Task] = set()
 
     async def aclose(self) -> None:
@@ -217,16 +217,13 @@ class AgentActor:
         if task is not None:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
-        emitter = getattr(self, "_lifecycle_emitter", None)
-        if emitter is not None:
-            try:
-                await emitter(
-                    chat_id=chat_id,
-                    actor_name=self._actor_name(),
-                    base_revision=session.execution.last_committed_revision,
-                )
-            except Exception:
-                logger.exception("session_close emitter raised")
+        await self._emit_lifecycle(
+            "session_close",
+            chat_id=chat_id,
+            actor_name=self._actor_name(),
+            turn_id=None,
+            base_revision=session.execution.last_committed_revision,
+        )
 
     def _spawn_command_task(self, env: Envelope) -> None:
         task = asyncio.create_task(self._handle_command(env))
@@ -398,7 +395,45 @@ class AgentActor:
         pass
 
     async def _on_turn_finished(self, ctx: ActorTurnContext, result: ActorTurnResult) -> None:
-        pass
+        # A completed turn is a generic platform lifecycle event. Subclasses
+        # that override this MUST call super() to preserve the emit.
+        if result.status == "completed":
+            await self._emit_lifecycle(
+                "turn_complete",
+                chat_id=ctx.chat_id,
+                actor_name=ctx.actor_name,
+                turn_id=ctx.turn_id,
+                base_revision=result.committed_revision,
+            )
+
+    async def _emit_lifecycle(
+        self,
+        kind: LifecycleKind,
+        *,
+        chat_id: str,
+        actor_name: str | None,
+        turn_id: str | None,
+        base_revision: int | None,
+    ) -> None:
+        """Emit a lifecycle event on the bus, if one is wired. The bus is the
+        single generic channel for turn_complete / session_close — the actor
+        names no plugin, and plugins subscribe to react (e.g. recall flush,
+        consolidation)."""
+        if self._lifecycle_bus is None:
+            return
+        try:
+            await self._lifecycle_bus.emit(
+                LifecycleEvent(
+                    kind=kind,
+                    chat_id=chat_id,
+                    actor_name=actor_name,
+                    base_revision=base_revision,
+                    turn_id=turn_id,
+                    payload={},
+                )
+            )
+        except Exception:
+            logger.exception("%s lifecycle emit raised", kind)
 
     def _build_host_sink(self, ctx: ActorTurnContext, mailbox_sink: MailboxEventSink) -> HostChannelSink:
         """Construct the per-turn event sink. The base actor registers the
