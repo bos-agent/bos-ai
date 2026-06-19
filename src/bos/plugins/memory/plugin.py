@@ -365,17 +365,17 @@ class MemoryAgentPlugin:
         async def revise_maxim(key: str, content: str) -> str:
             if not _allowed(key.lower(), maxim_keys):
                 return f"Error: Maxim '{key}' is not allowed."
-            current = await backend.get_maxim(key.lower())
             ts = datetime.now().strftime("%Y-%m-%d %H:%M")
-            revised = f"{current}\n[{ts}] {content}" if current else f"[{ts}] {content}"
-            if len(revised) > MAXIM_LIMIT:
+            # Atomic read-append-write (enforcing the size cap inside the lock) so a
+            # concurrent consolidation PROMOTE on the same maxim cannot be lost.
+            written, length = await backend.append_to_maxim(key.lower(), f"[{ts}] {content}", max_len=MAXIM_LIMIT)
+            if not written:
                 return (
                     f"Error: Revision would bring maxim '{key}' to "
-                    f"{len(revised)} characters (limit {MAXIM_LIMIT}). "
+                    f"{length} characters (limit {MAXIM_LIMIT}). "
                     f"Wait for a merge cycle or keep it shorter."
                 )
-            await backend.set_maxim(key.lower(), revised)
-            return f"(Revision appended to maxim '{key}'. Total size: {len(revised)}/{MAXIM_LIMIT} characters.)"
+            return f"(Revision appended to maxim '{key}'. Total size: {length}/{MAXIM_LIMIT} characters.)"
 
         @registry(
             name="Recall",

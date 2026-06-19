@@ -1,5 +1,7 @@
 """Regression + feature tests for MarkdownMemoryBackend."""
 
+import asyncio
+
 import pytest
 
 from bos.plugins.memory.markdown_backend import MarkdownMemoryBackend
@@ -143,3 +145,55 @@ class TestRemovedMethods:
         assert not hasattr(MarkdownMemoryBackend, "optimize")
         assert not hasattr(InMemMemoryExtension, "forget_memory")
         assert not hasattr(MarkdownMemoryBackend, "forget_memory")
+
+
+class TestConcurrentWrites:
+    """The read-modify-write must be atomic per entry/maxim file. These drive two
+    genuinely concurrent writers (each update_memory/append_to_maxim runs in its
+    own thread via asyncio.to_thread) and assert no edit is lost. They pass on the
+    atomic backend on every run; on the pre-fix code (lock spanning only the
+    write) a round drops one of the two edits."""
+
+    @pytest.mark.asyncio
+    async def test_concurrent_update_distinct_fields_no_lost_edit(self, tmp_path):
+        b = _backend(tmp_path)
+        eid = await b.ingest_memory("a fact", importance=1)
+        for k in range(2, 40):
+            # One writer bumps importance, the other bumps last_used — distinct
+            # fields, so an atomic RMW must preserve BOTH.
+            await asyncio.gather(
+                b.update_memory(eid, importance=k),
+                b.update_memory(eid, last_used=f"t{k}"),
+            )
+            entry = await b.get_memory(eid)
+            assert entry is not None
+            assert entry.metadata["importance"] == k, f"importance lost at round {k}"
+            assert entry.metadata["last_used"] == f"t{k}", f"last_used lost at round {k}"
+
+    @pytest.mark.asyncio
+    async def test_concurrent_append_to_maxim_both_survive(self, tmp_path):
+        b = _backend(tmp_path)
+        for k in range(40):
+            await asyncio.gather(
+                b.append_to_maxim("user", f"A{k}"),
+                b.append_to_maxim("user", f"B{k}"),
+            )
+        text = await b.get_maxim("user")
+        for k in range(40):
+            assert f"A{k}" in text, f"A{k} append lost"
+            assert f"B{k}" in text, f"B{k} append lost"
+
+    @pytest.mark.asyncio
+    async def test_append_to_maxim_respects_max_len(self, tmp_path):
+        b = _backend(tmp_path)
+        await b.set_maxim("user", "x" * 20)
+        # Would exceed the cap: nothing written, reports the would-be length.
+        written, length = await b.append_to_maxim("user", "y" * 20, max_len=30)
+        assert written is False
+        assert length == 41  # 20 + "\n" + 20
+        assert await b.get_maxim("user") == "x" * 20
+        # Within the cap: written, reports the new length.
+        written, length = await b.append_to_maxim("user", "z", max_len=30)
+        assert written is True
+        assert length == 22
+        assert (await b.get_maxim("user")).endswith("\nz")

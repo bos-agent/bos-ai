@@ -165,10 +165,10 @@ class DefaultMemoryOperationService:
             entry = await self._backend.get_memory(op.target_id, include_invalid=True)
             assert entry is not None  # target existence checked above
             gist = (op.content or entry.content).strip()
-            current = await self._backend.get_maxim(op.maxim_key)
             ts = self._now()[:16].replace("T", " ")
-            revised = f"{current}\n[{ts}] {gist}" if current else f"[{ts}] {gist}"
-            await self._backend.set_maxim(op.maxim_key, revised)
+            # Atomic read-append-write so a concurrent revise_maxim tool call
+            # cannot clobber this promotion (or vice versa).
+            await self._backend.append_to_maxim(op.maxim_key, f"[{ts}] {gist}")
         return await self._record(op, "applied", entry_id)
 
     async def apply(self, ops: list[MemoryOperation], *, dry_run: bool = False) -> list[AuditRecord]:

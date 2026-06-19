@@ -94,10 +94,17 @@ class MarkdownMemoryBackend:
         fm = yaml.safe_dump(front, sort_keys=True, allow_unicode=True).strip()
         return f"---\n{fm}\n---\n{entry.content}\n"
 
+    def _write_entry_unlocked(self, entry: MemoryEntry) -> None:
+        """Serialize + write without taking the file lock. Callers performing a
+        read-modify-write hold _flock(path) across the whole sequence and use this;
+        nesting _write_entry's own lock inside that flock would self-deadlock."""
+        path = self._memories_dir / f"{entry.id}.md"
+        path.write_text(self._serialize(entry), encoding="utf-8")
+
     def _write_entry(self, entry: MemoryEntry) -> None:
         path = self._memories_dir / f"{entry.id}.md"
         with _flock(path):
-            path.write_text(self._serialize(entry), encoding="utf-8")
+            self._write_entry_unlocked(entry)
 
     # ── maxims ──
 
@@ -112,6 +119,22 @@ class MarkdownMemoryBackend:
                 path.write_text(content, encoding="utf-8")
 
         await asyncio.to_thread(_write)
+
+    async def append_to_maxim(self, key: str, line: str, *, max_len: int | None = None) -> tuple[bool, int]:
+        path = self._maxims_dir / f"{key.lower()}.md"
+
+        def _append() -> tuple[bool, int]:
+            # Read + append + write under one flock so concurrent revisers cannot
+            # each read the same snapshot and clobber one another's appends.
+            with _flock(path):
+                current = self._read_text_sync(path)
+                revised = f"{current}\n{line}" if current else line
+                if max_len is not None and len(revised) > max_len:
+                    return (False, len(revised))
+                path.write_text(revised, encoding="utf-8")
+                return (True, len(revised))
+
+        return await asyncio.to_thread(_append)
 
     # ── capture + read ──
 
@@ -201,47 +224,59 @@ class MarkdownMemoryBackend:
         links=None,
         last_used=None,
     ) -> None:
+        path = self._memories_dir / f"{entry_id}.md"
+
         def _update() -> None:
-            entry = self._file_to_entry(self._memories_dir / f"{entry_id}.md")
-            if entry is None:
-                return
-            if content is not None:
-                entry.content = content
-            if tags is not None:
-                entry.tags = list(tags)
-            if importance is not None:
-                entry.metadata["importance"] = importance
-            if summary is not None:
-                entry.metadata["summary"] = summary
-            if links is not None:
-                entry.metadata["links"] = list(links)
-            if last_used is not None:
-                entry.metadata["last_used"] = last_used
-            self._write_entry(entry)
+            # Hold the lock across read+write so a concurrent writer (e.g. a
+            # recall-flush last_used bump racing a consolidation importance edit)
+            # cannot read a stale snapshot and clobber the other's field.
+            with _flock(path):
+                entry = self._file_to_entry(path)
+                if entry is None:
+                    return
+                if content is not None:
+                    entry.content = content
+                if tags is not None:
+                    entry.tags = list(tags)
+                if importance is not None:
+                    entry.metadata["importance"] = importance
+                if summary is not None:
+                    entry.metadata["summary"] = summary
+                if links is not None:
+                    entry.metadata["links"] = list(links)
+                if last_used is not None:
+                    entry.metadata["last_used"] = last_used
+                self._write_entry_unlocked(entry)
 
         await asyncio.to_thread(_update)
 
     async def invalidate_memory(self, entry_id: str, *, requested_by: RequestedBy) -> None:
+        path = self._memories_dir / f"{entry_id}.md"
+
         def _invalidate() -> None:
-            entry = self._file_to_entry(self._memories_dir / f"{entry_id}.md")
-            if entry is None:
-                return
-            entry.metadata["valid"] = False
-            entry.metadata["invalidated_at"] = datetime.now().isoformat()
-            entry.metadata["invalidated_by"] = requested_by
-            self._write_entry(entry)
+            with _flock(path):
+                entry = self._file_to_entry(path)
+                if entry is None:
+                    return
+                entry.metadata["valid"] = False
+                entry.metadata["invalidated_at"] = datetime.now().isoformat()
+                entry.metadata["invalidated_by"] = requested_by
+                self._write_entry_unlocked(entry)
 
         await asyncio.to_thread(_invalidate)
 
     async def restore_memory(self, entry_id: str) -> None:
+        path = self._memories_dir / f"{entry_id}.md"
+
         def _restore() -> None:
-            entry = self._file_to_entry(self._memories_dir / f"{entry_id}.md")
-            if entry is None:
-                return
-            entry.metadata["valid"] = True
-            entry.metadata["invalidated_at"] = None
-            entry.metadata["invalidated_by"] = None
-            self._write_entry(entry)
+            with _flock(path):
+                entry = self._file_to_entry(path)
+                if entry is None:
+                    return
+                entry.metadata["valid"] = True
+                entry.metadata["invalidated_at"] = None
+                entry.metadata["invalidated_by"] = None
+                self._write_entry_unlocked(entry)
 
         await asyncio.to_thread(_restore)
 

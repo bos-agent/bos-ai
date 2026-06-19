@@ -35,6 +35,14 @@ class MemoryBackend(Protocol):
     # maxims
     async def get_maxim(self, key: str) -> str: ...
     async def set_maxim(self, key: str, content: str) -> None: ...
+    async def append_to_maxim(self, key: str, line: str, *, max_len: int | None = None) -> tuple[bool, int]:
+        """Atomically append ``line`` as a new line to the maxim's current content.
+
+        The read-append-write is a single atomic operation so concurrent revisers
+        (e.g. a consolidation PROMOTE racing the revise_maxim tool) never clobber
+        each other's appends. If ``max_len`` is set and the result would exceed it,
+        nothing is written. Returns ``(written, resulting_length)``."""
+        ...
 
     # capture (raw append) + read
     async def ingest_memory(

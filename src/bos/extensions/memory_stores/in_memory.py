@@ -33,6 +33,15 @@ class InMemMemoryExtension:
     async def set_maxim(self, key: str, content: str) -> None:
         self._maxims[key.lower()] = content
 
+    async def append_to_maxim(self, key: str, line: str, *, max_len: int | None = None) -> tuple[bool, int]:
+        # Synchronous dict access with no intervening await — atomic on the loop.
+        current = self._maxims.get(key.lower(), "")
+        revised = f"{current}\n{line}" if current else line
+        if max_len is not None and len(revised) > max_len:
+            return (False, len(revised))
+        self._maxims[key.lower()] = revised
+        return (True, len(revised))
+
     async def ingest_memory(
         self,
         content: str,
