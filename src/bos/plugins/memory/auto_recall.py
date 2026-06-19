@@ -1,12 +1,14 @@
 """Auto-recall turn interceptor (BEP 10 §3) — retrieves on the incoming message
-and injects top hits as ephemeral context after the cache breakpoint. Records
-surfaced entry-ids on TurnContext.metadata['recalled'] for the off-turn recall
-log (the off-turn flush itself is BEP-11-gated)."""
+and injects top hits as ephemeral context after the cache breakpoint. Emits a
+``memory.recalled`` TurnEvent on the per-turn event sink carrying the surfaced
+entry-ids; the actor accumulates these for the off-turn recall log."""
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Literal
 from xml.sax.saxutils import escape
+
+from bos.protocol import TurnEvent
 
 from .scoped_memory import MemoryBackend
 
@@ -14,6 +16,7 @@ if TYPE_CHECKING:
     from bos.core.agent import TurnContext
 
 _EPHEMERAL_KEY = "memory_auto_recall"
+RECALL_EVENT_TYPE = "memory.recalled"
 
 InterceptStage = Literal[
     "prepare",
@@ -58,5 +61,17 @@ class AutoRecallInterceptor:
         items = "\n".join(f'<recalled id="{escape(h.id)}">{escape(h.content[:300])}</recalled>' for h in hits)
         block = f"<auto_recall>\nPossibly-relevant memories (context, not proof):\n{items}\n</auto_recall>"
         context.set_ephemeral_message(_EPHEMERAL_KEY, {"role": "user", "content": block})
-        recalled: list[str] = context.metadata.setdefault("recalled", [])
-        recalled.extend(h.id for h in hits)
+
+        sink = getattr(context, "event_sink", None)
+        if sink is None:
+            return
+        await sink.emit(
+            TurnEvent(
+                event_type=RECALL_EVENT_TYPE,
+                phase="prepare",
+                chat_id=getattr(context, "chat_id", ""),
+                turn_id=getattr(context, "turn_id", ""),
+                agent_name=getattr(context, "agent_name", None),
+                metadata={"ids": [h.id for h in hits]},
+            )
+        )

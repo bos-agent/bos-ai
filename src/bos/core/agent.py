@@ -346,7 +346,6 @@ class Agent:
         self._local_tools = local_tools or ToolRegistry(f"_local_tools:{self._name}", "Agent-scoped local tools.")
         self._plugins = plugins
         self._plugins_prompt = plugins_prompt or {}
-        self._current_context: TurnContext | None = None
         self._tool_noise_filter = tool_noise_filter
         self._compaction_lock = chat_compaction_lock
         self._history_attribution = history_attribution
@@ -394,8 +393,7 @@ class Agent:
             metadata=(ctx_metadata or {}).copy(),
             current_message_projector=self._project_current_message,
         )
-        self._current_context = ctx
-        ctx.set_system_prompt(await self._build_system_prompt())
+        ctx.set_system_prompt(await self._build_system_prompt(ctx))
         user_message_metadata = ctx.metadata.get("user_message_metadata")
         ctx.add_message(
             {"role": "user", "content": content or ""},
@@ -533,7 +531,7 @@ class Agent:
                     break
                 iteration += 1
                 await _interrupt()
-                ctx.set_system_prompt(await self._build_system_prompt())
+                ctx.set_system_prompt(await self._build_system_prompt(ctx))
                 await _run_interceptor("before_llm")
                 await _emit_event(
                     "llm",
@@ -798,14 +796,14 @@ class Agent:
             )
         return formatted
 
-    async def _build_system_prompt(self) -> str:
+    async def _build_system_prompt(self, ctx: TurnContext | None = None) -> str:
         system_sections = [self._system_prompt]
         # Plugin prompt sections, in resolved plugin order
         for plugin in self._plugins:
             if plugin.name in self._plugins_prompt:
                 section = self._plugins_prompt[plugin.name]
             else:
-                section = await plugin.get_system_prompt_section(self._current_context)
+                section = await plugin.get_system_prompt_section(ctx)
             if section:
                 system_sections.append(section)
         sections = [

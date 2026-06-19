@@ -13,7 +13,7 @@ from bos.protocol import Envelope, MessageContent, MessageType, TurnEvent
 from .agent import AbortTurn, Agent
 from .chat_state import ChatState, ChatStateError
 from .contract import MailBox
-from .events import MailboxEventSink
+from .events import CLIENT_TURN_EVENT_TYPES, HostChannelSink, MailboxEventSink
 from .harness import CURRENT_MAILBOX
 
 if TYPE_CHECKING:
@@ -332,12 +332,13 @@ class AgentActor:
 
         try:
             token = CURRENT_MAILBOX.set(self._mailbox)
-            event_sink = _RouteAwareMailboxEventSink(
+            mailbox_sink = _RouteAwareMailboxEventSink(
                 self._mailbox,
                 reply_recipient,
                 reply_chat_id,
                 self._channel_metadata(inbound_env),
             )
+            event_sink = self._build_host_sink(turn_ctx, mailbox_sink)
 
             def _observe_commit(commit: Any) -> None:
                 nonlocal committed_revision
@@ -398,6 +399,17 @@ class AgentActor:
 
     async def _on_turn_finished(self, ctx: ActorTurnContext, result: ActorTurnResult) -> None:
         pass
+
+    def _build_host_sink(self, ctx: ActorTurnContext, mailbox_sink: MailboxEventSink) -> HostChannelSink:
+        """Construct the per-turn event sink. The base actor registers the
+        mailbox forwarder for every client-facing event type — that's the
+        wire protocol clients see. Subclasses may override and call
+        ``super()._build_host_sink(...)`` to extend the sink with additional
+        handlers (e.g. capturing internal events into a turn-local buffer)."""
+        sink = HostChannelSink()
+        for event_type in CLIENT_TURN_EVENT_TYPES:
+            sink.on(event_type, mailbox_sink.emit)
+        return sink
 
     def _turn_metadata(self, reply_recipient: str, inbound_env: Envelope | None = None) -> dict[str, Any]:
         metadata: dict[str, Any] = {"sender": reply_recipient, "actor_address": self._address}

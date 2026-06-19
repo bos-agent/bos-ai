@@ -98,6 +98,7 @@ class TestTurnCompleteEmission:
         actor._lifecycle_bus = bus
         actor._chat_coordinator = _DummyCoordinator()
         actor._mailbox = None
+        actor._recalled_per_turn = {}
 
         ctx = ActorTurnContext(
             chat_id="c1",
@@ -130,6 +131,7 @@ class TestTurnCompleteEmission:
         actor._lifecycle_bus = bus
         actor._chat_coordinator = _DummyCoordinator()
         actor._mailbox = _NoopMailbox()
+        actor._recalled_per_turn = {}
         ctx = ActorTurnContext(
             chat_id="c1",
             actor_name="A",

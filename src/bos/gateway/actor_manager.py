@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 from bos.config.workspace import ResolvedActorConfig
 from bos.core import ActorTurnContext, ActorTurnResult, AgentActor, MailBox
+from bos.core.events import HostChannelSink, MailboxEventSink
 from bos.protocol import MessageType
 
 from .chat_coordinator import ChannelConversationRef, ChatCoordinationError, ChatCoordinator
@@ -18,6 +19,9 @@ if TYPE_CHECKING:
     from bos.core import AgentHarness, LifecycleBus
 
 logger = logging.getLogger(__name__)
+
+
+_MEMORY_RECALL_EVENT_TYPE = "memory.recalled"
 
 
 class CoordinatedActor(AgentActor):
@@ -33,6 +37,7 @@ class CoordinatedActor(AgentActor):
         super().__init__(*args, **kwargs)
         self._chat_coordinator = chat_coordinator
         self._lifecycle_bus = lifecycle_bus
+        self._recalled_per_turn: dict[str, list[str]] = {}
 
     async def _on_turn_started(self, ctx: ActorTurnContext) -> None:
         ref = _ctx_channel_ref(ctx)
@@ -48,20 +53,23 @@ class CoordinatedActor(AgentActor):
             base_revision=ctx.base_revision,
         )
 
+    def _build_host_sink(self, ctx: ActorTurnContext, mailbox_sink: MailboxEventSink) -> HostChannelSink:
+        sink = super()._build_host_sink(ctx, mailbox_sink)
+        buffer: list[str] = []
+        self._recalled_per_turn[ctx.turn_id] = buffer
+        sink.on(_MEMORY_RECALL_EVENT_TYPE, lambda e: buffer.extend(e.metadata.get("ids", ())))
+        return sink
+
     async def _on_turn_finished(self, ctx: ActorTurnContext, result: ActorTurnResult) -> None:
         self._chat_coordinator.end_turn(
             chat_id=ctx.chat_id,
             turn_id=ctx.turn_id,
             committed_revision=result.committed_revision,
         )
+        recalled = self._recalled_per_turn.pop(ctx.turn_id, [])
         if getattr(self, "_lifecycle_bus", None) is not None and result.status == "completed":
             from bos.core.contract import LifecycleEvent
 
-            recalled: list[str] = []
-            agent = getattr(self, "_agent", None)
-            current_ctx = getattr(agent, "_current_context", None) if agent is not None else None
-            if current_ctx is not None:
-                recalled = list(current_ctx.metadata.get("recalled", []) or [])
             await self._lifecycle_bus.emit(
                 LifecycleEvent(
                     kind="turn_complete",

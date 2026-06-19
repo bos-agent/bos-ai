@@ -218,14 +218,23 @@ class TestAutoRecall:
         eid = await store.ingest_memory("user prefers PostgreSQL 16", tags=["db"])
         interceptor = AutoRecallInterceptor(store, top_k=5)
 
+        class _Sink:
+            def __init__(self):
+                self.events = []
+
+            async def emit(self, event):
+                self.events.append(event)
+
         class _Ctx:
             turn_id = "t1"
             chat_id = "c1"
+            agent_name = "A"
             current = [{"role": "user", "content": "what database do I like? postgresql?"}]
 
             def __init__(self):
                 self.metadata = {}
                 self.ephemeral_set = {}
+                self.event_sink = _Sink()
 
             def set_ephemeral_message(self, key, msg):
                 self.ephemeral_set[key] = msg
@@ -234,7 +243,10 @@ class TestAutoRecall:
         await interceptor.intercept("prepare", ctx)
         assert "memory_auto_recall" in ctx.ephemeral_set
         assert "PostgreSQL" in str(ctx.ephemeral_set["memory_auto_recall"])
-        assert eid in ctx.metadata["recalled"]
+        recalled_ids = [
+            i for e in ctx.event_sink.events if e.event_type == "memory.recalled" for i in e.metadata.get("ids", [])
+        ]
+        assert eid in recalled_ids
 
     @pytest.mark.asyncio
     async def test_interceptor_only_runs_on_prepare(self):
@@ -281,7 +293,15 @@ class TestAutoRecall:
         eid = await store.ingest_memory("user prefers PostgreSQL 16", tags=["db"])
         interceptor = AutoRecallInterceptor(store, top_k=5)
 
-        ctx = TurnContext(agent_name="A", chat_id="c1", turn_id="t1")
+        class _Sink:
+            def __init__(self):
+                self.events = []
+
+            async def emit(self, event):
+                self.events.append(event)
+
+        sink = _Sink()
+        ctx = TurnContext(agent_name="A", chat_id="c1", turn_id="t1", event_sink=sink)
         ctx.current = [Message(llm_message={"role": "user", "content": "what database do I like? postgresql?"})]
         await interceptor.intercept("prepare", ctx)
 
@@ -289,7 +309,8 @@ class TestAutoRecall:
         assert any("memory_auto_recall" == m.get("_ephemeral_key") for m in ctx.ephemeral)
         block = next(m for m in ctx.ephemeral if m.get("_ephemeral_key") == "memory_auto_recall")
         assert "PostgreSQL" in block["content"]
-        assert eid in ctx.metadata["recalled"]
+        recalled_ids = [i for e in sink.events if e.event_type == "memory.recalled" for i in e.metadata.get("ids", [])]
+        assert eid in recalled_ids
 
 
 class TestHarnessConfig:
