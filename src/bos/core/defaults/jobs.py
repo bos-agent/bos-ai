@@ -148,13 +148,23 @@ class InProcJobRunner:
         rec = self._records.get(job_id)
         if rec and rec.status == "queued":
             self._records[job_id] = self._with(rec, status="cancelled", finished_at=datetime.now().isoformat())
-            self._inflight_by_key.pop(rec.key, None)
+            self._release_key(rec.key, job_id)
 
     # ── internals ──
 
     @staticmethod
     def _record_status_running(rec: JobRecord) -> bool:
         return rec.status == "running"
+
+    def _release_key(self, key: str, job_id: str) -> None:
+        """Drop the in-flight reservation only if it still belongs to this job.
+
+        A blind pop(key) can evict a *different* job's reservation: after this
+        job is cancelled/superseded, the same key may have been re-submitted and
+        now maps to a newer job id. Releasing it then breaks dedup for the live
+        job, letting two same-key jobs run concurrently."""
+        if self._inflight_by_key.get(key) == job_id:
+            del self._inflight_by_key[key]
 
     @staticmethod
     def _with(rec: JobRecord, **changes: Any) -> JobRecord:
@@ -173,7 +183,7 @@ class InProcJobRunner:
             if self._records[job_id].status != "queued":
                 # cancel() flips a still-queued record to "cancelled" but cannot
                 # pull its tuple out of the queue; drop it here instead of running.
-                self._inflight_by_key.pop(job.key, None)
+                self._release_key(job.key, job_id)
                 continue
             if self._draining.is_set():
                 self._records[job_id] = self._with(
@@ -181,7 +191,7 @@ class InProcJobRunner:
                     status="cancelled",
                     finished_at=datetime.now().isoformat(),
                 )
-                self._inflight_by_key.pop(job.key, None)
+                self._release_key(job.key, job_id)
                 continue
             self._records[job_id] = self._with(self._records[job_id], status="running")
             try:
@@ -212,7 +222,7 @@ class InProcJobRunner:
                     finished_at=datetime.now().isoformat(),
                 )
             finally:
-                self._inflight_by_key.pop(job.key, None)
+                self._release_key(job.key, job_id)
 
     async def _on_session_close(self, event: LifecycleEvent) -> None:
         factory = self._trigger_factories.get("session_close")

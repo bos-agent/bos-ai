@@ -118,6 +118,49 @@ class TestSubmitAndDrain:
             await runner.drain(timeout=0.0)
 
     @pytest.mark.asyncio
+    async def test_cancelled_job_does_not_evict_resubmitted_key(self):
+        """Regression: dropping a cancelled job must not release a *newer* job's
+        key reservation. Sequence: submit A (key=k) -> cancel A (frees k) ->
+        submit B (key=k, takes k). When the worker later drops the cancelled A,
+        a blind pop(k) would evict B's reservation, breaking dedup and letting a
+        third same-key submit run concurrently with B."""
+        bus = DefaultLifecycleBus()
+        runner = InProcJobRunner(bus, max_concurrency=1, idle_after=300)
+        await runner.start()
+        gate = asyncio.Event()
+        try:
+            log: list[str] = []
+
+            class _Gated:
+                key = "hog"
+
+                async def run(self):
+                    await gate.wait()
+
+            # Occupy the single worker so A and B both stay queued.
+            await runner.submit(_Gated())
+            id_a = await runner.submit(_RecJob(key="same", log=log))
+            await runner.cancel(id_a)
+            id_b = await runner.submit(_RecJob(key="same", log=log, delay=0.20))
+            assert id_a != id_b
+            assert runner._inflight_by_key["same"] == id_b
+
+            # Release the hog: worker drops cancelled A, then runs B.
+            gate.set()
+            await asyncio.sleep(0.05)  # land inside B's run window
+            # B's reservation must survive A's drop.
+            assert runner._inflight_by_key.get("same") == id_b
+            # so a same-key submit while B runs dedups to B (no concurrent run).
+            id_c = await runner.submit(_RecJob(key="same", log=log))
+            assert id_c == id_b
+
+            await runner.drain(timeout=1.0)
+            assert log == ["same"]  # B ran exactly once; no concurrent duplicate
+        finally:
+            gate.set()
+            await runner.drain(timeout=0.0)
+
+    @pytest.mark.asyncio
     async def test_drain_mid_job_marks_record_cancelled_not_stuck_running(self):
         """Regression: when drain cancels a worker mid-run, CancelledError must
         not leave the JobRecord stuck at 'running'. Otherwise the phantom keeps
