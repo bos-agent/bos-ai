@@ -62,4 +62,8 @@ class MemoryConsolidationJob:
         )
         ops = await self.consolidator.propose(request)
         await self.operation_service.apply(ops, dry_run=not self.policy.auto_apply)
-        await self.watermarks.set(self.chat_id, self.base_revision)
+        # Only advance the watermark when ops were actually applied. A dry-run
+        # mutates nothing, so burning the watermark would silently exclude these
+        # turns from every future real consolidation.
+        if self.policy.auto_apply:
+            await self.watermarks.set(self.chat_id, self.base_revision)

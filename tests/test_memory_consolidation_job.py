@@ -28,7 +28,7 @@ def _msg(role, content, *, turn_id="t1"):
 
 class TestJobRun:
     @pytest.mark.asyncio
-    async def test_dry_run_applies_no_writes_but_advances_watermark(self, tmp_path):
+    async def test_dry_run_applies_no_writes_and_does_not_advance_watermark(self, tmp_path):
         chat_store = InMemChatStore()
         backend = InMemMemoryExtension()
         await chat_store.commit_turn("c1", [_msg("user", "I prefer dark mode", turn_id="t1")], turn_id="t1")
@@ -61,11 +61,57 @@ class TestJobRun:
         await job.run()
         # dry-run: no entries actually created
         assert await backend.search_memories("dark") == []
-        # but watermark advanced
-        assert await wm.get("c1") == head
+        # watermark NOT advanced: a dry-run wrote nothing, so burning the
+        # watermark would silently exclude these turns from future real runs.
+        assert await wm.get("c1") == 0
         # and dry-run record is in audit
         audit = await op_svc.audit()
         assert audit and audit[0].result == "dry_run"
+
+    @pytest.mark.asyncio
+    async def test_dry_run_then_apply_still_persists_memory(self, tmp_path):
+        """Regression: a default dry-run must not poison a later real --apply."""
+        chat_store = InMemChatStore()
+        backend = InMemMemoryExtension()
+        await chat_store.commit_turn("c1", [_msg("user", "I prefer dark mode")], turn_id="t1")
+        wm = WatermarkStore(tmp_path / "wm.json")
+        op_svc = DefaultMemoryOperationService(
+            backend,
+            audit_path=tmp_path / "audit.jsonl",
+            maxim_keys={"user"},
+        )
+        blm = _StubBLM({
+            "operations": [
+                {"op": "ADD", "reason": "stable preference", "content": "prefers dark mode", "importance": 7},
+            ]
+        })
+        consolidator = DefaultMemoryConsolidator(blm, maxim_keys={"user"})
+        head = await chat_store.get_revision("c1")
+
+        def _job(*, auto_apply: bool) -> MemoryConsolidationJob:
+            return MemoryConsolidationJob(
+                chat_id="c1",
+                actor_name="test-agent",
+                base_revision=head,
+                trigger="manual",
+                policy=ConsolidationPolicy(auto_apply=auto_apply),
+                chat_store=chat_store,
+                backend=backend,
+                consolidator=consolidator,
+                operation_service=op_svc,
+                watermarks=wm,
+                maxim_keys={"user"},
+            )
+
+        # First: a dry-run over the new turns (CLI default).
+        await _job(auto_apply=False).run()
+        assert await backend.search_memories("dark") == []
+        assert await wm.get("c1") == 0
+
+        # Then: a real --apply over the same turns still persists and advances.
+        await _job(auto_apply=True).run()
+        assert (await backend.search_memories("dark"))[0].content == "prefers dark mode"
+        assert await wm.get("c1") == head
 
     @pytest.mark.asyncio
     async def test_auto_apply_persists_and_advances(self, tmp_path):
