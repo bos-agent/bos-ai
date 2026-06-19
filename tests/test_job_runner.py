@@ -186,6 +186,38 @@ class TestSubmitAndDrain:
             await runner.drain(timeout=0.0)
 
     @pytest.mark.asyncio
+    async def test_drain_propagates_external_cancellation(self):
+        """Regression: if the drain() coroutine is itself cancelled (cooperative
+        shutdown) while awaiting workers, that cancellation must propagate out —
+        not be swallowed by the worker-reaping await and silently complete."""
+        bus = DefaultLifecycleBus()
+        runner = InProcJobRunner(bus, max_concurrency=1, idle_after=300)
+        await runner.start()
+        try:
+
+            class _SlowToCancel:
+                key = "slow"
+
+                async def run(self):
+                    try:
+                        await asyncio.sleep(10)
+                    except asyncio.CancelledError:
+                        # linger so drain stays suspended awaiting this worker,
+                        # giving the test a window to cancel the drain coroutine.
+                        await asyncio.sleep(0.20)
+                        raise
+
+            await runner.submit(_SlowToCancel())
+            await asyncio.sleep(0.02)  # worker picks it up -> running
+            drain_task = asyncio.create_task(runner.drain(timeout=0.0))
+            await asyncio.sleep(0.02)  # drain past deadline, now awaiting the worker
+            drain_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await drain_task
+        finally:
+            await runner.drain(timeout=1.0)
+
+    @pytest.mark.asyncio
     async def test_failed_job_records_error(self):
         class _Boom:
             key = "boom"

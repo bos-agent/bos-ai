@@ -84,11 +84,11 @@ class InProcJobRunner:
         self._draining.set()
         for t in self._workers:
             t.cancel()
-        for t in self._workers:
-            try:
-                await t
-            except (asyncio.CancelledError, Exception):
-                pass
+        # return_exceptions=True absorbs each worker's own CancelledError/Exception
+        # as a result, but still re-raises if *this* drain coroutine is cancelled
+        # (cooperative shutdown) — so we don't swallow cancellation aimed at us.
+        if self._workers:
+            await asyncio.gather(*self._workers, return_exceptions=True)
         self._workers.clear()
         for timer in self._idle_timers.values():
             timer.cancel()
