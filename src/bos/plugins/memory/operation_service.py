@@ -182,8 +182,12 @@ class DefaultMemoryOperationService:
 
     async def touch_last_used(self, entry_ids: list[str]) -> None:
         now = self._now()
-        for eid in entry_ids:
-            await self._backend.update_memory(eid, last_used=now)
+        # De-dupe (a memory may be recalled more than once in a turn) then bump
+        # each entry concurrently. The updates touch independent files with
+        # independent locks, so there is no reason to serialize K full
+        # read-modify-write cycles every turn.
+        unique_ids = list(dict.fromkeys(entry_ids))
+        await asyncio.gather(*(self._backend.update_memory(eid, last_used=now) for eid in unique_ids))
 
     async def restore(self, entry_id: str) -> None:
         await self._backend.restore_memory(entry_id)

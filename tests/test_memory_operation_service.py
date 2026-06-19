@@ -185,6 +185,42 @@ class TestServiceHelpers:
         assert (await b.get_memory(eid)).metadata["last_used"] is not None
 
     @pytest.mark.asyncio
+    async def test_touch_last_used_stamps_all_ids(self, tmp_path):
+        b = InMemMemoryExtension()
+        ids = [await b.ingest_memory(f"fact {i}") for i in range(3)]
+        svc = _svc(tmp_path, b)
+        await svc.touch_last_used(ids)
+        for eid in ids:
+            assert (await b.get_memory(eid)).metadata["last_used"] is not None
+
+    @pytest.mark.asyncio
+    async def test_touch_last_used_dedupes_and_runs_concurrently(self, tmp_path):
+        """Duplicate ids are collapsed to one update, and independent updates are
+        issued concurrently rather than serialized one-await-at-a-time."""
+        import asyncio
+
+        class _SlowBackend:
+            def __init__(self):
+                self.calls: list[str] = []
+                self.peak_concurrency = 0
+                self._active = 0
+
+            async def update_memory(self, entry_id, **kwargs):
+                self.calls.append(entry_id)
+                self._active += 1
+                self.peak_concurrency = max(self.peak_concurrency, self._active)
+                await asyncio.sleep(0.02)  # hold the "lock" so overlap is observable
+                self._active -= 1
+
+        backend = _SlowBackend()
+        svc = _svc(tmp_path, backend)
+        await svc.touch_last_used(["a", "b", "a", "c"])
+        # dedup: "a" stamped once -> 3 unique updates
+        assert sorted(backend.calls) == ["a", "b", "c"]
+        # concurrency: all three overlapped (serial execution would peak at 1)
+        assert backend.peak_concurrency == 3
+
+    @pytest.mark.asyncio
     async def test_restore(self, tmp_path):
         b = InMemMemoryExtension()
         eid = await b.ingest_memory("a fact")
