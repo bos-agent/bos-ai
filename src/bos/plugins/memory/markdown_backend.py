@@ -73,6 +73,9 @@ class MarkdownMemoryBackend:
             except yaml.YAMLError:
                 logger.warning("Bad frontmatter in %s", path, exc_info=True)
                 front = {}
+            if not isinstance(front, dict):
+                logger.warning("Non-mapping frontmatter in %s; ignoring", path, exc_info=False)
+                front = {}
             tags = list(front.pop("tags", []) or [])
             created_at = front.pop("created_at", created_at) or created_at
             for k, default in _DEFAULT_META.items():
