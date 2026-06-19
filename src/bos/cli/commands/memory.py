@@ -15,16 +15,20 @@ import click
 
 import bos.exts  # noqa: F401 — registers default ep impls (chat_store, mail_route, ...)
 from bos.cli.commands.scaffolding import _discover_project
+from bos.core import _deep_merge
 from bos.plugins.memory.plugin import MemoryHarnessPlugin, _PerAgentMemory
 
 
 def _memory_config(ws) -> dict[str, Any]:
-    """Resolve the MemoryPlugin config: defaults overlaid with user [exts.ep_plugin.MemoryPlugin]."""
+    """Resolve the MemoryPlugin config: defaults overlaid with user [exts.ep_plugin.MemoryPlugin].
+
+    Deep-merges so setting one key under a nested section (e.g. [retrieval]) keeps
+    that section's other defaults instead of replacing the whole sub-dict."""
     plugin = MemoryHarnessPlugin()
     cfg = dict(plugin.default_config())
     if getattr(ws.config, "exts", None) is not None:
         user = ws.config.exts.model_dump().get("ep_plugin", {}).get("MemoryPlugin", {}) or {}
-        cfg.update(user)
+        cfg = _deep_merge(cfg, user)
     return cfg
 
 
