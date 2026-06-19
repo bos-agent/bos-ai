@@ -16,6 +16,20 @@ from bos.core.llm import LLMResponse
 
 logger = logging.getLogger(__name__)
 
+# Provider finish_reason values that mean the model did not return a usable,
+# complete answer. These are NOT schema problems: json.loads("") raises
+# "Expecting value", and the "reply ONLY with JSON" retry hint cannot repair a
+# truncation, content filter, or provider error.
+_UNUSABLE_FINISH_REASONS = frozenset({"length", "content_filter", "error"})
+
+
+class BackgroundLLMError(ValueError):
+    """BackgroundLLM could not obtain a usable, schema-valid response.
+
+    Subclasses ValueError so existing callers that catch ValueError from
+    ``ask`` keep working, while giving an accurate, catchable type for empty/
+    errored/truncated completions that are not schema-validation failures."""
+
 
 class DefaultBackgroundLLM:
     def __init__(self, llm, *, max_retries: int = 1) -> None:
@@ -46,8 +60,19 @@ class DefaultBackgroundLLM:
             resp = await self._llm.complete(messages, **kwargs)
             if response_schema is None:
                 return resp
+            content = resp.content or ""
+            if resp.finish_reason in _UNUSABLE_FINISH_REASONS or not content.strip():
+                # Empty / truncated / errored completion — not a schema failure.
+                # Surface the true cause (finish_reason + any error text) instead
+                # of mislabeling it, and skip the retry: the JSON-only hint cannot
+                # fix a length cutoff, content filter, or provider error.
+                detail = content.strip() or "<empty content>"
+                raise BackgroundLLMError(
+                    f"BackgroundLLM received no usable completion "
+                    f"(finish_reason={resp.finish_reason!r}): {detail[:300]}"
+                )
             try:
-                parsed = json.loads(resp.content or "")
+                parsed = json.loads(content)
                 jsonschema.validate(parsed, response_schema)
                 return resp
             except (json.JSONDecodeError, jsonschema.ValidationError) as e:

@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from bos.core.defaults.background_llm import DefaultBackgroundLLM
+from bos.core.defaults.background_llm import BackgroundLLMError, DefaultBackgroundLLM
 from bos.core.llm import LLMResponse
 
 
@@ -20,8 +20,8 @@ class _StubLLM:
         return self._responses.pop(0)
 
 
-def _r(content):
-    return LLMResponse(content=content)
+def _r(content, finish_reason="stop"):
+    return LLMResponse(content=content, finish_reason=finish_reason)
 
 
 SCHEMA = {
@@ -65,6 +65,38 @@ class TestBackgroundLLM:
         blm = DefaultBackgroundLLM(stub, max_retries=1)
         with pytest.raises(ValueError, match="schema"):
             await blm.ask(messages=[{"role": "user", "content": "x"}], response_schema=SCHEMA)
+
+    @pytest.mark.asyncio
+    async def test_empty_content_reports_cause_not_schema_failure(self):
+        """Regression: content='' with finish_reason='stop' must not be reported
+        as a schema-validation failure (json.loads('') -> 'Expecting value'); the
+        true cause is surfaced and no retry is wasted on the JSON-only hint."""
+        stub = _StubLLM([_r("")])
+        blm = DefaultBackgroundLLM(stub, max_retries=1)
+        with pytest.raises(BackgroundLLMError, match="no usable completion") as ei:
+            await blm.ask(messages=[{"role": "user", "content": "x"}], response_schema=SCHEMA)
+        assert "schema validation" not in str(ei.value)
+        assert "<empty content>" in str(ei.value)
+        assert len(stub.calls) == 1  # not retried
+
+    @pytest.mark.asyncio
+    async def test_length_truncation_detected(self):
+        stub = _StubLLM([_r('{"op": "ADD"', finish_reason="length")])
+        blm = DefaultBackgroundLLM(stub, max_retries=1)
+        with pytest.raises(BackgroundLLMError, match="finish_reason='length'"):
+            await blm.ask(messages=[{"role": "user", "content": "x"}], response_schema=SCHEMA)
+        assert len(stub.calls) == 1  # not retried
+
+    @pytest.mark.asyncio
+    async def test_errored_nonempty_completion_detected(self):
+        """An error string with finish_reason='error' is non-empty but is not a
+        schema problem — it must be detected and its text surfaced."""
+        stub = _StubLLM([_r("Error calling default provider: boom", finish_reason="error")])
+        blm = DefaultBackgroundLLM(stub, max_retries=1)
+        with pytest.raises(BackgroundLLMError, match="finish_reason='error'") as ei:
+            await blm.ask(messages=[{"role": "user", "content": "x"}], response_schema=SCHEMA)
+        assert "boom" in str(ei.value)
+        assert len(stub.calls) == 1  # not retried
 
     @pytest.mark.asyncio
     async def test_passes_model_and_kwargs_through(self):
