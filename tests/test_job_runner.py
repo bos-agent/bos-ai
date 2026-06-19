@@ -118,6 +118,31 @@ class TestSubmitAndDrain:
             await runner.drain(timeout=0.0)
 
     @pytest.mark.asyncio
+    async def test_drain_mid_job_marks_record_cancelled_not_stuck_running(self):
+        """Regression: when drain cancels a worker mid-run, CancelledError must
+        not leave the JobRecord stuck at 'running'. Otherwise the phantom keeps
+        drain's wait-loop condition true and every subsequent drain busy-waits
+        to its own timeout."""
+        bus = DefaultLifecycleBus()
+        runner = InProcJobRunner(bus, max_concurrency=1, idle_after=300)
+        await runner.start()
+        try:
+            log: list[str] = []
+            jid = await runner.submit(_RecJob(key="slow", log=log, delay=0.50))
+            await asyncio.sleep(0.02)  # let the worker pick it up -> "running"
+            await runner.drain(timeout=0.05)  # deadline elapses, worker cancelled mid-run
+            assert await runner.status(jid) == "cancelled"
+
+            # A second drain on the same instance must return promptly, not
+            # busy-wait on a phantom 'running' record.
+            loop = asyncio.get_event_loop()
+            t0 = loop.time()
+            await runner.drain(timeout=0.50)
+            assert loop.time() - t0 < 0.25
+        finally:
+            await runner.drain(timeout=0.0)
+
+    @pytest.mark.asyncio
     async def test_failed_job_records_error(self):
         class _Boom:
             key = "boom"

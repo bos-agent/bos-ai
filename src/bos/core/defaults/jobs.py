@@ -191,6 +191,18 @@ class InProcJobRunner:
                     status="succeeded",
                     finished_at=datetime.now().isoformat(),
                 )
+            except asyncio.CancelledError:
+                # drain() cancels workers mid-run; CancelledError is a
+                # BaseException, so it bypasses `except Exception` below. Mark
+                # the record terminal before re-raising, otherwise it stays
+                # "running" forever and every later drain() busy-waits on the
+                # phantom until its own timeout.
+                self._records[job_id] = self._with(
+                    self._records[job_id],
+                    status="cancelled",
+                    finished_at=datetime.now().isoformat(),
+                )
+                raise
             except Exception as e:
                 logger.exception("job %s (%s) failed", job_id, job.key)
                 self._records[job_id] = self._with(
