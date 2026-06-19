@@ -17,14 +17,22 @@ class RetrievalCase:
 
 async def recall_at_k(backend, cases: list[RetrievalCase], *, k: int = 5) -> float:
     """Mean recall@k: fraction of each case's relevant ids that appear in the
-    top-k search results, averaged over cases. Returns 0.0 for an empty set."""
+    top-k search results, averaged over the cases that have relevant ids. Cases
+    with no relevant ids are skipped (not counted in the denominator). Returns
+    0.0 when there are no cases, or none with relevant ids."""
     if not cases:
         return 0.0
     total = 0.0
+    scored = 0
     for case in cases:
         if not case.relevant_ids:
             continue
         hits = await backend.search_memories(case.query, top_k=k)
         found = {h.id for h in hits} & case.relevant_ids
         total += len(found) / len(case.relevant_ids)
-    return total / len(cases)
+        scored += 1
+    # Average only over scored cases; cases with no relevant ids are not
+    # measurable recall and must not dilute the mean. No scorable case -> 0.0.
+    if scored == 0:
+        return 0.0
+    return total / scored
