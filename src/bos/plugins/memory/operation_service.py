@@ -6,11 +6,12 @@ from __future__ import annotations
 import asyncio
 from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime
-from typing import Literal, Protocol
+from typing import Literal, Protocol, cast
 
 from .scoped_memory import MemoryBackend, MemoryEntry, RequestedBy
 
 MemoryOpKind = Literal["ADD", "UPDATE", "INVALIDATE", "PROMOTE", "LINK", "NOOP"]
+AuditResult = Literal["applied", "dry_run", "rejected", "noop"]
 
 
 @dataclass(frozen=True)
@@ -31,7 +32,7 @@ class MemoryOperation:
 @dataclass(frozen=True)
 class AuditRecord:
     op: MemoryOperation
-    result: Literal["applied", "dry_run", "rejected", "noop"]
+    result: AuditResult
     entry_id: str | None
     at: str
     error: str | None = None
@@ -196,7 +197,7 @@ class DefaultMemoryOperationService:
         op = MemoryOperation(**op_fields)
         return AuditRecord(
             op=op,
-            result=row.get("_result"),
+            result=cast(AuditResult, row.get("_result")),
             entry_id=row.get("_entry_id"),
             at=row.get("_at", ""),
             error=row.get("_error"),
