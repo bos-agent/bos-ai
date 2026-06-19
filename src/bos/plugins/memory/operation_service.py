@@ -156,14 +156,16 @@ class DefaultMemoryOperationService:
         elif op.op == "LINK":
             assert op.target_id is not None and op.links is not None  # _validate: LINK requires both
             existing = await self._backend.get_memory(op.target_id, include_invalid=True)
-            assert existing is not None  # target existence checked above
+            if existing is None:  # vanished between the existence check above and this re-read
+                return await self._record(op, "rejected", op.target_id, error=f"target {op.target_id} not found")
             prior_links: list[str] = existing.metadata.get("links") or []
             merged = list({*prior_links, *op.links})
             await self._backend.update_memory(op.target_id, links=merged)
         elif op.op == "PROMOTE":
             assert op.target_id is not None and op.maxim_key is not None  # _validate: PROMOTE requires both
             entry = await self._backend.get_memory(op.target_id, include_invalid=True)
-            assert entry is not None  # target existence checked above
+            if entry is None:  # vanished between the existence check above and this re-read
+                return await self._record(op, "rejected", op.target_id, error=f"target {op.target_id} not found")
             gist = (op.content or entry.content).strip()
             ts = self._now()[:16].replace("T", " ")
             # Atomic read-append-write so a concurrent revise_maxim tool call
