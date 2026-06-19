@@ -170,6 +170,11 @@ class InProcJobRunner:
     async def _worker(self, n: int) -> None:
         while True:
             job_id, job = await self._queue.get()
+            if self._records[job_id].status != "queued":
+                # cancel() flips a still-queued record to "cancelled" but cannot
+                # pull its tuple out of the queue; drop it here instead of running.
+                self._inflight_by_key.pop(job.key, None)
+                continue
             if self._draining.is_set():
                 self._records[job_id] = self._with(
                     self._records[job_id],

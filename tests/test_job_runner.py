@@ -94,6 +94,30 @@ class TestSubmitAndDrain:
             await runner.drain(timeout=0.0)
 
     @pytest.mark.asyncio
+    async def test_cancel_before_pickup_prevents_run(self):
+        """Regression: cancel() on a still-queued job must keep the worker from
+        running it. The cancel flips the record to 'cancelled' but leaves the
+        tuple in the queue; the worker must drop it on dequeue rather than
+        overwrite the status with 'running' and execute job.run()."""
+        bus = DefaultLifecycleBus()
+        runner = InProcJobRunner(bus, max_concurrency=1, idle_after=300)
+        await runner.start()
+        try:
+            log: list[str] = []
+            # 'hog' occupies the single worker so 'target' stays queued.
+            await runner.submit(_RecJob(key="hog", log=log, delay=0.20))
+            target = await runner.submit(_RecJob(key="target", log=log))
+            await runner.cancel(target)
+            assert await runner.status(target) == "cancelled"
+            await runner.drain(timeout=1.0)
+            assert "target" not in log
+            assert await runner.status(target) == "cancelled"
+            # the cancelled key is freed so a later submit of the same key works
+            assert "target" not in runner._inflight_by_key
+        finally:
+            await runner.drain(timeout=0.0)
+
+    @pytest.mark.asyncio
     async def test_failed_job_records_error(self):
         class _Boom:
             key = "boom"
