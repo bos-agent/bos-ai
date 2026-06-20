@@ -49,7 +49,7 @@ from bos.plugins.memory.operation_service import (  # noqa: E402
 )
 
 
-def _svc(tmp_path, backend, maxim_keys=("user", "soul", "identity", "rules")):
+def _svc(tmp_path, backend, maxim_keys=("user", "self", "rules")):
     return DefaultMemoryOperationService(
         backend,
         audit_path=tmp_path / "audit.jsonl",

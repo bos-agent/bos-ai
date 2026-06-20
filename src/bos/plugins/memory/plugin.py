@@ -42,8 +42,7 @@ MAXIM_LIMIT = 2048
 
 _MAXIM_DESCRIPTIONS = {
     "user": "your knowledge about the user — preferences, background, projects, style",
-    "soul": "your character and operating philosophy — how you work, communicate, and make decisions",
-    "identity": "who you are — your role, purpose, and context",
+    "self": "who you are and how you work — your role, purpose, character, and operating philosophy",
     "rules": "hard constraints — things you must always or never do",
 }
 
@@ -74,7 +73,7 @@ Guidelines:
 ### Maxims
 
 Deeply held convictions (e.g., user preferences, rules). Always visible in your context.
-- Scope: Respect the keys ("user", "soul", "identity", "rules").
+- Scope: Respect the keys ("user", "self", "rules").
 - Limits: 2048 chars total. Keep notes concise.
 - Do NOT use for: Facts, snippets, meeting notes, one-off details.""",
 }
@@ -125,7 +124,7 @@ class MemoryHarnessPlugin:
 
     def default_config(self) -> Mapping[str, Any]:
         return {
-            "maxims": ["user", "soul", "identity", "rules"],
+            "maxims": ["user", "self", "rules"],
             "backend": "_default",
             "retrieval": {"auto_recall": True, "index_in_prompt": True, "index_max": 50, "top_k": 5},
             "consolidation": {"enabled": False, "retention_days": 30, "auto_apply": False},
@@ -387,7 +386,7 @@ class MemoryAgentPlugin:
             parameters={
                 "type": "object",
                 "properties": {
-                    "key": {"type": "string", "description": "Maxim key. One of: user, soul, identity, rules."},
+                    "key": {"type": "string", "description": "Maxim key. One of: user, self, rules."},
                     "content": {"type": "string", "description": "The revision note to append."},
                 },
                 "required": ["key", "content"],

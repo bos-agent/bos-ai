@@ -92,7 +92,7 @@ enabled = [
 
 # Per-plugin configuration
 # [agent.defaults.plugin-bindings.MemoryPlugin]
-# maxims = ["user", "soul", "identity", "rules"]
+# maxims = ["user", "self", "rules"]
 # scope = "workspace"
 
 [agent.defaults.plugin-bindings.SubagentPlugin]

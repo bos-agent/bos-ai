@@ -411,11 +411,11 @@ class TestSystemPromptIntegration:
     async def test_maxim_header_has_scope_description(self):
         store = InMemMemoryExtension()
         await store.set_maxim("rules", "rule content")
-        await store.set_maxim("soul", "soul content")
-        agent = _create_memory_agent(memory=store, maxim_keys={"rules", "soul"})
+        await store.set_maxim("self", "self content")
+        agent = _create_memory_agent(memory=store, maxim_keys={"rules", "self"})
         prompt = await agent._build_system_prompt()
         assert '<maxim name="rules" scope="hard constraints' in prompt
-        assert '<maxim name="soul" scope="your character' in prompt
+        assert '<maxim name="self" scope="who you are' in prompt
 
     @pytest.mark.asyncio
     async def test_empty_maxims_are_not_injected_into_prompt(self):

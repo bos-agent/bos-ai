@@ -59,7 +59,7 @@ Workspace plugin defaults live under `platform.plugins`. These defaults do not e
 # enabled_plugins = ["MemoryPlugin", "TaskPlugin", "SkillsPlugin", "SubagentPlugin"]
 
 [platform.plugins.MemoryPlugin]
-maxims = ["user", "soul"]
+maxims = ["user", "self"]
 scope = "workspace"
 ```
 
@@ -75,7 +75,7 @@ An agent can disable a globally enabled plugin with `enabled = false`.
 enabled_plugins = ["MemoryPlugin", "TaskPlugin"]
 
 [platform.plugins.MemoryPlugin]
-maxims = ["user", "soul"]
+maxims = ["user", "self"]
 
 [[platform.agents]]
 name = "coding"

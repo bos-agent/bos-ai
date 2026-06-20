@@ -20,7 +20,7 @@ Memory in BOS AI has two cognitive roles:
 | **Change rate** | Deliberate, slow, curated | Frequent, incremental, accumulated |
 | **Load pattern** | Injected into system prompt (per-session snapshot, BEP 10 §5) | Queried on demand via `Recall` / auto-recall |
 | **Authority** | Operator-configured keys; content written **off-turn** by `optimize()` (BEP 10 §4) | Created/curated **off-turn** by `optimize()`; agent reads only |
-| **Filter** | `maxims = ["user", "soul"]` in agent config | No allow-list on write; filter on recall |
+| **Filter** | `maxims = ["user", "self"]` in agent config | No allow-list on write; filter on recall |
 
 Both are backed by a single extension. The distinction is access temperature, not storage.
 
@@ -86,7 +86,7 @@ Proposed:
 ```toml
 [[platform.agents]]
 name = "main"
-maxims = ["user", "soul"]
+maxims = ["user", "self"]
 exclude_maxims = ["tasks"]
 ```
 
@@ -138,8 +138,7 @@ Each maxim key has a defined scope, documented in the system prompt so the agent
 | Key | Scope | Example content |
 |---|---|---|
 | `user` | What you know about the user — preferences, background, projects, style, constraints they've asked you to follow. | "User prefers synchronous patterns. TypeScript for frontend, Python for backend. Lives in UTC+8." |
-| `soul` | Your character and operating philosophy — how you approach problems, your communication style, what you value. | "Communicate concisely. Prefer working code over explanations. Ask clarifying questions when ambiguous." |
-| `identity` | Who you are — your role, your purpose, the system you're part of. | "You are a research assistant for the BOS AI project. Your primary user is the lead developer." |
+| `self` | Who you are and how you work — your role, purpose, character, communication style, and operating philosophy. | "You are a research assistant for the BOS AI project; your primary user is the lead developer. Communicate concisely, prefer working code over explanations, ask clarifying questions when ambiguous." |
 | `rules` | Hard constraints — things you must never do, formats you must follow, boundaries you cannot cross. | "Never modify files outside the workspace. Never include secrets in responses. Always confirm before destructive operations." |
 
 Maxim keys are static and operator-configured. The agent cannot create new keys — it can only update the content of existing ones via `Remember(key, content)`.
@@ -162,12 +161,7 @@ The `optimize()` hook can also be used by extensions to proactively compact maxi
 (content)
 ```
 
-* **soul** (your character and operating philosophy — how you work, communicate, and make decisions)
-```
-(content)
-```
-
-* **identity** (who you are — your role, purpose, and context)
+* **self** (who you are and how you work — your role, purpose, character, and operating philosophy)
 ```
 (content)
 ```
