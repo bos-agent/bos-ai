@@ -41,7 +41,7 @@ class JsonlChatStore:
         self,
         store_dir: str | Path | None = None,
         bos_dir: str | Path | None = None,
-        tool_noise_filter: ToolNoiseFilter = "keep_signatures",
+        tool_noise_filter: ToolNoiseFilter = "strip_all",
     ) -> None:
         store_dir = Path(store_dir).expanduser() if store_dir else "messages"
         self._dir = Path(bos_dir or ".").expanduser().resolve() / store_dir

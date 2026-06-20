@@ -12,9 +12,8 @@ from .registry import ExtensionPoint, ToolRegistry
 
 # ── BEP 5: Shared literals ─────────────────────────────────────────────────
 
-ToolNoiseFilter = Literal["keep_signatures", "strip_all", "keep_all"]
+ToolNoiseFilter = Literal["strip_all", "keep_all"]
 TokenEstimateSource = Literal["litellm", "fallback", "fallback-error"]
-ToolResultStatus = Literal["success", "error", "unknown"]
 ReasoningEffort = Literal["low", "medium", "high"]
 InterceptorStage = Literal[
     "prepare", "before_llm", "after_llm", "after_tool", "final_response", "max_iteration", "error"

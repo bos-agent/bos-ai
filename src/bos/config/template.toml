@@ -76,7 +76,7 @@ model = "gemini/gemini-2.5-flash"
 #reasoning_effort = "medium"           # low, medium, high
 #max_tokens = 131072
 #max_iterations = 60
-#tool_noise_filter = "keep_signatures" # keep_all, keep_signatures, strip_all
+#tool_noise_filter = "strip_all" # strip_all, keep_all
 
 [agent.defaults.tools]
 enabled = ["*"]

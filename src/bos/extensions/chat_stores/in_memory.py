@@ -31,7 +31,7 @@ class InMemChatStore:
 
     def __init__(
         self,
-        tool_noise_filter: ToolNoiseFilter = "keep_signatures",
+        tool_noise_filter: ToolNoiseFilter = "strip_all",
     ) -> None:
         self._messages: dict[str, list[Message]] = {}
         self._locks: dict[str, asyncio.Lock] = {}
