@@ -84,7 +84,7 @@ _RESPONSE_SCHEMA: dict = {
                     "maxim_key": {"type": "string"},
                     "requested_by": {"enum": ["user", "consolidator", "admin", "retention"]},
                 },
-                "required": ["op", "reason"],
+                "required": ["op", "reason", "source_turn_ids"],
             },
         },
     },

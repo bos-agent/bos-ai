@@ -36,7 +36,13 @@ async def test_mid_chat_fact_persists_into_next_session(tmp_path):
     chat_store = InMemChatStore()
     canned = _CannedLLM({
         "operations": [
-            {"op": "ADD", "reason": "stable user preference", "content": "user prefers dark mode", "importance": 8},
+            {
+                "op": "ADD",
+                "reason": "stable user preference",
+                "content": "user prefers dark mode",
+                "importance": 8,
+                "source_turn_ids": ["t1"],
+            },
         ]
     })
     blm = DefaultBackgroundLLM(canned)

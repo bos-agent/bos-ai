@@ -31,6 +31,14 @@ class TestStructural:
         assert req.chat_id == "c1"
         assert hasattr(MemoryConsolidator, "propose")
 
+    def test_schema_requires_source_turn_ids(self):
+        """source_turn_ids must be required so the model populates it rather than
+        dropping it as an optional field under provider controlled generation."""
+        from bos.plugins.memory.consolidator import _RESPONSE_SCHEMA
+
+        item_required = _RESPONSE_SCHEMA["properties"]["operations"]["items"]["required"]
+        assert "source_turn_ids" in item_required
+
 
 class _StubBackgroundLLM:
     def __init__(self, payload):
