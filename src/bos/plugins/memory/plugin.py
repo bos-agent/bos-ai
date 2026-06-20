@@ -35,6 +35,7 @@ if TYPE_CHECKING:
 
     from ._watermark import WatermarkStore
     from .consolidator import DefaultMemoryConsolidator
+    from .job import TriggerName
     from .operation_service import DefaultMemoryOperationService
 
 MAXIM_LIMIT = 2048
@@ -160,7 +161,11 @@ class MemoryHarnessPlugin:
             and services.background_llm is not None
             and services.chat_store is not None
         ):
-            services.jobs.bind_trigger("session_close", self._make_consolidation_job_factory())
+            services.jobs.bind_trigger("session_close", self._make_consolidation_job_factory("session_close"))
+            # Off-turn consolidation after a chat goes quiet. The runner arms a
+            # per-chat idle timer on each turn_complete (default 5 min); when it
+            # lapses with no new turn it fires this factory for that chat.
+            services.jobs.bind_trigger("idle", self._make_consolidation_job_factory("idle"))
 
         # Recall-log flush (BEP 10 §6): on turn_complete, dispatch to the
         # event.actor_name's bundle. The bundle holds the ids its own
@@ -214,7 +219,7 @@ class MemoryHarnessPlugin:
         recalled = bundle.recalled_by_turn.pop(turn_id, []) if turn_id else []
         await RecallFlushSubscriber(bundle.op_service).flush(recalled, chat_id=event.chat_id)
 
-    def _make_consolidation_job_factory(self):
+    def _make_consolidation_job_factory(self, trigger: TriggerName = "session_close"):
         from .job import MemoryConsolidationJob
 
         def factory(event: LifecycleEvent | None) -> Job | None:
@@ -227,7 +232,7 @@ class MemoryHarnessPlugin:
                 actor_name=event.actor_name,
                 chat_id=event.chat_id,
                 base_revision=int(event.base_revision),
-                trigger="session_close",
+                trigger=trigger,
                 policy=self._policy,
                 chat_store=self._services.chat_store,
                 backend=bundle.backend,

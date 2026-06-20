@@ -12,9 +12,9 @@ from bos.plugins.memory.operation_service import DefaultMemoryOperationService
 from bos.plugins.memory.plugin import MemoryHarnessPlugin
 
 
-async def _setup_plugin(tmp_path, *, consolidation_enabled=False):
+async def _setup_plugin(tmp_path, *, consolidation_enabled=False, idle_after=300):
     bus = DefaultLifecycleBus()
-    runner = InProcJobRunner(bus, max_concurrency=1, idle_after=300)
+    runner = InProcJobRunner(bus, max_concurrency=1, idle_after=idle_after)
     await runner.start()
     from bos.extensions.chat_stores.in_memory import InMemChatStore
 
@@ -153,6 +153,43 @@ async def test_consolidation_enabled_binds_session_close(tmp_path):
         recs = await runner.list()
         assert len(recs) == 1
         assert recs[0].status == "succeeded"
+    finally:
+        await runner.drain(timeout=0.0)
+
+
+@pytest.mark.asyncio
+async def test_consolidation_enabled_binds_idle(tmp_path):
+    import asyncio
+
+    # Tiny idle window so the per-chat timer fires within the test.
+    h, runner = await _setup_plugin(tmp_path, consolidation_enabled=True, idle_after=0.05)
+    try:
+        from bos.core.contract import LifecycleEvent, Message
+
+        h.bind({**h._cfg, "agent_name": "alice"})
+        await h._services.chat_store.commit_turn(
+            "c1",
+            [Message(llm_message={"role": "user", "content": "hi"})],
+            turn_id="t1",
+        )
+        # A completed turn arms the per-chat idle timer; no further turns means
+        # it fires after idle_after and spawns an idle-triggered consolidation.
+        await runner._bus.emit(
+            LifecycleEvent(
+                kind="turn_complete",
+                chat_id="c1",
+                actor_name="alice",
+                base_revision=1,
+                payload={},
+            )
+        )
+        await asyncio.sleep(0.15)  # let the idle timer fire and submit
+        await runner.drain(timeout=1.0)
+        recs = await runner.list()
+        assert len(recs) == 1
+        assert recs[0].status == "succeeded"
+        # The job carries the real trigger, not session_close.
+        assert recs[0].key.endswith(":idle")
     finally:
         await runner.drain(timeout=0.0)
 
