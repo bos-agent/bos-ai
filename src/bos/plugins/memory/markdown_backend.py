@@ -50,6 +50,10 @@ class MarkdownMemoryBackend:
     def _read_text_sync(path: Path) -> str:
         try:
             return path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            # A maxim that was never written is the normal empty case, not an
+            # error: get_maxim() polls every configured key each consolidation.
+            return ""
         except Exception:
             logger.warning("Failed to read text from %s", path, exc_info=False)
             return ""
