@@ -208,6 +208,9 @@ cython_debug/
 # Worktrees:
 .worktrees/
 
+# Superpowers plans/docs (local-only, not version controlled)
+docs/superpowers/
+
 # Ruff stuff:
 .ruff_cache/
 
