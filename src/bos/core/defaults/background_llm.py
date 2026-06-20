@@ -23,6 +23,21 @@ logger = logging.getLogger(__name__)
 _UNUSABLE_FINISH_REASONS = frozenset({"length", "content_filter", "error"})
 
 
+def _provider_hint_schema(schema: Any) -> Any:
+    """Return a deep copy of *schema* safe to send as a provider hint.
+
+    ``additionalProperties`` is the OpenAI strict-schema idiom; Gemini's
+    ``response_schema`` rejects it ("Unknown name additionalProperties"). Local
+    ``jsonschema.validate`` remains authoritative on the original schema, so
+    dropping it from the hint costs nothing.
+    """
+    if isinstance(schema, dict):
+        return {k: _provider_hint_schema(v) for k, v in schema.items() if k != "additionalProperties"}
+    if isinstance(schema, list):
+        return [_provider_hint_schema(v) for v in schema]
+    return schema
+
+
 class BackgroundLLMError(ValueError):
     """BackgroundLLM could not obtain a usable, schema-valid response.
 
@@ -53,7 +68,9 @@ class DefaultBackgroundLLM:
             "metadata": metadata,
         }
         if response_schema is not None:
-            kwargs["response_schema"] = response_schema
+            # Send the provider a sanitized hint; validate locally against the
+            # original (authoritative) schema below.
+            kwargs["response_schema"] = _provider_hint_schema(response_schema)
         attempt = 0
         last_error: str | None = None
         while True:

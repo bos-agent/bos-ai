@@ -99,6 +99,60 @@ class TestBackgroundLLM:
         assert len(stub.calls) == 1  # not retried
 
     @pytest.mark.asyncio
+    async def test_strips_additional_properties_from_provider_hint(self):
+        """Gemini rejects `additionalProperties` in response_schema. The schema
+        sent to the provider (a hint) must be stripped of it at every nesting
+        level, while local validation keeps the original strict schema."""
+        strict_schema = {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "operations": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {"op": {"type": "string"}},
+                        "required": ["op"],
+                    },
+                }
+            },
+            "required": ["operations"],
+        }
+        stub = _StubLLM([_r(json.dumps({"operations": [{"op": "ADD"}]}))])
+        blm = DefaultBackgroundLLM(stub)
+        await blm.ask(messages=[{"role": "user", "content": "x"}], response_schema=strict_schema)
+
+        sent = stub.calls[0]["kwargs"]["response_schema"]
+
+        def _has_key(node, key):
+            if isinstance(node, dict):
+                return key in node or any(_has_key(v, key) for v in node.values())
+            if isinstance(node, list):
+                return any(_has_key(v, key) for v in node)
+            return False
+
+        assert not _has_key(sent, "additionalProperties")
+        # caller's schema object must not be mutated
+        assert strict_schema["additionalProperties"] is False
+
+    @pytest.mark.asyncio
+    async def test_local_validation_still_enforces_additional_properties_false(self):
+        """Stripping the provider hint must not weaken local validation: an
+        extra key still fails `additionalProperties: false`."""
+        strict_schema = {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {"op": {"type": "string"}},
+            "required": ["op"],
+        }
+        extra = _r(json.dumps({"op": "ADD", "rogue": "x"}))
+        stub = _StubLLM([extra, extra])
+        blm = DefaultBackgroundLLM(stub, max_retries=1)
+        with pytest.raises(ValueError, match="schema"):
+            await blm.ask(messages=[{"role": "user", "content": "x"}], response_schema=strict_schema)
+
+    @pytest.mark.asyncio
     async def test_passes_model_and_kwargs_through(self):
         stub = _StubLLM([_r("ok")])
         blm = DefaultBackgroundLLM(stub)
