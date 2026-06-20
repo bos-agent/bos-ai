@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any
 
 from bos.protocol import Envelope, MessageContent, MessageType, TurnEvent
 
-from .agent import AbortTurn, Agent
+from .agent import AbortTurn, Agent, TurnContext
 from .chat_state import ChatState, ChatStateError
 from .contract import LifecycleBus, LifecycleEvent, LifecycleKind, MailBox
 from .events import CLIENT_TURN_EVENT_TYPES, HostChannelSink, MailboxEventSink
@@ -574,7 +574,9 @@ class AgentActor:
 
     async def _cmd_prompt(self, input: str, env: Envelope) -> dict[str, Any]:
         """Show the current agent system prompt."""
-        return {"name": "prompt", "ok": True, "result": await self._agent._build_system_prompt()}
+        # Rendered outside a real turn, so pass a throwaway context.
+        ctx = TurnContext(agent_name=self._agent.name, chat_id="introspection", turn_id="introspection")
+        return {"name": "prompt", "ok": True, "result": await self._agent._build_system_prompt(ctx)}
 
     async def _cmd_new(self, input: str, env: Envelope) -> dict[str, Any]:
         """Start a new chat for the current client."""
@@ -632,9 +634,7 @@ class AgentActor:
             chat_id=env.chat_id,
         )
 
-    def _make_interrupt(
-        self, chat_id: str, generation: int
-    ) -> Callable[[], dict[str, Any] | None]:
+    def _make_interrupt(self, chat_id: str, generation: int) -> Callable[[], dict[str, Any] | None]:
         def _interrupt() -> dict[str, Any] | None:
             if not self._generation_is_current(chat_id, generation):
                 raise AbortTurn()

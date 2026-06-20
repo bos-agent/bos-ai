@@ -4,7 +4,7 @@ import json
 from types import SimpleNamespace
 
 import pytest
-from conftest import create_test_agent
+from conftest import create_test_agent, dummy_turn_context
 
 from bos.config.default_agent_spec import default_agent_spec
 from bos.core import LLMResponse, ep_provider
@@ -92,7 +92,7 @@ async def test_plan_plugin_keeps_current_plan_out_of_system_prompt():
         open_questions=["Proceed?"],
         status="needs_input",
     )
-    prompt = await agent._build_system_prompt()
+    prompt = await agent._build_system_prompt(dummy_turn_context())
     system_end = prompt.index("</system_prompt>")
 
     assert prompt.index("<plan_workflow>") < system_end

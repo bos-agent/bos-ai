@@ -451,6 +451,18 @@ class ToolSet(Protocol):
     async def invoke(self, name: str, kwargs: dict[str, Any] | None = None) -> str: ...
 
 
+@runtime_checkable
+class PromptProvider(Protocol):
+    """Supplies extra system-prompt sections for a turn.
+
+    Which plugins contribute and in what order is the outer layer's job; the
+    Agent just asks the provider each turn and appends the result to its base
+    system prompt.
+    """
+
+    async def sections(self, context: TurnContext) -> list[str]: ...
+
+
 @dataclass(frozen=True)
 class ToolContext:
     agent_name: str

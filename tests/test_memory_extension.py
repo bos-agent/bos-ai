@@ -1,7 +1,7 @@
 """Tests for MemoryPlugin tools and system prompt integration."""
 
 import pytest
-from conftest import InMemMemoryExtension, create_test_agent
+from conftest import InMemMemoryExtension, create_test_agent, dummy_turn_context
 
 from bos.plugins.memory import MemoryAgentPlugin
 
@@ -89,10 +89,12 @@ class TestRememberTool:
 class TestReviseMaximTool:
     @pytest.mark.asyncio
     async def test_revise_appends_timestamped_entry(self):
-        agent = _create_memory_agent(maxim_keys={"user"})
+        memory = InMemMemoryExtension()
+        plugin = MemoryAgentPlugin(memory, {"user"})
+        agent = create_test_agent(plugins=[plugin])
         result = await agent._invoke_tool("ReviseMaxim", key="user", content="likes Python")
         assert "appended" in result
-        backend = agent._plugins[0]._backend
+        backend = plugin._backend
         maxim = await backend.get_maxim("user")
         assert "likes Python" in maxim
         assert "]" in maxim
@@ -160,7 +162,7 @@ class TestInContextIndex:
         store = InMemMemoryExtension()
         await store.ingest_memory("deploys happen on Fridays", tags=["ops"], summary="Friday deploys")
         agent = _create_memory_agent(memory=store, maxim_keys={"user"})
-        prompt = await agent._build_system_prompt()
+        prompt = await agent._build_system_prompt(dummy_turn_context())
         assert "<memory_index>" in prompt
         assert "Friday deploys" in prompt
 
@@ -171,7 +173,7 @@ class TestInContextIndex:
             await store.ingest_memory(f"fact {i}", importance=i + 1)
         plugin = MemoryAgentPlugin(store, {"user"}, index_max=2)
         agent = create_test_agent(plugins=[plugin])
-        prompt = await agent._build_system_prompt()
+        prompt = await agent._build_system_prompt(dummy_turn_context())
         # only the 2 highest-importance summaries appear
         assert prompt.count("<index_entry") == 2
 
@@ -200,8 +202,8 @@ class TestPerTurnMemoization:
         the agent's own write, unlike an external backend mutation."""
         store = InMemMemoryExtension()
         await store.set_maxim("user", "v1")
-        agent = _create_memory_agent(memory=store, maxim_keys={"user"})
-        plugin = agent._plugins[0]
+        plugin = MemoryAgentPlugin(store, {"user"})
+        agent = create_test_agent(plugins=[plugin])
 
         class _Ctx:
             turn_id = "turn-A"
@@ -218,8 +220,8 @@ class TestPerTurnMemoization:
         """Regression: a Remember made by the agent mid-turn appears in the
         memory_index on the next iteration of the same turn."""
         store = InMemMemoryExtension()
-        agent = _create_memory_agent(memory=store, maxim_keys={"user"})
-        plugin = agent._plugins[0]
+        plugin = MemoryAgentPlugin(store, {"user"})
+        agent = create_test_agent(plugins=[plugin])
 
         class _Ctx:
             turn_id = "turn-A"
@@ -392,7 +394,7 @@ class TestSystemPromptIntegration:
         store = InMemMemoryExtension()
         await store.set_maxim("user", "test user content")
         agent = _create_memory_agent(memory=store, maxim_keys={"user"})
-        prompt = await agent._build_system_prompt()
+        prompt = await agent._build_system_prompt(dummy_turn_context())
         assert "<active_maxims>" in prompt
         assert '<maxim name="user" scope="your knowledge about the user' in prompt
         assert "test user content" in prompt
@@ -403,7 +405,7 @@ class TestSystemPromptIntegration:
         await store.set_maxim("user", "user content")
         await store.set_maxim("soul", "soul content")
         agent = _create_memory_agent(memory=store, maxim_keys={"user"})
-        prompt = await agent._build_system_prompt()
+        prompt = await agent._build_system_prompt(dummy_turn_context())
         assert "user content" in prompt
         assert "soul content" not in prompt
 
@@ -413,14 +415,14 @@ class TestSystemPromptIntegration:
         await store.set_maxim("rules", "rule content")
         await store.set_maxim("self", "self content")
         agent = _create_memory_agent(memory=store, maxim_keys={"rules", "self"})
-        prompt = await agent._build_system_prompt()
+        prompt = await agent._build_system_prompt(dummy_turn_context())
         assert '<maxim name="rules" scope="hard constraints' in prompt
         assert '<maxim name="self" scope="who you are' in prompt
 
     @pytest.mark.asyncio
     async def test_empty_maxims_are_not_injected_into_prompt(self):
         agent = _create_memory_agent(maxim_keys={"user"})
-        prompt = await agent._build_system_prompt()
+        prompt = await agent._build_system_prompt(dummy_turn_context())
         assert "<memory_workflow>" in prompt
         assert "<active_maxims>" in prompt
         assert '<maxim name="user" scope="your knowledge about the user' in prompt

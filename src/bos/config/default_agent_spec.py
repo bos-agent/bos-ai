@@ -90,6 +90,5 @@ default_agent_spec: dict[str, Any] = {
     "plugins": {
         "enabled": ["MemoryPlugin", "PlanPlugin", "TaskPlugin", "SkillsPlugin", "SubagentPlugin"],
         "disabled": [],
-        "prompts": {},
     },
 }

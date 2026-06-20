@@ -7,6 +7,11 @@ import json
 
 import click
 
+from bos.core import TurnContext
+
+# Throwaway context for rendering a system prompt outside a real turn.
+_INTROSPECTION_CTX = TurnContext(agent_name="debug", chat_id="introspection", turn_id="introspection")
+
 
 @click.group(name="debug")
 def debug():
@@ -58,7 +63,7 @@ def prompt(ctx, agent_kind: str | None, workspace_dir: str | None):
     async def _run() -> str:
         async with ws.harness() as harness:
             agent = await harness.create_agent(selected, agent_cfg=agent_cfg)
-            return await agent._build_system_prompt()
+            return await agent._build_system_prompt(_INTROSPECTION_CTX)
 
     click.echo(asyncio.run(_run()))
 
@@ -95,7 +100,7 @@ def messages(ctx, chat_id: str, agent_kind: str | None, workspace_dir: str | Non
             agent = await harness.create_agent(selected, agent_cfg=agent_cfg)
             history = await agent._load_and_compact_history(chat_id, budget_model=None)
             if include_system:
-                system = await agent._build_system_prompt()
+                system = await agent._build_system_prompt(_INTROSPECTION_CTX)
                 return [{"role": "system", "content": system}] + history
             return history
 

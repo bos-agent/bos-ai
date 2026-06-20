@@ -18,6 +18,7 @@ from bos.core import (
     ep_provider,
 )
 from bos.core.agent import Agent
+from bos.core.harness import _PluginPromptProvider
 from bos.core.registry import ToolRegistry
 from bos.plugins.subagent import SubagentAgentPlugin  # noqa: F401  registers SubagentPlugin
 from bos.protocol import MessageType
@@ -31,9 +32,9 @@ def create_test_agent(*, plugins=None, local_tools=None, tools=None, exclude_too
     kwargs.setdefault("chat_store", InMemChatStore())
     kwargs.setdefault("consolidator", MessageOnlyConsolidator())
     return Agent(
-        plugins=plugins,
         tools=resolved,
         interceptor=compose_test_interceptors(plugins, interceptor),
+        prompt_provider=_PluginPromptProvider(plugins),
         **kwargs,
     )
 

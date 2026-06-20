@@ -42,6 +42,7 @@ class FakeMailbox:
 
 class StubAgent:
     def __init__(self) -> None:
+        self.name = "stub"
         self._chat_store = InMemChatStore()
         self._memory = InMemMemoryExtension()
         self._consolidator = MessageOnlyConsolidator()

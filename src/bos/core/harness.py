@@ -56,12 +56,12 @@ class AgentRegistry:
 
         plugins = kwargs.get("plugins")
         if plugins is None:
-            kwargs["plugins"] = {"enabled": [], "disabled": [], "prompts": {}}
+            kwargs["plugins"] = {"enabled": [], "disabled": []}
         elif not isinstance(plugins, dict):
             raise TypeError(f"plugins must be a dict or None, got {type(plugins).__name__}")
 
         kwargs.setdefault("tools", [])
-        kwargs.setdefault("plugins", {"enabled": [], "disabled": [], "prompts": {}})
+        kwargs.setdefault("plugins", {"enabled": [], "disabled": []})
         kwargs["kind"] = name
         cls._registry[name] = {
             "defaults": kwargs,
@@ -185,6 +185,29 @@ class _CompositePluginInterceptor:
             except Exception as e:
                 logger.error("Error in plugin interceptor: %s", e, exc_info=True)
         await self._fallback.intercept(stage, context)
+
+
+class _PluginPromptProvider:
+    """Builds per-turn system-prompt sections from the agent's plugins, in order.
+
+    Satisfies the core ``PromptProvider`` protocol; the Agent asks it each turn
+    and stays unaware of plugins.
+    """
+
+    def __init__(self, plugins: list[AgentPlugin]) -> None:
+        self._plugins = plugins
+
+    async def sections(self, context: TurnContext) -> list[str]:
+        out: list[str] = []
+        for plugin in self._plugins:
+            try:
+                section = await plugin.get_system_prompt_section(context)
+            except Exception as e:
+                logger.error("Error in plugin prompt section %s: %s", plugin.name, e, exc_info=True)
+                continue
+            if section:
+                out.append(section)
+        return out
 
 
 class _HarnessSubagentRuntime:
@@ -372,7 +395,7 @@ class AgentHarness:
             "consolidator": self.consolidator,
             "tools": tools,
             "interceptor": interceptor,
-            "plugins": plugins,
+            "prompt_provider": _PluginPromptProvider(plugins),
             "chat_compaction_lock": self._get_compaction_lock,
             "workspace": str(self._workspace),
         }

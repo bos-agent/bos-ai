@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from bos.core.agent import Agent
+from bos.core.agent import Agent, TurnContext
 from bos.core.contract import Message, TurnInterceptor, ep_consolidator, ep_tool
-from bos.core.harness import ChainInterceptor, ResolvedToolSet, _CompositePluginInterceptor
+from bos.core.harness import ChainInterceptor, ResolvedToolSet, _CompositePluginInterceptor, _PluginPromptProvider
 from bos.core.registry import ToolRegistry
 from bos.extensions.chat_stores.in_memory import InMemChatStore
 from bos.extensions.mailboxes.in_memory import InMemMailRoute  # noqa: F401
@@ -28,6 +28,12 @@ def resolve_test_tools(
     for plugin in plugins or []:
         plugin.register_tools(local)
     return local, ResolvedToolSet([local, ep_tool], include=include, exclude=exclude)
+
+
+def dummy_turn_context() -> TurnContext:
+    """A throwaway TurnContext for introspection-style calls — e.g. building the
+    system prompt outside a real turn."""
+    return TurnContext(agent_name="test", chat_id="test", turn_id="test")
 
 
 def compose_test_interceptors(
@@ -55,9 +61,9 @@ def create_test_agent(
     kwargs.setdefault("chat_store", InMemChatStore())
     kwargs.setdefault("consolidator", MessageOnlyConsolidator())
     return Agent(
-        plugins=plugins,
         tools=resolved,
         interceptor=compose_test_interceptors(plugins, interceptor),
+        prompt_provider=_PluginPromptProvider(plugins),
         **kwargs,
     )
 

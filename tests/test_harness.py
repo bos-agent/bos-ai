@@ -9,6 +9,7 @@ from conftest import (
     InMemMemoryExtension,
     MessageOnlyConsolidator,
     create_test_agent,
+    dummy_turn_context,
 )
 
 import bos.extensions.tools.filesystem  # noqa: F401  — registers ep_tool entries
@@ -72,7 +73,7 @@ async def test_subagent_plugin_hides_prompt_and_tool_when_no_subagents():
         assert local_tools.get("AskSubagent") is None
         assert await subagent.get_system_prompt_section(None) is None
         assert "AskSubagent" not in await agent._prompt_section_tools()
-        assert "<subagent_workflow>" not in await agent._build_system_prompt()
+        assert "<subagent_workflow>" not in await agent._build_system_prompt(dummy_turn_context())
     finally:
         AgentRegistry._registry.clear()
         AgentRegistry._registry.update(snapshot)
@@ -130,7 +131,7 @@ async def test_harness_binds_subagent_plugin_bindings_from_validated_config(tmp_
 
         async with ws.harness() as harness:
             agent = await harness.create_agent("_default")
-            prompt = await agent._build_system_prompt()
+            prompt = await agent._build_system_prompt(dummy_turn_context())
 
         assert agent._tools.has("AskSubagent")
         assert "<subagent_workflow>" in prompt
@@ -823,7 +824,7 @@ async def test_plugin_prompt_sections_render_inside_system_prompt():
             SubagentAgentPlugin(_MockSubagentRuntime(), enabled=None, disabled=[]),
         ]
     )
-    prompt = await agent._build_system_prompt()
+    prompt = await agent._build_system_prompt(dummy_turn_context())
     system_end = prompt.index("</system_prompt>")
 
     assert prompt.index("<memory_workflow>") < system_end
@@ -835,31 +836,6 @@ async def test_plugin_prompt_sections_render_inside_system_prompt():
     assert prompt.index("<available_tools>") > system_end
 
     AgentRegistry._registry.pop("test-subagent", None)
-
-
-@pytest.mark.asyncio
-async def test_plugins_prompt_overrides_plugin_section():
-    class DummyPlugin:
-        @property
-        def name(self) -> str:
-            return "DummyPlugin"
-
-        def register_tools(self, registry) -> None:
-            pass
-
-        async def get_system_prompt_section(self, context) -> str | None:
-            return "Original dummy prompt section"
-
-        def get_interceptors(self):
-            return []
-
-    agent = create_test_agent(
-        plugins=[DummyPlugin()],
-        plugins_prompt={"DummyPlugin": "Overridden dummy prompt section"},
-    )
-    prompt = await agent._build_system_prompt()
-    assert "Overridden dummy prompt section" in prompt
-    assert "Original dummy prompt section" not in prompt
 
 
 @pytest.mark.asyncio

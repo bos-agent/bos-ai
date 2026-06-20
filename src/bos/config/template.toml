@@ -88,7 +88,6 @@ enabled = [
     "*",
 ] # ["MemoryPlugin", "PlanPlugin", "TaskPlugin", "SkillsPlugin", "SubagentPlugin"]
 #disabled = []
-#prompts = {}
 
 # Per-plugin configuration
 # [agent.defaults.plugin-bindings.MemoryPlugin]

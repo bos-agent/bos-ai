@@ -16,7 +16,7 @@ from bos.core.contract import (
     ep_plugin,
     ep_tool,
 )
-from bos.core.harness import ResolvedToolSet
+from bos.core.harness import ResolvedToolSet, _PluginPromptProvider
 from bos.core.registry import ExtensionPoint, ToolRegistry
 
 # Plugin-defined extension points use the `pep_` prefix (plugin extension
@@ -303,7 +303,7 @@ class SkillsAgentPlugin:
                 llm=runtime.llm,
                 model=model,
                 tools=ResolvedToolSet([local_tools, ep_tool], include=include),
-                plugins=[test_plugin],
+                prompt_provider=_PluginPromptProvider([test_plugin]),
                 max_iterations=30,
                 workspace=runtime.workspace,
             )

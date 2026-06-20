@@ -22,12 +22,12 @@ from ._utils import (
     _xml_attr,
 )
 from .contract import (
-    AgentPlugin,
     ChatStore,
     ContextResult,
     EventSink,
     InterceptorStage,
     Message,
+    PromptProvider,
     ReasoningEffort,
     ToolAttributes,
     ToolContext,
@@ -232,6 +232,14 @@ class _NoopInterceptor:
         return None
 
 
+class _NoopPromptProvider:
+    """Contributes no extra prompt sections. The default when an Agent is
+    constructed without an injected provider."""
+
+    async def sections(self, context: TurnContext) -> list[str]:
+        return []
+
+
 class _EmptyToolSet:
     """A ToolSet with no tools. Default when an Agent is constructed without
     an injected, resolved tool collection."""
@@ -260,8 +268,7 @@ class Agent:
         chat_store: ChatStore,
         consolidator: Consolidator,
         system_prompt: str | None = None,
-        plugins: Sequence[AgentPlugin] = (),
-        plugins_prompt: dict[str, str] | None = None,
+        prompt_provider: PromptProvider | None = None,
         tools: ToolSet | None = None,
         tools_usage: dict[str, str] | None = None,
         model: str | None = None,
@@ -293,8 +300,7 @@ class Agent:
         self._consolidator = consolidator
         self._kind = kind
         self._name = agent_name or kind
-        self._plugins = plugins
-        self._plugins_prompt = plugins_prompt or {}
+        self._prompt_provider: PromptProvider = prompt_provider or _NoopPromptProvider()
         self._tool_noise_filter: ToolNoiseFilter | None = tool_noise_filter
         self._compaction_lock = chat_compaction_lock
         self._history_attribution = history_attribution
@@ -335,7 +341,6 @@ class Agent:
             metadata=(ctx_metadata or {}).copy(),
             current_message_projector=self._project_current_message,
         )
-        ctx.set_system_prompt(await self._build_system_prompt(ctx))
         user_message_metadata = ctx.metadata.get("user_message_metadata")
         ctx.add_message(
             {"role": "user", "content": content or ""},
@@ -462,6 +467,12 @@ class Agent:
 
         try:
             await _run_interceptor("prepare")
+            # Build the system prompt once per turn (after prepare). It is not
+            # rebuilt per iteration: intra-turn state the agent produces (e.g. a
+            # memory write) is already present in the turn's message context, so
+            # re-rendering it into the system prompt mid-turn is redundant and
+            # would needlessly churn the prompt-cache prefix.
+            ctx.set_system_prompt(await self._build_system_prompt(ctx))
             await _emit_event("turn", "start", stage="prepare", detail="start")
             iteration = 0
             while True:
@@ -473,7 +484,6 @@ class Agent:
                     break
                 iteration += 1
                 await _interrupt()
-                ctx.set_system_prompt(await self._build_system_prompt(ctx))
                 await _run_interceptor("before_llm")
                 await _emit_event(
                     "llm",
@@ -726,16 +736,8 @@ class Agent:
             )
         return formatted
 
-    async def _build_system_prompt(self, ctx: TurnContext | None = None) -> str:
-        system_sections = [self._system_prompt]
-        # Plugin prompt sections, in resolved plugin order
-        for plugin in self._plugins:
-            if plugin.name in self._plugins_prompt:
-                section = self._plugins_prompt[plugin.name]
-            else:
-                section = await plugin.get_system_prompt_section(ctx)
-            if section:
-                system_sections.append(section)
+    async def _build_system_prompt(self, ctx: TurnContext) -> str:
+        system_sections = [self._system_prompt, *await self._prompt_provider.sections(ctx)]
         sections = [
             self._prompt_section_base(system_sections),
             await self._prompt_section_tools(),
