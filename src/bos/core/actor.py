@@ -6,15 +6,18 @@ import json
 import logging
 import uuid
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from bos.protocol import Envelope, MessageContent, MessageType, TurnEvent
 
 from .agent import AbortTurn, Agent
 from .chat_state import ChatState, ChatStateError
-from .contract import MailBox
-from .events import MailboxEventSink
+from .contract import LifecycleBus, LifecycleEvent, LifecycleKind, MailBox
+from .events import CLIENT_TURN_EVENT_TYPES, HostChannelSink, MailboxEventSink
 from .harness import CURRENT_MAILBOX
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +28,10 @@ class SessionExecution:
     generation: int = 0
     reply_recipient: str | None = None
     reply_chat_id: str | None = None
+    # Most recent ChatCommit.revision the actor observed for this session.
+    # `retire_session` emits session_close with it so the event carries a real
+    # base_revision without an out-of-band chat_store lookup.
+    last_committed_revision: int | None = None
 
 
 @dataclass
@@ -66,7 +73,7 @@ class _RouteAwareMailboxEventSink(MailboxEventSink):
         self._channel_metadata = dict(channel_metadata or {})
 
     async def emit(self, event: TurnEvent) -> None:
-        metadata = {"turn_id": event.turn_id, "event_type": event.event_type}
+        metadata: dict[str, Any] = {"turn_id": event.turn_id, "event_type": event.event_type}
         if self._channel_metadata:
             metadata["channel"] = self._channel_metadata
         await self._mailbox.send(
@@ -86,12 +93,20 @@ class AgentActor:
     Messages arriving during an active turn are rejected immediately.
     """
 
-    def __init__(self, agent: Agent, mailbox: MailBox, chat_state: ChatState | None = None):
+    def __init__(
+        self,
+        agent: Agent,
+        mailbox: MailBox,
+        chat_state: ChatState | None = None,
+        *,
+        lifecycle_bus: LifecycleBus | None = None,
+    ):
         self._address = mailbox.address
         self._agent = agent
         self._mailbox = mailbox
         self._chat_state = chat_state or ChatState()
         self._sessions: dict[str, SessionState] = {}
+        self._lifecycle_bus = lifecycle_bus
         self._command_tasks: set[asyncio.Task] = set()
 
     async def aclose(self) -> None:
@@ -202,6 +217,13 @@ class AgentActor:
         if task is not None:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+        await self._emit_lifecycle(
+            "session_close",
+            chat_id=chat_id,
+            actor_name=self._actor_name(),
+            turn_id=None,
+            base_revision=session.execution.last_committed_revision,
+        )
 
     def _spawn_command_task(self, env: Envelope) -> None:
         task = asyncio.create_task(self._handle_command(env))
@@ -307,16 +329,20 @@ class AgentActor:
 
         try:
             token = CURRENT_MAILBOX.set(self._mailbox)
-            event_sink = _RouteAwareMailboxEventSink(
+            mailbox_sink = _RouteAwareMailboxEventSink(
                 self._mailbox,
                 reply_recipient,
                 reply_chat_id,
                 self._channel_metadata(inbound_env),
             )
+            event_sink = self._build_host_sink(turn_ctx, mailbox_sink)
 
             def _observe_commit(commit: Any) -> None:
                 nonlocal committed_revision
                 committed_revision = getattr(commit, "revision", None)
+                session_now = self._sessions.get(chat_id)
+                if session_now is not None and committed_revision is not None:
+                    session_now.execution.last_committed_revision = committed_revision
 
             response = await self._agent.ask(
                 chat_id,
@@ -369,7 +395,56 @@ class AgentActor:
         pass
 
     async def _on_turn_finished(self, ctx: ActorTurnContext, result: ActorTurnResult) -> None:
-        pass
+        # A completed turn is a generic platform lifecycle event. Subclasses
+        # that override this MUST call super() to preserve the emit.
+        if result.status == "completed":
+            await self._emit_lifecycle(
+                "turn_complete",
+                chat_id=ctx.chat_id,
+                actor_name=ctx.actor_name,
+                turn_id=ctx.turn_id,
+                base_revision=result.committed_revision,
+            )
+
+    async def _emit_lifecycle(
+        self,
+        kind: LifecycleKind,
+        *,
+        chat_id: str,
+        actor_name: str | None,
+        turn_id: str | None,
+        base_revision: int | None,
+    ) -> None:
+        """Emit a lifecycle event on the bus, if one is wired. The bus is the
+        single generic channel for turn_complete / session_close — the actor
+        names no plugin, and plugins subscribe to react (e.g. recall flush,
+        consolidation)."""
+        if self._lifecycle_bus is None:
+            return
+        try:
+            await self._lifecycle_bus.emit(
+                LifecycleEvent(
+                    kind=kind,
+                    chat_id=chat_id,
+                    actor_name=actor_name,
+                    base_revision=base_revision,
+                    turn_id=turn_id,
+                    payload={},
+                )
+            )
+        except Exception:
+            logger.exception("%s lifecycle emit raised", kind)
+
+    def _build_host_sink(self, ctx: ActorTurnContext, mailbox_sink: MailboxEventSink) -> HostChannelSink:
+        """Construct the per-turn event sink. The base actor registers the
+        mailbox forwarder for every client-facing event type — that's the
+        wire protocol clients see. Subclasses may override and call
+        ``super()._build_host_sink(...)`` to extend the sink with additional
+        handlers (e.g. capturing internal events into a turn-local buffer)."""
+        sink = HostChannelSink()
+        for event_type in CLIENT_TURN_EVENT_TYPES:
+            sink.on(event_type, mailbox_sink.emit)
+        return sink
 
     def _turn_metadata(self, reply_recipient: str, inbound_env: Envelope | None = None) -> dict[str, Any]:
         metadata: dict[str, Any] = {"sender": reply_recipient, "actor_address": self._address}
@@ -557,7 +632,9 @@ class AgentActor:
             chat_id=env.chat_id,
         )
 
-    def _make_interrupt(self, chat_id: str, generation: int):
+    def _make_interrupt(
+        self, chat_id: str, generation: int
+    ) -> Callable[[], dict[str, Any] | None]:
         def _interrupt() -> dict[str, Any] | None:
             if not self._generation_is_current(chat_id, generation):
                 raise AbortTurn()
@@ -590,8 +667,4 @@ class AgentActor:
 
     def _execution_is_current(self, chat_id: str, generation: int) -> bool:
         session = self._sessions.get(chat_id)
-        return (
-            session is not None
-            and session.execution.generation == generation
-            and session.execution.task is not None
-        )
+        return session is not None and session.execution.generation == generation and session.execution.task is not None

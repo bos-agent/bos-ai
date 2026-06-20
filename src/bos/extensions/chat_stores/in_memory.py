@@ -31,7 +31,7 @@ class InMemChatStore:
 
     def __init__(
         self,
-        tool_noise_filter: ToolNoiseFilter = "keep_signatures",
+        tool_noise_filter: ToolNoiseFilter = "strip_all",
     ) -> None:
         self._messages: dict[str, list[Message]] = {}
         self._locks: dict[str, asyncio.Lock] = {}
@@ -57,10 +57,11 @@ class InMemChatStore:
         return result
 
     def _estimate(self, projected: list[dict[str, Any]], model: str | None) -> TokenEstimate:
+        # TODO duplicated logic from bos.core.defaults.jsonl_chat_store. should import from there.
         try:
             from litellm import token_counter
 
-            count = int(token_counter(model=model, messages=projected))
+            count = int(token_counter(model=model or "", messages=projected))
             return TokenEstimate(count=count, tokenizer_model=model, source="litellm")
         except Exception:
             pass
@@ -103,9 +104,7 @@ class InMemChatStore:
 
     # ── ChatStore protocol ────────────────────────────────────────
 
-    async def commit_turn(
-        self, chat_id: str, messages: list[Message], *, turn_id: str
-    ) -> ChatCommit:
+    async def commit_turn(self, chat_id: str, messages: list[Message], *, turn_id: str) -> ChatCommit:
         pending = list(messages)
         if not pending:
             raise ValueError("commit_turn() requires at least one message.")
@@ -203,6 +202,16 @@ class InMemChatStore:
         if not active_only:
             return messages
         return self._active_messages(messages)
+
+    async def get_revision(self, chat_id: str) -> int:
+        async with self._get_lock(chat_id):
+            messages = list(self._messages.get(chat_id, []))
+        return self._chat_revision(messages)
+
+    async def get_messages_since(self, chat_id: str, *, revision: int) -> list[Message]:
+        async with self._get_lock(chat_id):
+            messages = list(self._messages.get(chat_id, []))
+        return [m for m in messages if int(m.metadata.get("chat_revision", 0) or 0) > revision]
 
     async def list_chats(self) -> dict[str, ChatMeta]:
         result: dict[str, ChatMeta] = {}

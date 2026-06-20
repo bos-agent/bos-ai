@@ -101,22 +101,23 @@ def main() -> None:
 
     signal.signal(signal.SIGTERM, _on_sigterm)
 
-    async def _watch_singleton_lock(target: asyncio.Task) -> None:
+    async def _watch_singleton_lock(target: asyncio.Task | None) -> None:
         # Singleton authority must hold for the whole process lifetime, not just
         # at startup. If this gateway ever stops owning the on-disk lock (the
         # file was wiped/recreated and another instance took over), stand down
         # rather than becoming a second poller that duplicates message delivery.
         from bos.runner.proc import lock_still_owned
 
-        while True:
-            await asyncio.sleep(_LOCK_WATCH_INTERVAL)
-            if not lock_still_owned(rd, singleton_lock):
-                logger.error(
-                    "Lost singleton lock ownership for %s — another gateway has taken over; shutting down.",
-                    ws.bos_dir,
-                )
-                target.cancel()
-                return
+        if target is not None:
+            while True:
+                await asyncio.sleep(_LOCK_WATCH_INTERVAL)
+                if not lock_still_owned(rd, singleton_lock):
+                    logger.error(
+                        "Lost singleton lock ownership for %s — another gateway has taken over; shutting down.",
+                        ws.bos_dir,
+                    )
+                    target.cancel()
+                    return
 
     async def _run() -> None:
         logger.info("Gateway process started (PID %d, workspace=%s)", os.getpid(), ws.workspace)

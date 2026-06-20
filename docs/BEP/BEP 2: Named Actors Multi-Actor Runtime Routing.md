@@ -161,8 +161,8 @@ class ScopedMemory:
         return f"scope:{self._scope}" in tags or "scope:global" in tags
 ```
 
-The wrapper uses delimiter-safe maxim keys such as `actors:bob:identity`, not
-path-like keys such as `actors/bob/identity`. The current default
+The wrapper uses delimiter-safe maxim keys such as `actors:bob:self`, not
+path-like keys such as `actors/bob/self`. The current default
 `MarkdownMemoryExtension` maps a maxim key directly to `maxims/<key>.md`; slash
 characters would create nested paths and require parent-directory creation plus
 path-safety rules. Colon-delimited keys work with the current protocol and
@@ -171,8 +171,8 @@ default backend without changing the memory extension.
 Memory behavior:
 
 - `user` is the only shared maxim.
-- `soul`, `identity`, `rules`, and all custom maxims are actor-scoped.
-- The LLM still sees ordinary maxim keys such as `user`, `identity`, and `rules`.
+- `self`, `rules`, and all custom maxims are actor-scoped.
+- The LLM still sees ordinary maxim keys such as `user`, `self`, and `rules`.
 - `Remember`, `Recall`, and `Forget` should appear unscoped to the LLM; the wrapper maps calls to actor-scoped keys/tags internally.
 - Search should over-fetch before filtering so actor-scoped results are not accidentally dropped by a backend's `top_k` limit.
 

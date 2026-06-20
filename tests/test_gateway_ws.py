@@ -254,9 +254,10 @@ async def test_gateway_ws_new_command_updates_channel_cursor(tmp_path, monkeypat
             assert payload["name"] == "new"
             assert payload["ok"] is True
             assert payload["chat_id"] != "chat-1"
-            assert gateway.chat_coordinator.get_cursor(
-                gateway.channel_manager.channels["tui-a"].channel.ref
-            ) == payload["chat_id"]
+            assert (
+                gateway.chat_coordinator.get_cursor(gateway.channel_manager.channels["tui-a"].channel.ref)
+                == payload["chat_id"]
+            )
             await ws.close()
     finally:
         await gateway.actor_manager.stop_all()
@@ -270,21 +271,19 @@ async def test_gateway_client_forwards_session_ack_envelope():
 
     class _FakeMsg:
         type = aiohttp.WSMsgType.TEXT
-        data = json.dumps(
-            {
-                "sender": "agent@main",
-                "content": "connected",
-                "content_type": "system",
+        data = json.dumps({
+            "sender": "agent@main",
+            "content": "connected",
+            "content_type": "system",
+            "chat_id": "chat-9",
+            "metadata": {
+                "event": "session",
+                "channel_id": "tui-a",
                 "chat_id": "chat-9",
-                "metadata": {
-                    "event": "session",
-                    "channel_id": "tui-a",
-                    "chat_id": "chat-9",
-                    "current_revision": 4,
-                    "missing_messages": [{"llm_message": {"role": "user", "content": "hi"}}],
-                },
-            }
-        )
+                "current_revision": 4,
+                "missing_messages": [{"llm_message": {"role": "user", "content": "hi"}}],
+            },
+        })
 
     class _FakeWS:
         closed = False

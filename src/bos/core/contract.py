@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -12,10 +12,12 @@ from .registry import ExtensionPoint, ToolRegistry
 
 # ── BEP 5: Shared literals ─────────────────────────────────────────────────
 
-ToolNoiseFilter = Literal["keep_signatures", "strip_all", "keep_all"]
+ToolNoiseFilter = Literal["strip_all", "keep_all"]
 TokenEstimateSource = Literal["litellm", "fallback", "fallback-error"]
-ToolResultStatus = Literal["success", "error", "unknown"]
 ReasoningEffort = Literal["low", "medium", "high"]
+InterceptorStage = Literal[
+    "prepare", "before_llm", "after_llm", "after_tool", "final_response", "max_iteration", "error"
+]
 
 
 @runtime_checkable
@@ -45,7 +47,7 @@ ep_tool = ToolRegistry(
         )
         async def echo(message: str) -> str:
             ...
-    """
+    """,
 )
 
 ep_provider = ExtensionPoint(
@@ -56,7 +58,7 @@ ep_provider = ExtensionPoint(
 
         async def my_provider(messages: list[dict], **kwargs: Any) -> LLMResponse:
             ...
-    """
+    """,
 )
 
 ep_agent = ExtensionPoint(
@@ -76,7 +78,7 @@ ep_agent = ExtensionPoint(
                 "model": "gemini-2.5-flash",
                 "tools": {"enabled": ["GetWeather"]},
             }
-    """
+    """,
 )
 
 
@@ -178,6 +180,10 @@ class ChatStore(Protocol):
     # ── Raw access ──
     async def get_messages(self, chat_id: str, *, active_only: bool = True) -> list[Message]: ...
 
+    # ── Revision-window read (BEP 5 amendment for BEP 10 consolidation) ──
+    async def get_revision(self, chat_id: str) -> int: ...
+    async def get_messages_since(self, chat_id: str, *, revision: int) -> list[Message]: ...
+
     # ── Metadata ──
     async def list_chats(self) -> dict[str, ChatMeta]: ...
 
@@ -186,7 +192,7 @@ ep_consolidator = ExtensionPoint(
     name="ep_consolidator",
     description="""
         Content consolidator. A factory that creates consolidators implementing the Consolidator protocol.
-    """
+    """,
 )
 
 
@@ -209,15 +215,7 @@ if TYPE_CHECKING:
 class TurnInterceptor(Protocol):
     async def intercept(
         self,
-        stage: Literal[
-            "prepare",
-            "before_llm",
-            "after_llm",
-            "after_tool",
-            "final_response",
-            "max_iteration",
-            "error",
-        ],
+        stage: InterceptorStage,
         context: TurnContext,
     ) -> None: ...
 
@@ -225,6 +223,92 @@ class TurnInterceptor(Protocol):
 @runtime_checkable
 class EventSink(Protocol):
     async def emit(self, event: TurnEvent) -> None: ...
+
+
+# ── BEP 11 §1: Lifecycle bus ───────────────────────────────────────────────
+
+LifecycleKind = Literal["turn_complete", "session_close"]
+
+
+@dataclass(frozen=True)
+class LifecycleEvent:
+    kind: LifecycleKind
+    chat_id: str
+    actor_name: str | None
+    base_revision: int | None
+    # The turn this event closes, for ``turn_complete``. ``None`` for
+    # ``session_close`` (which spans the whole session, not one turn).
+    turn_id: str | None = None
+    payload: dict[str, Any] = field(default_factory=dict)
+
+
+@runtime_checkable
+class LifecycleBus(Protocol):
+    def subscribe(self, kind: LifecycleKind, handler: Callable[[LifecycleEvent], Awaitable[None]]) -> None: ...
+    async def emit(self, event: LifecycleEvent) -> None: ...
+
+
+# ── BEP 11 §3: Background LLM ──────────────────────────────────────────────
+
+
+# ── BEP 11 §2: Job runner ──────────────────────────────────────────────────
+
+JobTrigger = Literal["session_close", "idle", "manual"]
+JobStatus = Literal["queued", "running", "succeeded", "failed", "cancelled"]
+
+
+@runtime_checkable
+class Job(Protocol):
+    @property
+    def key(self) -> str: ...
+
+    async def run(self) -> None: ...
+
+
+@dataclass(frozen=True)
+class JobRecord:
+    id: str
+    key: str
+    status: JobStatus
+    error: str | None
+    submitted_at: str
+    finished_at: str | None
+
+
+@runtime_checkable
+class JobRunner(Protocol):
+    async def start(self) -> None: ...
+    async def submit(self, job: Job) -> str: ...
+    def bind_trigger(
+        self,
+        trigger: JobTrigger,
+        factory: Callable[[LifecycleEvent | None], Job | None],
+    ) -> None: ...
+    async def drain(self, *, timeout: float) -> None: ...
+    async def status(self, job_id: str) -> JobStatus: ...
+    async def list(self, *, filter: dict | None = None) -> list[JobRecord]: ...
+    async def retry(self, job_id: str) -> None: ...
+    async def cancel(self, job_id: str) -> None: ...
+
+
+ep_job_runner = ExtensionPoint(
+    name="ep_job_runner",
+    description="Off-critical-path job runner implementations (BEP 11 §2).",
+)
+
+
+@runtime_checkable
+class BackgroundLLM(Protocol):
+    async def ask(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        model: str | None = None,
+        reasoning_effort: ReasoningEffort | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        response_schema: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> Any: ...
 
 
 ep_mail_route = ExtensionPoint(
@@ -294,7 +378,7 @@ class BaseChannel(Generic[SettingsT]):
     gateway-owned ``ChannelRuntimeContext``.
     """
 
-    SettingsType: ClassVar[type[SettingsT] | None] = None
+    SettingsType: ClassVar[type[Any] | None] = None
 
     def __init__(
         self,
@@ -367,7 +451,10 @@ class PluginServices:
     llm: Any  # LLMClient
     consolidator: Consolidator
     subagents: SubagentRuntime
-    chat_store: ChatStore | None = None
+    chat_store: ChatStore
+    events: LifecycleBus | None = None
+    jobs: JobRunner | None = None
+    background_llm: BackgroundLLM | None = None
 
 
 @runtime_checkable

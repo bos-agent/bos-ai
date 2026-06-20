@@ -135,10 +135,10 @@ def _runner_config_arg(ctx, ws: Workspace) -> str:
     return str(ws.config_file)
 
 
-def _daemon_workspace_dir(config_arg: str, bos_dir, workspace_override: str | None) -> str | os.PathLike[str]:
+def _daemon_workspace_dir(config_arg: str, bos_dir, workspace_override: str | None) -> str | Path:
     if workspace_override:
         return workspace_override
-    return bos_dir if _is_builtin_preset_arg(config_arg) else "."
+    return Path(bos_dir) if _is_builtin_preset_arg(config_arg) else "."
 
 
 def _is_builtin_preset_arg(config_arg: str) -> bool:
@@ -224,7 +224,6 @@ def _ensure_gateway_endpoint(ctx, rd: GatewayRunDir, workspace_dir: str | None) 
     raise click.ClickException(
         "Gateway endpoint did not become available — check `boscli gateway status` and the gateway log."
     )
-
 
 
 def _preview(value: Any, limit: int = 120) -> str:

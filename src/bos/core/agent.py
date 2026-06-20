@@ -30,6 +30,7 @@ from .contract import (
     ChatStore,
     ContextResult,
     EventSink,
+    InterceptorStage,
     Message,
     ReasoningEffort,
     ToolContext,
@@ -107,6 +108,29 @@ class TurnContext:
 
     def clear_ephemeral_message(self, key: str) -> None:
         self.ephemeral = [message for message in self.ephemeral if message.get("_ephemeral_key") != key]
+
+    def get_last_user_text(self) -> str:
+        """Return the most-recent user message's text from this turn's `current` messages.
+
+        Iterates `self.current` in reverse and returns the first user message's text
+        content. Multimodal content (a list of parts) is flattened to its text parts
+        concatenated; non-text parts are skipped. Returns "" if no user message is
+        present in this turn — interceptors use this on `prepare` to read the
+        incoming user message without depending on the underlying Message shape.
+        """
+        for message in reversed(self.current):
+            llm_msg = message.llm_message
+            if llm_msg.get("role") != "user":
+                continue
+            content = llm_msg.get("content", "")
+            if isinstance(content, str):
+                return content
+            if isinstance(content, list):
+                return "".join(
+                    part.get("text", "") for part in content if isinstance(part, dict) and part.get("type") == "text"
+                )
+            return str(content)
+        return ""
 
     @property
     def final_response(self) -> str:
@@ -216,7 +240,7 @@ class ChainInterceptor:
             for cfg in (interceptors or [])
             if isinstance(cfg, str) or (isinstance(cfg, dict) and "name" in cfg)
         ]
-        self._instances: list[TurnInterceptor] = [None] * len(self._configs)
+        self._instances: list[TurnInterceptor | None | Exception] = [None] * len(self._configs)
 
     async def aclose(self) -> None:
         for interceptor in self._instances:
@@ -224,14 +248,7 @@ class ChainInterceptor:
 
     async def intercept(
         self,
-        stage: Literal[
-            "prepare",
-            "before_llm",
-            "after_llm",
-            "after_tool",
-            "final_response",
-            "max_iteration",
-        ],
+        stage: InterceptorStage,
         context: TurnContext,
     ) -> None:
         for i, cfg in enumerate(self._configs):
@@ -241,8 +258,9 @@ class ChainInterceptor:
                 except Exception as e:
                     self._instances[i] = e
                     logger.error(f"Failed to create interceptor {cfg['name']}: {e}")
-            if isinstance(self._instances[i], TurnInterceptor):
-                await self._instances[i].intercept(stage, context)
+            inst = self._instances[i]
+            if isinstance(inst, TurnInterceptor):
+                await inst.intercept(stage, context)
 
 
 class _CompositePluginInterceptor:
@@ -259,14 +277,7 @@ class _CompositePluginInterceptor:
 
     async def intercept(
         self,
-        stage: Literal[
-            "prepare",
-            "before_llm",
-            "after_llm",
-            "after_tool",
-            "final_response",
-            "max_iteration",
-        ],
+        stage: InterceptorStage,
         context: TurnContext,
     ) -> None:
         for interceptor in self._plugin:
@@ -323,8 +334,7 @@ class Agent:
         self._local_tools = local_tools or ToolRegistry(f"_local_tools:{self._name}", "Agent-scoped local tools.")
         self._plugins = plugins
         self._plugins_prompt = plugins_prompt or {}
-        self._current_context: TurnContext | None = None
-        self._tool_noise_filter = tool_noise_filter
+        self._tool_noise_filter: ToolNoiseFilter | None = tool_noise_filter
         self._compaction_lock = chat_compaction_lock
         self._history_attribution = history_attribution
         self._workspace = str(workspace) if workspace else None
@@ -348,7 +358,7 @@ class Agent:
         self,
         chat_id: str,
         content: MessageContent,
-        interrupt: Callable[[], dict[str, Any] | Awaitable[dict[str, Any]]] | None = None,
+        interrupt: Callable[[], dict[str, Any] | Awaitable[dict[str, Any]] | None] | None = None,
         ctx_metadata: dict[str, Any] | None = None,
         llm_args: dict[str, Any] | None = None,
         event_sink: EventSink | None = None,
@@ -371,8 +381,7 @@ class Agent:
             metadata=(ctx_metadata or {}).copy(),
             current_message_projector=self._project_current_message,
         )
-        self._current_context = ctx
-        ctx.set_system_prompt(await self._build_system_prompt())
+        ctx.set_system_prompt(await self._build_system_prompt(ctx))
         user_message_metadata = ctx.metadata.get("user_message_metadata")
         ctx.add_message(
             {"role": "user", "content": content or ""},
@@ -396,7 +405,7 @@ class Agent:
             cache_index -= 1
 
         def _cache_control_injection_points() -> list[dict[str, Any]]:
-            hints = [{"location": "message", "role": "system"}]
+            hints: list[dict[str, Any]] = [{"location": "message", "role": "system"}]
             if cache_index == 0:
                 return hints
             # ctx.ephemeral is appended after persisted/current messages in the
@@ -444,7 +453,7 @@ class Agent:
                     if inspect.isawaitable(result):
                         await result
 
-        async def _run_interceptor(stage: str):
+        async def _run_interceptor(stage: InterceptorStage):
             try:
                 await self._interceptor.intercept(stage, ctx)
             except AbortTurn:
@@ -510,10 +519,13 @@ class Agent:
                     break
                 iteration += 1
                 await _interrupt()
-                ctx.set_system_prompt(await self._build_system_prompt())
+                ctx.set_system_prompt(await self._build_system_prompt(ctx))
                 await _run_interceptor("before_llm")
                 await _emit_event(
-                    "llm", "start", stage="before_llm", detail="thinking",
+                    "llm",
+                    "start",
+                    stage="before_llm",
+                    detail="thinking",
                     metadata={"iteration": iteration, "max_iterations": self._max_iterations},
                 )
 
@@ -548,9 +560,7 @@ class Agent:
                 )
                 if not response.tool_calls:
                     # finalize the response if there is no tool call required
-                    final_content = _strip_reply_artifacts(
-                        response.content, strip_labels=self._history_attribution
-                    )
+                    final_content = _strip_reply_artifacts(response.content, strip_labels=self._history_attribution)
                     if response.finish_reason == "error":
                         logger.error("Error in LLM response: %s", response.finish_reason)
                         final_content = final_content or "(LLM responds error)"
@@ -774,14 +784,14 @@ class Agent:
             )
         return formatted
 
-    async def _build_system_prompt(self) -> str:
+    async def _build_system_prompt(self, ctx: TurnContext | None = None) -> str:
         system_sections = [self._system_prompt]
         # Plugin prompt sections, in resolved plugin order
         for plugin in self._plugins:
             if plugin.name in self._plugins_prompt:
                 section = self._plugins_prompt[plugin.name]
             else:
-                section = await plugin.get_system_prompt_section(self._current_context)
+                section = await plugin.get_system_prompt_section(ctx)
             if section:
                 system_sections.append(section)
         sections = [
@@ -801,7 +811,7 @@ class Agent:
             _pick_collection(all_tools, self._tools, self._exclude_tools),
             "tools",
         )
-        available_tools = {k: self._tools_usage.get(k, v).strip() for k, v in available_tools.items()}
+        available_tools = {k: (self._tools_usage.get(k, v) or "").strip() for k, v in available_tools.items()}
 
         if not available_tools:
             return "<available_tools>\n\n</available_tools>"

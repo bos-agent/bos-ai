@@ -17,23 +17,21 @@ async def _wait_for_path(path, *, timeout: float = 2.0) -> None:
 
 
 def _signal_script(*, ready_path, terminated_path) -> str:
-    return "\n".join(
-        [
-            "import pathlib",
-            "import signal",
-            "import sys",
-            "import time",
-            f"ready = pathlib.Path({str(ready_path)!r})",
-            f"terminated = pathlib.Path({str(terminated_path)!r})",
-            "def handle_term(signum, frame):",
-            "    terminated.write_text(str(signum), encoding='utf-8')",
-            "    sys.exit(0)",
-            "signal.signal(signal.SIGTERM, handle_term)",
-            "ready.write_text('ready', encoding='utf-8')",
-            "while True:",
-            "    time.sleep(1)",
-        ]
-    )
+    return "\n".join([
+        "import pathlib",
+        "import signal",
+        "import sys",
+        "import time",
+        f"ready = pathlib.Path({str(ready_path)!r})",
+        f"terminated = pathlib.Path({str(terminated_path)!r})",
+        "def handle_term(signum, frame):",
+        "    terminated.write_text(str(signum), encoding='utf-8')",
+        "    sys.exit(0)",
+        "signal.signal(signal.SIGTERM, handle_term)",
+        "ready.write_text('ready', encoding='utf-8')",
+        "while True:",
+        "    time.sleep(1)",
+    ])
 
 
 @pytest.mark.asyncio

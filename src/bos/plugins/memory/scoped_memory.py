@@ -1,9 +1,16 @@
-"""Memory backend types — MemoryEntry, MemoryBackend protocol, ScopedMemory."""
+"""Memory backend types — entries, index, protocol (BEP 10 §6).
+
+Ω: ScopedMemory class removed. Per-agent isolation is now achieved by
+giving each agent its own backend instance rooted at its own storage
+subtree (see MemoryHarnessPlugin._build_for). The file retains its name
+for backward-compatible imports of the types and protocol below."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Literal, Protocol
+
+RequestedBy = Literal["user", "consolidator", "admin", "retention"]
 
 
 @dataclass
@@ -12,65 +19,63 @@ class MemoryEntry:
     content: str
     tags: list[str] = field(default_factory=list)
     created_at: str = ""
-    metadata: dict | None = None
+    # importance:int(1-10), valid:bool, invalidated_at, invalidated_by,
+    # last_used, links:list[str], source_turn_ids:list[str], summary
+    metadata: dict = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class MemoryIndexEntry:
+    id: str
+    tags: list[str]
+    summary: str
 
 
 class MemoryBackend(Protocol):
+    # maxims
     async def get_maxim(self, key: str) -> str: ...
     async def set_maxim(self, key: str, content: str) -> None: ...
-    async def search_memories(self, query: str, *, top_k: int = 5) -> list[MemoryEntry]: ...
-    async def ingest_memory(self, content: str, *, tags: list[str] | None = None) -> str: ...
-    async def get_memory(self, entry_id: str) -> MemoryEntry | None: ...
-    async def forget_memory(self, entry_id: str) -> None: ...
-    async def optimize(self) -> None: ...
+    async def append_to_maxim(self, key: str, line: str, *, max_len: int | None = None) -> tuple[bool, int]:
+        """Atomically append ``line`` as a new line to the maxim's current content.
 
+        The read-append-write is a single atomic operation so concurrent revisers
+        (e.g. a consolidation PROMOTE racing the revise_maxim tool) never clobber
+        each other's appends. If ``max_len`` is set and the result would exceed it,
+        nothing is written. Returns ``(written, resulting_length)``."""
+        ...
 
-class ScopedMemory:
-    """MemoryBackend wrapper that presents an actor-scoped memory view."""
+    # capture (raw append) + read
+    async def ingest_memory(
+        self,
+        content: str,
+        *,
+        tags: list[str] | None = None,
+        importance: int = 5,
+        summary: str | None = None,
+        source_turn_ids: list[str] | None = None,
+    ) -> str: ...
+    async def get_memory(self, entry_id: str, *, include_invalid: bool = False) -> MemoryEntry | None: ...
+    async def search_memories(
+        self,
+        query: str,
+        *,
+        top_k: int = 5,
+        include_invalid: bool = False,
+    ) -> list[MemoryEntry]: ...
+    async def list_index(self) -> list[MemoryIndexEntry]: ...
 
-    def __init__(self, inner: MemoryBackend, scope: str) -> None:
-        self._inner = inner
-        self._scope = scope
-
-    @property
-    def scope(self) -> str:
-        return self._scope
-
-    def _maxim_key(self, key: str) -> str:
-        key = key.lower()
-        if key == "user":
-            return "user"
-        return f"actors:{self._scope}:{key}"
-
-    def _scope_tag(self) -> str:
-        return f"scope:{self._scope}"
-
-    async def get_maxim(self, key: str) -> str:
-        return await self._inner.get_maxim(self._maxim_key(key))
-
-    async def set_maxim(self, key: str, content: str) -> None:
-        await self._inner.set_maxim(self._maxim_key(key), content)
-
-    async def search_memories(self, query: str, *, top_k: int = 5) -> list[MemoryEntry]:
-        entries = await self._inner.search_memories(query, top_k=max(top_k * 4, 20))
-        return [entry for entry in entries if self._is_visible(entry)][:top_k]
-
-    async def ingest_memory(self, content: str, *, tags: list[str] | None = None) -> str:
-        scoped_tags = [*(tags or []), self._scope_tag()]
-        return await self._inner.ingest_memory(content, tags=scoped_tags)
-
-    async def get_memory(self, entry_id: str) -> MemoryEntry | None:
-        entry = await self._inner.get_memory(entry_id)
-        return entry if entry is not None and self._is_visible(entry) else None
-
-    async def forget_memory(self, entry_id: str) -> None:
-        if await self.get_memory(entry_id) is not None:
-            await self._inner.forget_memory(entry_id)
-
-    async def optimize(self) -> None:
-        if hasattr(self._inner, "optimize"):
-            await self._inner.optimize()
-
-    def _is_visible(self, entry: MemoryEntry) -> bool:
-        tags = set(entry.tags)
-        return self._scope_tag() in tags or "scope:global" in tags
+    # curation writes (driven by the L1 operation service)
+    async def update_memory(
+        self,
+        entry_id: str,
+        *,
+        content: str | None = None,
+        tags: list[str] | None = None,
+        importance: int | None = None,
+        summary: str | None = None,
+        links: list[str] | None = None,
+        last_used: str | None = None,
+    ) -> None: ...
+    async def invalidate_memory(self, entry_id: str, *, requested_by: RequestedBy) -> None: ...
+    async def restore_memory(self, entry_id: str) -> None: ...
+    async def purge_invalidated(self, *, older_than_days: int) -> int: ...

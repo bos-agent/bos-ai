@@ -18,9 +18,12 @@ from ._utils import (
 from .agent import Agent, ChainInterceptor
 from .contract import (
     AgentPlugin,
+    BackgroundLLM,
     ChatStore,
     Consolidator,
     HarnessPlugin,
+    JobRunner,
+    LifecycleBus,
     MailBox,
     MailRoute,
     PluginServices,
@@ -82,7 +85,11 @@ class _HarnessSubagentRuntime:
         self._harness = harness
 
     async def ask(
-        self, role: str, message: str, *, parent: ToolContext,
+        self,
+        role: str,
+        message: str,
+        *,
+        parent: ToolContext,
         agent_cfg: dict[str, Any] | None = None,
     ) -> str:
         child_chat_id = self._harness._make_subagent_chat_id(parent.chat_id, role)
@@ -112,7 +119,8 @@ class AgentHarness:
         consolidator: str = "_default",
         chat_store: str = "_default",
         mail_route: str = "_default",
-        interceptors: list[str] | None = None,
+        job_runner: str = "_default",
+        interceptors: list[str | dict[str, Any]] | None = None,
     ) -> None:
         self._bos_root = Path(bos_dir).expanduser().resolve()
         self._workspace = Path(workspace).expanduser().resolve()
@@ -120,6 +128,7 @@ class AgentHarness:
         self._consolidator_impl = consolidator
         self._chat_store_impl = chat_store
         self._mail_route_impl = mail_route
+        self._job_runner_impl = job_runner
         self._interceptors_impl = interceptors or []
 
         self._owned: list[Any] = []
@@ -129,6 +138,9 @@ class AgentHarness:
         self.consolidator: Consolidator | None = None
         self.interceptor: ChainInterceptor | None = None
         self.llm: LLMClient | None = None
+        self.events: LifecycleBus | None = None
+        self.jobs: JobRunner | None = None
+        self.background_llm: BackgroundLLM | None = None
 
         # Plugin state
         self._harness_plugins: dict[str, HarnessPlugin] = {}
@@ -146,9 +158,22 @@ class AgentHarness:
 
         self.mail_route = await self._create_and_own("ep_mail_route", MailRoute, None, impl=self._mail_route_impl)
         self.chat_store = await self._create_and_own("ep_chat_store", ChatStore, None, impl=self._chat_store_impl)
+        assert self.chat_store is not None  # ep_chat_store has a _default, so creation never returns None
         self.llm = LLMClient()
         self.consolidator = await self._create_consolidator()
         self.interceptor = ChainInterceptor(self._interceptors_impl)
+
+        # BEP 11 services: in-process LifecycleBus, JobRunner, BackgroundLLM.
+        from bos.core.contract import ep_job_runner
+        from bos.core.defaults.background_llm import DefaultBackgroundLLM
+        from bos.core.defaults.lifecycle import DefaultLifecycleBus
+
+        self.events = DefaultLifecycleBus()
+        self.jobs = await ep_job_runner.invoke(self._job_runner_impl, {"bus": self.events})
+        assert self.jobs is not None  # ep_job_runner has a _default, so creation never returns None
+        await self.jobs.start()
+        self._owned.append(self.jobs)
+        self.background_llm = DefaultBackgroundLLM(self.llm)
 
         # Build plugin services
         self._plugin_services = PluginServices(
@@ -158,12 +183,22 @@ class AgentHarness:
             chat_store=self.chat_store,
             consolidator=self.consolidator,
             subagents=_HarnessSubagentRuntime(self),
+            events=self.events,
+            jobs=self.jobs,
+            background_llm=self.background_llm,
         )
 
         self._token = CURRENT_HARNESS.set(self)
         return self
 
     async def __aexit__(self, *exc) -> None:
+        # Drain BEP 11 JobRunner first — gives in-flight jobs a bounded window
+        # while BackgroundLLM/ChatStore are still alive (BEP 11 §4).
+        if self.jobs is not None:
+            try:
+                await self.jobs.drain(timeout=5.0)
+            except Exception:
+                logger.exception("Error draining JobRunner")
         await _aclose(self.interceptor)
         # Teardown harness plugins in reverse setup order
         for hp in reversed(list(self._harness_plugins.values())):
@@ -183,7 +218,7 @@ class AgentHarness:
     async def create_agent(
         self,
         kind: str | None = None,
-        agent_cfg: dict[str, Any] = None,
+        agent_cfg: dict[str, Any] | None = None,
     ) -> Agent:
         if CURRENT_HARNESS.get(None) is None:
             raise RuntimeError("create_agent must be called within an active AgentHarness context.")
@@ -257,6 +292,10 @@ class AgentHarness:
 
             plugin_binding = bindings.get(pname, {})
             cfg = dict(hp.default_config()) | (plugin_binding if isinstance(plugin_binding, dict) else {})
+            # Inject the resolved agent identity so per-actor plugins
+            # (e.g. MemoryPlugin) can key state by it. Mirrors Agent's
+            # `self._name = agent_name or kind` resolution (agent.py:345).
+            cfg["agent_name"] = agent_cfg.get("agent_name") or agent_cfg.get("kind") or "default"
             hp.validate_config(cfg)
             try:
                 agent_plugin = hp.bind(cfg)
@@ -264,7 +303,7 @@ class AgentHarness:
                 logger.error(
                     "Failed to bind plugin %r for agent %r",
                     pname,
-                    agent_cfg.get("agent_name") or "unknown",
+                    cfg["agent_name"],
                     exc_info=True,
                 )
                 raise
@@ -300,9 +339,11 @@ class AgentHarness:
     async def _create_consolidator(self) -> Consolidator:
         cfg = {"model": os.getenv("BOS_CONSOLIDATOR_MODEL"), "llm": self.llm}
         from . import __dict__ as core_exports
+
         instance = await core_exports["ep_consolidator"].invoke(self._consolidator_impl, cfg)
-        if instance is not None:
-            self._owned.append(instance)
+        if instance is None:
+            raise RuntimeError(f"Consolidator extension {self._consolidator_impl!r} could not be created")
+        self._owned.append(instance)
         return instance
 
     def _get_compaction_lock(self, chat_id: str) -> asyncio.Lock:

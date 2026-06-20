@@ -55,9 +55,7 @@ class ExtensionPoint:
         self.describe = lambda: {k: v.description for k, v in self._extensions.items()}
         if not name.startswith("_"):
             if name in ExtensionPoint._by_name:
-                raise ValueError(
-                    f"Duplicate extension point name `{name}`; extension point names must be unique"
-                )
+                raise ValueError(f"Duplicate extension point name `{name}`; extension point names must be unique")
             ExtensionPoint._by_name[name] = self
 
     @classmethod
@@ -80,9 +78,10 @@ class ExtensionPoint:
         Implementations may be sync or async functions interchangeably;
         callers always await.
         """
-        if name not in self._extensions:
+        ext = self.get(name)
+        if ext is None:
             raise ValueError(f"Extension '{name}' not found for '{self.description[:30].strip()}...'")
-        return await _apply_async(self.get(name).fn, _compact(self.get(name).defaults, kwargs or {}))
+        return await _apply_async(ext.fn, _compact(ext.defaults, kwargs or {}))
 
     def update_defaults(self, name: str, defaults: dict[str, Any]) -> None:
         """Merge *defaults* into the registered defaults for extension *name*.
@@ -115,7 +114,7 @@ class ExtensionPoint:
             ext = Extension(
                 name=ext_name,
                 description=description or getattr(fn, "__doc__", ""),
-                defaults=defaults,
+                defaults=defaults() if callable(defaults) else (defaults or {}),
                 metadata=metadata,
                 fn=fn,
             )
@@ -134,11 +133,10 @@ class ToolRegistry(ExtensionPoint):
         return {t.name: self.build_openai_schema(t) for t in self._extensions.values()}
 
     async def invoke(self, name: str, kwargs: dict[str, Any] | None = None) -> str:
-        if name not in self._extensions:
-            raise ValueError(f"Extension '{name}' not found for '{self.description[:30].strip()}...'")
-        ext = self.get(name)
-        result = await _apply_async(ext.fn, _compact(ext.defaults, kwargs or {}))
-        return self._serialize_result(ext, result)
+        if ext := self.get(name):
+            result = await _apply_async(ext.fn, _compact(ext.defaults, kwargs or {}))
+            return self._serialize_result(ext, result)
+        raise ValueError(f"Extension '{name}' not found for '{self.description[:30].strip()}...'")
 
     @staticmethod
     def build_openai_schema(ext: Extension) -> dict[str, Any]:

@@ -670,9 +670,7 @@ async def test_session_event_hydrates_transcript(monkeypatch):
     log.lines.append("stale viewport content")
 
     history = [{"llm_message": {"role": "user", "content": "hi"}}]
-    await app.on_system_event(
-        SystemEvent("connected", "chat-7", {"event": "session", "missing_messages": history})
-    )
+    await app.on_system_event(SystemEvent("connected", "chat-7", {"event": "session", "missing_messages": history}))
 
     assert app._chat_id == "chat-7"
     assert client.chat_id == "chat-7"
@@ -683,9 +681,7 @@ async def test_session_event_hydrates_transcript(monkeypatch):
     # The first session ack is the initial connect, not a reconnect.
     assert not any("Reconnected" in str(line) for line in log.lines)
 
-    await app.on_system_event(
-        SystemEvent("connected", "chat-7", {"event": "session", "missing_messages": history})
-    )
+    await app.on_system_event(SystemEvent("connected", "chat-7", {"event": "session", "missing_messages": history}))
 
     assert any("Reconnected" in str(line) for line in log.lines)
 
@@ -726,9 +722,7 @@ async def test_stale_rejection_does_not_clobber_typed_text(monkeypatch):
     app._last_sent_text = "my rejected message"
     app.query_one("#prompt").text = "already typing something new"
 
-    await app.on_system_event(
-        SystemEvent("{}", "chat-1", {"event": "stale_chat", "payload": {"missing_messages": []}})
-    )
+    await app.on_system_event(SystemEvent("{}", "chat-1", {"event": "stale_chat", "payload": {"missing_messages": []}}))
 
     assert app.query_one("#prompt").text == "already typing something new"
     assert not any("back in the prompt" in str(line) for line in log.lines)
@@ -837,9 +831,7 @@ async def test_turn_error_system_event_resets_busy_and_shows_error(monkeypatch):
     monkeypatch.setattr(app, "_write_system", outputs.append)
     monkeypatch.setattr(app, "_update_status", lambda: None)
 
-    await app.on_system_event(
-        SystemEvent("Turn failed: provider exploded", "chat-1", {"event": "turn_error"})
-    )
+    await app.on_system_event(SystemEvent("Turn failed: provider exploded", "chat-1", {"event": "turn_error"}))
 
     assert app._busy is False
     assert app._pending_tool_calls == []
@@ -954,15 +946,13 @@ async def test_plan_slash_command_routes_to_show_plan(monkeypatch):
 
 
 def test_render_plan_text_includes_populated_sections_only():
-    text = _render_plan_text(
-        {
-            "status": "approved",
-            "objective": "Ship the feature",
-            "user_value": "Users see plans",
-            "breakdown": ["Step one"],
-            "open_questions": [],
-        }
-    ).plain
+    text = _render_plan_text({
+        "status": "approved",
+        "objective": "Ship the feature",
+        "user_value": "Users see plans",
+        "breakdown": ["Step one"],
+        "open_questions": [],
+    }).plain
 
     assert "Objective" in text
     assert "Ship the feature" in text

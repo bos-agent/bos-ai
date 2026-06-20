@@ -7,7 +7,7 @@ import logging
 import os
 import time
 from pathlib import Path
-from typing import Any, AsyncGenerator
+from typing import TYPE_CHECKING, Any, AsyncGenerator
 from urllib.parse import urlencode
 
 import httpx
@@ -22,6 +22,9 @@ from bos.extensions.providers.google_oauth import (
     start_callback_server,
     wait_for_callback,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 logger = logging.getLogger("bos")
 
@@ -66,31 +69,27 @@ def _get_antigravity_headers() -> dict[str, str]:
     return {
         "User-Agent": f"antigravity/{version} darwin/arm64",
         "X-Goog-Api-Client": "google-cloud-sdk vscode_cloudshelleditor/0.1",
-        "Client-Metadata": json.dumps(
-            {
-                "ideType": "ANTIGRAVITY",
-                "platform": "MACOS",
-                "pluginType": "GEMINI",
-            }
-        ),
+        "Client-Metadata": json.dumps({
+            "ideType": "ANTIGRAVITY",
+            "platform": "MACOS",
+            "pluginType": "GEMINI",
+        }),
     }
 
 
 async def _discover_antigravity_project(
     access_token: str,
-    on_progress: Any | None = None,
+    on_progress: Callable[[str], None] | None = None,
 ) -> str:
     headers = {
         "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json",
         "User-Agent": "google-api-nodejs-client/9.15.1",
-        "Client-Metadata": json.dumps(
-            {
-                "ideType": "ANTIGRAVITY",
-                "platform": "MACOS",
-                "pluginType": "GEMINI",
-            }
-        ),
+        "Client-Metadata": json.dumps({
+            "ideType": "ANTIGRAVITY",
+            "platform": "MACOS",
+            "pluginType": "GEMINI",
+        }),
     }
 
     # Prod first for discovery, then sandbox fallbacks (matches reference project)
@@ -130,14 +129,14 @@ async def _discover_antigravity_project(
     return _DEFAULT_PROJECT_ID
 
 
-def _progress(cb: Any | None, msg: str) -> None:
+def _progress(cb: Callable[[str], None] | None, msg: str) -> None:
     if callable(cb):
         cb(msg)
 
 
 async def login_antigravity(
-    on_auth: Any | None = None,
-    on_progress: Any | None = None,
+    on_auth: Callable[[str, str], None] | None = None,
+    on_progress: Callable[[str], None] | None = None,
 ) -> OAuthCredentials:
     verifier, challenge = generate_pkce()
 
@@ -145,19 +144,17 @@ async def login_antigravity(
     server = start_callback_server(port=51121, path="/oauth-callback")
 
     try:
-        params = urlencode(
-            {
-                "client_id": _CLIENT_KEY,
-                "response_type": "code",
-                "redirect_uri": _REDIRECT_URI,
-                "scope": " ".join(_SCOPES),
-                "code_challenge": challenge,
-                "code_challenge_method": "S256",
-                "state": verifier,
-                "access_type": "offline",
-                "prompt": "consent",
-            }
-        )
+        params = urlencode({
+            "client_id": _CLIENT_KEY,
+            "response_type": "code",
+            "redirect_uri": _REDIRECT_URI,
+            "scope": " ".join(_SCOPES),
+            "code_challenge": challenge,
+            "code_challenge_method": "S256",
+            "state": verifier,
+            "access_type": "offline",
+            "prompt": "consent",
+        })
         auth_url = f"{_AUTH_URL}?{params}"
 
         if on_auth:
@@ -299,19 +296,17 @@ def _convert_messages(messages: list[dict[str, Any]]) -> tuple[str, list[dict[st
             if parts:
                 contents.append({"role": "model", "parts": parts})
         elif role == "tool":
-            contents.append(
-                {
-                    "role": "user",
-                    "parts": [
-                        {
-                            "functionResponse": {
-                                "name": msg.get("name", ""),
-                                "response": {"output": str(content_val)},
-                            }
+            contents.append({
+                "role": "user",
+                "parts": [
+                    {
+                        "functionResponse": {
+                            "name": msg.get("name", ""),
+                            "response": {"output": str(content_val)},
                         }
-                    ],
-                }
-            )
+                    }
+                ],
+            })
     return system_prompt, contents
 
 
@@ -319,13 +314,11 @@ def _convert_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
     decls = []
     for tool in tools:
         fn = tool.get("function", {}) if tool.get("type") == "function" else tool
-        decls.append(
-            {
-                "name": fn.get("name"),
-                "description": fn.get("description", ""),
-                "parameters": fn.get("parameters", {}),
-            }
-        )
+        decls.append({
+            "name": fn.get("name"),
+            "description": fn.get("description", ""),
+            "parameters": fn.get("parameters", {}),
+        })
     return [{"functionDeclarations": decls}] if decls else []
 
 
@@ -470,13 +463,11 @@ async def antigravity_complete(
         "requestId": f"agent-{int(time.time() * 1000)}-{os.urandom(5).hex()}",
     }
     headers = _get_antigravity_headers()
-    headers.update(
-        {
-            "Authorization": f"Bearer {access_token}",
-            "Content-Type": "application/json",
-            "Accept": "text/event-stream",
-        }
-    )
+    headers.update({
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json",
+        "Accept": "text/event-stream",
+    })
 
     endpoints = list(ANTIGRAVITY_ENDPOINT_FALLBACKS)
 

@@ -60,13 +60,11 @@ async def test_run_oneshot_exchange_returns_final_reply():
     from bos.cli.commands.agent import _run_oneshot_exchange
 
     turn_event = json.dumps({"event_type": "turn", "phase": "start"})
-    client = _StubGatewayClient(
-        [
-            _env(turn_event, MessageType.TURN_EVENT),
-            _env("session noise", MessageType.SYSTEM),
-            _env("final answer", MessageType.MESSAGE),
-        ]
-    )
+    client = _StubGatewayClient([
+        _env(turn_event, MessageType.TURN_EVENT),
+        _env("session noise", MessageType.SYSTEM),
+        _env("final answer", MessageType.MESSAGE),
+    ])
 
     result = await _run_oneshot_exchange(client, "do the task", progress=None)
 

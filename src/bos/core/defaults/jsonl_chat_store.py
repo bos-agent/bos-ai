@@ -41,7 +41,7 @@ class JsonlChatStore:
         self,
         store_dir: str | Path | None = None,
         bos_dir: str | Path | None = None,
-        tool_noise_filter: ToolNoiseFilter = "keep_signatures",
+        tool_noise_filter: ToolNoiseFilter = "strip_all",
     ) -> None:
         store_dir = Path(store_dir).expanduser() if store_dir else "messages"
         self._dir = Path(bos_dir or ".").expanduser().resolve() / store_dir
@@ -65,9 +65,7 @@ class JsonlChatStore:
                 messages.append(
                     Message(
                         llm_message=raw.get("llm_message", {}),
-                        created_at=datetime.fromisoformat(raw["created_at"])
-                        if "created_at" in raw
-                        else datetime.now(),
+                        created_at=datetime.fromisoformat(raw["created_at"]) if "created_at" in raw else datetime.now(),
                         turn_id=raw.get("turn_id"),
                         is_summary=raw.get("is_summary", False),
                         metadata=raw.get("metadata", {}),
@@ -133,7 +131,7 @@ class JsonlChatStore:
         try:
             from litellm import token_counter
 
-            count = int(token_counter(model=model, messages=projected))
+            count = int(token_counter(model=model or "", messages=projected))
             return TokenEstimate(count=count, tokenizer_model=model, source="litellm")
         except Exception:
             pass
@@ -148,9 +146,7 @@ class JsonlChatStore:
 
     # ── ChatStore protocol ────────────────────────────────────────
 
-    async def commit_turn(
-        self, chat_id: str, messages: list[Message], *, turn_id: str
-    ) -> ChatCommit:
+    async def commit_turn(self, chat_id: str, messages: list[Message], *, turn_id: str) -> ChatCommit:
         pending = list(messages)
         if not pending:
             raise ValueError("commit_turn() requires at least one message.")
@@ -257,6 +253,14 @@ class JsonlChatStore:
         if not active_only:
             return messages
         return self._active_messages(messages)
+
+    async def get_revision(self, chat_id: str) -> int:
+        messages = await asyncio.to_thread(self._read_messages_sync, chat_id)
+        return self._chat_revision(messages)
+
+    async def get_messages_since(self, chat_id: str, *, revision: int) -> list[Message]:
+        messages = await asyncio.to_thread(self._read_messages_sync, chat_id)
+        return [m for m in messages if int(m.metadata.get("chat_revision", 0) or 0) > revision]
 
     async def list_chats(self) -> dict[str, ChatMeta]:
         def _scan() -> dict[str, ChatMeta]:

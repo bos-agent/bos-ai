@@ -50,7 +50,7 @@ class StubAgent:
     async def ask(self, *args, **kwargs):
         raise AssertionError("ask should not be used in direct command tests")
 
-    async def _build_system_prompt(self) -> str:
+    async def _build_system_prompt(self, ctx=None) -> str:
         return "Rendered system prompt"
 
 

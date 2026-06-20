@@ -9,6 +9,7 @@ This file provides guidance to AI coding agent while working with code in this r
 - Run a single test file: `uv run pytest -q tests/test_harness.py`
 - Run a single test: `uv run pytest -q tests/test_harness.py -k test_name`
 - Lint: `uv run ruff check src tests`
+- Type-check: `npx -y pyright src` (Pylance/pyright is the project's type checker; `.vscode/settings.json` pins `typeCheckingMode = basic`). Pyright is not a project dependency, so run it via `npx`.
 - CLI help: `uv run boscli --help`
 - Prefer `uv run boscli ...` for local CLI invocation (not system `boscli`).
 
@@ -27,6 +28,16 @@ pyproject.toml  - BOS project configuration
 - Pull request titles must follow semantic/conventional format (`feat(config): ...`, `fix(runner): ...`).
 - `uv run ruff check src tests` is a useful signal but the repo may contain pre-existing lint findings.
 - `src/bos/core/__init__.py` is the public API surface. Internal helpers with `_` prefix are exported for use by extensions but are not considered stable.
+
+### Before committing — REQUIRED checks
+
+Run all three and resolve findings **before** committing. Do not commit with new failures in any of them.
+
+1. **Tests:** `uv run pytest -q` — must pass.
+2. **Lint:** `uv run ruff check src tests` — no new findings from your diff.
+3. **Type-check:** `npx -y pyright src` — your changes must not add errors. The codebase is currently at **zero** pyright errors; keep it there.
+
+Treat type-checker findings as real defects, not noise — prefer a correct fix (annotate the literal, guard/narrow the `None`, widen an over-strict signature, fix the actual type) over suppression. Reserve `# pyright: ignore[<rule>]` for genuine third-party stub gaps or intentional optional/duck-typed imports, and always scope it to the specific rule. Several latent runtime bugs in this repo were first surfaced by pyright (e.g. a bare int passed where `aiohttp.ClientTimeout` was required; `AttributeError` on configs missing an optional `[platform]`/`[runtime]` section) — so a clean type-check is a correctness gate, not just style.
 
 ## BEP Process
 

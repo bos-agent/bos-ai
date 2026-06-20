@@ -3,7 +3,7 @@ from __future__ import annotations
 import base64
 import mimetypes
 from pathlib import Path
-from typing import Any, Literal, TypeAlias, TypedDict
+from typing import Any, Literal, TypeAlias, TypedDict, cast
 
 from .message_types import MessageType
 
@@ -75,7 +75,9 @@ def validate_message_part(part: Any) -> None:
 
 def content_as_parts(content: MessageContent) -> list[dict[str, Any]]:
     validate_message_content(content)
-    return [{"type": "text", "text": content}] if isinstance(content, str) else list(content)
+    if isinstance(content, str):
+        return [{"type": "text", "text": content}]
+    return cast("list[dict[str, Any]]", list(content))
 
 
 def content_to_plain_text(content: Any) -> str:
@@ -139,6 +141,6 @@ def _validate_source(source: Any, *, allow_path: bool) -> None:
     if source.get("kind") not in allowed_kinds:
         if allow_path:
             raise TypeError("Content source `kind` must be `url` or `path`.")
-        raise TypeError("Image parts currently require `source.kind == \"url\"`.")
+        raise TypeError('Image parts currently require `source.kind == "url"`.')
     if not isinstance(source.get("value"), str) or not source["value"].strip():
         raise TypeError("Content source `value` must be a non-empty string.")

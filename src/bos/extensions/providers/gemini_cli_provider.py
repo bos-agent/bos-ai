@@ -11,7 +11,7 @@ import logging
 import os
 import time
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlencode
 
 import httpx
@@ -38,6 +38,9 @@ from bos.extensions.providers.google_oauth import (
     start_callback_server,
     wait_for_callback,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 logger = logging.getLogger("bos")
 
@@ -71,8 +74,8 @@ def _get_gemini_cli_headers() -> dict[str, str]:
 
 
 async def login_gemini_cli(
-    on_auth: Any | None = None,
-    on_progress: Any | None = None,
+    on_auth: Callable[[str, str], None] | None = None,
+    on_progress: Callable[[str], None] | None = None,
 ) -> OAuthCredentials:
     """Interactive OAuth login for the Gemini CLI provider."""
     verifier, challenge = generate_pkce()
@@ -81,19 +84,17 @@ async def login_gemini_cli(
     server = start_callback_server(port=51121, path="/oauth-callback")
 
     try:
-        params = urlencode(
-            {
-                "client_id": _CLIENT_KEY,
-                "response_type": "code",
-                "redirect_uri": _REDIRECT_URI,
-                "scope": " ".join(_SCOPES),
-                "code_challenge": challenge,
-                "code_challenge_method": "S256",
-                "state": verifier,
-                "access_type": "offline",
-                "prompt": "consent",
-            }
-        )
+        params = urlencode({
+            "client_id": _CLIENT_KEY,
+            "response_type": "code",
+            "redirect_uri": _REDIRECT_URI,
+            "scope": " ".join(_SCOPES),
+            "code_challenge": challenge,
+            "code_challenge_method": "S256",
+            "state": verifier,
+            "access_type": "offline",
+            "prompt": "consent",
+        })
         auth_url = f"{_AUTH_URL}?{params}"
 
         if on_auth:
@@ -301,13 +302,11 @@ async def gemini_cli_complete(
         "request": request,
     }
     headers = _get_gemini_cli_headers()
-    headers.update(
-        {
-            "Authorization": f"Bearer {access_token}",
-            "Content-Type": "application/json",
-            "Accept": "text/event-stream",
-        }
-    )
+    headers.update({
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json",
+        "Accept": "text/event-stream",
+    })
 
     try:
         async with httpx.AsyncClient(timeout=300) as client:

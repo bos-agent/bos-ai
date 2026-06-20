@@ -32,6 +32,7 @@ from textual_autocomplete import AutoComplete, DropdownItem, TargetState
 
 from bos.gateway.client import GatewayClient
 from bos.protocol import WS_TAKEOVER_CLOSE_REASON, MessageType, TurnEvent
+from bos.protocol.content import content_to_plain_text
 
 logger = logging.getLogger(__name__)
 
@@ -255,7 +256,7 @@ class SlashAutoComplete(AutoComplete):
     def target(self) -> PromptInput:  # type: ignore[override]
         if isinstance(self._target, PromptInput):
             return self._target
-        target = self.screen.query_one(self._target)
+        target = self.screen.query_one(self._target)  # pyright: ignore[reportArgumentType, reportCallIssue]
         assert isinstance(target, PromptInput)
         return target
 
@@ -263,7 +264,7 @@ class SlashAutoComplete(AutoComplete):
         target = self.target
         return TargetState(
             text=target.text,
-            cursor_position=target.document.get_index_from_location(target.cursor_location),
+            cursor_position=target.document.get_index_from_location(target.cursor_location),  # pyright: ignore[reportAttributeAccessIssue]
         )
 
     def _listen_to_messages(self, event: events.Event) -> None:
@@ -634,10 +635,10 @@ class ChatApp(App):
                     log.write(f"\n[bold dim cyan]❯ User ({env.sender})[/]")
                     log.write(f"  {env.content}")
                 elif env.content_type == MessageType.SYSTEM:
-                    self.post_message(SystemEvent(env.content, env.chat_id, env.metadata))
+                    self.post_message(SystemEvent(content_to_plain_text(env.content), env.chat_id, env.metadata))
                 else:
                     # Normal reply
-                    self.post_message(AgentReplyEvent(env.content, env.chat_id))
+                    self.post_message(AgentReplyEvent(content_to_plain_text(env.content), env.chat_id))
             except asyncio.CancelledError:
                 break
             except Exception:
@@ -801,7 +802,7 @@ class ChatApp(App):
 
         # Visual mark for replies from a non-current chat
         is_current = not event.chat_id or event.chat_id == self._chat_id
-        chat_mark = "" if is_current else f" [dim](chat {event.chat_id[:8]}…)[/]"
+        chat_mark = "" if is_current else f" [dim](chat {(event.chat_id or '')[:8]}…)[/]"
         log.write(f"\n[bold green]▸ Assistant{chat_mark}[/]")
         try:
             md = Markdown(content)
@@ -1164,7 +1165,7 @@ class ChatApp(App):
 
     # ── autocomplete ───────────────────────────────────────────
 
-    def _get_candidates(self, state: Any) -> list[str]:
+    def _get_candidates(self, state: Any) -> list[DropdownItem]:
         """Return candidate completions based on the current input prefix."""
         text = state.text[: state.cursor_position]
         if text.startswith("/"):

@@ -1,0 +1,9 @@
+# Run `uv run pre-commit install` once per clone to enable these hooks.
+# Keep `rev` in sync with the ruff pin in pyproject.toml's dev group.
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.10
+    hooks:
+      - id: ruff-check
+        args: [--fix]
+      - id: ruff-format

@@ -17,6 +17,7 @@ _LAZY_COMMANDS: dict[str, str] = {
     "gateway": "bos.cli.commands.agent:gateway",
     "ask": "bos.cli.commands.agent:ask",
     "tui": "bos.cli.commands.agent:tui",
+    "memory": "bos.cli.commands.memory:memory",
 }
 
 if os.environ.get("BOS_DEV"):
@@ -89,7 +90,6 @@ class _LazyGroup(click.Group):
                     "CLI plugin entry point '%s' resolved to %s, expected click.Command; skipping",
                     ep.name,
                     type(cmd).__name__,
-
                 )
                 continue
             self._plugin_commands[ep.name] = cmd  # type: ignore[assignment]  # Group is a Command
@@ -180,4 +180,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

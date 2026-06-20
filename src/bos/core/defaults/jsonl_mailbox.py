@@ -77,7 +77,7 @@ class _JsonlMailBox:
 class JsonlMailRoute:
     """File-based mail route using JSONL inbox files."""
 
-    def __init__(self, store_dir: str | Path = None, bos_dir: str | Path | None = None) -> None:
+    def __init__(self, store_dir: str | Path | None = None, bos_dir: str | Path | None = None) -> None:
         store_dir = Path(store_dir).expanduser() if store_dir else "mailboxes"
         self._dir = Path(bos_dir or ".").expanduser().resolve() / store_dir
         self._dir.mkdir(parents=True, exist_ok=True)
@@ -119,7 +119,7 @@ class JsonlMailRoute:
     async def receive_nowait(self, address: str) -> Envelope | None:
         """Non-blocking receive. Returns ``None`` when inbox is empty."""
         inbox = self._inbox_path(address)
-        offset = self._byte_offsets.get(address) if address in self._byte_offsets else self._init_offset(address)
+        offset = self._byte_offsets[address] if address in self._byte_offsets else self._init_offset(address)
 
         def _read() -> tuple[str | None, int]:
             if not inbox.exists():

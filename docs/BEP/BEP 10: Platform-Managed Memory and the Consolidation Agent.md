@@ -252,7 +252,7 @@ class MemoryOperation:
     summary: str | None = None           # ADD / UPDATE — one-line for the in-context index (§6)
     tags: list[str] | None = None        # ADD / UPDATE
     importance: int | None = None        # ADD / UPDATE — 1..10
-    maxim_key: str | None = None         # PROMOTE — target maxim (user|soul|identity|rules)
+    maxim_key: str | None = None         # PROMOTE — target maxim (user|self|rules)
     links: list[str] | None = None       # LINK — entry-ids to attach
     requested_by: RequestedBy = "consolidator"   # INVALIDATE — "user" for an explicit forget
 ```
@@ -532,7 +532,7 @@ persistence     = "memory"          # "memory" (v1) | "store" (durable, later)
 
 # ── memory domain — travels with the swappable plugin ──
 [exts.ep_plugin.MemoryPlugin]
-maxims  = ["user", "soul", "identity", "rules"]   # always-in-prompt keys
+maxims  = ["user", "self", "rules"]   # always-in-prompt keys
 scope   = "workspace"
 backend = "_default"                              # markdown default; swappable (§10)
 

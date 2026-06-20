@@ -1,4 +1,5 @@
 """Tests for BEP6 agent resolution: inline [agents.<name>], external files, resolve_agents()."""
+
 from contextlib import contextmanager
 from textwrap import dedent
 
@@ -90,9 +91,7 @@ def test_resolve_agents_loads_external_toml(tmp_path):
     bos_dir.mkdir(parents=True)
     agents_dir = bos_dir / "agents"
     agents_dir.mkdir()
-    (agents_dir / "helper.toml").write_text(
-        'system_prompt = "I help."\ntools = { enabled = ["ReadFile"] }\n'
-    )
+    (agents_dir / "helper.toml").write_text('system_prompt = "I help."\ntools = { enabled = ["ReadFile"] }\n')
 
     config = {"platform": {"agent_dirs": ["./agents"]}}
     ws = Workspace(tmp_path, bos_dir, config)
@@ -123,12 +122,14 @@ def test_resolve_agents_loads_markdown_agent(tmp_path):
     bos_dir.mkdir(parents=True)
     agents_dir = bos_dir / "agents"
     agents_dir.mkdir()
-    (agents_dir / "assistant.md").write_text(dedent("""\
+    (agents_dir / "assistant.md").write_text(
+        dedent("""\
         ---
         model: gpt-4o
         ---
         You are a helpful assistant.
-    """))
+    """)
+    )
 
     config = {"platform": {"agent_dirs": ["./agents"]}}
     ws = Workspace(tmp_path, bos_dir, config)
@@ -245,11 +246,7 @@ def test_bootstrap_registers_both_inline_and_external_agents(tmp_path):
 
 def test_non_string_system_prompt_rejected_by_pydantic(tmp_path):
     """Pydantic validation rejects non-string system_prompt in agents.<name>."""
-    config = {
-        "agents": {
-            "bad": {"system_prompt": 42}
-        }
-    }
+    config = {"agents": {"bad": {"system_prompt": 42}}}
     with pytest.raises(Exception):
         Workspace(tmp_path, tmp_path / ".bos", config)
 

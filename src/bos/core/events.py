@@ -1,12 +1,21 @@
 from __future__ import annotations
 
+import inspect
 import json
+import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from typing import Any
 
 from bos.protocol import MessageType, TurnEvent
 
 from .contract import EventSink, MailBox
+
+logger = logging.getLogger(__name__)
+
+HostEventHandler = Callable[[TurnEvent], Awaitable[None] | None]
+
+CLIENT_TURN_EVENT_TYPES: tuple[str, ...] = ("turn", "llm", "response", "tool", "task", "plan")
 
 
 def derive_event_sink(event_sink: EventSink | None, **defaults: Any) -> EventSink | None:
@@ -23,6 +32,29 @@ class DerivedEventSink:
     async def emit(self, event: TurnEvent) -> None:
         updates = {key: value for key, value in self._defaults.items() if getattr(event, key, None) is None}
         await self._inner.emit(replace(event, **updates) if updates else event)
+
+
+class HostChannelSink:
+    """Opt-in pub/sub event sink. Handlers register per ``event_type``;
+    ``emit()`` dispatches to all handlers registered for that type. Events
+    with no registered handler drop silently — the mailbox forwarder is just
+    one consumer that registers for the client-facing types.
+    """
+
+    def __init__(self) -> None:
+        self._handlers: dict[str, list[HostEventHandler]] = {}
+
+    def on(self, event_type: str, handler: HostEventHandler) -> None:
+        self._handlers.setdefault(event_type, []).append(handler)
+
+    async def emit(self, event: TurnEvent) -> None:
+        for handler in self._handlers.get(event.event_type, ()):
+            try:
+                result = handler(event)
+                if inspect.isawaitable(result):
+                    await result
+            except Exception:
+                logger.debug("Host channel handler raised", exc_info=True)
 
 
 class MailboxEventSink:

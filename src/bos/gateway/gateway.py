@@ -107,7 +107,7 @@ class Gateway:
         if existing is not None and not hasattr(existing.channel, "close_for_takeover"):
             return web.json_response({"ok": False, "error": "duplicate_channel_id"}, status=409)
         if existing is not None:
-            await existing.channel.close_for_takeover()
+            await existing.channel.close_for_takeover()  # pyright: ignore[reportAttributeAccessIssue]
 
         conversation_id = (request.query.get("channel_conversation_id") or "default").strip() or "default"
         ref = ChannelConversationRef(channel_id=channel_id, channel_conversation_id=conversation_id)
@@ -139,7 +139,8 @@ class Gateway:
         )
         await self.channel_manager.start_channel(managed)
         try:
-            await managed.task
+            if managed.task is not None:
+                await managed.task
         finally:
             await self.channel_manager.unregister(channel_id, expected=managed, cancel=False)
         return ws
@@ -154,7 +155,8 @@ class Gateway:
         await runner.setup()
         site = web.TCPSite(runner, self.config.host, self.config.port)
         await site.start()
-        sockets = getattr(site, "_server", None).sockets if getattr(site, "_server", None) else None
+        server = getattr(site, "_server", None)
+        sockets = server.sockets if server else None
         if sockets:
             self.actual_port = sockets[0].getsockname()[1]
         self.actual_host = self.config.host

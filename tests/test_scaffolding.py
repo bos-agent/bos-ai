@@ -108,9 +108,7 @@ def test_init_package_archetype(tmp_path, monkeypatch):
 
 def test_init_package_name_override(tmp_path, monkeypatch):
     monkeypatch.delenv("BOS_CONFIG", raising=False)
-    result = _invoke(
-        ["init", str(tmp_path), "--yes", "--no-git", "--archetype", "package", "--name", "CoolTools"]
-    )
+    result = _invoke(["init", str(tmp_path), "--yes", "--no-git", "--archetype", "package", "--name", "CoolTools"])
 
     assert result.exit_code == 0, result.output
     assert (tmp_path / "src" / "cooltools" / "tools.py").is_file()

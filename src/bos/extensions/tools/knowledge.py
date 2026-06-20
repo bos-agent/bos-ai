@@ -4,6 +4,7 @@ import os
 import ssl
 import urllib.request
 from dataclasses import dataclass
+from typing import Any
 from urllib.error import HTTPError
 
 from bs4 import BeautifulSoup
@@ -90,7 +91,7 @@ async def tool_web_search(
     return "Error executing WebSearch: " + "; ".join(errors)
 
 
-def _positive_int(value: object, default: int) -> int:
+def _positive_int(value: Any, default: int) -> int:
     try:
         parsed = int(value)
     except (TypeError, ValueError):
@@ -123,7 +124,7 @@ async def _search_duckduckgo(query: str, *, timeout_seconds: int, max_results: i
 async def _search_tavily(
     query: str,
     *,
-    config: dict[str, object],
+    config: dict[str, Any],
     timeout_seconds: int,
     max_results: int,
 ) -> tuple[str | None, list[SearchResult]]:
@@ -140,8 +141,13 @@ async def _search_tavily(
         "search_depth": str(config.get("search_depth", "basic")),
     }
     for key in (
-        "include_answer", "include_raw_content", "include_images",
-        "topic", "days", "include_domains", "exclude_domains",
+        "include_answer",
+        "include_raw_content",
+        "include_images",
+        "topic",
+        "days",
+        "include_domains",
+        "exclude_domains",
     ):
         if key in config and config[key] is not None:
             payload[key] = config[key]

@@ -323,37 +323,33 @@ async def test_forward_replies_uses_transient_status_message_then_final_reply():
 
     channel._api_call = fake_api_call  # type: ignore[method-assign]
     metadata = {"channel": {"channel_id": "telegram:daily", "channel_conversation_id": "tg_chat:42"}}
-    mailbox = FakeMailbox(
-        [
-            Envelope(
-                sender="agent@main",
-                recipient="channel@telegram:daily",
-                content=json.dumps(
-                    {
-                        "event_type": "llm",
-                        "phase": "start",
-                        "chat_id": "chat-a",
-                        "turn_id": "turn-1",
-                        "agent_name": "main",
-                        "detail": "thinking_content",
-                        "content": "checking the docs",
-                        "timestamp": "2026-04-20T00:00:00",
-                    }
-                ),
-                content_type=MessageType.TURN_EVENT,
-                chat_id="chat-a",
-                metadata=metadata,
-            ),
-            Envelope(
-                sender="agent@main",
-                recipient="channel@telegram:daily",
-                content="final answer",
-                content_type=MessageType.MESSAGE,
-                chat_id="chat-a",
-                metadata=metadata,
-            ),
-        ]
-    )
+    mailbox = FakeMailbox([
+        Envelope(
+            sender="agent@main",
+            recipient="channel@telegram:daily",
+            content=json.dumps({
+                "event_type": "llm",
+                "phase": "start",
+                "chat_id": "chat-a",
+                "turn_id": "turn-1",
+                "agent_name": "main",
+                "detail": "thinking_content",
+                "content": "checking the docs",
+                "timestamp": "2026-04-20T00:00:00",
+            }),
+            content_type=MessageType.TURN_EVENT,
+            chat_id="chat-a",
+            metadata=metadata,
+        ),
+        Envelope(
+            sender="agent@main",
+            recipient="channel@telegram:daily",
+            content="final answer",
+            content_type=MessageType.MESSAGE,
+            chat_id="chat-a",
+            metadata=metadata,
+        ),
+    ])
 
     task = asyncio.create_task(channel._forward_replies(mailbox))
     await asyncio.sleep(0)
@@ -389,18 +385,16 @@ async def test_forward_replies_sends_long_reply_as_document():
 
     metadata = {"channel": {"channel_id": "telegram:daily", "channel_conversation_id": "tg_chat:42"}}
     long_text = "x" * (TELEGRAM_ATTACHMENT_THRESHOLD + 1)
-    mailbox = FakeMailbox(
-        [
-            Envelope(
-                sender="agent@main",
-                recipient="channel@telegram:daily",
-                content=long_text,
-                content_type=MessageType.MESSAGE,
-                chat_id="chat-a",
-                metadata=metadata,
-            ),
-        ]
-    )
+    mailbox = FakeMailbox([
+        Envelope(
+            sender="agent@main",
+            recipient="channel@telegram:daily",
+            content=long_text,
+            content_type=MessageType.MESSAGE,
+            chat_id="chat-a",
+            metadata=metadata,
+        ),
+    ])
 
     task = asyncio.create_task(channel._forward_replies(mailbox))
     await asyncio.sleep(0)
@@ -433,18 +427,16 @@ async def test_forward_replies_sends_short_reply_inline():
     channel._send_document = fake_send_document  # type: ignore[method-assign]
 
     metadata = {"channel": {"channel_id": "telegram:daily", "channel_conversation_id": "tg_chat:42"}}
-    mailbox = FakeMailbox(
-        [
-            Envelope(
-                sender="agent@main",
-                recipient="channel@telegram:daily",
-                content="short answer",
-                content_type=MessageType.MESSAGE,
-                chat_id="chat-a",
-                metadata=metadata,
-            ),
-        ]
-    )
+    mailbox = FakeMailbox([
+        Envelope(
+            sender="agent@main",
+            recipient="channel@telegram:daily",
+            content="short answer",
+            content_type=MessageType.MESSAGE,
+            chat_id="chat-a",
+            metadata=metadata,
+        ),
+    ])
 
     task = asyncio.create_task(channel._forward_replies(mailbox))
     await asyncio.sleep(0)
@@ -594,18 +586,16 @@ async def test_forward_replies_updates_telegram_cursor_from_new_result():
 
     channel._api_call = fake_api_call  # type: ignore[method-assign]
     metadata = {"channel": {"channel_id": "telegram:daily", "channel_conversation_id": "tg_chat:42"}}
-    mailbox = FakeMailbox(
-        [
-            Envelope(
-                sender="agent@main",
-                recipient="channel@telegram:daily",
-                content='{"name":"new","ok":true,"chat_id":"chat-b"}',
-                content_type=MessageType.COMMAND_RESULT,
-                chat_id="chat-a",
-                metadata=metadata,
-            ),
-        ]
-    )
+    mailbox = FakeMailbox([
+        Envelope(
+            sender="agent@main",
+            recipient="channel@telegram:daily",
+            content='{"name":"new","ok":true,"chat_id":"chat-b"}',
+            content_type=MessageType.COMMAND_RESULT,
+            chat_id="chat-a",
+            metadata=metadata,
+        ),
+    ])
 
     task = asyncio.create_task(channel._forward_replies(mailbox))
     await asyncio.sleep(0)
@@ -614,18 +604,21 @@ async def test_forward_replies_updates_telegram_cursor_from_new_result():
 
     ref = channel._ref_from_env(mailbox._queue._queue[0]) if False else None
     assert ref is None
-    assert channel._runtime.chat_coordinator.get_cursor(
-        channel._ref_from_env(
-            Envelope(
-                sender="agent@main",
-                recipient="channel@telegram:daily",
-                content="",
-                content_type=MessageType.MESSAGE,
-                chat_id="chat-b",
-                metadata=metadata,
+    assert (
+        channel._runtime.chat_coordinator.get_cursor(
+            channel._ref_from_env(
+                Envelope(
+                    sender="agent@main",
+                    recipient="channel@telegram:daily",
+                    content="",
+                    content_type=MessageType.MESSAGE,
+                    chat_id="chat-b",
+                    metadata=metadata,
+                )
             )
         )
-    ) == "chat-b"
+        == "chat-b"
+    )
     assert "chat-a" not in channel._chat_to_telegram_chat
     assert channel._chat_to_telegram_chat["chat-b"] == "42"
     assert calls == [

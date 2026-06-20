@@ -49,7 +49,7 @@ def _loader_cache_key(config: Mapping[str, Any]) -> tuple[str, tuple[str, ...]]:
 
 if TYPE_CHECKING:
     from bos.core.agent import TurnContext
-    from bos.core.contract import ToolContext
+    from bos.core.contract import Consolidator, ToolContext
 
 
 @dataclass(frozen=True)
@@ -57,7 +57,7 @@ class _SkillTestRuntime:
     """Harness services captured at bind time so TestSkill can build throwaway agents."""
 
     llm: Any
-    consolidator: Any
+    consolidator: Consolidator
     workspace: str
     loader_factory: Callable[[], Any]
     test_tools: Any = "*"  # "*" (all tools) or an explicit tool-name list
@@ -107,14 +107,12 @@ class SkillsHarnessPlugin:
         if exclude is not None and not isinstance(exclude, list):
             raise TypeError("SkillsPlugin: 'exclude' must be a list or None")
         preload = config.get("preload")
-        if preload is not None and (
-            not isinstance(preload, list) or not all(isinstance(p, str) for p in preload)
-        ):
+        if preload is not None and (not isinstance(preload, list) or not all(isinstance(p, str) for p in preload)):
             raise TypeError("SkillsPlugin: 'preload' must be a list of skill names")
         test_tools = config.get("test_tools")
         if test_tools is not None and test_tools != "*":
             if not isinstance(test_tools, list) or not all(isinstance(t, str) for t in test_tools):
-                raise TypeError('SkillsPlugin: \'test_tools\' must be "*" or a list of tool names')
+                raise TypeError("SkillsPlugin: 'test_tools' must be \"*\" or a list of tool names")
 
     def bind(self, config: Mapping[str, Any]) -> AgentPlugin:
         cache_key = _loader_cache_key(config)
@@ -142,9 +140,7 @@ class SkillsHarnessPlugin:
             loader_factory=lambda: loader_ext.fn(bos_dir=services.bos_dir, skill_dirs=list(skill_dirs)),
             test_tools=config.get("test_tools", "*"),
         )
-        return SkillsAgentPlugin(
-            loader, allow, exclude, preload=config.get("preload", []), test_runtime=test_runtime
-        )
+        return SkillsAgentPlugin(loader, allow, exclude, preload=config.get("preload", []), test_runtime=test_runtime)
 
     async def teardown(self) -> None:
         from bos.core._utils import _aclose
@@ -332,16 +328,12 @@ class SkillsAgentPlugin:
             try:
                 body = await self._loader.load_skill(name)
             except Exception:
-                logger.warning(
-                    "Failed to preload skill %r; leaving it in available_skills.", name, exc_info=True
-                )
+                logger.warning("Failed to preload skill %r; leaving it in available_skills.", name, exc_info=True)
                 continue
             available.pop(name)
             preloaded.append(f'<skill_instructions name="{_xml_attr(name)}">\n{body.strip()}\n</skill_instructions>')
         if preloaded:
-            preloaded.append(
-                "(The skill_instructions above are already fully loaded; do not call LoadSkill for them.)"
-            )
+            preloaded.append("(The skill_instructions above are already fully loaded; do not call LoadSkill for them.)")
             sections.append("\n\n".join(preloaded))
 
         if not available:

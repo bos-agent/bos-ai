@@ -10,6 +10,7 @@ from ..llm import LLMClient
 def _project_history(messages: list[Message]) -> list[dict[str, Any]]:
     return [_compact({"role": m.llm_message["role"], "content": m.llm_message.get("content", "")}) for m in messages]
 
+
 DEFAULT_COMPACTION_INSTRUCTION = """\
 Provide a dense, concise summary of the conversation history for future turns.
 Preserve user intent, decisions, unresolved tasks, tool results, and important constraints.
@@ -54,19 +55,15 @@ class LLMConsolidator:
     ) -> list[dict[str, Any]]:
         prompt: list[dict[str, Any]] = [{"role": "system", "content": instruction.strip()}]
         if existing_summaries:
-            prompt.append(
-                {
-                    "role": "system",
-                    "content": "Existing summary context:\n" + "\n\n".join(existing_summaries),
-                }
-            )
+            prompt.append({
+                "role": "system",
+                "content": "Existing summary context:\n" + "\n\n".join(existing_summaries),
+            })
         prompt.extend(_project_history(conversation))
-        prompt.append(
-            {
-                "role": "user",
-                "content": "Please provide the summary of the conversation above.",
-            }
-        )
+        prompt.append({
+            "role": "user",
+            "content": "Please provide the summary of the conversation above.",
+        })
         return prompt
 
     @staticmethod

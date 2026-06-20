@@ -84,14 +84,12 @@ def _select_interactive(message: str, choices: list[Choice], selectables: list[C
                 lines.append((label_style, f"{cursor}{choice.label}\n"))
         return lines
 
-    style = Style.from_dict(
-        {
-            "cursor": "bold",
-            "label": "",
-            "annotation": "fg:ansibrightblack",
-            "sep": "italic fg:ansibrightblack",
-        }
-    )
+    style = Style.from_dict({
+        "cursor": "bold",
+        "label": "",
+        "annotation": "fg:ansibrightblack",
+        "sep": "italic fg:ansibrightblack",
+    })
 
     kb = KeyBindings()
 

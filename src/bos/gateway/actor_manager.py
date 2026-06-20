@@ -21,9 +21,18 @@ logger = logging.getLogger(__name__)
 
 
 class CoordinatedActor(AgentActor):
-    """AgentActor variant that fences turns through ChatCoordinator hooks."""
+    """AgentActor variant that fences turns through ChatCoordinator hooks.
 
-    def __init__(self, *args: Any, chat_coordinator: ChatCoordinator, **kwargs: Any) -> None:
+    Lifecycle events (turn_complete / session_close) are emitted generically by
+    the base AgentActor via its ``lifecycle_bus``; this subclass adds only the
+    coordinator fencing and channel re-sync, and is plugin-agnostic."""
+
+    def __init__(
+        self,
+        *args: Any,
+        chat_coordinator: ChatCoordinator,
+        **kwargs: Any,
+    ) -> None:
         super().__init__(*args, **kwargs)
         self._chat_coordinator = chat_coordinator
 
@@ -47,6 +56,8 @@ class CoordinatedActor(AgentActor):
             turn_id=ctx.turn_id,
             committed_revision=result.committed_revision,
         )
+        # Base actor emits turn_complete on the lifecycle bus (completed turns).
+        await super()._on_turn_finished(ctx, result)
         if result.status in ("aborted", "error") and ctx.reply_recipient:
             # Aborted and errored turns never send a reply envelope, but the
             # turn may have committed history and advanced the chat revision.
@@ -106,8 +117,7 @@ class ActorManager:
         self.chat_coordinator = chat_coordinator
         self._state_changed = state_changed
         self._actors = {
-            name: ManagedActor(name=name, config=config)
-            for name, config in workspace.resolve_gateway_actors().items()
+            name: ManagedActor(name=name, config=config) for name, config in workspace.resolve_gateway_actors().items()
         }
 
     @property
@@ -154,7 +164,14 @@ class ActorManager:
         agent = await self.harness.create_agent(record.config.agent, agent_cfg=agent_cfg)
         mailbox = self.harness.mail_route.bind(record.config.address)
         record.mailbox = mailbox
-        record.actor = CoordinatedActor(agent, mailbox, chat_coordinator=self.chat_coordinator)
+        bus = getattr(self.harness, "events", None)
+
+        record.actor = CoordinatedActor(
+            agent,
+            mailbox,
+            chat_coordinator=self.chat_coordinator,
+            lifecycle_bus=bus,
+        )
         record.status = "running"
         record.error = None
         record.task = asyncio.create_task(self._run_record(record), name=f"bos-actor:{record.name}")

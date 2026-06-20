@@ -222,12 +222,16 @@ def stop_gateway(rd: LifecycleRunDir, sig: int = signal.SIGTERM) -> None:
         container_id = state.get("container_id")
         if not container_id:
             raise RuntimeError("No Docker container recorded — is the gateway running?")
-        cmd = ["kill", "--signal", _signal_name(sig), str(container_id)] if sig == signal.SIGKILL else [
-            "stop",
-            "--signal",
-            _signal_name(sig),
-            str(container_id),
-        ]
+        cmd = (
+            ["kill", "--signal", _signal_name(sig), str(container_id)]
+            if sig == signal.SIGKILL
+            else [
+                "stop",
+                "--signal",
+                _signal_name(sig),
+                str(container_id),
+            ]
+        )
         proc = _docker_run(*cmd)
         if proc.returncode != 0 and "No such container" not in proc.stderr:
             raise RuntimeError(proc.stderr.strip() or "Failed to stop Docker container.")
@@ -322,18 +326,16 @@ def build_docker_argv(
     if runtime.container_name:
         argv.extend(["--name", runtime.container_name])
 
-    argv.extend(
-        [
-            "--workdir",
-            runtime.workspace_dir,
-            "--volume",
-            f"{workspace.workspace}:{runtime.workspace_dir}",
-            "--env",
-            "BOS_RUNTIME=docker",
-            "--env",
-            f"BOS_CONFIG={runner_config_arg}",
-        ]
-    )
+    argv.extend([
+        "--workdir",
+        runtime.workspace_dir,
+        "--volume",
+        f"{workspace.workspace}:{runtime.workspace_dir}",
+        "--env",
+        "BOS_RUNTIME=docker",
+        "--env",
+        f"BOS_CONFIG={runner_config_arg}",
+    ])
 
     if _should_mount_bos_dir(workspace, runtime, container_bos_dir):
         argv.extend(["--volume", f"{workspace.bos_dir}:{container_bos_dir}"])
@@ -352,6 +354,7 @@ def build_docker_argv(
 def _docker_runner_config_arg(workspace: Workspace, container_bos_dir: str, config_arg: str | None) -> str:
     if config_arg and not Path(config_arg).expanduser().is_file():
         return config_arg
+    assert workspace.config_file is not None  # docker config path requires a resolved config file
     return f"{container_bos_dir}/{workspace.config_file.name}"
 
 
