@@ -61,7 +61,11 @@ class MemoryConsolidationJob:
             policy=self.policy,
         )
         ops = await self.consolidator.propose(request)
-        await self.operation_service.apply(ops, dry_run=not self.policy.auto_apply)
+        # Authoritative provenance for this run: the distinct turn ids actually
+        # in the consolidated window, app-derived (order-preserving), recorded on
+        # every audit record for audit/reconciliation.
+        window_turn_ids = list(dict.fromkeys(m.turn_id for m in transcript if m.turn_id))
+        await self.operation_service.apply(ops, dry_run=not self.policy.auto_apply, window_turn_ids=window_turn_ids)
         # Only advance the watermark when ops were actually applied. A dry-run
         # mutates nothing, so burning the watermark would silently exclude these
         # turns from every future real consolidation.

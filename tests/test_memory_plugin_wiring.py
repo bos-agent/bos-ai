@@ -97,9 +97,12 @@ async def test_two_agents_get_isolated_bundles(tmp_path):
         # Writes through alice's op_service don't appear in bob's
         from bos.plugins.memory.operation_service import MemoryOperation
 
-        await alice.op_service.apply([
-            MemoryOperation(op="ADD", reason="alice fact", content="alice loves Python"),
-        ])
+        await alice.op_service.apply(
+            [
+                MemoryOperation(op="ADD", reason="alice fact", content="alice loves Python"),
+            ],
+            window_turn_ids=[],
+        )
         assert (await alice.backend.search_memories("Python")) != []
         assert (await bob.backend.search_memories("Python")) == []
     finally:

@@ -221,7 +221,10 @@ def audit_cmd(agent: str | None, filter_str: str | None):
             click.echo("(no audit records)")
             return
         for r in records:
-            click.echo(f"{r.at}  {r.op.op}  result={r.result}  entry={r.entry_id}  reason={r.op.reason!r}")
+            click.echo(
+                f"{r.at}  {r.op.op}  result={r.result}  entry={r.entry_id}  "
+                f"reason={r.op.reason!r}  window_turn_ids={r.window_turn_ids}"
+            )
 
     _run(_audit, agent=agent)
 

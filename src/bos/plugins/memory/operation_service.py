@@ -36,6 +36,9 @@ class AuditRecord:
     entry_id: str | None
     at: str
     error: str | None = None
+    # Authoritative turn ids consolidated in this run (app-derived, not the
+    # LLM's claim). Recorded for audit/reconciliation; see DefaultMemoryConsolidator.
+    window_turn_ids: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -49,7 +52,9 @@ class RecallEvent:
 
 
 class MemoryOperationService(Protocol):
-    async def apply(self, ops: list[MemoryOperation], *, dry_run: bool = False) -> list[AuditRecord]: ...
+    async def apply(
+        self, ops: list[MemoryOperation], *, dry_run: bool = False, window_turn_ids: list[str]
+    ) -> list[AuditRecord]: ...
     async def search_candidates(self, query: str, *, top_k: int) -> list[MemoryEntry]: ...
     async def touch_last_used(self, entry_ids: list[str]) -> None: ...
     async def restore(self, entry_id: str) -> None: ...
@@ -103,26 +108,43 @@ class DefaultMemoryOperationService:
             return "LINK requires links"
         return None
 
-    async def _record(self, op, result, entry_id, error=None) -> AuditRecord:
-        rec = AuditRecord(op=op, result=result, entry_id=entry_id, at=self._now(), error=error)
+    async def _record(self, op, result, entry_id, error=None, window_turn_ids=None) -> AuditRecord:
+        rec = AuditRecord(
+            op=op,
+            result=result,
+            entry_id=entry_id,
+            at=self._now(),
+            error=error,
+            window_turn_ids=list(window_turn_ids or []),
+        )
         self._mem_audit.append(rec)
         if self._log is not None:
-            row = {**asdict(op), "_result": result, "_entry_id": entry_id, "_at": rec.at, "_error": error}
+            row = {
+                **asdict(op),
+                "_result": result,
+                "_entry_id": entry_id,
+                "_at": rec.at,
+                "_error": error,
+                "_window_turn_ids": rec.window_turn_ids,
+            }
             await self._log.append(row)
         return rec
 
-    async def _apply_one(self, op: MemoryOperation, *, dry_run: bool) -> AuditRecord:
+    async def _apply_one(self, op: MemoryOperation, *, dry_run: bool, window_turn_ids: list[str]) -> AuditRecord:
+        async def record(result, entry_id, error=None) -> AuditRecord:
+            return await self._record(op, result, entry_id, error=error, window_turn_ids=window_turn_ids)
+
         err = self._validate(op)
         if err is not None:
-            return await self._record(op, "rejected", None, error=err)
+            return await record("rejected", None, error=err)
         if op.op == "NOOP":
-            return await self._record(op, "noop", None)
+            return await record("noop", None)
         # target existence check for ops that need it (maxim-targeted UPDATE has no target_id)
         if op.op in ("UPDATE", "INVALIDATE", "PROMOTE", "LINK") and op.target_id is not None:
             if await self._backend.get_memory(op.target_id, include_invalid=True) is None:
-                return await self._record(op, "rejected", op.target_id, error=f"target {op.target_id} not found")
+                return await record("rejected", op.target_id, error=f"target {op.target_id} not found")
         if dry_run:
-            return await self._record(op, "dry_run", op.target_id)
+            return await record("dry_run", op.target_id)
         # The asserts below restate guarantees already enforced by _validate() (and the
         # target-existence check above); they narrow Optional fields for the type checker.
         entry_id = op.target_id
@@ -157,7 +179,7 @@ class DefaultMemoryOperationService:
             assert op.target_id is not None and op.links is not None  # _validate: LINK requires both
             existing = await self._backend.get_memory(op.target_id, include_invalid=True)
             if existing is None:  # vanished between the existence check above and this re-read
-                return await self._record(op, "rejected", op.target_id, error=f"target {op.target_id} not found")
+                return await record("rejected", op.target_id, error=f"target {op.target_id} not found")
             prior_links: list[str] = existing.metadata.get("links") or []
             merged = list({*prior_links, *op.links})
             await self._backend.update_memory(op.target_id, links=merged)
@@ -165,17 +187,19 @@ class DefaultMemoryOperationService:
             assert op.target_id is not None and op.maxim_key is not None  # _validate: PROMOTE requires both
             entry = await self._backend.get_memory(op.target_id, include_invalid=True)
             if entry is None:  # vanished between the existence check above and this re-read
-                return await self._record(op, "rejected", op.target_id, error=f"target {op.target_id} not found")
+                return await record("rejected", op.target_id, error=f"target {op.target_id} not found")
             gist = (op.content or entry.content).strip()
             ts = self._now()[:16].replace("T", " ")
             # Atomic read-append-write so a concurrent revise_maxim tool call
             # cannot clobber this promotion (or vice versa).
             await self._backend.append_to_maxim(op.maxim_key, f"[{ts}] {gist}")
-        return await self._record(op, "applied", entry_id)
+        return await record("applied", entry_id)
 
-    async def apply(self, ops: list[MemoryOperation], *, dry_run: bool = False) -> list[AuditRecord]:
+    async def apply(
+        self, ops: list[MemoryOperation], *, dry_run: bool = False, window_turn_ids: list[str]
+    ) -> list[AuditRecord]:
         async with self._lock:
-            return [await self._apply_one(op, dry_run=dry_run) for op in ops]
+            return [await self._apply_one(op, dry_run=dry_run, window_turn_ids=window_turn_ids) for op in ops]
 
     async def search_candidates(self, query: str, *, top_k: int = 5) -> list[MemoryEntry]:
         return await self._backend.search_memories(query, top_k=top_k)
@@ -207,6 +231,7 @@ class DefaultMemoryOperationService:
             entry_id=row.get("_entry_id"),
             at=row.get("_at", ""),
             error=row.get("_error"),
+            window_turn_ids=list(row.get("_window_turn_ids") or []),
         )
 
     async def audit(self, *, filter: dict | None = None) -> list[AuditRecord]:

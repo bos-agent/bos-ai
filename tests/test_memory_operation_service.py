@@ -67,10 +67,13 @@ class TestAuditReadback:
         b = InMemMemoryExtension()
         eid = await b.ingest_memory("stale fact")
         writer = _svc(tmp_path, b)
-        await writer.apply([
-            MemoryOperation(op="ADD", reason="durable pref", content="likes dark mode", importance=6),
-            MemoryOperation(op="INVALIDATE", reason="user said stop", target_id=eid, requested_by="user"),
-        ])
+        await writer.apply(
+            [
+                MemoryOperation(op="ADD", reason="durable pref", content="likes dark mode", importance=6),
+                MemoryOperation(op="INVALIDATE", reason="user said stop", target_id=eid, requested_by="user"),
+            ],
+            window_turn_ids=[],
+        )
 
         # A brand-new service over the same audit_path — _mem_audit is empty.
         reader = _svc(tmp_path, b)
@@ -92,7 +95,7 @@ class TestAuditReadback:
         """With no audit_path configured, audit() returns the in-memory list."""
         b = InMemMemoryExtension()
         svc = DefaultMemoryOperationService(b, audit_path=None, maxim_keys={"user"})
-        await svc.apply([MemoryOperation(op="ADD", reason="x", content="y")])
+        await svc.apply([MemoryOperation(op="ADD", reason="x", content="y")], window_turn_ids=[])
         recs = await svc.audit()
         assert [r.op.op for r in recs] == ["ADD"]
 
@@ -102,9 +105,10 @@ class TestApply:
     async def test_add_creates_entry_and_audits(self, tmp_path):
         b = InMemMemoryExtension()
         svc = _svc(tmp_path, b)
-        recs = await svc.apply([
-            MemoryOperation(op="ADD", reason="durable pref", content="likes dark mode", importance=6)
-        ])
+        recs = await svc.apply(
+            [MemoryOperation(op="ADD", reason="durable pref", content="likes dark mode", importance=6)],
+            window_turn_ids=[],
+        )
         assert recs[0].result == "applied"
         eid = recs[0].entry_id
         assert (await b.get_memory(eid)).content == "likes dark mode"
@@ -118,6 +122,7 @@ class TestApply:
         recs = await svc.apply(
             [MemoryOperation(op="ADD", reason="x", content="should not persist")],
             dry_run=True,
+            window_turn_ids=[],
         )
         assert recs[0].result == "dry_run"
         assert await b.search_memories("persist") == []
@@ -129,9 +134,10 @@ class TestApply:
         b = InMemMemoryExtension()
         eid = await b.ingest_memory("stale fact")
         svc = _svc(tmp_path, b)
-        recs = await svc.apply([
-            MemoryOperation(op="INVALIDATE", reason="user said stop", target_id=eid, requested_by="user")
-        ])
+        recs = await svc.apply(
+            [MemoryOperation(op="INVALIDATE", reason="user said stop", target_id=eid, requested_by="user")],
+            window_turn_ids=[],
+        )
         assert recs[0].result == "applied"
         assert await b.get_memory(eid) is None
         assert (await b.get_memory(eid, include_invalid=True)).metadata["invalidated_by"] == "user"
@@ -140,7 +146,9 @@ class TestApply:
     async def test_update_missing_target_is_rejected(self, tmp_path):
         b = InMemMemoryExtension()
         svc = _svc(tmp_path, b)
-        recs = await svc.apply([MemoryOperation(op="UPDATE", reason="x", target_id="ghost", content="y")])
+        recs = await svc.apply(
+            [MemoryOperation(op="UPDATE", reason="x", target_id="ghost", content="y")], window_turn_ids=[]
+        )
         assert recs[0].result == "rejected"
         assert "ghost" in recs[0].error
 
@@ -148,7 +156,7 @@ class TestApply:
     async def test_add_without_content_is_rejected(self, tmp_path):
         b = InMemMemoryExtension()
         svc = _svc(tmp_path, b)
-        recs = await svc.apply([MemoryOperation(op="ADD", reason="x")])
+        recs = await svc.apply([MemoryOperation(op="ADD", reason="x")], window_turn_ids=[])
         assert recs[0].result == "rejected"
 
     @pytest.mark.asyncio
@@ -156,15 +164,35 @@ class TestApply:
         b = InMemMemoryExtension()
         eid = await b.ingest_memory("a durable pattern")
         svc = _svc(tmp_path, b)
-        recs = await svc.apply([MemoryOperation(op="PROMOTE", reason="x", target_id=eid, maxim_key="bogus")])
+        recs = await svc.apply(
+            [MemoryOperation(op="PROMOTE", reason="x", target_id=eid, maxim_key="bogus")], window_turn_ids=[]
+        )
         assert recs[0].result == "rejected"
 
     @pytest.mark.asyncio
     async def test_noop_is_recorded(self, tmp_path):
         b = InMemMemoryExtension()
         svc = _svc(tmp_path, b)
-        recs = await svc.apply([MemoryOperation(op="NOOP", reason="considered, declined")])
+        recs = await svc.apply([MemoryOperation(op="NOOP", reason="considered, declined")], window_turn_ids=[])
         assert recs[0].result == "noop"
+
+    @pytest.mark.asyncio
+    async def test_records_window_turn_ids_for_audit(self, tmp_path):
+        """apply() records the authoritative window turn ids for the run on every
+        audit record (for audit/reconciliation), and leaves the op's own
+        LLM-supplied source_turn_ids untouched."""
+        b = InMemMemoryExtension()
+        svc = _svc(tmp_path, b)
+        recs = await svc.apply(
+            [MemoryOperation(op="ADD", reason="x", content="c", source_turn_ids=["llm-claimed"])],
+            window_turn_ids=["t1", "t2"],
+        )
+        assert recs[0].window_turn_ids == ["t1", "t2"]
+        # "no need to fix anything": the op's source_turn_ids is left as-is.
+        assert recs[0].op.source_turn_ids == ["llm-claimed"]
+        # window ids survive the JSONL round-trip read by a fresh service.
+        fresh = DefaultMemoryOperationService(b, audit_path=tmp_path / "audit.jsonl")
+        assert (await fresh.audit())[0].window_turn_ids == ["t1", "t2"]
 
 
 class TestServiceHelpers:
@@ -236,14 +264,17 @@ class TestMaximCompact:
         b = InMemMemoryExtension()
         await b.set_maxim("user", "old long content\n[2026-01-01 10:00] note A\n[2026-01-02 11:00] note B")
         svc = _svc(tmp_path, b)
-        recs = await svc.apply([
-            MemoryOperation(
-                op="UPDATE",
-                reason="compact maxim notes",
-                maxim_key="user",
-                content="compacted prose: A and B",
-            )
-        ])
+        recs = await svc.apply(
+            [
+                MemoryOperation(
+                    op="UPDATE",
+                    reason="compact maxim notes",
+                    maxim_key="user",
+                    content="compacted prose: A and B",
+                )
+            ],
+            window_turn_ids=[],
+        )
         assert recs[0].result == "applied"
         assert await b.get_maxim("user") == "compacted prose: A and B"
 
@@ -251,27 +282,33 @@ class TestMaximCompact:
     async def test_update_maxim_unknown_key_rejected(self, tmp_path):
         b = InMemMemoryExtension()
         svc = _svc(tmp_path, b)
-        recs = await svc.apply([
-            MemoryOperation(
-                op="UPDATE",
-                reason="x",
-                maxim_key="bogus",
-                content="x",
-            )
-        ])
+        recs = await svc.apply(
+            [
+                MemoryOperation(
+                    op="UPDATE",
+                    reason="x",
+                    maxim_key="bogus",
+                    content="x",
+                )
+            ],
+            window_turn_ids=[],
+        )
         assert recs[0].result == "rejected"
 
     @pytest.mark.asyncio
     async def test_update_maxim_requires_content(self, tmp_path):
         b = InMemMemoryExtension()
         svc = _svc(tmp_path, b)
-        recs = await svc.apply([
-            MemoryOperation(
-                op="UPDATE",
-                reason="x",
-                maxim_key="user",
-            )
-        ])
+        recs = await svc.apply(
+            [
+                MemoryOperation(
+                    op="UPDATE",
+                    reason="x",
+                    maxim_key="user",
+                )
+            ],
+            window_turn_ids=[],
+        )
         assert recs[0].result == "rejected"
 
     @pytest.mark.asyncio
@@ -279,13 +316,16 @@ class TestMaximCompact:
         b = InMemMemoryExtension()
         eid = await b.ingest_memory("a fact")
         svc = _svc(tmp_path, b)
-        recs = await svc.apply([
-            MemoryOperation(
-                op="UPDATE",
-                reason="x",
-                maxim_key="user",
-                target_id=eid,
-                content="y",
-            )
-        ])
+        recs = await svc.apply(
+            [
+                MemoryOperation(
+                    op="UPDATE",
+                    reason="x",
+                    maxim_key="user",
+                    target_id=eid,
+                    content="y",
+                )
+            ],
+            window_turn_ids=[],
+        )
         assert recs[0].result == "rejected"
