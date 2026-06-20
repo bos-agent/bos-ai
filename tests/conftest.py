@@ -5,19 +5,47 @@ from __future__ import annotations
 from typing import Any
 
 from bos.core.agent import Agent, ChainInterceptor
-from bos.core.contract import Message, ep_consolidator
+from bos.core.contract import Message, ep_consolidator, ep_tool
+from bos.core.harness import ResolvedToolSet
+from bos.core.registry import ToolRegistry
 from bos.extensions.chat_stores.in_memory import InMemChatStore
 from bos.extensions.mailboxes.in_memory import InMemMailRoute  # noqa: F401
 from bos.extensions.memory_stores.in_memory import InMemMemoryExtension  # noqa: F401
 
 
-def create_test_agent(*, plugins: list[Any] | None = None, **kwargs: Any) -> Agent:
+def resolve_test_tools(
+    *,
+    plugins: list[Any] | None = None,
+    local_tools: ToolRegistry | None = None,
+    include: list[str] | None = None,
+    exclude: list[str] | None = None,
+) -> tuple[ToolRegistry, ResolvedToolSet]:
+    """Mirror the harness tool resolution for direct-construction tests:
+    register plugin tools into a local registry and expose a filtered view
+    over [local, global]. Returns (local_registry, resolved) so tests can
+    still inspect/extend the local registry."""
+    local = local_tools or ToolRegistry("_local_tools:test", "Agent-scoped local tools.")
+    for plugin in plugins or []:
+        plugin.register_tools(local)
+    return local, ResolvedToolSet([local, ep_tool], include=include, exclude=exclude)
+
+
+def create_test_agent(
+    *,
+    plugins: list[Any] | None = None,
+    local_tools: ToolRegistry | None = None,
+    tools: list[str] | None = None,
+    exclude_tools: list[str] | None = None,
+    **kwargs: Any,
+) -> Agent:
+    plugins = plugins or []
+    _, resolved = resolve_test_tools(plugins=plugins, local_tools=local_tools, include=tools, exclude=exclude_tools)
     kwargs.setdefault("kind", "test")
     kwargs.setdefault("agent_name", "test")
     kwargs.setdefault("chat_store", InMemChatStore())
     kwargs.setdefault("consolidator", MessageOnlyConsolidator())
     kwargs.setdefault("interceptor", ChainInterceptor())
-    return Agent(plugins=plugins or [], **kwargs)
+    return Agent(plugins=plugins, tools=resolved, **kwargs)
 
 
 class RecordingConsolidator:

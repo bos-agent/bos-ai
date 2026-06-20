@@ -14,7 +14,9 @@ from bos.core.contract import (
     PluginServices,
     TurnInterceptor,
     ep_plugin,
+    ep_tool,
 )
+from bos.core.harness import ResolvedToolSet
 from bos.core.registry import ExtensionPoint, ToolRegistry
 
 # Plugin-defined extension points use the `pep_` prefix (plugin extension
@@ -278,11 +280,17 @@ class SkillsAgentPlugin:
             model = AgentRegistry.get_defaults(context.agent_name).get("model") if context else None
 
             test_tools = runtime.test_tools
-            tools = None if test_tools == "*" else sorted(set(test_tools) | {"LoadSkill"})
+            include = None if test_tools == "*" else sorted(set(test_tools) | {"LoadSkill"})
 
             # Conceptually a subagent run, but built directly: the harness
             # subagent path pins the shared chat store and cached skills
             # loader, and gives no signal on whether LoadSkill was called.
+            # Resolve the test agent's tools the same way the harness does:
+            # register the plugin's tools into a local registry, then expose a
+            # filtered view over [local, global].
+            test_plugin = SkillsAgentPlugin(loader, allow=[name], exclude=[])
+            local_tools = ToolRegistry("_local_tools:skill-test", "Agent-scoped local tools.")
+            test_plugin.register_tools(local_tools)
             test_agent = Agent(
                 kind="_skill_test",
                 agent_name=f"skill-test:{name}",
@@ -294,8 +302,8 @@ class SkillsAgentPlugin:
                 consolidator=runtime.consolidator,
                 llm=runtime.llm,
                 model=model,
-                tools=tools,
-                plugins=[SkillsAgentPlugin(loader, allow=[name], exclude=[])],
+                tools=ResolvedToolSet([local_tools, ep_tool], include=include),
+                plugins=[test_plugin],
                 max_iterations=30,
                 workspace=runtime.workspace,
             )

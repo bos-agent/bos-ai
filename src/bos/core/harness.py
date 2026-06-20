@@ -11,9 +11,11 @@ from typing import Any
 
 from ._utils import (
     _aclose,
+    _allowed,
     _apply,
     _create_extension_instance,
     _deep_merge,
+    _pick_collection,
 )
 from .agent import Agent, ChainInterceptor
 from .contract import (
@@ -27,11 +29,15 @@ from .contract import (
     MailBox,
     MailRoute,
     PluginServices,
+    ToolAttributes,
     ToolContext,
     ep_plugin,
+    ep_tool,
+    ep_turn_interceptor,
 )
 from .events import derive_event_sink
 from .llm import LLMClient
+from .registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +82,60 @@ class AgentRegistry:
 
 CURRENT_HARNESS: contextvars.ContextVar[AgentHarness] = contextvars.ContextVar("current_harness")
 CURRENT_MAILBOX: contextvars.ContextVar[MailBox] = contextvars.ContextVar("current_mailbox")
+
+
+class ResolvedToolSet:
+    """A live, filtered view over one or more source tool collections.
+
+    Satisfies the core ``ToolSet`` protocol. This is where tool *resolution*
+    lives (outer layer): merge of sources with earlier sources taking
+    precedence, plus include/exclude policy. The Agent receives the resolved
+    view and stays ignorant of registries, globals, and filtering.
+    """
+
+    def __init__(
+        self,
+        sources: list[ToolRegistry],
+        *,
+        include: list[str] | None = None,
+        exclude: list[str] | None = None,
+    ) -> None:
+        # Precedence: earlier sources win on name conflicts (local before global).
+        self._sources = sources
+        self._include = include
+        self._exclude = exclude
+
+    def has(self, name: str) -> bool:
+        return _allowed(name, self._include, self._exclude) and any(s.has(name) for s in self._sources)
+
+    def _merged(self, get: str) -> dict[str, Any]:
+        merged: dict[str, Any] = {}
+        for source in reversed(self._sources):  # later sources are lower precedence
+            merged |= getattr(source, get)()
+        return _pick_collection(merged, self._include, self._exclude)
+
+    def to_openai_schema(self) -> dict[str, dict[str, Any]]:
+        return self._merged("to_openai_schema")
+
+    def describe_usage(self) -> dict[str, str]:
+        return self._merged("describe_usage")
+
+    def attributes(self, name: str) -> ToolAttributes:
+        # Adapt the registry's raw (untyped) metadata into core's typed,
+        # core-owned ToolAttributes.
+        for source in self._sources:
+            if source.has(name):
+                metadata = source.metadata_for(name)
+                return ToolAttributes(parallel_safe=bool(metadata.get("parallel_safe", False)))
+        return ToolAttributes()
+
+    async def invoke(self, name: str, kwargs: dict[str, Any] | None = None) -> str:
+        if not _allowed(name, self._include, self._exclude):
+            raise Exception(f"Tool {name} is not allowed")
+        for source in self._sources:
+            if source.has(name):
+                return await source.invoke(name, kwargs)
+        raise Exception(f"Tool {name} not found")
 
 
 class _HarnessSubagentRuntime:
@@ -161,7 +221,7 @@ class AgentHarness:
         assert self.chat_store is not None  # ep_chat_store has a _default, so creation never returns None
         self.llm = LLMClient()
         self.consolidator = await self._create_consolidator()
-        self.interceptor = ChainInterceptor(self._interceptors_impl)
+        self.interceptor = ChainInterceptor(self._interceptors_impl, registry=ep_turn_interceptor)
 
         # BEP 11 services: in-process LifecycleBus, JobRunner, BackgroundLLM.
         from bos.core.contract import ep_job_runner
@@ -236,13 +296,29 @@ class AgentHarness:
 
         merged_cfg = _deep_merge(dict(agent_defaults), agent_cfg or {})
 
+        agent_name = kind or merged_cfg.get("kind") or "undef"
+        plugins = await self._bind_plugins_for_agent(merged_cfg)
+
+        # Resolve this agent's tools (outer layer's job): register plugin tools
+        # into an agent-local registry, then expose a filtered view over
+        # [local, global] honoring the agent's include/exclude config.
+        local_tools = ToolRegistry(f"_local_tools:{agent_name}", "Agent-scoped local tools.")
+        for plugin in plugins:
+            plugin.register_tools(local_tools)
+        tools = ResolvedToolSet(
+            [local_tools, ep_tool],
+            include=merged_cfg.get("tools"),
+            exclude=merged_cfg.get("exclude_tools"),
+        )
+
         kwargs = merged_cfg | {
-            "kind": kind or merged_cfg.get("kind") or "undef",
+            "kind": agent_name,
             "llm": self.llm,
             "chat_store": self.chat_store,
             "consolidator": self.consolidator,
+            "tools": tools,
             "interceptor": self.interceptor,
-            "plugins": await self._bind_plugins_for_agent(merged_cfg),
+            "plugins": plugins,
             "chat_compaction_lock": self._get_compaction_lock,
             "workspace": str(self._workspace),
         }

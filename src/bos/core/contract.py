@@ -421,6 +421,37 @@ ep_plugin = ExtensionPoint(
 
 
 @dataclass(frozen=True)
+class ToolAttributes:
+    """Per-tool attributes that core (Agent) recognizes.
+
+    This is the typed escape hatch for evolving tool behavior: new attributes
+    are added here as explicit, typed fields with defaults — core owns the keys
+    and their value types, so the surface stays self-documenting and outer
+    layers cannot smuggle in semantics core silently depends on. Outer layers
+    populate it from their own (richer, untyped) metadata.
+    """
+
+    parallel_safe: bool = False
+
+
+@runtime_checkable
+class ToolSet(Protocol):
+    """A resolved collection of callable tools an Agent may use.
+
+    The core contract for tools: Agent depends only on this, not on the
+    extension mechanism (``ToolRegistry``/``ExtensionPoint``) that implements
+    it. Outer layers resolve the agent's allowed tools (merge, filter, plugin
+    registration) and inject a value satisfying this protocol.
+    """
+
+    def has(self, name: str) -> bool: ...
+    def to_openai_schema(self) -> dict[str, dict[str, Any]]: ...
+    def describe_usage(self) -> dict[str, str]: ...
+    def attributes(self, name: str) -> ToolAttributes: ...
+    async def invoke(self, name: str, kwargs: dict[str, Any] | None = None) -> str: ...
+
+
+@dataclass(frozen=True)
 class ToolContext:
     agent_name: str
     chat_id: str

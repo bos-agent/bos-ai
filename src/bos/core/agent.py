@@ -16,12 +16,10 @@ from bos.protocol import MessageContent, TurnEvent
 
 from ._utils import (
     _aclose,
-    _allowed,
     _apply_async,
     _as_parts,
     _compact,
     _create_extension_instance,
-    _pick_collection,
     _strip_reply_artifacts,
     _xml_attr,
 )
@@ -33,14 +31,14 @@ from .contract import (
     InterceptorStage,
     Message,
     ReasoningEffort,
+    ToolAttributes,
     ToolContext,
     ToolNoiseFilter,
+    ToolSet,
     TurnInterceptor,
-    ep_tool,
-    ep_turn_interceptor,
 )
 from .llm import LLMClient, ToolCallRequest
-from .registry import ToolRegistry
+from .registry import ExtensionPoint
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -234,12 +232,18 @@ class ChainInterceptor:
     and runs them sequentially in the provided order.
     """
 
-    def __init__(self, interceptors: list[str | dict[str, Any]] | None = None) -> None:
+    def __init__(
+        self,
+        interceptors: list[str | dict[str, Any]] | None = None,
+        *,
+        registry: ExtensionPoint | None = None,
+    ) -> None:
         self._configs = [
             cfg.copy() if isinstance(cfg, dict) else {"name": cfg}
             for cfg in (interceptors or [])
             if isinstance(cfg, str) or (isinstance(cfg, dict) and "name" in cfg)
         ]
+        self._registry = registry
         self._instances: list[TurnInterceptor | None | Exception] = [None] * len(self._configs)
 
     async def aclose(self) -> None:
@@ -252,9 +256,9 @@ class ChainInterceptor:
         context: TurnContext,
     ) -> None:
         for i, cfg in enumerate(self._configs):
-            if self._instances[i] is None and ep_turn_interceptor.has(cfg["name"]):
+            if self._instances[i] is None and self._registry is not None and self._registry.has(cfg["name"]):
                 try:
-                    self._instances[i] = await _create_extension_instance(ep_turn_interceptor, TurnInterceptor, cfg)
+                    self._instances[i] = await _create_extension_instance(self._registry, TurnInterceptor, cfg)
                 except Exception as e:
                     self._instances[i] = e
                     logger.error(f"Failed to create interceptor {cfg['name']}: {e}")
@@ -290,6 +294,26 @@ class _CompositePluginInterceptor:
         await self._fallback.intercept(stage, context)
 
 
+class _EmptyToolSet:
+    """A ToolSet with no tools. Default when an Agent is constructed without
+    an injected, resolved tool collection."""
+
+    def has(self, name: str) -> bool:
+        return False
+
+    def to_openai_schema(self) -> dict[str, dict[str, Any]]:
+        return {}
+
+    def describe_usage(self) -> dict[str, str]:
+        return {}
+
+    def attributes(self, name: str) -> ToolAttributes:
+        return ToolAttributes()
+
+    async def invoke(self, name: str, kwargs: dict[str, Any] | None = None) -> str:
+        raise Exception(f"Tool {name} not found")
+
+
 class Agent:
     def __init__(
         self,
@@ -300,14 +324,12 @@ class Agent:
         system_prompt: str | None = None,
         plugins: Sequence[AgentPlugin] = (),
         plugins_prompt: dict[str, str] | None = None,
-        tools: list[str] | None = None,
+        tools: ToolSet | None = None,
         tools_usage: dict[str, str] | None = None,
-        exclude_tools: list[str] | None = None,
         model: str | None = None,
         agent_name: str | None = None,
         reasoning_effort: ReasoningEffort | None = None,
         llm: LLMClient | None = None,
-        local_tools: ToolRegistry | None = None,
         interceptor: TurnInterceptor | None = None,
         max_tokens: int = 128 * 1024,
         max_iterations: int = 80,
@@ -319,9 +341,11 @@ class Agent:
         if system_prompt is not None and not isinstance(system_prompt, str):
             raise TypeError("system_prompt must be a string or None")
         self._system_prompt = system_prompt or ""
-        self._tools = tools
+        # The resolved set of tools this agent may call. Resolution (merge of
+        # global + plugin-local tools, plus include/exclude filtering) is done
+        # by the outer layer; the entity only consumes the result.
+        self._tools: ToolSet = tools or _EmptyToolSet()
         self._tools_usage = tools_usage or {}
-        self._exclude_tools = exclude_tools
         self._model = model
         self._reasoning_effort = reasoning_effort
         self._max_tokens = max_tokens
@@ -331,7 +355,6 @@ class Agent:
         self._consolidator = consolidator
         self._kind = kind
         self._name = agent_name or kind
-        self._local_tools = local_tools or ToolRegistry(f"_local_tools:{self._name}", "Agent-scoped local tools.")
         self._plugins = plugins
         self._plugins_prompt = plugins_prompt or {}
         self._tool_noise_filter: ToolNoiseFilter | None = tool_noise_filter
@@ -345,10 +368,6 @@ class Agent:
             plugin_interceptors=plugin_interceptors,
             fallback=interceptor or ChainInterceptor(),
         )
-
-        # Register plugin tools into the agent-local tool registry
-        for plugin in self._plugins:
-            plugin.register_tools(self._local_tools)
 
     @property
     def name(self) -> str:
@@ -651,18 +670,10 @@ class Agent:
         return ctx.final_response
 
     def _get_tool_defs(self) -> list[dict[str, Any]]:
-        tool_defs = ep_tool.to_openai_schema() | self._local_tools.to_openai_schema()
-        return list(_pick_collection(tool_defs, self._tools, self._exclude_tools).values())
-
-    def _tool_metadata(self, tool_name: str) -> dict[str, Any]:
-        if self._local_tools.has(tool_name):
-            return self._local_tools.metadata_for(tool_name)
-        if ep_tool.has(tool_name):
-            return ep_tool.metadata_for(tool_name)
-        return {}
+        return list(self._tools.to_openai_schema().values())
 
     def _tool_parallel_safe(self, tool_name: str) -> bool:
-        return bool(self._tool_metadata(tool_name).get("parallel_safe", False))
+        return self._tools.attributes(tool_name).parallel_safe
 
     def _tool_call_batches(self, tool_calls: Sequence[ToolCallRequest]) -> list[list[ToolCallRequest]]:
         batches: list[list[ToolCallRequest]] = []
@@ -681,8 +692,6 @@ class Agent:
 
     async def _call_tool(self, tc: ToolCallRequest, ctx: TurnContext, event_sink: EventSink | None = None) -> str:
         try:
-            if not _allowed(tc.name, self._tools, self._exclude_tools):
-                raise Exception(f"Tool {tc.name} is not allowed")
             return await self._invoke_tool(
                 tc.name,
                 **tc.arguments,
@@ -710,10 +719,8 @@ class Agent:
                 event_sink=event_sink,
             ),
         }
-        if self._local_tools.has(tool_name):
-            return await self._local_tools.invoke(tool_name, kwargs)
-        if ep_tool.has(tool_name):
-            return await ep_tool.invoke(tool_name, kwargs)
+        if self._tools.has(tool_name):
+            return await self._tools.invoke(tool_name, kwargs)
         raise Exception(f"Tool {tool_name} not found")
 
     async def _load_and_compact_history(self, chat_id: str, *, budget_model: str | None) -> list[dict[str, Any]]:
@@ -806,11 +813,7 @@ class Agent:
         return f"<system_prompt>\n{content}\n</system_prompt>"
 
     async def _prompt_section_tools(self) -> str:
-        all_tools = ep_tool.describe_usage() | self._local_tools.describe_usage()
-        available_tools = self._limit_prompt_collection(
-            _pick_collection(all_tools, self._tools, self._exclude_tools),
-            "tools",
-        )
+        available_tools = self._limit_prompt_collection(self._tools.describe_usage(), "tools")
         available_tools = {k: (self._tools_usage.get(k, v) or "").strip() for k, v in available_tools.items()}
 
         if not available_tools:
