@@ -19,11 +19,17 @@ logger = logging.getLogger(__name__)
 JobTriggerName = Literal["session_close", "idle", "manual"]
 
 
+class ConsolidationUnavailable(Exception):
+    """Raised when the consolidator cannot produce a trustworthy proposal (e.g.
+    the model returned an unparseable response). The job treats this as "no
+    result" and leaves the watermark untouched so the turns are retried, rather
+    than silently burning the window with an empty apply."""
+
+
 @dataclass(frozen=True)
 class ConsolidationPolicy:
     enabled: bool = False
     retention_days: int = 30
-    auto_apply: bool = False
 
 
 @dataclass(frozen=True)
@@ -110,7 +116,7 @@ def _render_user_prompt(request: MemoryConsolidationRequest) -> str:
         for key, text in request.active_maxims.items():
             lines.append(f"[maxim={key}] {text}")
     lines.append("\n## Policy")
-    lines.append(f"actor={request.actor_name} trigger={request.trigger} auto_apply={request.policy.auto_apply}")
+    lines.append(f"actor={request.actor_name} trigger={request.trigger}")
     return "\n".join(lines)
 
 
@@ -131,9 +137,11 @@ class DefaultMemoryConsolidator:
         )
         try:
             payload = json.loads(resp.content or "")
-        except json.JSONDecodeError:
-            logger.warning("consolidator: failed to parse response JSON; treating as NOOP")
-            return []
+        except json.JSONDecodeError as exc:
+            # An unparseable response is NOT "nothing to consolidate" — it is a
+            # failure. Surface it so the job leaves the watermark in place and
+            # retries these turns later, instead of advancing past them.
+            raise ConsolidationUnavailable("consolidator: failed to parse response JSON") from exc
         ops_in = payload.get("operations", [])
         out: list[MemoryOperation] = []
         for raw in ops_in:

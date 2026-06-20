@@ -1,6 +1,6 @@
 """End-to-end BEP 10 off-turn consolidation:
 commit turns → emit session_close → consolidator proposes ADD → operation
-service applies (auto_apply=True) → fact is queryable in a fresh harness."""
+service applies → fact is queryable in a fresh harness."""
 
 import json
 
@@ -63,7 +63,7 @@ async def test_mid_chat_fact_persists_into_next_session(tmp_path):
     plugin._cfg = {
         **plugin.default_config(),
         "backend": "in_memory",
-        "consolidation": {"enabled": True, "retention_days": 30, "auto_apply": True},
+        "consolidation": {"enabled": True, "retention_days": 30},
     }
     await plugin.setup(services)
 

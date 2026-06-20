@@ -235,7 +235,7 @@ class TestSessionCloseFactoryGuard:
             plugin._cfg = {
                 **plugin.default_config(),
                 "backend": "in_memory",
-                "consolidation": {"enabled": True, "retention_days": 30, "auto_apply": False},
+                "consolidation": {"enabled": True, "retention_days": 30},
             }
             await plugin.setup(h._plugin_services)
             await h.events.emit(

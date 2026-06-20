@@ -11,15 +11,17 @@ from bos.plugins.memory.operation_service import DefaultMemoryOperationService
 
 
 class _StubBLM:
-    def __init__(self, ops_payload):
+    def __init__(self, ops_payload, *, raw=None):
         self._payload = ops_payload
+        self._raw = raw
 
     async def ask(self, **kwargs):
         import json as _json
 
         from bos.core.llm import LLMResponse
 
-        return LLMResponse(content=_json.dumps(self._payload))
+        content = self._raw if self._raw is not None else _json.dumps(self._payload)
+        return LLMResponse(content=content)
 
 
 def _msg(role, content, *, turn_id="t1"):
@@ -28,93 +30,7 @@ def _msg(role, content, *, turn_id="t1"):
 
 class TestJobRun:
     @pytest.mark.asyncio
-    async def test_dry_run_applies_no_writes_and_does_not_advance_watermark(self, tmp_path):
-        chat_store = InMemChatStore()
-        backend = InMemMemoryExtension()
-        await chat_store.commit_turn("c1", [_msg("user", "I prefer dark mode", turn_id="t1")], turn_id="t1")
-        wm = WatermarkStore(tmp_path / "wm.json")
-        op_svc = DefaultMemoryOperationService(
-            backend,
-            audit_path=tmp_path / "audit.jsonl",
-            maxim_keys={"user"},
-        )
-        blm = _StubBLM({
-            "operations": [
-                {"op": "ADD", "reason": "stable preference", "content": "prefers dark mode", "importance": 7},
-            ]
-        })
-        consolidator = DefaultMemoryConsolidator(blm, maxim_keys={"user"})
-        head = await chat_store.get_revision("c1")
-        job = MemoryConsolidationJob(
-            chat_id="c1",
-            actor_name="test-agent",
-            base_revision=head,
-            trigger="manual",
-            policy=ConsolidationPolicy(auto_apply=False),
-            chat_store=chat_store,
-            backend=backend,
-            consolidator=consolidator,
-            operation_service=op_svc,
-            watermarks=wm,
-            maxim_keys={"user"},
-        )
-        await job.run()
-        # dry-run: no entries actually created
-        assert await backend.search_memories("dark") == []
-        # watermark NOT advanced: a dry-run wrote nothing, so burning the
-        # watermark would silently exclude these turns from future real runs.
-        assert await wm.get("c1") == 0
-        # and dry-run record is in audit
-        audit = await op_svc.audit()
-        assert audit and audit[0].result == "dry_run"
-
-    @pytest.mark.asyncio
-    async def test_dry_run_then_apply_still_persists_memory(self, tmp_path):
-        """Regression: a default dry-run must not poison a later real --apply."""
-        chat_store = InMemChatStore()
-        backend = InMemMemoryExtension()
-        await chat_store.commit_turn("c1", [_msg("user", "I prefer dark mode")], turn_id="t1")
-        wm = WatermarkStore(tmp_path / "wm.json")
-        op_svc = DefaultMemoryOperationService(
-            backend,
-            audit_path=tmp_path / "audit.jsonl",
-            maxim_keys={"user"},
-        )
-        blm = _StubBLM({
-            "operations": [
-                {"op": "ADD", "reason": "stable preference", "content": "prefers dark mode", "importance": 7},
-            ]
-        })
-        consolidator = DefaultMemoryConsolidator(blm, maxim_keys={"user"})
-        head = await chat_store.get_revision("c1")
-
-        def _job(*, auto_apply: bool) -> MemoryConsolidationJob:
-            return MemoryConsolidationJob(
-                chat_id="c1",
-                actor_name="test-agent",
-                base_revision=head,
-                trigger="manual",
-                policy=ConsolidationPolicy(auto_apply=auto_apply),
-                chat_store=chat_store,
-                backend=backend,
-                consolidator=consolidator,
-                operation_service=op_svc,
-                watermarks=wm,
-                maxim_keys={"user"},
-            )
-
-        # First: a dry-run over the new turns (CLI default).
-        await _job(auto_apply=False).run()
-        assert await backend.search_memories("dark") == []
-        assert await wm.get("c1") == 0
-
-        # Then: a real --apply over the same turns still persists and advances.
-        await _job(auto_apply=True).run()
-        assert (await backend.search_memories("dark"))[0].content == "prefers dark mode"
-        assert await wm.get("c1") == head
-
-    @pytest.mark.asyncio
-    async def test_auto_apply_persists_and_advances(self, tmp_path):
+    async def test_persists_and_advances(self, tmp_path):
         chat_store = InMemChatStore()
         backend = InMemMemoryExtension()
         await chat_store.commit_turn("c1", [_msg("user", "I prefer dark mode")], turn_id="t1")
@@ -136,7 +52,7 @@ class TestJobRun:
             actor_name="test-agent",
             base_revision=head,
             trigger="manual",
-            policy=ConsolidationPolicy(auto_apply=True),
+            policy=ConsolidationPolicy(),
             chat_store=chat_store,
             backend=backend,
             consolidator=consolidator,
@@ -147,6 +63,65 @@ class TestJobRun:
         await job.run()
         assert (await backend.search_memories("dark"))[0].content == "prefers dark mode"
         assert await wm.get("c1") == head
+
+    @pytest.mark.asyncio
+    async def test_empty_proposal_advances_watermark(self, tmp_path):
+        """A valid but empty proposal means 'nothing durable in this window' and
+        legitimately advances the watermark (no memory written)."""
+        chat_store = InMemChatStore()
+        backend = InMemMemoryExtension()
+        await chat_store.commit_turn("c1", [_msg("user", "just chatter")], turn_id="t1")
+        wm = WatermarkStore(tmp_path / "wm.json")
+        op_svc = DefaultMemoryOperationService(backend, audit_path=tmp_path / "audit.jsonl", maxim_keys={"user"})
+        consolidator = DefaultMemoryConsolidator(_StubBLM({"operations": []}), maxim_keys={"user"})
+        head = await chat_store.get_revision("c1")
+        job = MemoryConsolidationJob(
+            chat_id="c1",
+            actor_name="test-agent",
+            base_revision=head,
+            trigger="manual",
+            policy=ConsolidationPolicy(),
+            chat_store=chat_store,
+            backend=backend,
+            consolidator=consolidator,
+            operation_service=op_svc,
+            watermarks=wm,
+            maxim_keys={"user"},
+        )
+        await job.run()
+        assert await backend.search_memories("chatter") == []
+        assert await wm.get("c1") == head
+
+    @pytest.mark.asyncio
+    async def test_unparseable_proposal_does_not_advance_watermark(self, tmp_path):
+        """Regression: an unparseable model response must NOT burn the window. It
+        raises (ConsolidationUnavailable), leaving the watermark for a retry."""
+        from bos.plugins.memory.consolidator import ConsolidationUnavailable
+
+        chat_store = InMemChatStore()
+        backend = InMemMemoryExtension()
+        await chat_store.commit_turn("c1", [_msg("user", "I prefer dark mode")], turn_id="t1")
+        wm = WatermarkStore(tmp_path / "wm.json")
+        op_svc = DefaultMemoryOperationService(backend, audit_path=tmp_path / "audit.jsonl", maxim_keys={"user"})
+        consolidator = DefaultMemoryConsolidator(_StubBLM({}, raw="<<not json>>"), maxim_keys={"user"})
+        head = await chat_store.get_revision("c1")
+        job = MemoryConsolidationJob(
+            chat_id="c1",
+            actor_name="test-agent",
+            base_revision=head,
+            trigger="manual",
+            policy=ConsolidationPolicy(),
+            chat_store=chat_store,
+            backend=backend,
+            consolidator=consolidator,
+            operation_service=op_svc,
+            watermarks=wm,
+            maxim_keys={"user"},
+        )
+        with pytest.raises(ConsolidationUnavailable):
+            await job.run()
+        assert await wm.get("c1") == 0  # not advanced — turns retried later
+        assert await backend.search_memories("dark") == []
 
     @pytest.mark.asyncio
     async def test_watermark_does_not_advance_on_failure(self, tmp_path):
@@ -170,7 +145,7 @@ class TestJobRun:
             actor_name="test-agent",
             base_revision=head,
             trigger="manual",
-            policy=ConsolidationPolicy(auto_apply=True),
+            policy=ConsolidationPolicy(),
             chat_store=chat_store,
             backend=backend,
             consolidator=_RaisingConsolidator(),

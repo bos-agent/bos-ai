@@ -127,7 +127,7 @@ class MemoryHarnessPlugin:
             "maxims": ["user", "self", "rules"],
             "backend": "_default",
             "retrieval": {"auto_recall": True, "index_in_prompt": True, "index_max": 50, "top_k": 5},
-            "consolidation": {"enabled": False, "retention_days": 30, "auto_apply": False},
+            "consolidation": {"enabled": False, "retention_days": 30},
         }
 
     async def setup(self, services: PluginServices) -> None:
@@ -150,7 +150,6 @@ class MemoryHarnessPlugin:
         self._policy = ConsolidationPolicy(
             enabled=bool(cons_cfg.get("enabled", False)),
             retention_days=int(cons_cfg.get("retention_days", 30)),
-            auto_apply=bool(cons_cfg.get("auto_apply", False)),
         )
 
         if (
@@ -248,22 +247,14 @@ class MemoryHarnessPlugin:
         chat_id: str,
         *,
         agent_name: str,
-        dry_run: bool | None = None,
     ):
         """Build and run a consolidation job synchronously (admin "run now")."""
-        from .consolidator import ConsolidationPolicy
         from .job import MemoryConsolidationJob
 
         bundle = self._for(agent_name)
         if bundle.consolidator is None:
             return []
         policy = self._policy
-        if dry_run is not None:
-            policy = ConsolidationPolicy(
-                enabled=policy.enabled,
-                retention_days=policy.retention_days,
-                auto_apply=not dry_run,
-            )
         rev = await self._services.chat_store.get_revision(chat_id)
         if rev == 0:
             return []

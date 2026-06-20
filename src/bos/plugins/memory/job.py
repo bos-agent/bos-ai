@@ -60,14 +60,17 @@ class MemoryConsolidationJob:
             active_maxims=active_maxims,
             policy=self.policy,
         )
+        # A propose() failure (e.g. ConsolidationUnavailable on an unparseable
+        # response, or a transport error) raises here; the watermark is left
+        # untouched so these turns are retried on the next trigger rather than
+        # silently burned by an empty apply.
         ops = await self.consolidator.propose(request)
         # Authoritative provenance for this run: the distinct turn ids actually
         # in the consolidated window, app-derived (order-preserving), recorded on
         # every audit record for audit/reconciliation.
         window_turn_ids = list(dict.fromkeys(m.turn_id for m in transcript if m.turn_id))
-        await self.operation_service.apply(ops, dry_run=not self.policy.auto_apply, window_turn_ids=window_turn_ids)
-        # Only advance the watermark when ops were actually applied. A dry-run
-        # mutates nothing, so burning the watermark would silently exclude these
-        # turns from every future real consolidation.
-        if self.policy.auto_apply:
-            await self.watermarks.set(self.chat_id, self.base_revision)
+        await self.operation_service.apply(ops, window_turn_ids=window_turn_ids)
+        # Advance the watermark only after a trustworthy proposal was applied
+        # (an empty-but-valid proposal legitimately means "nothing durable
+        # here" and may advance). Failures never reach this line.
+        await self.watermarks.set(self.chat_id, self.base_revision)

@@ -116,20 +116,6 @@ class TestApply:
         assert audit[0].op.reason == "durable pref"
 
     @pytest.mark.asyncio
-    async def test_dry_run_mutates_nothing(self, tmp_path):
-        b = InMemMemoryExtension()
-        svc = _svc(tmp_path, b)
-        recs = await svc.apply(
-            [MemoryOperation(op="ADD", reason="x", content="should not persist")],
-            dry_run=True,
-            window_turn_ids=[],
-        )
-        assert recs[0].result == "dry_run"
-        assert await b.search_memories("persist") == []
-        # dry-run is still audited
-        assert (await svc.audit())[0].result == "dry_run"
-
-    @pytest.mark.asyncio
     async def test_invalidate_records_requested_by(self, tmp_path):
         b = InMemMemoryExtension()
         eid = await b.ingest_memory("stale fact")

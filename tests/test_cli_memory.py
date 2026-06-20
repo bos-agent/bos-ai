@@ -51,10 +51,10 @@ def test_recall_with_query_returns_results(tmp_path, monkeypatch):
     assert result.exit_code == 0
 
 
-def test_consolidate_dry_run_prints_summary(tmp_path, monkeypatch):
+def test_consolidate_prints_summary(tmp_path, monkeypatch):
     _seeded_workspace(tmp_path, monkeypatch)
     runner = CliRunner()
-    result = runner.invoke(memory_cmd, ["consolidate", "--chat", "c1", "--dry-run"])
+    result = runner.invoke(memory_cmd, ["consolidate", "--chat", "c1"])
     assert result.exit_code == 0
     # CLI prints either a per-chat summary or a "no chat" hint
     out = result.output.lower()

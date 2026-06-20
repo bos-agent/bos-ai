@@ -157,13 +157,7 @@ def recall_cmd(agent: str | None, query: str, top_k: int):
 @_AGENT_OPT
 @click.option("--chat", "chat_id", default=None, help="Chat id to consolidate (default: --all).")
 @click.option("--all", "do_all", is_flag=True, default=False, help="Iterate every chat past its watermark.")
-@click.option(
-    "--dry-run/--apply",
-    default=True,
-    show_default=True,
-    help="Dry-run validates + audits but does not mutate the backend.",
-)
-def consolidate_cmd(agent: str | None, chat_id: str | None, do_all: bool, dry_run: bool):
+def consolidate_cmd(agent: str | None, chat_id: str | None, do_all: bool):
     """Run the consolidation handler for one chat or all chats with unprocessed turns."""
 
     async def _consolidate(_bundle, plugin, _h):
@@ -179,11 +173,10 @@ def consolidate_cmd(agent: str | None, chat_id: str | None, do_all: bool, dry_ru
         # Resolve once at this layer (the closure has the agent name via _run)
         resolved_agent = _resolve_agent_name(_discover_project(), agent)
         for cid in targets:
-            records = await plugin.run_consolidation_now(cid, agent_name=resolved_agent, dry_run=dry_run)
+            records = await plugin.run_consolidation_now(cid, agent_name=resolved_agent)
             applied = sum(1 for r in records if r.result == "applied")
-            drun = sum(1 for r in records if r.result == "dry_run")
             rej = sum(1 for r in records if r.result == "rejected")
-            click.echo(f"agent {resolved_agent} / chat {cid}: applied={applied} dry_run={drun} rejected={rej}")
+            click.echo(f"agent {resolved_agent} / chat {cid}: applied={applied} rejected={rej}")
 
     _run(_consolidate, agent=agent)
 

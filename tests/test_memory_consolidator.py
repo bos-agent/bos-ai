@@ -15,8 +15,8 @@ class TestStructural:
             MemoryConsolidator,
         )
 
-        pol = ConsolidationPolicy(enabled=True, retention_days=30, auto_apply=True)
-        assert pol.auto_apply is True
+        pol = ConsolidationPolicy(enabled=True, retention_days=30)
+        assert pol.enabled is True
         req = MemoryConsolidationRequest(
             chat_id="c1",
             actor_name="A",
@@ -41,13 +41,15 @@ class TestStructural:
 
 
 class _StubBackgroundLLM:
-    def __init__(self, payload):
+    def __init__(self, payload, *, raw: str | None = None):
         self._payload = payload
+        self._raw = raw
         self.calls = []
 
     async def ask(self, **kwargs):
         self.calls.append(kwargs)
-        return LLMResponse(content=json.dumps(self._payload))
+        content = self._raw if self._raw is not None else json.dumps(self._payload)
+        return LLMResponse(content=content)
 
 
 class TestDefaultConsolidator:
@@ -82,6 +84,33 @@ class TestDefaultConsolidator:
         assert [o.op for o in ops] == ["ADD", "NOOP"]
         assert ops[0].importance == 7
         assert ops[1].reason == "considered, declined"
+
+    @pytest.mark.asyncio
+    async def test_unparseable_response_raises_consolidation_unavailable(self):
+        """A non-JSON response is a failure, not 'nothing to consolidate'. It must
+        raise so the job leaves the watermark in place and retries the turns."""
+        from bos.plugins.memory.consolidator import (
+            ConsolidationPolicy,
+            ConsolidationUnavailable,
+            DefaultMemoryConsolidator,
+            MemoryConsolidationRequest,
+        )
+
+        blm = _StubBackgroundLLM({}, raw="not json at all")
+        c = DefaultMemoryConsolidator(blm, maxim_keys={"user"})
+        req = MemoryConsolidationRequest(
+            chat_id="c1",
+            actor_name=None,
+            base_revision=1,
+            trigger="manual",
+            transcript_window=[],
+            raw_appends=[],
+            candidate_memories=[],
+            active_maxims={},
+            policy=ConsolidationPolicy(),
+        )
+        with pytest.raises(ConsolidationUnavailable):
+            await c.propose(req)
 
     @pytest.mark.asyncio
     async def test_response_schema_required_keys(self):

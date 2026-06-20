@@ -1,5 +1,5 @@
-"""L1 memory operation service — the single validated/audited/dry-run write door
-for curation (BEP 10 §4). Raw agent appends bypass this service and write to L0."""
+"""L1 memory operation service — the single validated/audited write door for
+curation (BEP 10 §4). Raw agent appends bypass this service and write to L0."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from typing import Literal, Protocol, cast
 from .scoped_memory import MemoryBackend, MemoryEntry, RequestedBy
 
 MemoryOpKind = Literal["ADD", "UPDATE", "INVALIDATE", "PROMOTE", "LINK", "NOOP"]
-AuditResult = Literal["applied", "dry_run", "rejected", "noop"]
+AuditResult = Literal["applied", "rejected", "noop"]
 
 
 @dataclass(frozen=True)
@@ -52,9 +52,7 @@ class RecallEvent:
 
 
 class MemoryOperationService(Protocol):
-    async def apply(
-        self, ops: list[MemoryOperation], *, dry_run: bool = False, window_turn_ids: list[str]
-    ) -> list[AuditRecord]: ...
+    async def apply(self, ops: list[MemoryOperation], *, window_turn_ids: list[str]) -> list[AuditRecord]: ...
     async def search_candidates(self, query: str, *, top_k: int) -> list[MemoryEntry]: ...
     async def touch_last_used(self, entry_ids: list[str]) -> None: ...
     async def restore(self, entry_id: str) -> None: ...
@@ -64,7 +62,7 @@ class MemoryOperationService(Protocol):
 class DefaultMemoryOperationService:
     """Validates each op, applies it via the L0 backend, appends an AuditRecord.
     Applies are serialized (one scope per service instance) so writes never
-    interleave; dry-run validates and audits but mutates nothing."""
+    interleave."""
 
     def __init__(self, backend: MemoryBackend, *, audit_path=None, maxim_keys: set[str] | None = None) -> None:
         from ._audit_log import JsonlLog
@@ -130,7 +128,7 @@ class DefaultMemoryOperationService:
             await self._log.append(row)
         return rec
 
-    async def _apply_one(self, op: MemoryOperation, *, dry_run: bool, window_turn_ids: list[str]) -> AuditRecord:
+    async def _apply_one(self, op: MemoryOperation, *, window_turn_ids: list[str]) -> AuditRecord:
         async def record(result, entry_id, error=None) -> AuditRecord:
             return await self._record(op, result, entry_id, error=error, window_turn_ids=window_turn_ids)
 
@@ -143,8 +141,6 @@ class DefaultMemoryOperationService:
         if op.op in ("UPDATE", "INVALIDATE", "PROMOTE", "LINK") and op.target_id is not None:
             if await self._backend.get_memory(op.target_id, include_invalid=True) is None:
                 return await record("rejected", op.target_id, error=f"target {op.target_id} not found")
-        if dry_run:
-            return await record("dry_run", op.target_id)
         # The asserts below restate guarantees already enforced by _validate() (and the
         # target-existence check above); they narrow Optional fields for the type checker.
         entry_id = op.target_id
@@ -195,11 +191,9 @@ class DefaultMemoryOperationService:
             await self._backend.append_to_maxim(op.maxim_key, f"[{ts}] {gist}")
         return await record("applied", entry_id)
 
-    async def apply(
-        self, ops: list[MemoryOperation], *, dry_run: bool = False, window_turn_ids: list[str]
-    ) -> list[AuditRecord]:
+    async def apply(self, ops: list[MemoryOperation], *, window_turn_ids: list[str]) -> list[AuditRecord]:
         async with self._lock:
-            return [await self._apply_one(op, dry_run=dry_run, window_turn_ids=window_turn_ids) for op in ops]
+            return [await self._apply_one(op, window_turn_ids=window_turn_ids) for op in ops]
 
     async def search_candidates(self, query: str, *, top_k: int = 5) -> list[MemoryEntry]:
         return await self._backend.search_memories(query, top_k=top_k)

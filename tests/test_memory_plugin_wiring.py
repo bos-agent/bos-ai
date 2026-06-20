@@ -40,7 +40,7 @@ async def _setup_plugin(tmp_path, *, consolidation_enabled=False, idle_after=300
     h = MemoryHarnessPlugin()
     cfg = {**h.default_config(), "backend": "in_memory"}
     if consolidation_enabled:
-        cfg = {**cfg, "consolidation": {"enabled": True, "retention_days": 30, "auto_apply": False}}
+        cfg = {**cfg, "consolidation": {"enabled": True, "retention_days": 30}}
     h._cfg = cfg
     await h.setup(svc)
     return h, runner
@@ -230,7 +230,7 @@ async def test_run_consolidation_now_returns_audit_records(tmp_path):
             [Message(llm_message={"role": "user", "content": "I prefer dark mode"})],
             turn_id="t1",
         )
-        records = await h.run_consolidation_now("c1", agent_name="alice", dry_run=True)
+        records = await h.run_consolidation_now("c1", agent_name="alice")
         assert records == []
     finally:
         await runner.drain(timeout=0.0)
