@@ -3,7 +3,13 @@ import json
 import uuid
 
 import pytest
-from conftest import InMemChatStore, InMemMailRoute, MessageOnlyConsolidator, resolve_test_tools
+from conftest import (
+    InMemChatStore,
+    InMemMailRoute,
+    MessageOnlyConsolidator,
+    compose_test_interceptors,
+    resolve_test_tools,
+)
 
 from bos.core import (
     AgentActor,
@@ -11,21 +17,25 @@ from bos.core import (
     ToolCallRequest,
     ep_provider,
 )
-from bos.core.agent import Agent, ChainInterceptor
+from bos.core.agent import Agent
 from bos.core.registry import ToolRegistry
 from bos.plugins.subagent import SubagentAgentPlugin  # noqa: F401  registers SubagentPlugin
 from bos.protocol import MessageType
 
 
-def create_test_agent(*, plugins=None, local_tools=None, tools=None, exclude_tools=None, **kwargs):
+def create_test_agent(*, plugins=None, local_tools=None, tools=None, exclude_tools=None, interceptor=None, **kwargs):
     plugins = plugins or []
     _, resolved = resolve_test_tools(plugins=plugins, local_tools=local_tools, include=tools, exclude=exclude_tools)
     kwargs.setdefault("kind", "test")
     kwargs.setdefault("agent_name", "test")
     kwargs.setdefault("chat_store", InMemChatStore())
     kwargs.setdefault("consolidator", MessageOnlyConsolidator())
-    kwargs.setdefault("interceptor", ChainInterceptor())
-    return Agent(plugins=plugins, tools=resolved, **kwargs)
+    return Agent(
+        plugins=plugins,
+        tools=resolved,
+        interceptor=compose_test_interceptors(plugins, interceptor),
+        **kwargs,
+    )
 
 
 class CaptureSink:

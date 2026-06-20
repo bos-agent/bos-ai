@@ -15,11 +15,9 @@ from xml.sax.saxutils import escape
 from bos.protocol import MessageContent, TurnEvent
 
 from ._utils import (
-    _aclose,
     _apply_async,
     _as_parts,
     _compact,
-    _create_extension_instance,
     _strip_reply_artifacts,
     _xml_attr,
 )
@@ -38,7 +36,6 @@ from .contract import (
     TurnInterceptor,
 )
 from .llm import LLMClient, ToolCallRequest
-from .registry import ExtensionPoint
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -226,72 +223,13 @@ class AbortTurn(Exception):
     pass
 
 
-class ChainInterceptor:
-    """
-    An interceptor that takes a list of interceptor names (or configurations)
-    and runs them sequentially in the provided order.
-    """
+class _NoopInterceptor:
+    """Does nothing. The default when an Agent is constructed without an
+    injected interceptor — combining plugin/configured interceptors into a
+    single TurnInterceptor is the outer layer's job."""
 
-    def __init__(
-        self,
-        interceptors: list[str | dict[str, Any]] | None = None,
-        *,
-        registry: ExtensionPoint | None = None,
-    ) -> None:
-        self._configs = [
-            cfg.copy() if isinstance(cfg, dict) else {"name": cfg}
-            for cfg in (interceptors or [])
-            if isinstance(cfg, str) or (isinstance(cfg, dict) and "name" in cfg)
-        ]
-        self._registry = registry
-        self._instances: list[TurnInterceptor | None | Exception] = [None] * len(self._configs)
-
-    async def aclose(self) -> None:
-        for interceptor in self._instances:
-            await _aclose(interceptor)
-
-    async def intercept(
-        self,
-        stage: InterceptorStage,
-        context: TurnContext,
-    ) -> None:
-        for i, cfg in enumerate(self._configs):
-            if self._instances[i] is None and self._registry is not None and self._registry.has(cfg["name"]):
-                try:
-                    self._instances[i] = await _create_extension_instance(self._registry, TurnInterceptor, cfg)
-                except Exception as e:
-                    self._instances[i] = e
-                    logger.error(f"Failed to create interceptor {cfg['name']}: {e}")
-            inst = self._instances[i]
-            if isinstance(inst, TurnInterceptor):
-                await inst.intercept(stage, context)
-
-
-class _CompositePluginInterceptor:
-    """Runs plugin interceptors, then a fallback interceptor chain."""
-
-    def __init__(self, plugin_interceptors: list[TurnInterceptor], fallback: TurnInterceptor) -> None:
-        self._plugin = plugin_interceptors
-        self._fallback = fallback
-
-    async def aclose(self) -> None:
-        for interceptor in self._plugin:
-            await _aclose(interceptor)
-        await _aclose(self._fallback)
-
-    async def intercept(
-        self,
-        stage: InterceptorStage,
-        context: TurnContext,
-    ) -> None:
-        for interceptor in self._plugin:
-            try:
-                await interceptor.intercept(stage, context)
-            except AbortTurn:
-                raise
-            except Exception as e:
-                logger.error("Error in plugin interceptor: %s", e, exc_info=True)
-        await self._fallback.intercept(stage, context)
+    async def intercept(self, stage: InterceptorStage, context: TurnContext) -> None:
+        return None
 
 
 class _EmptyToolSet:
@@ -362,12 +300,9 @@ class Agent:
         self._history_attribution = history_attribution
         self._workspace = str(workspace) if workspace else None
 
-        # Compose interceptors: plugin interceptors first, then configured harness/workspace interceptors
-        plugin_interceptors = [i for plugin in self._plugins for i in plugin.get_interceptors()]
-        self._interceptor = _CompositePluginInterceptor(
-            plugin_interceptors=plugin_interceptors,
-            fallback=interceptor or ChainInterceptor(),
-        )
+        # The agent runs a single interceptor; assembling plugin + configured
+        # interceptors into one is the outer layer's job.
+        self._interceptor: TurnInterceptor = interceptor or _NoopInterceptor()
 
     @property
     def name(self) -> str:

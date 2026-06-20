@@ -17,13 +17,14 @@ from ._utils import (
     _deep_merge,
     _pick_collection,
 )
-from .agent import Agent, ChainInterceptor
+from .agent import AbortTurn, Agent, TurnContext
 from .contract import (
     AgentPlugin,
     BackgroundLLM,
     ChatStore,
     Consolidator,
     HarnessPlugin,
+    InterceptorStage,
     JobRunner,
     LifecycleBus,
     MailBox,
@@ -31,6 +32,7 @@ from .contract import (
     PluginServices,
     ToolAttributes,
     ToolContext,
+    TurnInterceptor,
     ep_plugin,
     ep_tool,
     ep_turn_interceptor,
@@ -138,6 +140,53 @@ class ResolvedToolSet:
         raise Exception(f"Tool {name} not found")
 
 
+class ChainInterceptor:
+    """Runs a sequence of resolved interceptor instances in the given order.
+
+    Resolution of interceptor names/configs into instances is the outer layer's
+    job; this only runs what it is handed.
+    """
+
+    def __init__(self, interceptors: list[TurnInterceptor] | None = None) -> None:
+        self._interceptors = list(interceptors or [])
+
+    async def aclose(self) -> None:
+        for interceptor in self._interceptors:
+            await _aclose(interceptor)
+
+    async def intercept(self, stage: InterceptorStage, context: TurnContext) -> None:
+        for interceptor in self._interceptors:
+            await interceptor.intercept(stage, context)
+
+
+class _CompositePluginInterceptor:
+    """Runs plugin interceptors (best-effort), then a fallback interceptor chain.
+
+    Plugin interceptors are best-effort: a failing one is logged and skipped so
+    a buggy plugin cannot crash the turn. AbortTurn still propagates, and the
+    configured fallback chain runs with normal error propagation.
+    """
+
+    def __init__(self, plugin_interceptors: list[TurnInterceptor], fallback: TurnInterceptor) -> None:
+        self._plugin = plugin_interceptors
+        self._fallback = fallback
+
+    async def aclose(self) -> None:
+        for interceptor in self._plugin:
+            await _aclose(interceptor)
+        await _aclose(self._fallback)
+
+    async def intercept(self, stage: InterceptorStage, context: TurnContext) -> None:
+        for interceptor in self._plugin:
+            try:
+                await interceptor.intercept(stage, context)
+            except AbortTurn:
+                raise
+            except Exception as e:
+                logger.error("Error in plugin interceptor: %s", e, exc_info=True)
+        await self._fallback.intercept(stage, context)
+
+
 class _HarnessSubagentRuntime:
     """Adapter that implements SubagentRuntime using AgentHarness internals."""
 
@@ -221,7 +270,7 @@ class AgentHarness:
         assert self.chat_store is not None  # ep_chat_store has a _default, so creation never returns None
         self.llm = LLMClient()
         self.consolidator = await self._create_consolidator()
-        self.interceptor = ChainInterceptor(self._interceptors_impl, registry=ep_turn_interceptor)
+        self.interceptor = ChainInterceptor(await self._resolve_interceptors(self._interceptors_impl))
 
         # BEP 11 services: in-process LifecycleBus, JobRunner, BackgroundLLM.
         from bos.core.contract import ep_job_runner
@@ -311,13 +360,18 @@ class AgentHarness:
             exclude=merged_cfg.get("exclude_tools"),
         )
 
+        # Assemble this agent's single interceptor (outer layer's job): plugin
+        # interceptors (best-effort) ahead of the configured/workspace chain.
+        plugin_interceptors = [i for plugin in plugins for i in plugin.get_interceptors()]
+        interceptor = _CompositePluginInterceptor(plugin_interceptors, self.interceptor or ChainInterceptor())
+
         kwargs = merged_cfg | {
             "kind": agent_name,
             "llm": self.llm,
             "chat_store": self.chat_store,
             "consolidator": self.consolidator,
             "tools": tools,
-            "interceptor": self.interceptor,
+            "interceptor": interceptor,
             "plugins": plugins,
             "chat_compaction_lock": self._get_compaction_lock,
             "workspace": str(self._workspace),
@@ -421,6 +475,24 @@ class AgentHarness:
             raise RuntimeError(f"Consolidator extension {self._consolidator_impl!r} could not be created")
         self._owned.append(instance)
         return instance
+
+    async def _resolve_interceptors(self, configs: list[str | dict[str, Any]]) -> list[TurnInterceptor]:
+        """Resolve interceptor names/configs into instances via ep_turn_interceptor.
+
+        A name that is not registered is skipped; one that fails to instantiate
+        is logged and skipped — a bad interceptor never breaks the chain.
+        """
+        resolved: list[TurnInterceptor] = []
+        for entry in configs:
+            cfg = {"name": entry} if isinstance(entry, str) else entry
+            name = cfg.get("name")
+            if not name or not ep_turn_interceptor.has(name):
+                continue
+            try:
+                resolved.append(await _create_extension_instance(ep_turn_interceptor, TurnInterceptor, cfg))
+            except Exception as e:
+                logger.error("Failed to create interceptor %s: %s", name, e)
+        return resolved
 
     def _get_compaction_lock(self, chat_id: str) -> asyncio.Lock:
         if chat_id not in self._compaction_locks:

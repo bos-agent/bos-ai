@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from bos.core.agent import Agent, ChainInterceptor
-from bos.core.contract import Message, ep_consolidator, ep_tool
-from bos.core.harness import ResolvedToolSet
+from bos.core.agent import Agent
+from bos.core.contract import Message, TurnInterceptor, ep_consolidator, ep_tool
+from bos.core.harness import ChainInterceptor, ResolvedToolSet, _CompositePluginInterceptor
 from bos.core.registry import ToolRegistry
 from bos.extensions.chat_stores.in_memory import InMemChatStore
 from bos.extensions.mailboxes.in_memory import InMemMailRoute  # noqa: F401
@@ -30,12 +30,22 @@ def resolve_test_tools(
     return local, ResolvedToolSet([local, ep_tool], include=include, exclude=exclude)
 
 
+def compose_test_interceptors(
+    plugins: list[Any] | None = None, fallback: TurnInterceptor | None = None
+) -> _CompositePluginInterceptor:
+    """Mirror the harness interceptor assembly for direct-construction tests:
+    plugin interceptors (best-effort) ahead of a fallback chain."""
+    plugin_interceptors = [i for plugin in plugins or [] for i in plugin.get_interceptors()]
+    return _CompositePluginInterceptor(plugin_interceptors, fallback or ChainInterceptor())
+
+
 def create_test_agent(
     *,
     plugins: list[Any] | None = None,
     local_tools: ToolRegistry | None = None,
     tools: list[str] | None = None,
     exclude_tools: list[str] | None = None,
+    interceptor: TurnInterceptor | None = None,
     **kwargs: Any,
 ) -> Agent:
     plugins = plugins or []
@@ -44,8 +54,12 @@ def create_test_agent(
     kwargs.setdefault("agent_name", "test")
     kwargs.setdefault("chat_store", InMemChatStore())
     kwargs.setdefault("consolidator", MessageOnlyConsolidator())
-    kwargs.setdefault("interceptor", ChainInterceptor())
-    return Agent(plugins=plugins, tools=resolved, **kwargs)
+    return Agent(
+        plugins=plugins,
+        tools=resolved,
+        interceptor=compose_test_interceptors(plugins, interceptor),
+        **kwargs,
+    )
 
 
 class RecordingConsolidator:

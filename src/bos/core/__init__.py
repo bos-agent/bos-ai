@@ -31,7 +31,7 @@ from ._utils import (
     _xml_attr,
 )
 from .actor import ActorTurnContext, ActorTurnResult, AgentActor
-from .agent import AbortTurn, Agent, ChainInterceptor, TurnContext
+from .agent import AbortTurn, Agent, TurnContext
 from .contract import (
     AgentPlugin,
     BackgroundLLM,
@@ -80,6 +80,7 @@ from .harness import (
     CURRENT_MAILBOX,
     AgentHarness,
     AgentRegistry,
+    ChainInterceptor,
 )
 from .llm import LLMClient, LLMResponse, ToolCallRequest
 from .registry import Extension, ExtensionPoint, ToolRegistry
