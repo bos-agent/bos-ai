@@ -19,6 +19,7 @@ from bos.core import (
 )
 from bos.core.agent import Agent
 from bos.core.harness import _PluginPromptProvider
+from bos.core.llm import LLMClient
 from bos.core.registry import ToolRegistry
 from bos.plugins.subagent import SubagentAgentPlugin  # noqa: F401  registers SubagentPlugin
 from bos.protocol import MessageType
@@ -31,6 +32,7 @@ def create_test_agent(*, plugins=None, local_tools=None, tools=None, exclude_too
     kwargs.setdefault("agent_name", "test")
     kwargs.setdefault("chat_store", InMemChatStore())
     kwargs.setdefault("consolidator", MessageOnlyConsolidator())
+    kwargs.setdefault("llm", LLMClient())
     return Agent(
         tools=resolved,
         interceptor=compose_test_interceptors(plugins, interceptor),

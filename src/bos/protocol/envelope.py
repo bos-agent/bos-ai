@@ -2,10 +2,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from bos.protocol.content import MessageContent, validate_envelope_content
+from bos.protocol.content import validate_envelope_content
 from bos.protocol.message_types import MessageType
+
+if TYPE_CHECKING:
+    from bos.core.agent import MessageContent
 
 
 @dataclass

@@ -7,6 +7,7 @@ from typing import Any
 from bos.core.agent import Agent, TurnContext
 from bos.core.contract import Message, TurnInterceptor, ep_consolidator, ep_tool
 from bos.core.harness import ChainInterceptor, ResolvedToolSet, _CompositePluginInterceptor, _PluginPromptProvider
+from bos.core.llm import LLMClient
 from bos.core.registry import ToolRegistry
 from bos.extensions.chat_stores.in_memory import InMemChatStore
 from bos.extensions.mailboxes.in_memory import InMemMailRoute  # noqa: F401
@@ -60,6 +61,7 @@ def create_test_agent(
     kwargs.setdefault("agent_name", "test")
     kwargs.setdefault("chat_store", InMemChatStore())
     kwargs.setdefault("consolidator", MessageOnlyConsolidator())
+    kwargs.setdefault("llm", LLMClient())
     return Agent(
         tools=resolved,
         interceptor=compose_test_interceptors(plugins, interceptor),

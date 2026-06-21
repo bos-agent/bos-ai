@@ -7,42 +7,40 @@ import logging
 import os
 import platform
 import uuid
-from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal, Sequence
 from xml.sax.saxutils import escape
 
-from bos.protocol import MessageContent, TurnEvent
-
 from ._utils import (
     _apply_async,
-    _as_parts,
     _compact,
     _strip_reply_artifacts,
     _xml_attr,
 )
 from .contract import (
+    LLM,
     ChatStore,
     ContextResult,
     EventSink,
     InterceptorStage,
     Message,
+    MessageContent,
     PromptProvider,
     ReasoningEffort,
     ToolAttributes,
+    ToolCallRequest,
     ToolContext,
     ToolNoiseFilter,
     ToolSet,
+    TurnContext,
+    TurnEvent,
     TurnInterceptor,
 )
-from .llm import LLMClient, ToolCallRequest
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
     from contextlib import AbstractAsyncContextManager
 
     from .contract import Consolidator
-    from .llm import LLMResponse
 
 logger = logging.getLogger(__name__)
 
@@ -54,82 +52,6 @@ Intermediate assistant/tool state from the aborted turn was intentionally not
 committed as conversation context. If the user asks to continue, start a fresh
 attempt from the preceding user request and redo any necessary checks or tool
 work."""
-
-
-@dataclass
-class TurnContext:
-    agent_name: str
-    chat_id: str
-    turn_id: str
-    system: list[dict[str, Any]] = field(default_factory=list)
-    history: list[dict[str, Any]] = field(default_factory=list)
-    current: list[Message] = field(default_factory=list)
-    ephemeral: list[dict[str, Any]] = field(default_factory=list)
-    tool_defs: list[dict[str, Any]] = field(default_factory=list)
-    current_llm_response: LLMResponse | None = None
-    final_content: str | None = None
-    event_sink: EventSink | None = None
-    metadata: dict[str, Any] = field(default_factory=dict)
-    current_message_projector: Callable[[Message], dict[str, Any]] | None = None
-
-    def set_system_prompt(self, content: MessageContent) -> None:
-        self.system = [{"role": "system", "content": content}]
-
-    def add_message(self, llm_message: dict[str, Any], *, merge: bool = False, **kwargs) -> None:
-        if merge and self.current and self.current[-1].llm_message["role"] == llm_message["role"]:
-            parts = _as_parts(self.current[-1].llm_message["content"]) + _as_parts(llm_message["content"])
-            self.current[-1].llm_message["content"] = parts
-        else:
-            self.current.append(Message(llm_message=llm_message, turn_id=self.turn_id, metadata=kwargs))
-
-    def get_llm_messages(self) -> list[dict[str, Any]]:
-        project = self.current_message_projector or (lambda m: m.llm_message)
-        return (
-            self.system
-            + self.history
-            + [project(m) for m in self.current]
-            + [{k: v for k, v in message.items() if not k.startswith("_")} for message in self.ephemeral]
-        )
-
-    def set_ephemeral_message(self, key: str, llm_message: dict[str, Any]) -> None:
-        """Set or replace a keyed ephemeral message for this turn.
-
-        Ephemeral messages are sent to the LLM after persisted/current messages, but are not
-        persisted to chat history. A stable key lets interceptors refresh dynamic context without
-        accumulating stale duplicates across LLM iterations in the same turn.
-        """
-        self.clear_ephemeral_message(key)
-        self.ephemeral.append(llm_message | {"_ephemeral_key": key})
-
-    def clear_ephemeral_message(self, key: str) -> None:
-        self.ephemeral = [message for message in self.ephemeral if message.get("_ephemeral_key") != key]
-
-    def get_last_user_text(self) -> str:
-        """Return the most-recent user message's text from this turn's `current` messages.
-
-        Iterates `self.current` in reverse and returns the first user message's text
-        content. Multimodal content (a list of parts) is flattened to its text parts
-        concatenated; non-text parts are skipped. Returns "" if no user message is
-        present in this turn — interceptors use this on `prepare` to read the
-        incoming user message without depending on the underlying Message shape.
-        """
-        for message in reversed(self.current):
-            llm_msg = message.llm_message
-            if llm_msg.get("role") != "user":
-                continue
-            content = llm_msg.get("content", "")
-            if isinstance(content, str):
-                return content
-            if isinstance(content, list):
-                return "".join(
-                    part.get("text", "") for part in content if isinstance(part, dict) and part.get("type") == "text"
-                )
-            return str(content)
-        return ""
-
-    @property
-    def final_response(self) -> str:
-        return self.final_content or self.current[-1].llm_message["content"] if self.current else "(no response)"
 
 
 def _attribute_history_message(
@@ -274,7 +196,7 @@ class Agent:
         model: str | None = None,
         agent_name: str | None = None,
         reasoning_effort: ReasoningEffort | None = None,
-        llm: LLMClient | None = None,
+        llm: LLM,
         interceptor: TurnInterceptor | None = None,
         max_tokens: int = 128 * 1024,
         max_iterations: int = 80,
@@ -295,7 +217,7 @@ class Agent:
         self._reasoning_effort = reasoning_effort
         self._max_tokens = max_tokens
         self._max_iterations = max_iterations
-        self._llm = llm or LLMClient()
+        self._llm = llm
         self._chat_store = chat_store
         self._consolidator = consolidator
         self._kind = kind

@@ -4,7 +4,7 @@ Lightweight single-file agent framework.
 
 from __future__ import annotations
 
-from bos.protocol import Envelope, TurnEvent
+from bos.protocol import Envelope
 
 from ._utils import (
     _aclose,
@@ -31,19 +31,34 @@ from ._utils import (
     _xml_attr,
 )
 from .actor import ActorTurnContext, ActorTurnResult, AgentActor
-from .agent import AbortTurn, Agent, TurnContext
+from .agent import (
+    LLM,
+    AbortTurn,
+    Agent,
+    ChatCommit,
+    ChatMeta,
+    ChatStore,
+    Consolidator,
+    ContextResult,
+    EventSink,
+    LLMResponse,
+    Message,
+    ReasoningEffort,
+    TokenEstimate,
+    TokenEstimateSource,
+    ToolCallRequest,
+    ToolContext,
+    ToolNoiseFilter,
+    TurnContext,
+    TurnEvent,
+    TurnInterceptor,
+)
 from .contract import (
     AgentPlugin,
     BackgroundLLM,
     BaseChannel,
     Channel,
-    ChatCommit,
-    ChatMeta,
-    ChatStore,
     Closeable,
-    Consolidator,
-    ContextResult,
-    EventSink,
     HarnessPlugin,
     Job,
     JobRecord,
@@ -55,15 +70,8 @@ from .contract import (
     LifecycleKind,
     MailBox,
     MailRoute,
-    Message,
     PluginServices,
-    ReasoningEffort,
     SubagentRuntime,
-    TokenEstimate,
-    TokenEstimateSource,
-    ToolContext,
-    ToolNoiseFilter,
-    TurnInterceptor,
     ep_agent,
     ep_channel,
     ep_chat_store,
@@ -82,7 +90,7 @@ from .harness import (
     AgentRegistry,
     ChainInterceptor,
 )
-from .llm import LLMClient, LLMResponse, ToolCallRequest
+from .llm import LLMClient
 from .registry import Extension, ExtensionPoint, ToolRegistry
 
 __all__ = [
@@ -118,6 +126,7 @@ __all__ = [
     "LifecycleBus",
     "LifecycleEvent",
     "LifecycleKind",
+    "LLM",
     "LLMClient",
     "LLMResponse",
     "MailBox",

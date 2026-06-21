@@ -3,34 +3,14 @@ from __future__ import annotations
 import base64
 import mimetypes
 from pathlib import Path
-from typing import Any, Literal, TypeAlias, TypedDict, cast
+from typing import Any
 
 from .message_types import MessageType
 
-
-class ContentSource(TypedDict):
-    kind: Literal["url", "path"]
-    value: str
-
-
-class TextPart(TypedDict):
-    type: Literal["text"]
-    text: str
-
-
-class ImagePart(TypedDict):
-    type: Literal["image"]
-    source: ContentSource
-
-
-class FilePart(TypedDict):
-    type: Literal["file"]
-    mime_type: str
-    source: ContentSource
-
-
-MessageContentPart: TypeAlias = TextPart | ImagePart | FilePart
-MessageContent: TypeAlias = str | list[MessageContentPart]
+# The message-content types and their structural validation are owned by the
+# agent core (``bos.core.agent``). ``bos.protocol`` stays a leaf at import time
+# — it pulls those symbols inward only lazily (inside functions) so importing
+# ``bos.protocol`` never triggers ``bos.core``.
 
 
 def is_message_content_type(content_type: MessageType | str) -> bool:
@@ -39,45 +19,12 @@ def is_message_content_type(content_type: MessageType | str) -> bool:
 
 def validate_envelope_content(content: Any, content_type: MessageType | str) -> None:
     if is_message_content_type(content_type):
+        from bos.core.agent import validate_message_content
+
         validate_message_content(content)
         return
     if not isinstance(content, str):
         raise TypeError("Non-message envelopes require string content.")
-
-
-def validate_message_content(content: Any) -> None:
-    if isinstance(content, str):
-        return
-    if not isinstance(content, list):
-        raise TypeError("Message content must be a string or a list of BOS content parts.")
-    for part in content:
-        validate_message_part(part)
-
-
-def validate_message_part(part: Any) -> None:
-    if not isinstance(part, dict):
-        raise TypeError("Message content parts must be objects.")
-    part_type = part.get("type")
-    if part_type == "text":
-        if not isinstance(part.get("text"), str):
-            raise TypeError("Text parts require a string `text` field.")
-        return
-    if part_type == "image":
-        _validate_source(part.get("source"), allow_path=True)
-        return
-    if part_type == "file":
-        if not isinstance(part.get("mime_type"), str) or not part["mime_type"].strip():
-            raise TypeError("File parts require a non-empty string `mime_type` field.")
-        _validate_source(part.get("source"), allow_path=True)
-        return
-    raise TypeError(f"Unsupported BOS message part type: {part_type!r}")
-
-
-def content_as_parts(content: MessageContent) -> list[dict[str, Any]]:
-    validate_message_content(content)
-    if isinstance(content, str):
-        return [{"type": "text", "text": content}]
-    return cast("list[dict[str, Any]]", list(content))
 
 
 def content_to_plain_text(content: Any) -> str:

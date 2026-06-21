@@ -1,0 +1,80 @@
+"""The innermost ring: the Agent and every contract it defines or depends on.
+
+This package imports stdlib only. Outer rings (harness, extensions, gateway,
+``bos.protocol``) implement these ports and depend *inward* on it.
+"""
+
+from __future__ import annotations
+
+from ._content import (
+    ContentSource,
+    FilePart,
+    ImagePart,
+    MessageContent,
+    MessageContentPart,
+    TextPart,
+    content_as_parts,
+    validate_message_content,
+    validate_message_part,
+)
+from .agent import AbortTurn, Agent
+from .contract import (
+    LLM,
+    ChatCommit,
+    ChatMeta,
+    ChatStore,
+    Consolidator,
+    ContextResult,
+    EventSink,
+    InterceptorStage,
+    LLMResponse,
+    Message,
+    PromptProvider,
+    ReasoningEffort,
+    TokenEstimate,
+    TokenEstimateSource,
+    ToolAttributes,
+    ToolCallRequest,
+    ToolContext,
+    ToolNoiseFilter,
+    ToolSet,
+    TurnContext,
+    TurnEvent,
+    TurnInterceptor,
+)
+
+__all__ = [
+    "LLM",
+    "AbortTurn",
+    "Agent",
+    "ChatCommit",
+    "ChatMeta",
+    "ChatStore",
+    "Consolidator",
+    "ContentSource",
+    "ContextResult",
+    "EventSink",
+    "FilePart",
+    "ImagePart",
+    "InterceptorStage",
+    "LLMResponse",
+    "Message",
+    "MessageContent",
+    "MessageContentPart",
+    "PromptProvider",
+    "ReasoningEffort",
+    "TextPart",
+    "TokenEstimate",
+    "TokenEstimateSource",
+    "ToolAttributes",
+    "ToolCallRequest",
+    "ToolContext",
+    "ToolNoiseFilter",
+    "ToolSet",
+    "TurnContext",
+    "TurnEvent",
+    "TurnInterceptor",
+    "content_as_parts",
+    "validate_message_content",
+    "validate_message_part",
+]
