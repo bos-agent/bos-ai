@@ -27,6 +27,56 @@ InterceptorStage = Literal[
 # ── Turn events (the agent's output stream) ────────────────────────────────
 
 
+# The TurnEvent vocabulary is an OPEN extension point: plugins emit their own
+# events (e.g. event_type "task"/"plan") to join the turn lifecycle, so the
+# fields stay plain ``str``. These namespace classes name the *core's own*
+# canonical values so emitters and consumers reference a symbol instead of
+# duplicating string literals — they are a shared reference, not a closed set.
+
+
+class AgentEventType:
+    """``event_type`` values the Agent itself emits."""
+
+    turn = "turn"
+    llm = "llm"
+    response = "response"
+    tool = "tool"
+
+
+class EventPhase:
+    """``phase`` values: the point within an event's span."""
+
+    start = "start"
+    finish = "finish"
+    fail = "fail"
+
+
+class EventStage:
+    """``stage`` labels for the turn lifecycle (mirror ``InterceptorStage``)."""
+
+    prepare = "prepare"
+    before_llm = "before_llm"
+    after_llm = "after_llm"
+    after_tool = "after_tool"
+    final_response = "final_response"
+    max_iteration = "max_iteration"
+    error = "error"
+
+
+class EventDetail:
+    """``detail`` values the Agent emits (fine-grained sub-kind)."""
+
+    start = "start"
+    thinking = "thinking"
+    tool_calls = "tool_calls"
+    response_ready = "response_ready"
+    final = "final"
+    tool_call = "tool_call"
+    tool_result = "tool_result"
+    max_iteration = "max_iteration"
+    error = "error"
+
+
 @dataclass
 class TurnEvent:
     event_type: str

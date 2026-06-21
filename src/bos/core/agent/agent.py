@@ -19,9 +19,13 @@ from ._utils import (
 )
 from .contract import (
     LLM,
+    AgentEventType,
     ChatStore,
     ContextResult,
+    EventDetail,
+    EventPhase,
     EventSink,
+    EventStage,
     InterceptorStage,
     Message,
     MessageContent,
@@ -395,23 +399,28 @@ class Agent:
             # re-rendering it into the system prompt mid-turn is redundant and
             # would needlessly churn the prompt-cache prefix.
             ctx.set_system_prompt(await self._build_system_prompt(ctx))
-            await _emit_event("turn", "start", stage="prepare", detail="start")
+            await _emit_event(AgentEventType.turn, EventPhase.start, stage=EventStage.prepare, detail=EventDetail.start)
             iteration = 0
             while True:
                 if iteration >= self._max_iterations:
                     # max iterations reached
                     ctx.add_message({"role": "assistant", "content": "(max iterations reached)"})
                     await _run_interceptor("max_iteration")
-                    await _emit_event("turn", "fail", stage="max_iteration", detail="max_iteration")
+                    await _emit_event(
+                        AgentEventType.turn,
+                        EventPhase.fail,
+                        stage=EventStage.max_iteration,
+                        detail=EventDetail.max_iteration,
+                    )
                     break
                 iteration += 1
                 await _interrupt()
                 await _run_interceptor("before_llm")
                 await _emit_event(
-                    "llm",
-                    "start",
-                    stage="before_llm",
-                    detail="thinking",
+                    AgentEventType.llm,
+                    EventPhase.start,
+                    stage=EventStage.before_llm,
+                    detail=EventDetail.thinking,
                     metadata={"iteration": iteration, "max_iterations": self._max_iterations},
                 )
 
@@ -428,10 +437,10 @@ class Agent:
                 # model's thinking content and any tool calls.
                 thinking = _resolve_thinking(response)
                 await _emit_event(
-                    "llm",
-                    "finish",
-                    stage="after_llm",
-                    detail="tool_calls" if response.tool_calls else "response_ready",
+                    AgentEventType.llm,
+                    EventPhase.finish,
+                    stage=EventStage.after_llm,
+                    detail=EventDetail.tool_calls if response.tool_calls else EventDetail.response_ready,
                     content=thinking,
                     tool_calls=(
                         [{"name": tc.name, "arguments": tc.arguments} for tc in response.tool_calls]
@@ -468,10 +477,10 @@ class Agent:
                     ctx.final_content = final_content
                     await _run_interceptor("final_response")
                     await _emit_event(
-                        "response",
-                        "finish",
-                        stage="final_response",
-                        detail="final",
+                        AgentEventType.response,
+                        EventPhase.finish,
+                        stage=EventStage.final_response,
+                        detail=EventDetail.final,
                         content=final_content,
                     )
                     break
@@ -489,9 +498,9 @@ class Agent:
                 for batch in self._tool_call_batches(response.tool_calls):
                     for tc in batch:
                         await _emit_event(
-                            "tool",
-                            "start",
-                            detail="tool_call",
+                            AgentEventType.tool,
+                            EventPhase.start,
+                            detail=EventDetail.tool_call,
                             tool_name=tc.name,
                             content=json.dumps(tc.arguments, default=str),
                         )
@@ -510,10 +519,10 @@ class Agent:
                         })
                         await _run_interceptor("after_tool")
                         await _emit_event(
-                            "tool",
-                            "finish",
-                            stage="after_tool",
-                            detail="tool_result",
+                            AgentEventType.tool,
+                            EventPhase.finish,
+                            stage=EventStage.after_tool,
+                            detail=EventDetail.tool_result,
                             tool_name=tc.name,
                             content=tool_result,
                         )
@@ -531,7 +540,7 @@ class Agent:
             logger.error("Error in agent: %s", e, exc_info=True)
             ctx.add_message({"role": "assistant", "content": f"(error: {e})"})
             await _run_interceptor("error")
-            await _emit_event("turn", "fail", detail="error", content=str(e))
+            await _emit_event(AgentEventType.turn, EventPhase.fail, detail=EventDetail.error, content=str(e))
         finally:
             await _persist_turn()
         return ctx.final_response

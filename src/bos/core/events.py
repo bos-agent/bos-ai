@@ -9,13 +9,22 @@ from typing import Any
 
 from bos.protocol import MessageType, TurnEvent
 
-from .contract import EventSink, MailBox
+from .contract import AgentEventType, EventSink, MailBox
 
 logger = logging.getLogger(__name__)
 
 HostEventHandler = Callable[[TurnEvent], Awaitable[None] | None]
 
-CLIENT_TURN_EVENT_TYPES: tuple[str, ...] = ("turn", "llm", "response", "tool", "task", "plan")
+# The first four are the Agent's own event types; "task"/"plan" are emitted by
+# the task/plan plugins (the event vocabulary is an open extension point).
+CLIENT_TURN_EVENT_TYPES: tuple[str, ...] = (
+    AgentEventType.turn,
+    AgentEventType.llm,
+    AgentEventType.response,
+    AgentEventType.tool,
+    "task",
+    "plan",
+)
 
 
 def derive_event_sink(event_sink: EventSink | None, **defaults: Any) -> EventSink | None:
