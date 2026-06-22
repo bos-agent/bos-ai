@@ -27,7 +27,6 @@ from .contract import (
     HarnessPlugin,
     InterceptorStage,
     JobRunner,
-    MailBox,
     MailRoute,
     PluginServices,
     ToolAttributes,
@@ -83,7 +82,6 @@ class AgentRegistry:
 
 
 CURRENT_HARNESS: contextvars.ContextVar[AgentHarness] = contextvars.ContextVar("current_harness")
-CURRENT_MAILBOX: contextvars.ContextVar[MailBox] = contextvars.ContextVar("current_mailbox")
 
 
 class ResolvedToolSet:

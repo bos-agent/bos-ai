@@ -93,7 +93,6 @@ from .contract import (
 )
 from .harness import (
     CURRENT_HARNESS,
-    CURRENT_MAILBOX,
     AgentHarness,
     AgentRegistry,
     ChainInterceptor,
@@ -113,7 +112,6 @@ __all__ = [
     "BackgroundLLM",
     "BaseChannel",
     "CURRENT_HARNESS",
-    "CURRENT_MAILBOX",
     "Channel",
     "ChainInterceptor",
     "ChatCommit",

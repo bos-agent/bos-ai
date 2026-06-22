@@ -196,12 +196,12 @@ The actor's imports ([actor.py:11-17](../../src/bos/core/actor.py#L11-L17)) clas
 | `.agent` (Agent, TurnContext, AbortTurn) | inner (agent) | ✅ legal |
 | `.chat_state` (ChatState, ChatStateError) | sibling module, stdlib-only | ⚠️ relocate into the ring |
 | `.events` (HostChannelSink, MailboxEventSink, CLIENT_TURN_EVENT_TYPES) | sibling module | ⚠️ relocate into the ring |
-| `.contract` (MailBox, LifecycleBus, LifecycleEvent, LifecycleKind) | **outer (harness ring)** | ❌ **outward** |
-| `.harness` (CURRENT_MAILBOX) | **outer (harness ring)** | ❌ **outward** |
+| `.contract` (MailBox, EventBus, SessionEvent, SessionEventKind) | **outer (harness ring)** | ❌ **outward** |
+| ~~`.harness` (CURRENT_MAILBOX)~~ | — | ✅ **resolved** — `CURRENT_MAILBOX` deleted as dead code ([OPEN-A]→B); the actor no longer imports `.harness` at all |
 
-The last two break the rule. The actor depends on ports defined in the *harness-ring* contract
-([contract.py](../../src/bos/core/contract.py)) and on a contextvar defined in
-[harness.py:86](../../src/bos/core/harness.py#L86).
+The `.contract` import still breaks the rule. The actor depends on ports defined in the *harness-ring* contract
+([contract.py](../../src/bos/core/contract.py)). (The former outward dependency on `CURRENT_MAILBOX` in
+`harness.py` is gone — see §2.4.)
 
 ### 2.3 Proposed end state
 
@@ -234,18 +234,15 @@ inward import (harness → actor). `bos.core.events` is imported directly by one
 (`tests/test_host_channel_sink.py`); `bos.core.chat_state` by one test (`tests/test_actor_commands.py`).
 These either get a thin re-export shim at the old path or a one-line import update.
 
-### 2.4 `CURRENT_MAILBOX` disposition
+### 2.4 `CURRENT_MAILBOX` disposition — RESOLVED (B: deleted)
 
-`CURRENT_MAILBOX` is **set/reset in the actor but read nowhere** — no `.get()` exists anywhere in `src`
-or `tests`. It is dead plumbing today, yet it is part of the public surface (`core/__init__.py` exports
-it). Options:
-
-- **(A) Move ownership into the actor ring** (it semantically *is* "the mailbox of the running turn"),
-  keep the `from bos.core import CURRENT_MAILBOX` re-export. No behavior change, no break. **Recommended.**
-- (B) Delete it as dead code — smaller surface, but a **breaking change** to the public API for any
-  out-of-tree tool that reads it.
-
-**[OPEN-A]** Confirm no out-of-tree consumer relies on `CURRENT_MAILBOX` being set, then choose A or B.
+`CURRENT_MAILBOX` was **set/reset in the actor but read nowhere** — no `.get()` existed anywhere in `src`
+or `tests`, pure dead plumbing. **[OPEN-A] resolved to option B: deleted as dead code.** Removed the
+definition (`harness.py`), the actor's set/reset (and the now-unused `contextvars` import + `token`
+plumbing + empty `finally`), and the `core/__init__.py` export. This also drops the actor's *only*
+`.harness` import, eliminating that §2.2 violation outright. It is a breaking change to the public API
+for any out-of-tree tool that read it — accepted, since nothing in-tree did and the value was never
+populated for readers anyway. Gates green (665 tests, ruff, pyright). No re-export/alias kept.
 
 ### 2.5 The Agent public-API boundary (the real design issue)
 
@@ -306,9 +303,9 @@ the ports, since it changes the target module.
 ### 2.9 Readiness
 
 The pure ring-move (§2.3–§2.5, path **D1**) depends on nothing outside this branch and is implementable
-now. It is smaller than the agent extraction was. **Gate:** [OPEN-A] (CURRENT_MAILBOX), [OPEN-B]
-(messaging ring), [OPEN-C] (chat_store injection) should be resolved before code; [OPEN-D] (SRP split)
-and [OPEN-F] (EventBus home) can be deferred without blocking.
+now. It is smaller than the agent extraction was. **Gate:** [OPEN-A] (CURRENT_MAILBOX) ✅ resolved (§2.4);
+[OPEN-B] (messaging ring), [OPEN-C] (chat_store injection) should be resolved before the remaining code;
+[OPEN-D] (SRP split) and [OPEN-F] (EventBus home) can be deferred without blocking.
 
 ### 2.10 Event model — resolved (supersedes the event-port plan in §2.3)
 
@@ -412,7 +409,7 @@ so decisions made during extraction are captured here rather than guessed up fro
 
 ## Open Questions
 
-- **[OPEN-A]** `CURRENT_MAILBOX`: move-and-keep (A) or delete as dead code (B)? Any out-of-tree reader?
+- ~~**[OPEN-A]** `CURRENT_MAILBOX`: move-and-keep (A) or delete as dead code (B)?~~ **RESOLVED → B (deleted); §2.4.**
 - **[OPEN-B]** Does messaging (`Envelope`/`MailBox`/`MailRoute`) become its own inner leaf ring, or live
   in the actor ring?
 - **[OPEN-C]** Give the actor `chat_store` by injection or via a public `Agent.chat_store` property?
@@ -430,3 +427,4 @@ so decisions made during extraction are captured here rather than guessed up fro
 | 2026-06-22 | Initial authoring | Establish the dependency-ring model; document the completed `agent` ring as the reference shape (§1); open the `actor` ring for design with proposal + open questions (§2) |
 | 2026-06-22 | Resolve event model (§2.10) | Rename `EventSink`→`TurnEventSink` (emit-only callback, not a bus); rename+generalize `LifecycleBus`/`LifecycleEvent`/`LifecycleKind` → a single type-keyed `EventBus` over a `SessionEvent` hierarchy rooted at `Event`; codify the messages-vs-events routing rule; add [OPEN-F] |
 | 2026-06-22 | Land the rename-only step | Implemented the §2.10 renames + `Event` base marker on `re-arch` with old names kept as back-compat aliases (subscription left kind-keyed; type-keying deferred to the 2nd event category). Gates green: 665 tests pass, ruff clean, pyright 0 errors. Tests untouched — proves the aliases hold |
+| 2026-06-22 | Resolve [OPEN-A] (§2.4) | Deleted `CURRENT_MAILBOX` as dead code (set/reset, never read): removed from `harness.py`, the actor (incl. the now-unused `contextvars`/`token`/`finally` plumbing — dropping the actor's only `.harness` import), and `core/__init__.py`. Eliminates one §2.2 outward violation. Gates green: 665 tests, ruff, pyright |

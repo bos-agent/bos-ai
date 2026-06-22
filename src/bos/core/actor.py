@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextvars
 import json
 import logging
 import uuid
@@ -14,7 +13,6 @@ from .agent import AbortTurn, Agent, TurnContext
 from .chat_state import ChatState, ChatStateError
 from .contract import EventBus, MailBox, SessionEvent, SessionEventKind
 from .events import CLIENT_TURN_EVENT_TYPES, HostChannelSink, MailboxEventSink
-from .harness import CURRENT_MAILBOX
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -302,7 +300,6 @@ class AgentActor:
         content: MessageContent,
         inbound_env: Envelope | None = None,
     ) -> None:
-        token: contextvars.Token | None = None
         committed_revision: int | None = None
         turn_ctx = ActorTurnContext(
             chat_id=chat_id,
@@ -328,7 +325,6 @@ class AgentActor:
             return
 
         try:
-            token = CURRENT_MAILBOX.set(self._mailbox)
             mailbox_sink = _RouteAwareMailboxEventSink(
                 self._mailbox,
                 reply_recipient,
@@ -365,9 +361,6 @@ class AgentActor:
                 ActorTurnResult(status="error", committed_revision=committed_revision, error=exc),
             )
             raise
-        finally:
-            if token is not None:
-                CURRENT_MAILBOX.reset(token)
 
         if not self._execution_is_current(chat_id, generation):
             await self._on_turn_finished(
