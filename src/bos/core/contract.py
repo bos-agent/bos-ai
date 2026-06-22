@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar, Generic, Literal, Protocol, TypeVar, runtime_checkable
 
-from bos.core.actor import Envelope, MessageType
+from bos.core.actor import Envelope, MailBox, MessageType
 
 # Outer-ring contracts (extension registry, jobs, lifecycle, channels, mailbox
 # wire, plugins). These depend *inward* on the agent core.
@@ -241,24 +241,8 @@ ep_mail_route = ExtensionPoint(
 )
 
 
-@runtime_checkable
-class MailBox(Protocol):
-    @property
-    def address(self) -> str: ...
-
-    async def receive(self) -> Envelope: ...
-
-    async def send(
-        self,
-        recipient: str,
-        content: MessageContent,
-        *,
-        content_type: MessageType | str = MessageType.MESSAGE,
-        chat_id: str | None = None,
-        metadata: dict[str, Any] | None = None,
-    ) -> None: ...
-
-    async def receive_nowait(self) -> Envelope | None: ...
+# MailBox (point-to-point messaging endpoint) is owned by the actor foundation
+# (bos.core.actor) — imported and re-exported above (BEP 13 §2.7).
 
 
 @runtime_checkable

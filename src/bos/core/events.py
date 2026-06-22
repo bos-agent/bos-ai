@@ -7,10 +7,10 @@ from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from typing import Any
 
-from bos.core.actor import MessageType
+from bos.core.actor import MailBox, MessageType
 from bos.protocol import TurnEvent
 
-from .contract import AgentEventType, MailBox, TurnEventSink
+from .contract import AgentEventType, TurnEventSink
 
 logger = logging.getLogger(__name__)
 
