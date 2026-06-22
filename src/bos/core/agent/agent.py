@@ -22,10 +22,6 @@ from .contract import (
     AgentEventType,
     ChatStore,
     ContextResult,
-    EventDetail,
-    EventPhase,
-    EventSink,
-    EventStage,
     InterceptorStage,
     Message,
     MessageContent,
@@ -38,6 +34,10 @@ from .contract import (
     ToolSet,
     TurnContext,
     TurnEvent,
+    TurnEventDetail,
+    TurnEventPhase,
+    TurnEventSink,
+    TurnEventStage,
     TurnInterceptor,
 )
 
@@ -247,7 +247,7 @@ class Agent:
         interrupt: Callable[[], dict[str, Any] | Awaitable[dict[str, Any]] | None] | None = None,
         ctx_metadata: dict[str, Any] | None = None,
         llm_args: dict[str, Any] | None = None,
-        event_sink: EventSink | None = None,
+        event_sink: TurnEventSink | None = None,
         turn_id: str | None = None,
         commit_observer: Callable[[Any], Any | Awaitable[Any]] | None = None,
     ) -> str:
@@ -399,7 +399,12 @@ class Agent:
             # re-rendering it into the system prompt mid-turn is redundant and
             # would needlessly churn the prompt-cache prefix.
             ctx.set_system_prompt(await self._build_system_prompt(ctx))
-            await _emit_event(AgentEventType.turn, EventPhase.start, stage=EventStage.prepare, detail=EventDetail.start)
+            await _emit_event(
+                AgentEventType.turn,
+                TurnEventPhase.start,
+                stage=TurnEventStage.prepare,
+                detail=TurnEventDetail.start,
+            )
             iteration = 0
             while True:
                 if iteration >= self._max_iterations:
@@ -408,9 +413,9 @@ class Agent:
                     await _run_interceptor("max_iteration")
                     await _emit_event(
                         AgentEventType.turn,
-                        EventPhase.fail,
-                        stage=EventStage.max_iteration,
-                        detail=EventDetail.max_iteration,
+                        TurnEventPhase.fail,
+                        stage=TurnEventStage.max_iteration,
+                        detail=TurnEventDetail.max_iteration,
                     )
                     break
                 iteration += 1
@@ -418,9 +423,9 @@ class Agent:
                 await _run_interceptor("before_llm")
                 await _emit_event(
                     AgentEventType.llm,
-                    EventPhase.start,
-                    stage=EventStage.before_llm,
-                    detail=EventDetail.thinking,
+                    TurnEventPhase.start,
+                    stage=TurnEventStage.before_llm,
+                    detail=TurnEventDetail.thinking,
                     metadata={"iteration": iteration, "max_iterations": self._max_iterations},
                 )
 
@@ -438,9 +443,9 @@ class Agent:
                 thinking = _resolve_thinking(response)
                 await _emit_event(
                     AgentEventType.llm,
-                    EventPhase.finish,
-                    stage=EventStage.after_llm,
-                    detail=EventDetail.tool_calls if response.tool_calls else EventDetail.response_ready,
+                    TurnEventPhase.finish,
+                    stage=TurnEventStage.after_llm,
+                    detail=TurnEventDetail.tool_calls if response.tool_calls else TurnEventDetail.response_ready,
                     content=thinking,
                     tool_calls=(
                         [{"name": tc.name, "arguments": tc.arguments} for tc in response.tool_calls]
@@ -478,9 +483,9 @@ class Agent:
                     await _run_interceptor("final_response")
                     await _emit_event(
                         AgentEventType.response,
-                        EventPhase.finish,
-                        stage=EventStage.final_response,
-                        detail=EventDetail.final,
+                        TurnEventPhase.finish,
+                        stage=TurnEventStage.final_response,
+                        detail=TurnEventDetail.final,
                         content=final_content,
                     )
                     break
@@ -499,8 +504,8 @@ class Agent:
                     for tc in batch:
                         await _emit_event(
                             AgentEventType.tool,
-                            EventPhase.start,
-                            detail=EventDetail.tool_call,
+                            TurnEventPhase.start,
+                            detail=TurnEventDetail.tool_call,
                             tool_name=tc.name,
                             content=json.dumps(tc.arguments, default=str),
                         )
@@ -520,9 +525,9 @@ class Agent:
                         await _run_interceptor("after_tool")
                         await _emit_event(
                             AgentEventType.tool,
-                            EventPhase.finish,
-                            stage=EventStage.after_tool,
-                            detail=EventDetail.tool_result,
+                            TurnEventPhase.finish,
+                            stage=TurnEventStage.after_tool,
+                            detail=TurnEventDetail.tool_result,
                             tool_name=tc.name,
                             content=tool_result,
                         )
@@ -540,7 +545,7 @@ class Agent:
             logger.error("Error in agent: %s", e, exc_info=True)
             ctx.add_message({"role": "assistant", "content": f"(error: {e})"})
             await _run_interceptor("error")
-            await _emit_event(AgentEventType.turn, EventPhase.fail, detail=EventDetail.error, content=str(e))
+            await _emit_event(AgentEventType.turn, TurnEventPhase.fail, detail=TurnEventDetail.error, content=str(e))
         finally:
             await _persist_turn()
         return ctx.final_response
@@ -566,7 +571,7 @@ class Agent:
             batches.append(pending_safe)
         return batches
 
-    async def _call_tool(self, tc: ToolCallRequest, ctx: TurnContext, event_sink: EventSink | None = None) -> str:
+    async def _call_tool(self, tc: ToolCallRequest, ctx: TurnContext, event_sink: TurnEventSink | None = None) -> str:
         try:
             return await self._invoke_tool(
                 tc.name,

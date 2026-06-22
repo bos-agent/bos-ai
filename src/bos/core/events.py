@@ -9,7 +9,7 @@ from typing import Any
 
 from bos.protocol import MessageType, TurnEvent
 
-from .contract import AgentEventType, EventSink, MailBox
+from .contract import AgentEventType, MailBox, TurnEventSink
 
 logger = logging.getLogger(__name__)
 
@@ -27,14 +27,14 @@ CLIENT_TURN_EVENT_TYPES: tuple[str, ...] = (
 )
 
 
-def derive_event_sink(event_sink: EventSink | None, **defaults: Any) -> EventSink | None:
+def derive_event_sink(event_sink: TurnEventSink | None, **defaults: Any) -> TurnEventSink | None:
     if event_sink is None:
         return None
     return DerivedEventSink(event_sink, defaults)
 
 
 class DerivedEventSink:
-    def __init__(self, inner: EventSink, defaults: dict[str, Any]) -> None:
+    def __init__(self, inner: TurnEventSink, defaults: dict[str, Any]) -> None:
         self._inner = inner
         self._defaults = {key: value for key, value in defaults.items() if value is not None}
 

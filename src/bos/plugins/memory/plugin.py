@@ -31,7 +31,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from bos.core.agent import TurnContext
-    from bos.core.contract import Job, LifecycleEvent
+    from bos.core.contract import Job, SessionEvent
 
     from ._watermark import WatermarkStore
     from .consolidator import DefaultMemoryConsolidator
@@ -220,7 +220,7 @@ class MemoryHarnessPlugin:
     def _make_consolidation_job_factory(self, trigger: TriggerName = "session_close"):
         from .job import MemoryConsolidationJob
 
-        def factory(event: LifecycleEvent | None) -> Job | None:
+        def factory(event: SessionEvent | None) -> Job | None:
             if event is None or event.base_revision is None or not event.actor_name:
                 return None
             bundle = self._per_agent.get(event.actor_name)

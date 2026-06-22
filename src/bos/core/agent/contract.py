@@ -43,7 +43,7 @@ class AgentEventType:
     tool = "tool"
 
 
-class EventPhase:
+class TurnEventPhase:
     """``phase`` values: the point within an event's span."""
 
     start = "start"
@@ -51,7 +51,7 @@ class EventPhase:
     fail = "fail"
 
 
-class EventStage:
+class TurnEventStage:
     """``stage`` labels for the turn lifecycle (mirror ``InterceptorStage``)."""
 
     prepare = "prepare"
@@ -63,7 +63,7 @@ class EventStage:
     error = "error"
 
 
-class EventDetail:
+class TurnEventDetail:
     """``detail`` values the Agent emits (fine-grained sub-kind)."""
 
     start = "start"
@@ -313,7 +313,7 @@ class TurnContext:
     tool_defs: list[dict[str, Any]] = field(default_factory=list)
     current_llm_response: LLMResponse | None = None
     final_content: str | None = None
-    event_sink: EventSink | None = None
+    event_sink: TurnEventSink | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
     current_message_projector: Callable[[Message], dict[str, Any]] | None = None
 
@@ -390,7 +390,12 @@ class TurnInterceptor(Protocol):
 
 
 @runtime_checkable
-class EventSink(Protocol):
+class TurnEventSink(Protocol):
+    """Emit-only callback port for intra-turn ``TurnEvent``s (BEP 13 §2.10).
+
+    Not a bus — the Agent is a pure emitter; fan-out/subscription is an outer
+    concern (``HostChannelSink``)."""
+
     async def emit(self, event: TurnEvent) -> None: ...
 
 
@@ -445,7 +450,7 @@ class ToolContext:
     agent_name: str
     chat_id: str
     turn_id: str
-    event_sink: EventSink | None = None
+    event_sink: TurnEventSink | None = None
     # Escape hatch for plugin/runtime-specific context that is intentionally
     # not modeled as a core ToolContext field.
     extra_data: Mapping[str, Any] = field(default_factory=dict)

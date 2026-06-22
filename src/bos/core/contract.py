@@ -22,10 +22,6 @@ from .agent import (
     ChatStore,
     Consolidator,
     ContextResult,
-    EventDetail,
-    EventPhase,
-    EventSink,
-    EventStage,
     InterceptorStage,
     LLMResponse,
     Message,
@@ -41,6 +37,10 @@ from .agent import (
     ToolSet,
     TurnContext,
     TurnEvent,
+    TurnEventDetail,
+    TurnEventPhase,
+    TurnEventSink,
+    TurnEventStage,
     TurnInterceptor,
 )
 from .registry import ExtensionPoint, ToolRegistry
@@ -130,14 +130,26 @@ ep_turn_interceptor = ExtensionPoint(
 )
 
 
-# ── BEP 11 §1: Lifecycle bus ───────────────────────────────────────────────
-
-LifecycleKind = Literal["turn_complete", "session_close"]
+# ── BEP 11 §1 / BEP 13 §2.10: Platform event bus ──────────────────────────
+#
+# ``Event`` is the ring-neutral marker for the platform event hierarchy. Each
+# category (today only ``SessionEvent``; later ``ActorEvent``, …) subclasses it
+# and carries its own typed ``kind`` discriminator. The bus stays keyed by
+# ``kind`` while ``SessionEvent`` is the sole category; it generalizes to
+# subscribe-by-type once a second category lands (BEP 13 §2.10).
 
 
 @dataclass(frozen=True)
-class LifecycleEvent:
-    kind: LifecycleKind
+class Event:
+    """Marker base for platform events broadcast on the ``EventBus``."""
+
+
+SessionEventKind = Literal["turn_complete", "session_close"]
+
+
+@dataclass(frozen=True)
+class SessionEvent(Event):
+    kind: SessionEventKind
     chat_id: str
     actor_name: str | None
     base_revision: int | None
@@ -148,9 +160,16 @@ class LifecycleEvent:
 
 
 @runtime_checkable
-class LifecycleBus(Protocol):
-    def subscribe(self, kind: LifecycleKind, handler: Callable[[LifecycleEvent], Awaitable[None]]) -> None: ...
-    async def emit(self, event: LifecycleEvent) -> None: ...
+class EventBus(Protocol):
+    def subscribe(self, kind: SessionEventKind, handler: Callable[[SessionEvent], Awaitable[None]]) -> None: ...
+    async def emit(self, event: SessionEvent) -> None: ...
+
+
+# Back-compat aliases — historical names before BEP 13 §2.10 renamed the bus
+# and its events for their subject (the session). Old imports keep resolving.
+LifecycleKind = SessionEventKind
+LifecycleEvent = SessionEvent
+LifecycleBus = EventBus
 
 
 # ── BEP 11 §2: Job runner ──────────────────────────────────────────────────
@@ -184,7 +203,7 @@ class JobRunner(Protocol):
     def bind_trigger(
         self,
         trigger: JobTrigger,
-        factory: Callable[[LifecycleEvent | None], Job | None],
+        factory: Callable[[SessionEvent | None], Job | None],
     ) -> None: ...
     async def drain(self, *, timeout: float) -> None: ...
     async def status(self, job_id: str) -> JobStatus: ...
@@ -346,7 +365,7 @@ class PluginServices:
     consolidator: Consolidator
     subagents: SubagentRuntime
     chat_store: ChatStore
-    events: LifecycleBus | None = None
+    events: EventBus | None = None
     jobs: JobRunner | None = None
     background_llm: BackgroundLLM | None = None
 
@@ -393,6 +412,8 @@ __all__ = [
     "Channel",
     "Closeable",
     "Envelope",
+    "Event",
+    "EventBus",
     "HarnessPlugin",
     "Job",
     "JobRecord",
@@ -406,6 +427,8 @@ __all__ = [
     "MailRoute",
     "MessageType",
     "PluginServices",
+    "SessionEvent",
+    "SessionEventKind",
     "SettingsT",
     "SubagentRuntime",
     "ep_agent",
@@ -426,10 +449,9 @@ __all__ = [
     "ChatStore",
     "Consolidator",
     "ContextResult",
-    "EventDetail",
-    "EventPhase",
-    "EventSink",
-    "EventStage",
+    "TurnEventDetail",
+    "TurnEventPhase",
+    "TurnEventStage",
     "InterceptorStage",
     "LLMResponse",
     "Message",
@@ -445,5 +467,6 @@ __all__ = [
     "ToolSet",
     "TurnContext",
     "TurnEvent",
+    "TurnEventSink",
     "TurnInterceptor",
 ]

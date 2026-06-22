@@ -23,10 +23,10 @@ from .contract import (
     BackgroundLLM,
     ChatStore,
     Consolidator,
+    EventBus,
     HarnessPlugin,
     InterceptorStage,
     JobRunner,
-    LifecycleBus,
     MailBox,
     MailRoute,
     PluginServices,
@@ -270,7 +270,7 @@ class AgentHarness:
         self.consolidator: Consolidator | None = None
         self.interceptor: ChainInterceptor | None = None
         self.llm: LLMClient | None = None
-        self.events: LifecycleBus | None = None
+        self.events: EventBus | None = None
         self.jobs: JobRunner | None = None
         self.background_llm: BackgroundLLM | None = None
 
@@ -295,12 +295,12 @@ class AgentHarness:
         self.consolidator = await self._create_consolidator()
         self.interceptor = ChainInterceptor(await self._resolve_interceptors(self._interceptors_impl))
 
-        # BEP 11 services: in-process LifecycleBus, JobRunner, BackgroundLLM.
+        # BEP 11 services: in-process EventBus, JobRunner, BackgroundLLM.
         from bos.core.contract import ep_job_runner
         from bos.core.defaults.background_llm import DefaultBackgroundLLM
-        from bos.core.defaults.lifecycle import DefaultLifecycleBus
+        from bos.core.defaults.lifecycle import DefaultEventBus
 
-        self.events = DefaultLifecycleBus()
+        self.events = DefaultEventBus()
         self.jobs = await ep_job_runner.invoke(self._job_runner_impl, {"bus": self.events})
         assert self.jobs is not None  # ep_job_runner has a _default, so creation never returns None
         await self.jobs.start()

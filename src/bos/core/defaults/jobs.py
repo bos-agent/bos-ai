@@ -14,12 +14,12 @@ from datetime import datetime
 from typing import Any
 
 from bos.core.contract import (
+    EventBus,
     Job,
     JobRecord,
     JobStatus,
     JobTrigger,
-    LifecycleBus,
-    LifecycleEvent,
+    SessionEvent,
     ep_job_runner,
 )
 
@@ -41,7 +41,7 @@ def _parse_duration(value: str | int | float) -> float:
 class InProcJobRunner:
     def __init__(
         self,
-        bus: LifecycleBus | None = None,
+        bus: EventBus | None = None,
         *,
         max_concurrency: int = 2,
         idle_after: str | int | float = 300,
@@ -58,7 +58,7 @@ class InProcJobRunner:
         # reference to a bare create_task() result, so without this the task
         # could be GC'd mid-flight, dropping the idle consolidation silently.
         self._idle_tasks: set[asyncio.Task] = set()
-        self._trigger_factories: dict[JobTrigger, Callable[[LifecycleEvent | None], Job | None]] = {}
+        self._trigger_factories: dict[JobTrigger, Callable[[SessionEvent | None], Job | None]] = {}
         self._started = False
         self._draining = asyncio.Event()
 
@@ -130,7 +130,7 @@ class InProcJobRunner:
     def bind_trigger(
         self,
         trigger: JobTrigger,
-        factory: Callable[[LifecycleEvent | None], Job | None],
+        factory: Callable[[SessionEvent | None], Job | None],
     ) -> None:
         self._trigger_factories[trigger] = factory
         if self._bus is None:
@@ -236,7 +236,7 @@ class InProcJobRunner:
             finally:
                 self._release_key(job.key, job_id)
 
-    async def _on_session_close(self, event: LifecycleEvent) -> None:
+    async def _on_session_close(self, event: SessionEvent) -> None:
         factory = self._trigger_factories.get("session_close")
         if factory is None:
             return
@@ -244,7 +244,7 @@ class InProcJobRunner:
         if job is not None:
             await self.submit(job)
 
-    async def _on_turn_complete_for_idle(self, event: LifecycleEvent) -> None:
+    async def _on_turn_complete_for_idle(self, event: SessionEvent) -> None:
         if "idle" not in self._trigger_factories:
             return
         existing = self._idle_timers.pop(event.chat_id, None)
@@ -256,14 +256,14 @@ class InProcJobRunner:
             lambda: self._spawn_idle(event),
         )
 
-    def _spawn_idle(self, event: LifecycleEvent) -> None:
+    def _spawn_idle(self, event: SessionEvent) -> None:
         # Retain a strong reference until the task finishes (asyncio only holds a
         # weak one), then drop it so the set does not grow unbounded.
         task = asyncio.create_task(self._fire_idle(event))
         self._idle_tasks.add(task)
         task.add_done_callback(self._idle_tasks.discard)
 
-    async def _fire_idle(self, event: LifecycleEvent) -> None:
+    async def _fire_idle(self, event: SessionEvent) -> None:
         self._idle_timers.pop(event.chat_id, None)
         factory = self._trigger_factories.get("idle")
         if factory is None:

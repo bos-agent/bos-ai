@@ -12,7 +12,7 @@ from bos.protocol import Envelope, MessageContent, MessageType, TurnEvent
 
 from .agent import AbortTurn, Agent, TurnContext
 from .chat_state import ChatState, ChatStateError
-from .contract import LifecycleBus, LifecycleEvent, LifecycleKind, MailBox
+from .contract import EventBus, MailBox, SessionEvent, SessionEventKind
 from .events import CLIENT_TURN_EVENT_TYPES, HostChannelSink, MailboxEventSink
 from .harness import CURRENT_MAILBOX
 
@@ -99,7 +99,7 @@ class AgentActor:
         mailbox: MailBox,
         chat_state: ChatState | None = None,
         *,
-        lifecycle_bus: LifecycleBus | None = None,
+        lifecycle_bus: EventBus | None = None,
     ):
         self._address = mailbox.address
         self._agent = agent
@@ -408,7 +408,7 @@ class AgentActor:
 
     async def _emit_lifecycle(
         self,
-        kind: LifecycleKind,
+        kind: SessionEventKind,
         *,
         chat_id: str,
         actor_name: str | None,
@@ -423,7 +423,7 @@ class AgentActor:
             return
         try:
             await self._lifecycle_bus.emit(
-                LifecycleEvent(
+                SessionEvent(
                     kind=kind,
                     chat_id=chat_id,
                     actor_name=actor_name,
