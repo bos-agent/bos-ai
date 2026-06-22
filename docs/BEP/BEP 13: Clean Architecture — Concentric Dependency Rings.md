@@ -101,10 +101,15 @@ actor, by the CLI and by the subagent runtime.
 
 `bos.core.agent` is a package that **imports stdlib only**, plus its own package-internal leaves
 (`._content`, `._utils`). It imports nothing from `core.contract`, `core.harness`, `bos.protocol`,
-`bos.gateway`, or any extension. This is enforceable by inspection of
-[agent/__init__.py](../../src/bos/core/agent/__init__.py) and the module headers — the docstring states
-the rule outright: *"This package imports stdlib only. Outer rings … implement these ports and depend
-inward on it."*
+`bos.gateway`, or any extension. **This is a firm invariant: the agent core is the absolute innermost
+ring and depends on *nothing* — not even `bos.protocol`.** The direction is the reverse: `bos.protocol`
+re-exports `TurnEvent`/`MessageContent` *from* the agent core ([turn_events.py](../../src/bos/protocol/turn_events.py),
+[protocol/__init__.py](../../src/bos/protocol/__init__.py)). This keeps the agent core a standalone
+library that can be lifted out to build other agent applications with no actor/mailbox/harness baggage.
+
+Enforced two ways: by the module docstring (*"This package imports stdlib only …"*) and by an automated
+guard — [tests/test_agent_ring_isolation.py](../../tests/test_agent_ring_isolation.py) statically asserts
+every import under `bos/core/agent/` resolves to stdlib or the package itself, so a regression fails CI.
 
 ### 1.3 Ports it owns
 
@@ -158,6 +163,8 @@ mechanism every later ring uses to move ownership inward without breaking call s
 A ring is "done" when:
 
 1. It imports only stdlib, inner rings, and `bos.protocol` — **zero outward imports** (grep-verifiable).
+   (Exception: the agent core itself imports *neither* — stdlib + its own leaves only, since
+   `bos.protocol` depends on it, not the reverse; see §1.2.)
 2. It **owns** the ports its inner-facing dependencies are expressed as; outer rings implement and inject.
 3. Each port has an inner default (noop/empty) so the ring is standalone-testable.
 4. It reaches into **no inner ring's privates** — only published API.
