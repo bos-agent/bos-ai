@@ -30,7 +30,6 @@ from ._utils import (
     _strip_think,
     _xml_attr,
 )
-from .actor import ActorTurnContext, ActorTurnResult, AgentActor
 from .agent import (
     LLM,
     AbortTurn,
@@ -57,6 +56,7 @@ from .agent import (
     TurnEventStage,
     TurnInterceptor,
 )
+from .agent_actor import ActorTurnContext, ActorTurnResult, AgentActor
 from .contract import (
     AgentPlugin,
     BackgroundLLM,

@@ -82,7 +82,7 @@ class TestTurnCompleteEmission:
     async def test_turn_complete_emits_with_base_revision(self):
         """When CoordinatedActor's _on_turn_finished sees status='completed',
         a LifecycleEvent fires on the injected bus with the committed revision."""
-        from bos.core.actor import ActorTurnContext, ActorTurnResult
+        from bos.core.agent_actor import ActorTurnContext, ActorTurnResult
         from bos.core.defaults.lifecycle import DefaultLifecycleBus
         from bos.gateway.actor_manager import CoordinatedActor
 
@@ -116,7 +116,7 @@ class TestTurnCompleteEmission:
 
     @pytest.mark.asyncio
     async def test_turn_complete_skipped_when_not_completed(self):
-        from bos.core.actor import ActorTurnContext, ActorTurnResult
+        from bos.core.agent_actor import ActorTurnContext, ActorTurnResult
         from bos.core.defaults.lifecycle import DefaultLifecycleBus
         from bos.gateway.actor_manager import CoordinatedActor
 
@@ -162,7 +162,7 @@ class TestSessionCloseEmission:
     @pytest.mark.asyncio
     async def test_retire_session_emits_session_close_with_none_revision_when_empty(self):
         """A session that never committed a turn closes with base_revision=None."""
-        from bos.core.actor import AgentActor, SessionState
+        from bos.core.agent_actor import AgentActor, SessionState
         from bos.core.defaults.lifecycle import DefaultLifecycleBus
 
         seen = []
@@ -187,7 +187,7 @@ class TestSessionCloseEmission:
     @pytest.mark.asyncio
     async def test_retire_session_forwards_last_committed_revision(self):
         """When the session has observed a commit, retire_session forwards that revision."""
-        from bos.core.actor import AgentActor, SessionState
+        from bos.core.agent_actor import AgentActor, SessionState
         from bos.core.defaults.lifecycle import DefaultLifecycleBus
 
         seen = []
@@ -211,7 +211,7 @@ class TestSessionCloseEmission:
 
     @pytest.mark.asyncio
     async def test_retire_session_no_bus_is_silent(self):
-        from bos.core.actor import AgentActor, SessionState
+        from bos.core.agent_actor import AgentActor, SessionState
 
         actor = AgentActor.__new__(AgentActor)
         actor._sessions = {"c1": SessionState(chat_id="c1")}
