@@ -5,26 +5,10 @@ import mimetypes
 from pathlib import Path
 from typing import Any
 
-from .message_types import MessageType
-
-# The message-content types and their structural validation are owned by the
-# agent core (``bos.core.agent``). ``bos.protocol`` stays a leaf at import time
-# — it pulls those symbols inward only lazily (inside functions) so importing
-# ``bos.protocol`` never triggers ``bos.core``.
-
-
-def is_message_content_type(content_type: MessageType | str) -> bool:
-    return str(content_type) == MessageType.MESSAGE
-
-
-def validate_envelope_content(content: Any, content_type: MessageType | str) -> None:
-    if is_message_content_type(content_type):
-        from bos.core.agent import validate_message_content
-
-        validate_message_content(content)
-        return
-    if not isinstance(content, str):
-        raise TypeError("Non-message envelopes require string content.")
+# Content rendering/encoding helpers (text preview, image encoding). Envelope
+# content validation moved out: the actor foundation's ``Envelope`` enforces the
+# generic transport invariant, and the agent core validates message content as
+# it processes a turn. This module no longer needs ``MessageType``.
 
 
 def content_to_plain_text(content: Any) -> str:

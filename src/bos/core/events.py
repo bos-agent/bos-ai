@@ -7,7 +7,8 @@ from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from typing import Any
 
-from bos.protocol import MessageType, TurnEvent
+from bos.core.actor import MessageType
+from bos.protocol import TurnEvent
 
 from .contract import AgentEventType, MailBox, TurnEventSink
 

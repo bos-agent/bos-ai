@@ -7,7 +7,8 @@ import uuid
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from bos.protocol import Envelope, MessageContent, MessageType, TurnEvent
+from bos.core.actor import Envelope, MessageType
+from bos.protocol import MessageContent, TurnEvent
 
 from .agent import AbortTurn, Agent, TurnContext
 from .chat_state import ChatState, ChatStateError

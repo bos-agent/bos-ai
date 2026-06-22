@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar, Generic, Literal, Protocol, TypeVar, runtime_checkable
 
-from bos.protocol import Envelope, MessageType
+from bos.core.actor import Envelope, MessageType
 
 # Outer-ring contracts (extension registry, jobs, lifecycle, channels, mailbox
 # wire, plugins). These depend *inward* on the agent core.

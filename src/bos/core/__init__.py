@@ -4,7 +4,7 @@ Lightweight single-file agent framework.
 
 from __future__ import annotations
 
-from bos.protocol import Envelope
+from bos.core.actor import Envelope
 
 from ._utils import (
     _aclose,
