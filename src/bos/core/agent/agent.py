@@ -398,7 +398,7 @@ class Agent:
             # memory write) is already present in the turn's message context, so
             # re-rendering it into the system prompt mid-turn is redundant and
             # would needlessly churn the prompt-cache prefix.
-            ctx.set_system_prompt(await self._build_system_prompt(ctx))
+            ctx.set_system_prompt(await self.build_system_prompt(ctx))
             await _emit_event(
                 AgentEventType.turn,
                 TurnEventPhase.start,
@@ -672,7 +672,7 @@ class Agent:
             )
         return formatted
 
-    async def _build_system_prompt(self, ctx: TurnContext) -> str:
+    async def build_system_prompt(self, ctx: TurnContext) -> str:
         system_sections = [self._system_prompt, *await self._prompt_provider.sections(ctx)]
         sections = [
             self._prompt_section_base(system_sections),
