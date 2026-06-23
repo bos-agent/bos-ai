@@ -14,6 +14,7 @@ from bos.protocol import WS_TAKEOVER_CLOSE_CODE, WS_TAKEOVER_CLOSE_REASON, Envel
 from ..core.actor_resolver import ActorResolutionError
 from ..core.channel_context import ChannelRuntimeContext
 from ..core.chat_coordinator import ChannelConversationRef
+from ..core.command_handler import CommandResult
 
 
 class WSChannel(BaseChannel[dict[str, Any]]):
@@ -129,36 +130,31 @@ class WSChannel(BaseChannel[dict[str, Any]]):
                 break
 
     async def _send_mail_loop(self, mailbox: MailBox) -> None:
+        # Carries actor output (replies, turn events, system events) to the
+        # client. Chat switching is no longer routed here — that is the control
+        # plane's job, handled synchronously in _deliver_command_result.
         while not self._ws.closed:
             env = await mailbox.receive()
-            selected_chat_id = _selected_chat_from_command_result(env)
-            out_chat_id = selected_chat_id or env.chat_id or self._chat_id
+            out_chat_id = env.chat_id or self._chat_id
             current_revision = await self._runtime.chat_coordinator.current_revision(out_chat_id)
             payload = _envelope_to_dict(env)
             metadata = dict(payload.get("metadata") or {})
             metadata["current_revision"] = current_revision
-            if selected_chat_id:
-                # Full transcript, not just unobserved messages: the client
-                # clears its viewport on chat switch and re-renders history.
-                metadata["missing_messages"] = await self._runtime.chat_coordinator.hydrate(
-                    chat_id=selected_chat_id,
-                )
-                self._chat_id = selected_chat_id
-                out_chat_id = selected_chat_id
             payload["metadata"] = metadata
             payload["chat_id"] = out_chat_id
             await self._ws.send_json(payload)
-            if selected_chat_id:
-                self._runtime.chat_coordinator.set_cursor(self.ref, out_chat_id, observed_revision=current_revision)
-            else:
-                self._runtime.chat_coordinator.mark_observed(
-                    chat_id=out_chat_id,
-                    ref=self.ref,
-                    revision=current_revision,
-                )
+            self._runtime.chat_coordinator.mark_observed(
+                chat_id=out_chat_id,
+                ref=self.ref,
+                revision=current_revision,
+            )
 
     async def _handle_inbound_payload(self, mailbox: MailBox, data: dict[str, Any]) -> None:
         content_type = data.get("content_type") or MessageType.MESSAGE
+        content: MessageContent = data.get("content", "")
+        if str(content_type) == str(MessageType.COMMAND):
+            await self._handle_command(content)
+            return
         chat_id = data.get("chat_id") or self._chat_id
         metadata = dict(data.get("metadata") or {})
         base_revision = _base_revision(data, metadata)
@@ -190,7 +186,6 @@ class WSChannel(BaseChannel[dict[str, Any]]):
         }
 
         target_address = f"agent@{self.target_actor}"
-        content: MessageContent = data.get("content", "")
         if str(content_type) == str(MessageType.MESSAGE):
             try:
                 route = self._runtime.actor_resolver.resolve(
@@ -212,6 +207,60 @@ class WSChannel(BaseChannel[dict[str, Any]]):
             chat_id=chat_id,
             metadata=metadata,
         )
+
+    async def _handle_command(self, content: MessageContent) -> None:
+        """Run a client slash-command through the gateway control plane and send
+        the result back natively — no COMMAND envelope, no actor mailbox."""
+        handler = self._runtime.command_handler
+        if handler is None:
+            await self._send_system_event(
+                {"event": "command_unavailable", "error": "No command handler configured."},
+                chat_id=self._chat_id,
+            )
+            return
+        command = content if isinstance(content, str) else ""
+        result = await handler.run(self.ref, command, target_actor=self.target_actor)
+        await self._deliver_command_result(result)
+
+    async def _deliver_command_result(self, result: CommandResult) -> None:
+        body: dict[str, Any] = {"name": result.name, "ok": result.ok}
+        if result.result is not None:
+            body["result"] = result.result
+        if result.error is not None:
+            body["error"] = result.error
+            body.setdefault("result", result.error)
+        if result.chat_id is not None:
+            body["chat_id"] = result.chat_id
+
+        # A /new or /resume switches the channel's chat: re-render from a full
+        # transcript and re-cursor (what _send_mail_loop used to do on a
+        # COMMAND_RESULT envelope, now done synchronously here).
+        switched = result.chat_id if (result.ok and result.name in ("new", "resume") and result.chat_id) else None
+        out_chat_id = switched or self._chat_id
+        current_revision = await self._runtime.chat_coordinator.current_revision(out_chat_id)
+        metadata: dict[str, Any] = {
+            "event": "command_result",
+            "channel_id": self.channel_id,
+            "current_revision": current_revision,
+        }
+        if switched:
+            metadata["missing_messages"] = await self._runtime.chat_coordinator.hydrate(chat_id=switched)
+            self._chat_id = switched
+            out_chat_id = switched
+        await self._ws.send_json(
+            _envelope_to_dict(
+                Envelope(
+                    sender=f"channel@{self.channel_id}",
+                    recipient=self.channel_id,
+                    content=json.dumps(body, default=str),
+                    content_type=MessageType.COMMAND_RESULT,
+                    chat_id=out_chat_id,
+                    metadata=metadata,
+                )
+            )
+        )
+        if switched:
+            self._runtime.chat_coordinator.set_cursor(self.ref, out_chat_id, observed_revision=current_revision)
 
     async def _send_preflight_rejection(self, preflight) -> None:
         if preflight.stale:
@@ -251,21 +300,6 @@ def _base_revision(data: dict[str, Any], metadata: dict[str, Any]) -> int | None
     if isinstance(raw, str) and raw.isdigit():
         return int(raw)
     return None
-
-
-def _selected_chat_from_command_result(env: Envelope) -> str | None:
-    if env.content_type != MessageType.COMMAND_RESULT:
-        return None
-    try:
-        payload = json.loads(env.content) if isinstance(env.content, str) else env.content
-    except Exception:
-        return None
-    if not isinstance(payload, dict) or not payload.get("ok"):
-        return None
-    if payload.get("name") not in {"new", "resume"}:
-        return None
-    chat_id = payload.get("chat_id")
-    return chat_id if isinstance(chat_id, str) and chat_id.strip() else None
 
 
 def _envelope_to_dict(env: Envelope) -> dict[str, Any]:
