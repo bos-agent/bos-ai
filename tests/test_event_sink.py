@@ -12,7 +12,6 @@ from conftest import (
 )
 
 from bos.core import (
-    AgentActor,
     LLMResponse,
     ToolCallRequest,
     ep_provider,
@@ -21,6 +20,7 @@ from bos.core.agent import Agent
 from bos.core.harness import _PluginPromptProvider
 from bos.core.llm import LLMClient
 from bos.core.registry import ToolRegistry
+from bos.gateway.agent_actor import AgentActor
 from bos.plugins.subagent import SubagentAgentPlugin  # noqa: F401  registers SubagentPlugin
 from bos.protocol import MessageType
 

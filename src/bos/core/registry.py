@@ -36,7 +36,7 @@ class ExtensionPoint:
     are distinguishable at a glance and in ``[exts]`` config keys.
     """
 
-    _by_name: ClassVar[dict[str, "ExtensionPoint"]] = {}
+    _by_name: ClassVar[dict[str, ExtensionPoint]] = {}
 
     def __init__(
         self,

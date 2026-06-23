@@ -56,7 +56,6 @@ from .agent import (
     TurnEventStage,
     TurnInterceptor,
 )
-from .agent_actor import ActorTurnContext, ActorTurnResult, AgentActor
 from .contract import (
     AgentPlugin,
     BackgroundLLM,
@@ -102,10 +101,7 @@ from .registry import Extension, ExtensionPoint, ToolRegistry
 
 __all__ = [
     "AbortTurn",
-    "AgentActor",
     "AgentEventType",
-    "ActorTurnContext",
-    "ActorTurnResult",
     "AgentHarness",
     "AgentRegistry",
     "AgentPlugin",

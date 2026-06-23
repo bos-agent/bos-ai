@@ -8,12 +8,13 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from bos.core.actor import Actor, Envelope, EventBus, MailBox, MessageType
+from bos.core.agent import AbortTurn, Agent, TurnContext
+from bos.core.contract import SessionEvent, SessionEventKind
+from bos.core.events import CLIENT_TURN_EVENT_TYPES, HostChannelSink, MailboxEventSink
 from bos.protocol import MessageContent, TurnEvent
 
-from .agent import AbortTurn, Agent, TurnContext
+from .chat_coordinator import ChannelConversationRef, ChatCoordinationError, ChatCoordinator
 from .chat_state import ChatState, ChatStateError
-from .contract import SessionEvent, SessionEventKind
-from .events import CLIENT_TURN_EVENT_TYPES, HostChannelSink, MailboxEventSink
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -103,11 +104,16 @@ class AgentActor(Actor):
         chat_state: ChatState | None = None,
         *,
         lifecycle_bus: EventBus | None = None,
+        chat_coordinator: ChatCoordinator | None = None,
     ):
         super().__init__(mailbox, event_bus=lifecycle_bus)
         self._agent = agent
         self._chat_state = chat_state or ChatState()
         self._sessions: dict[str, SessionState] = {}
+        # Optional turn fencing for multi-client gateway hosting. When absent
+        # (e.g. a bare actor in a test), the turn hooks below are no-ops beyond
+        # the lifecycle emit.
+        self._chat_coordinator = chat_coordinator
 
     async def aclose(self) -> None:
         session_tasks = [s.execution.task for s in self._sessions.values() if s.execution.task is not None]
@@ -375,11 +381,30 @@ class AgentActor(Actor):
         )
 
     async def _on_turn_started(self, ctx: ActorTurnContext) -> None:
-        pass
+        # Fence the turn through the coordinator (multi-client gateway hosting).
+        if self._chat_coordinator is None:
+            return
+        ref = _ctx_channel_ref(ctx)
+        if ref is None:
+            raise ChatCoordinationError("Gateway actor turn is missing channel metadata.")
+        if ctx.base_revision is None:
+            raise ChatCoordinationError("Gateway actor turn is missing base_revision.")
+        await self._chat_coordinator.begin_turn(
+            chat_id=ctx.chat_id,
+            ref=ref,
+            actor=ctx.actor_name,
+            turn_id=ctx.turn_id,
+            base_revision=ctx.base_revision,
+        )
 
     async def _on_turn_finished(self, ctx: ActorTurnContext, result: ActorTurnResult) -> None:
-        # A completed turn is a generic platform lifecycle event. Subclasses
-        # that override this MUST call super() to preserve the emit.
+        if self._chat_coordinator is not None:
+            self._chat_coordinator.end_turn(
+                chat_id=ctx.chat_id,
+                turn_id=ctx.turn_id,
+                committed_revision=result.committed_revision,
+            )
+        # A completed turn is a generic platform lifecycle event.
         if result.status == "completed":
             await self._emit_lifecycle(
                 "turn_complete",
@@ -387,6 +412,22 @@ class AgentActor(Actor):
                 actor_name=ctx.actor_name,
                 turn_id=ctx.turn_id,
                 base_revision=result.committed_revision,
+            )
+        if self._chat_coordinator is not None and result.status in ("aborted", "error") and ctx.reply_recipient:
+            # Aborted/errored turns send no reply envelope, but may have
+            # committed history and advanced the chat revision. Notify the
+            # originating channel so its revision cursor re-syncs; otherwise the
+            # client's next send is rejected as stale.
+            if result.status == "aborted":
+                content, event = "Turn aborted.", "turn_aborted"
+            else:
+                content, event = f"Turn failed: {result.error}", "turn_error"
+            await self._mailbox.send(
+                ctx.reply_recipient,
+                content,
+                content_type=MessageType.SYSTEM,
+                chat_id=ctx.chat_id,
+                metadata={"event": event},
             )
 
     async def _emit_lifecycle(
@@ -647,3 +688,14 @@ class AgentActor(Actor):
     def _execution_is_current(self, chat_id: str, generation: int) -> bool:
         session = self._sessions.get(chat_id)
         return session is not None and session.execution.generation == generation and session.execution.task is not None
+
+
+def _ctx_channel_ref(ctx: ActorTurnContext) -> ChannelConversationRef | None:
+    raw = ctx.channel_ref
+    if not isinstance(raw, dict):
+        return None
+    channel_id = raw.get("channel_id")
+    conversation_id = raw.get("channel_conversation_id")
+    if not isinstance(channel_id, str) or not isinstance(conversation_id, str):
+        return None
+    return ChannelConversationRef(channel_id=channel_id, channel_conversation_id=conversation_id)

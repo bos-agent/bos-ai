@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from bos.core.chat_state import ChatState, ChatStateError, normalize_alias
+from bos.gateway.chat_state import ChatState, ChatStateError, normalize_alias
 
 
 def test_resolve_for_client_creates_and_persists_cursor(tmp_path):

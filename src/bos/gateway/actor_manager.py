@@ -6,10 +6,10 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from bos.config.workspace import ResolvedActorConfig
-from bos.core import ActorTurnContext, ActorTurnResult, AgentActor, MailBox
-from bos.protocol import MessageType
+from bos.core import MailBox
 
-from .chat_coordinator import ChannelConversationRef, ChatCoordinationError, ChatCoordinator
+from .agent_actor import AgentActor
+from .chat_coordinator import ChatCoordinator
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -20,68 +20,12 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-class CoordinatedActor(AgentActor):
-    """AgentActor variant that fences turns through ChatCoordinator hooks.
-
-    Lifecycle events (turn_complete / session_close) are emitted generically by
-    the base AgentActor via its ``lifecycle_bus``; this subclass adds only the
-    coordinator fencing and channel re-sync, and is plugin-agnostic."""
-
-    def __init__(
-        self,
-        *args: Any,
-        chat_coordinator: ChatCoordinator,
-        **kwargs: Any,
-    ) -> None:
-        super().__init__(*args, **kwargs)
-        self._chat_coordinator = chat_coordinator
-
-    async def _on_turn_started(self, ctx: ActorTurnContext) -> None:
-        ref = _ctx_channel_ref(ctx)
-        if ref is None:
-            raise ChatCoordinationError("Gateway actor turn is missing channel metadata.")
-        if ctx.base_revision is None:
-            raise ChatCoordinationError("Gateway actor turn is missing base_revision.")
-        await self._chat_coordinator.begin_turn(
-            chat_id=ctx.chat_id,
-            ref=ref,
-            actor=ctx.actor_name,
-            turn_id=ctx.turn_id,
-            base_revision=ctx.base_revision,
-        )
-
-    async def _on_turn_finished(self, ctx: ActorTurnContext, result: ActorTurnResult) -> None:
-        self._chat_coordinator.end_turn(
-            chat_id=ctx.chat_id,
-            turn_id=ctx.turn_id,
-            committed_revision=result.committed_revision,
-        )
-        # Base actor emits turn_complete on the lifecycle bus (completed turns).
-        await super()._on_turn_finished(ctx, result)
-        if result.status in ("aborted", "error") and ctx.reply_recipient:
-            # Aborted and errored turns never send a reply envelope, but the
-            # turn may have committed history and advanced the chat revision.
-            # Notify the originating channel so its revision cursor re-syncs;
-            # otherwise the client's next send is rejected as stale.
-            if result.status == "aborted":
-                content, event = "Turn aborted.", "turn_aborted"
-            else:
-                content, event = f"Turn failed: {result.error}", "turn_error"
-            await self._mailbox.send(
-                ctx.reply_recipient,
-                content,
-                content_type=MessageType.SYSTEM,
-                chat_id=ctx.chat_id,
-                metadata={"event": event},
-            )
-
-
 @dataclass
 class ManagedActor:
     name: str
     config: ResolvedActorConfig
     mailbox: MailBox | None = None
-    actor: CoordinatedActor | None = None
+    actor: AgentActor | None = None
     task: asyncio.Task[None] | None = None
     status: str = "configured"
     restart_count: int = 0
@@ -166,11 +110,11 @@ class ActorManager:
         record.mailbox = mailbox
         bus = getattr(self.harness, "events", None)
 
-        record.actor = CoordinatedActor(
+        record.actor = AgentActor(
             agent,
             mailbox,
-            chat_coordinator=self.chat_coordinator,
             lifecycle_bus=bus,
+            chat_coordinator=self.chat_coordinator,
         )
         record.status = "running"
         record.error = None
@@ -205,14 +149,3 @@ class ActorManager:
     async def _notify_state_changed(self) -> None:
         if self._state_changed is not None:
             await self._state_changed()
-
-
-def _ctx_channel_ref(ctx: ActorTurnContext) -> ChannelConversationRef | None:
-    raw = ctx.channel_ref
-    if not isinstance(raw, dict):
-        return None
-    channel_id = raw.get("channel_id")
-    conversation_id = raw.get("channel_conversation_id")
-    if not isinstance(channel_id, str) or not isinstance(conversation_id, str):
-        return None
-    return ChannelConversationRef(channel_id=channel_id, channel_conversation_id=conversation_id)
