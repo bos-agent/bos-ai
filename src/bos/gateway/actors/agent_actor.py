@@ -103,16 +103,16 @@ class AgentActor(Actor):
         mailbox: MailBox,
         chat_state: ChatState | None = None,
         *,
-        lifecycle_bus: EventBus | None = None,
+        event_bus: EventBus | None = None,
         chat_coordinator: ChatCoordinator | None = None,
     ):
-        super().__init__(mailbox, event_bus=lifecycle_bus)
+        super().__init__(mailbox, event_bus=event_bus)
         self._agent = agent
         self._chat_state = chat_state or ChatState()
         self._sessions: dict[str, SessionState] = {}
         # Optional turn fencing for multi-client gateway hosting. When absent
         # (e.g. a bare actor in a test), the turn hooks below are no-ops beyond
-        # the lifecycle emit.
+        # the session-event emit.
         self._chat_coordinator = chat_coordinator
 
     async def aclose(self) -> None:
@@ -213,7 +213,7 @@ class AgentActor(Actor):
         if task is not None:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
-        await self._emit_lifecycle(
+        await self._emit_session_event(
             "session_close",
             chat_id=chat_id,
             actor_name=self._actor_name(),
@@ -404,9 +404,9 @@ class AgentActor(Actor):
                 turn_id=ctx.turn_id,
                 committed_revision=result.committed_revision,
             )
-        # A completed turn is a generic platform lifecycle event.
+        # A completed turn is a generic platform session event.
         if result.status == "completed":
-            await self._emit_lifecycle(
+            await self._emit_session_event(
                 "turn_complete",
                 chat_id=ctx.chat_id,
                 actor_name=ctx.actor_name,
@@ -430,7 +430,7 @@ class AgentActor(Actor):
                 metadata={"event": event},
             )
 
-    async def _emit_lifecycle(
+    async def _emit_session_event(
         self,
         kind: SessionEventKind,
         *,
@@ -439,7 +439,7 @@ class AgentActor(Actor):
         turn_id: str | None,
         base_revision: int | None,
     ) -> None:
-        """Emit a session lifecycle event on the bus (via the base ``emit``,
+        """Emit a session event on the bus (via the base ``emit``,
         which no-ops when no bus is wired and isolates handler failures). The
         bus is the single generic channel for turn_complete / session_close —
         the actor names no plugin; plugins subscribe to react (recall flush,

@@ -113,7 +113,7 @@ class ActorManager:
         record.actor = AgentActor(
             agent,
             mailbox,
-            lifecycle_bus=bus,
+            event_bus=bus,
             chat_coordinator=self.chat_coordinator,
         )
         record.status = "running"

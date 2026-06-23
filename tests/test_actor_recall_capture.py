@@ -126,7 +126,7 @@ async def test_coordinated_actor_emits_generic_turn_complete(stub_provider):
     agent = create_test_agent(
         model=f"{stub_provider}/coord", agent_name="main", plugins=[plugin], chat_store=chat_store
     )
-    actor = AgentActor(agent, actor_mb, chat_coordinator=coordinator, lifecycle_bus=bus)
+    actor = AgentActor(agent, actor_mb, chat_coordinator=coordinator, event_bus=bus)
 
     task = asyncio.create_task(actor.run())
     try:
