@@ -13,8 +13,9 @@ from typing import Any
 from aiohttp import ClientSession, ClientTimeout, FormData
 
 from bos.core import BaseChannel, MailBox, ep_channel
+from bos.core.actor import Envelope, MessageType
+from bos.core.agent import TurnEvent
 from bos.gateway import ChannelConversationRef, ChannelRuntimeContext
-from bos.protocol import Envelope, MessageType, TurnEvent
 
 logger = logging.getLogger(__name__)
 

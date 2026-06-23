@@ -1,6 +1,6 @@
 from typing import Any
 
-from bos.protocol.content import image_source_to_model_url
+from bos.core.agent import image_source_to_model_url
 
 from .._utils import _litellm_response_to_llm_response
 from ..contract import ep_provider

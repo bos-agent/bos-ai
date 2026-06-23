@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from bos.core import MailBox, Message
+from bos.core.actor import Envelope, MessageType
 from bos.extensions.channels.lark import (
     LARK_ATTACHMENT_THRESHOLD,
     LARK_MESSAGE_LIMIT,
@@ -20,7 +21,6 @@ from bos.extensions.channels.lark import (
 from bos.extensions.chat_stores.in_memory import InMemChatStore
 from bos.gateway import ActorDescriptor, ActorResolver, ChannelConversationRef, ChannelRuntimeContext, ChatCoordinator
 from bos.gateway.core.command_handler import CommandHandler
-from bos.protocol import Envelope, MessageType
 
 
 class FakeMailbox:

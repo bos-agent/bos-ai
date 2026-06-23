@@ -168,7 +168,7 @@ class TaskEventInterceptor:
             return
         task_list = self._task_lists.get(context.chat_id)
         if task_list is not None and task_list.needs_emit():
-            from bos.protocol import TurnEvent
+            from bos.core.agent import TurnEvent
 
             await event_sink.emit(
                 TurnEvent(

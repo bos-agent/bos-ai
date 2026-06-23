@@ -1,10 +1,10 @@
 """Guard: ``bos.core.actor`` is a zero-dependency system foundation (BEP 13 §2).
 
 A peer of the agent ring: it imports the stdlib and itself **only** — not
-``bos.protocol``, not ``bos.core.agent``, not the harness/outer rings. The
-dependency points the other way (``bos.protocol`` re-exports ``Envelope``/
-``MessageType`` *from* this ring), so the actor foundation can be lifted out to
-build other long-lived component systems with no agent/conversation baggage.
+``bos.core.agent``, not the harness/outer rings. The dependency points the other
+way (outer rings import ``Envelope``/``MessageType`` *from* this ring), so the
+actor foundation can be lifted out to build other long-lived component systems
+with no agent/conversation baggage.
 
 Static (AST) check, resolving relative imports to absolute so an escaping
 ``from ..agent import`` or ``from ..contract import`` is caught, not skipped.

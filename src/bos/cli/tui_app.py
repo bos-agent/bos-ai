@@ -30,9 +30,10 @@ from textual.widgets import Footer, Input, OptionList, RichLog, Static, TextArea
 from textual.widgets.option_list import Option
 from textual_autocomplete import AutoComplete, DropdownItem, TargetState
 
+from bos.core.actor import MessageType
+from bos.core.agent import TurnEvent, content_to_plain_text
+from bos.gateway import WS_TAKEOVER_CLOSE_REASON
 from bos.gateway.client import GatewayClient
-from bos.protocol import WS_TAKEOVER_CLOSE_REASON, MessageType, TurnEvent
-from bos.protocol.content import content_to_plain_text
 
 logger = logging.getLogger(__name__)
 

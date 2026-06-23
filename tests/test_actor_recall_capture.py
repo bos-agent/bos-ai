@@ -27,12 +27,12 @@ from conftest import InMemMailRoute, InMemMemoryExtension
 from test_event_sink import create_test_agent
 
 from bos.core import LLMResponse, ep_provider
+from bos.core.actor import MessageType
 from bos.core.contract import LifecycleEvent, Message, PluginServices
 from bos.core.defaults.lifecycle import DefaultLifecycleBus
 from bos.extensions.chat_stores.in_memory import InMemChatStore
 from bos.gateway import AgentActor, ChatCoordinator
 from bos.plugins.memory.plugin import MemoryAgentPlugin, MemoryHarnessPlugin
-from bos.protocol import MessageType
 
 
 @pytest.fixture

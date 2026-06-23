@@ -30,8 +30,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from bos.core import BaseChannel, MailBox, ep_channel
+from bos.core.actor import Envelope, MessageType
 from bos.gateway import ChannelConversationRef, ChannelRuntimeContext
-from bos.protocol import Envelope, MessageType
 
 logger = logging.getLogger(__name__)
 

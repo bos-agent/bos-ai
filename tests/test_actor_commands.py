@@ -4,8 +4,8 @@ import uuid
 import pytest
 from conftest import InMemChatStore, InMemMailRoute, InMemMemoryExtension, MessageOnlyConsolidator
 
+from bos.core.actor import Envelope, MessageType
 from bos.gateway.actors.agent_actor import AgentActor
-from bos.protocol import Envelope, MessageType
 
 
 class FakeMailbox:

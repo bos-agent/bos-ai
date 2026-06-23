@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from bos.core import ChatStore
-from bos.protocol import MessageType
+from bos.core.actor import MessageType
 
 logger = logging.getLogger(__name__)
 

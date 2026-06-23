@@ -13,7 +13,9 @@ from bos.cli.tui_app import (
     _render_plan_text,
     run_chat_tui,
 )
-from bos.protocol import WS_TAKEOVER_CLOSE_REASON, MessageType, TurnEvent
+from bos.core.actor import MessageType
+from bos.core.agent import TurnEvent
+from bos.gateway import WS_TAKEOVER_CLOSE_REASON
 
 
 class FakeClient:

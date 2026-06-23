@@ -8,11 +8,11 @@ from aiohttp import web
 
 from bos.config import Workspace
 from bos.core import Message
+from bos.core.actor import MessageType
 from bos.extensions.chat_stores.in_memory import InMemChatStore
 from bos.extensions.mailboxes.in_memory import InMemMailRoute
 from bos.gateway import Gateway
 from bos.gateway.client import GatewayClient
-from bos.protocol import MessageType
 
 
 class EchoCommitAgent:

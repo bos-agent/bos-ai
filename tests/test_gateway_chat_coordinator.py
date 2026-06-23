@@ -1,9 +1,9 @@
 import pytest
 
 from bos.core import Message
+from bos.core.actor import MessageType
 from bos.extensions.chat_stores.in_memory import InMemChatStore
 from bos.gateway import ChannelConversationRef, ChatCoordinationError, ChatCoordinator
-from bos.protocol import MessageType
 
 
 def test_cursors_persist_and_restore_across_instances(tmp_path):

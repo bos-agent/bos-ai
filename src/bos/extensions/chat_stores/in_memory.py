@@ -13,6 +13,7 @@ from datetime import datetime
 from typing import Any
 
 from bos.core._chat_store_utils import filter_tool_noise, project_message
+from bos.core.agent import content_preview
 from bos.core.contract import (
     ChatCommit,
     ChatMeta,
@@ -22,7 +23,6 @@ from bos.core.contract import (
     ToolNoiseFilter,
     ep_chat_store,
 )
-from bos.protocol.content import content_preview
 
 
 @ep_chat_store(name="InMemChatStore")

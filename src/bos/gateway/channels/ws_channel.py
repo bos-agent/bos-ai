@@ -9,12 +9,19 @@ from typing import Any
 from aiohttp import WSMsgType, web
 
 from bos.core import BaseChannel, MailBox
-from bos.protocol import WS_TAKEOVER_CLOSE_CODE, WS_TAKEOVER_CLOSE_REASON, Envelope, MessageContent, MessageType
+from bos.core.actor import Envelope, MessageType
+from bos.core.agent import MessageContent
 
 from ..core.actor_resolver import ActorResolutionError
 from ..core.channel_context import ChannelRuntimeContext
 from ..core.chat_coordinator import ChannelConversationRef
 from ..core.command_handler import CommandResult
+
+# WebSocket-transport constants: the close code/reason the gateway uses when a
+# newer interactive channel takes over an existing WS session. Owned by the WS
+# channel (the transport that emits them); re-exported from ``bos.gateway``.
+WS_TAKEOVER_CLOSE_CODE = 4001
+WS_TAKEOVER_CLOSE_REASON = "Another interactive channel took over this WebSocket session."
 
 
 class WSChannel(BaseChannel[dict[str, Any]]):

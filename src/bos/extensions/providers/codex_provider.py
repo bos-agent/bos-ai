@@ -11,7 +11,7 @@ from typing import Any, AsyncGenerator
 import httpx
 
 from bos.core import LLMResponse, ToolCallRequest, _get_bos_home, ep_provider
-from bos.protocol.content import image_source_to_model_url
+from bos.core.agent import image_source_to_model_url
 
 logger = logging.getLogger(__name__)
 DEFAULT_CODEX_URL = "https://chatgpt.com/backend-api/codex/responses"

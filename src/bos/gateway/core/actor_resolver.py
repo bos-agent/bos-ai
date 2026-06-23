@@ -4,7 +4,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from bos.protocol import MessageContent
+from bos.core.agent import MessageContent
 
 
 @dataclass(frozen=True)

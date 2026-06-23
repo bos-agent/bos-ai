@@ -15,7 +15,7 @@ from datetime import datetime
 from pathlib import Path
 
 from bos.core.actor import Envelope, MessageType
-from bos.protocol import MessageContent
+from bos.core.agent import MessageContent
 
 from .._utils import _flock
 from ..contract import ep_mail_route

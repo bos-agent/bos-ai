@@ -4,6 +4,8 @@ import json
 import pytest
 
 from bos.core import MailBox, Message
+from bos.core.actor import Envelope, MessageType
+from bos.core.agent import TurnEvent
 from bos.extensions.channels.telegram import (
     TELEGRAM_ATTACHMENT_THRESHOLD,
     TELEGRAM_MESSAGE_LIMIT,
@@ -22,7 +24,6 @@ from bos.extensions.channels.telegram import (
 from bos.extensions.chat_stores.in_memory import InMemChatStore
 from bos.gateway import ActorDescriptor, ActorResolver, ChannelConversationRef, ChannelRuntimeContext, ChatCoordinator
 from bos.gateway.core.command_handler import CommandHandler
-from bos.protocol import Envelope, MessageType, TurnEvent
 
 
 class FakeMailbox:

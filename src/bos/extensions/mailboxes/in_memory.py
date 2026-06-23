@@ -9,8 +9,9 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+from bos.core.actor import Envelope, MessageType
+from bos.core.agent import MessageContent
 from bos.core.contract import ep_mail_route
-from bos.protocol import Envelope, MessageContent, MessageType
 
 
 class _InMemMailBox:

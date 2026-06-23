@@ -7,8 +7,8 @@ forwarder is just one consumer that registers for the client-facing types.
 
 import pytest
 
+from bos.core.agent import TurnEvent
 from bos.core.events import HostChannelSink
-from bos.protocol import TurnEvent
 
 
 def _evt(event_type: str, **kw) -> TurnEvent:

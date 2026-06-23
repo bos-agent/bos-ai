@@ -5,11 +5,11 @@ import pytest
 
 from bos.config import Workspace
 from bos.core import Message
+from bos.core.actor import Envelope, MessageType
 from bos.extensions.chat_stores.in_memory import InMemChatStore
 from bos.extensions.mailboxes.in_memory import InMemMailRoute
 from bos.gateway import AgentActor, ChannelConversationRef, ChatCoordinator
 from bos.gateway.actors.actor_manager import ActorManager
-from bos.protocol import Envelope, MessageType
 
 
 class CommitAgent:

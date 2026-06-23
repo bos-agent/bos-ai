@@ -1,10 +1,9 @@
 """Guard: ``bos.core.agent`` is the absolute innermost ring (BEP 13 §1.2).
 
 It must import **only** the stdlib and its own package-internal modules — not
-``bos.protocol``, not ``bos.core.contract``/``harness``/``actor``, not any
-third-party package. This keeps the agent core a standalone library that can be
-lifted out to build other agent applications; ``bos.protocol`` depends on the
-agent core, never the other way round.
+``bos.core.contract``/``harness``/``actor``, not any third-party package. This
+keeps the agent core a standalone library that can be lifted out to build other
+agent applications; outer rings depend on the agent core, never the reverse.
 
 Static (AST) check rather than runtime import, because importing the submodule
 would pull in ``bos.core.__init__`` (the public API surface) and defeat the

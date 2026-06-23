@@ -1,7 +1,7 @@
 """The innermost ring: the Agent and every contract it defines or depends on.
 
-This package imports stdlib only. Outer rings (harness, extensions, gateway,
-``bos.protocol``) implement these ports and depend *inward* on it.
+This package imports stdlib only. Outer rings (harness, extensions, gateway)
+implement these ports and depend *inward* on it.
 """
 
 from __future__ import annotations
@@ -14,6 +14,10 @@ from ._content import (
     MessageContentPart,
     TextPart,
     content_as_parts,
+    content_length,
+    content_preview,
+    content_to_plain_text,
+    image_source_to_model_url,
     validate_message_content,
     validate_message_part,
 )
@@ -83,6 +87,10 @@ __all__ = [
     "TurnEventSink",
     "TurnInterceptor",
     "content_as_parts",
+    "content_length",
+    "content_preview",
+    "content_to_plain_text",
+    "image_source_to_model_url",
     "validate_message_content",
     "validate_message_part",
 ]

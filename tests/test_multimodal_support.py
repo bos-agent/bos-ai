@@ -14,12 +14,12 @@ from bos.core import (
     TurnContext,
     _as_parts,
 )
+from bos.core.actor import MessageType
+from bos.core.agent import content_length, content_preview
 from bos.core.defaults.consolidator import LLMConsolidator
 from bos.core.defaults.litellm_provider import _normalize_litellm_message, litellm_complete
 from bos.extensions.providers.antigravity_provider import _convert_messages as convert_antigravity_messages
 from bos.extensions.providers.codex_provider import _convert_user_message as convert_codex_user_message
-from bos.protocol import MessageType
-from bos.protocol.content import content_length, content_preview
 
 
 def _structured_message_content() -> list[dict[str, object]]:

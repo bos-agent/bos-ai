@@ -8,7 +8,7 @@ from dataclasses import replace
 from typing import Any
 
 from bos.core.actor import MailBox, MessageType
-from bos.protocol import TurnEvent
+from bos.core.agent import TurnEvent
 
 from .contract import AgentEventType, TurnEventSink
 
