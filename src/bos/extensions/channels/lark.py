@@ -185,21 +185,6 @@ def _assistant_text(message: dict[str, Any]) -> str | None:
     return None
 
 
-def _selected_chat_from_command_result(env: Envelope) -> str | None:
-    if env.content_type != MessageType.COMMAND_RESULT:
-        return None
-    try:
-        payload = json.loads(env.content) if isinstance(env.content, str) else env.content
-    except Exception:
-        return None
-    if not isinstance(payload, dict) or not payload.get("ok"):
-        return None
-    if payload.get("name") not in {"new", "resume"}:
-        return None
-    chat_id = payload.get("chat_id")
-    return chat_id if isinstance(chat_id, str) and chat_id.strip() else None
-
-
 def _import_lark():
     try:
         import lark_oapi as lark
@@ -563,16 +548,6 @@ class LarkChannel(BaseChannel[LarkSettings]):
             if lark_chat_id is None:
                 logger.warning("Dropping Lark reply without chat mapping (chat_id=%r)", env.chat_id)
                 continue
-
-            selected_chat_id = _selected_chat_from_command_result(env)
-            if selected_chat_id:
-                ref = self._ref_from_env(env)
-                if ref is not None:
-                    current_revision = await self._runtime.chat_coordinator.current_revision(selected_chat_id)
-                    self._runtime.chat_coordinator.set_cursor(ref, selected_chat_id, observed_revision=current_revision)
-                if env.chat_id and env.chat_id != selected_chat_id:
-                    self._chat_to_lark_chat.pop(env.chat_id, None)
-                self._chat_to_lark_chat[selected_chat_id] = lark_chat_id
 
             # Intermediate turn-event status streaming is not supported on Lark yet
             # (text-message editing is rate-limit-prone); deliver final replies only.

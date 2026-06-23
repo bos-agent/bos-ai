@@ -573,63 +573,6 @@ async def test_poll_updates_catches_up_stale_cursor_then_forwards_message():
     assert mailbox.sent[0].metadata["base_revision"] == 1
 
 
-@pytest.mark.asyncio
-async def test_forward_replies_updates_telegram_cursor_from_new_result():
-    channel = _channel()
-    channel._conversation_to_telegram_chat["tg_chat:42"] = "42"
-    channel._chat_to_telegram_chat["chat-a"] = "42"
-
-    calls: list[tuple[str, dict]] = []
-
-    async def fake_api_call(method: str, payload: dict):
-        calls.append((method, payload))
-        return {"ok": True, "result": True}
-
-    channel._api_call = fake_api_call  # type: ignore[method-assign]
-    metadata = {"channel": {"channel_id": "telegram:daily", "channel_conversation_id": "tg_chat:42"}}
-    mailbox = FakeMailbox([
-        Envelope(
-            sender="agent@main",
-            recipient="channel@telegram:daily",
-            content='{"name":"new","ok":true,"chat_id":"chat-b"}',
-            content_type=MessageType.COMMAND_RESULT,
-            chat_id="chat-a",
-            metadata=metadata,
-        ),
-    ])
-
-    task = asyncio.create_task(channel._forward_replies(mailbox))
-    await asyncio.sleep(0)
-    task.cancel()
-    await asyncio.gather(task, return_exceptions=True)
-
-    ref = channel._ref_from_env(mailbox._queue._queue[0]) if False else None
-    assert ref is None
-    assert (
-        channel._runtime.chat_coordinator.get_cursor(
-            channel._ref_from_env(
-                Envelope(
-                    sender="agent@main",
-                    recipient="channel@telegram:daily",
-                    content="",
-                    content_type=MessageType.MESSAGE,
-                    chat_id="chat-b",
-                    metadata=metadata,
-                )
-            )
-        )
-        == "chat-b"
-    )
-    assert "chat-a" not in channel._chat_to_telegram_chat
-    assert channel._chat_to_telegram_chat["chat-b"] == "42"
-    assert calls == [
-        (
-            "sendMessage",
-            {"chat_id": "42", "text": '{"name":"new","ok":true,"chat_id":"chat-b"}'},
-        )
-    ]
-
-
 def _command_runtime(store: InMemChatStore):
     coordinator = ChatCoordinator(store)
     retired: list[tuple[str, str]] = []

@@ -13,7 +13,6 @@ from bos.extensions.channels.lark import (
     _conversation_id_for_lark_chat,
     _extract_inbound_message,
     _resolve_domain,
-    _selected_chat_from_command_result,
     _split_message,
     _strip_mentions,
     _unsupported_message_chat_id,
@@ -193,16 +192,6 @@ def test_resolve_domain_maps_aliases_and_urls():
     assert _resolve_domain(lark, "lark") == "https://open.larksuite.com"
     assert _resolve_domain(lark, "LarkSuite") == "https://open.larksuite.com"
     assert _resolve_domain(lark, "https://open.larksuite.com") == "https://open.larksuite.com"
-
-
-def test_selected_chat_from_command_result():
-    env = Envelope(
-        sender="agent@main",
-        recipient="channel@lark:daily",
-        content='{"name":"new","ok":true,"chat_id":"chat-b"}',
-        content_type=MessageType.COMMAND_RESULT,
-    )
-    assert _selected_chat_from_command_result(env) == "chat-b"
 
 
 def test_event_to_dict_flattens_sdk_object():
@@ -389,39 +378,6 @@ async def test_forward_replies_skips_turn_events():
     await asyncio.gather(task, return_exceptions=True)
 
     assert delivered == []
-
-
-@pytest.mark.asyncio
-async def test_forward_replies_updates_cursor_from_new_result():
-    channel = _channel()
-    _capture_deliver(channel)
-    channel._conversation_to_lark_chat["lark_chat:oc_42"] = "oc_42"
-    channel._chat_to_lark_chat["chat-a"] = "oc_42"
-
-    metadata = {"channel": {"channel_id": "lark:daily", "channel_conversation_id": "lark_chat:oc_42"}}
-    mailbox = FakeMailbox([
-        Envelope(
-            sender="agent@main",
-            recipient="channel@lark:daily",
-            content='{"name":"new","ok":true,"chat_id":"chat-b"}',
-            content_type=MessageType.COMMAND_RESULT,
-            chat_id="chat-a",
-            metadata=metadata,
-        ),
-    ])
-
-    task = asyncio.create_task(channel._forward_replies(mailbox))
-    await asyncio.sleep(0)
-    task.cancel()
-    await asyncio.gather(task, return_exceptions=True)
-
-    ref = ChannelConversationRef("lark:daily", "lark_chat:oc_42")
-    assert channel._runtime.chat_coordinator.get_cursor(ref) == "chat-b"
-    assert "chat-a" not in channel._chat_to_lark_chat
-    assert channel._chat_to_lark_chat["chat-b"] == "oc_42"
-
-
-# ── outbound: attachment threshold + acknowledgement reaction ──────────────────
 
 
 @pytest.mark.asyncio

@@ -175,21 +175,6 @@ def _assistant_text(message: dict[str, Any]) -> str | None:
     return None
 
 
-def _selected_chat_from_command_result(env: Envelope) -> str | None:
-    if env.content_type != MessageType.COMMAND_RESULT:
-        return None
-    try:
-        payload = json.loads(env.content) if isinstance(env.content, str) else env.content
-    except Exception:
-        return None
-    if not isinstance(payload, dict) or not payload.get("ok"):
-        return None
-    if payload.get("name") not in {"new", "resume"}:
-        return None
-    chat_id = payload.get("chat_id")
-    return chat_id if isinstance(chat_id, str) and chat_id.strip() else None
-
-
 def _turn_event_label(event: TurnEvent) -> str:
     if event.parent_agent_name and event.agent_name and event.agent_name != event.parent_agent_name:
         return f"{event.parent_agent_name} -> {event.agent_name}"
@@ -515,17 +500,6 @@ class TelegramChannel(BaseChannel[TelegramSettings]):
             if telegram_chat_id is None:
                 logger.warning("Dropping Telegram reply without chat mapping (chat_id=%r)", env.chat_id)
                 continue
-            selected_chat_id = _selected_chat_from_command_result(env)
-            if selected_chat_id:
-                ref = self._ref_from_env(env)
-                if ref is not None:
-                    current_revision = await self._runtime.chat_coordinator.current_revision(selected_chat_id)
-                    # The command result is the channel's handoff point for the selected chat.
-                    # Future normal messages must use the selected chat's delivered revision.
-                    self._runtime.chat_coordinator.set_cursor(ref, selected_chat_id, observed_revision=current_revision)
-                if env.chat_id and env.chat_id != selected_chat_id:
-                    self._chat_to_telegram_chat.pop(env.chat_id, None)
-                self._chat_to_telegram_chat[selected_chat_id] = telegram_chat_id
 
             if env.content_type == MessageType.TURN_EVENT:
                 try:
