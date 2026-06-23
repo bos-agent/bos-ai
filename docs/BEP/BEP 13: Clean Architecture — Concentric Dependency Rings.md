@@ -6,10 +6,14 @@ extracting it, so this BEP is graduated **ring by ring**. Per-ring readiness:
 
 | Ring | Status |
 |---|---|
-| `agent` (innermost) | ✅ **done** — landed on `re-arch` (commits `73aa773`…`2f8d21f`); documented here as the reference shape (§1) |
-| `actor` | 🟡 **under design / debate** (§2) — proposal + open questions below |
+| `agent` (innermost — **domain foundation**) | ✅ **done** — landed on `re-arch`; the reference shape (§1) |
+| `actor` (innermost — **system foundation**) | ✅ **done** — landed on `re-arch` as a zero-dep peer of `agent` (§2) |
 | `harness`, `config`, `extension (+defaults)` | ⬜ not yet authored — same approach, added when we get there |
 | `gateway`, `cli`, … (outermost) | ⬜ not yet authored |
+
+**Two foundations, not one chain.** `agent` (domain) and `actor` (system) are *independent* innermost
+rings — each depends on nothing (not even `bos.protocol`). Everything else is built on top of them.
+`AgentActor` is a *specialization* that composes both and lives in the harness ring (§2).
 
 Motivation: BOS grew outward from a single agent loop into a harness, plugin system, gateway, channels,
 and CLI. Dependencies accreted in both directions — inner code reaching out to outer modules, outer
@@ -56,16 +60,32 @@ concern. They are not the same thing. The agent depends on the `ToolSet` *port*;
 
 ## The Rings (target topology)
 
-The intended layering, innermost → outermost (the arrow reads "is depended on by"):
+Two **independent zero-dependency foundations** at the center — one for the *domain*, one for the
+*system* — with everything else built on top (the arrow reads "is depended on by"):
 
 ```
-bos.core.agent  →  bos.core.actor  →  { harness, config, extension(+defaults) }  →  { gateway, cli, runner, … }
+bos.core.agent   (DOMAIN foundation — Agent, ports, TurnEvent, MessageContent)
+                   \
+                    \                 bos.core.actor   (SYSTEM foundation — base Actor, MailBox,
+                     \               /                   EventBus, Event, Envelope, MessageType)
+                      \             /
+                       bos.protocol   (downstream FACADE — owns nothing; re-exports both)
+                              ↓
+   AgentActor (composition) · harness · config · extension(+defaults)   →   gateway · cli · runner · …
 ```
 
-`bos.protocol` is a **leaf** that sits beside the agent ring: it owns the wire types (`Envelope`,
-`MessageType`) and *lazily* re-exports agent-owned types (`MessageContent`, `TurnEvent`) so that
-importing `bos.protocol` never triggers `bos.core` at module-init time
-([protocol/__init__.py](../../src/bos/protocol/__init__.py)). Any ring may import `bos.protocol`.
+- **`bos.core.agent`** and **`bos.core.actor`** each import the stdlib and themselves *only* — not each
+  other, not `bos.protocol`. Both are guard-enforced
+  ([test_agent_ring_isolation.py](../../tests/test_agent_ring_isolation.py),
+  [test_actor_ring_isolation.py](../../tests/test_actor_ring_isolation.py)). Either could be lifted out
+  to build a different application.
+- **`bos.protocol`** is a downstream **facade** that owns no types: it *lazily* re-exports
+  `Envelope`/`MessageType` from `actor` and `MessageContent`/`TurnEvent` from `agent`
+  ([protocol/__init__.py](../../src/bos/protocol/__init__.py)), so importing it never triggers
+  `bos.core` at module-init time. In-tree `bos.core` code imports these from their owning foundation
+  directly; the lazy re-export serves outer rings and back-compat call sites.
+- **`AgentActor`** composes the two foundations (an `Actor` that drives an `Agent`) and lives in the
+  harness ring, not in either foundation (§2).
 
 ---
 
@@ -174,72 +194,63 @@ A ring is "done" when:
 
 ---
 
-## 2. The Actor Ring — `bos.core.actor` (UNDER DESIGN — to be debated/finalized)
+## 2. The Actor Ring — `bos.core.actor` (DONE; the system foundation)
 
-> Everything in §2 is a proposal. Open questions are flagged **[OPEN]** and are the agenda for review.
-> This section will be rewritten as decisions land.
+The actor ring landed on `re-arch` as a **zero-dependency system foundation** — a peer of the agent ring,
+not an outer ring. It is the domain-agnostic runtime for long-lived, mailbox-bound components: any system
+of long-lived actors could build on it without the agent/conversation domain. (§2.4–§2.10 below record the
+design journey and the still-open follow-ups; this summary is the as-built state.)
 
-### 2.1 What the actor is today
-
-`AgentActor` ([actor.py](../../src/bos/core/actor.py)) is the concurrency/session shell around an
-`Agent`. At runtime it is **driven by `run()`**, a loop that polls a bound `MailBox`, and it owns, per
-`chat_id`: a task slot, an interrupt/abort buffer, a generation counter, and reply-routing state. It
-also emits lifecycle events (`turn_complete`/`session_close`) on an injected `LifecycleBus`, wires the
-per-turn `EventSink` (mailbox forwarder + host channel sink), and hosts a small **slash-command**
-subsystem (`/chats`, `/prompt`, `/new`, `/resume`) backed by `ChatState` cursor/alias storage.
-
-Its sole in-core consumer is the gateway, which **subclasses** it as `CoordinatedActor`
-([actor_manager.py:23](../../src/bos/gateway/actor_manager.py#L23)), overriding the protected hooks
-`_on_turn_started` / `_on_turn_finished` / `_build_host_sink`. That subclass-via-protected-hooks surface
-is already a clean inward dependency (gateway → actor) and is **kept**.
-
-### 2.2 Current dependency violations
-
-The actor's imports ([actor.py:11-17](../../src/bos/core/actor.py#L11-L17)) classify as:
-
-| Import | Target ring | Verdict |
-|---|---|---|
-| `bos.protocol` (Envelope, MessageType, MessageContent, TurnEvent) | leaf / inner | ✅ legal |
-| `.agent` (Agent, TurnContext, AbortTurn) | inner (agent) | ✅ legal |
-| `.chat_state` (ChatState, ChatStateError) | sibling module, stdlib-only | ⚠️ relocate into the ring |
-| `.events` (HostChannelSink, MailboxEventSink, CLIENT_TURN_EVENT_TYPES) | sibling module | ⚠️ relocate into the ring |
-| `.contract` (MailBox, EventBus, SessionEvent, SessionEventKind) | **outer (harness ring)** | ❌ **outward** |
-| ~~`.harness` (CURRENT_MAILBOX)~~ | — | ✅ **resolved** — `CURRENT_MAILBOX` deleted as dead code ([OPEN-A]→B); the actor no longer imports `.harness` at all |
-
-The `.contract` import still breaks the rule. The actor depends on ports defined in the *harness-ring* contract
-([contract.py](../../src/bos/core/contract.py)). (The former outward dependency on `CURRENT_MAILBOX` in
-`harness.py` is gone — see §2.4.)
-
-### 2.3 Proposed end state
-
-Promote `core/actor.py` to a package `core/actor/`, mirroring the agent extraction:
+### 2.1 What it is — package layout
 
 ```
-core/actor/__init__.py     # public surface: AgentActor, ActorTurnContext, ActorTurnResult,
-                           #   SessionState, + re-export of the ports it now owns
-core/actor/actor.py        # AgentActor
-core/actor/contract.py     # ports the actor owns: MailBox, EventBus + Event/SessionEvent (see §2.10)
-core/actor/events.py       # HostChannelSink, MailboxEventSink, derive_event_sink, CLIENT_TURN_EVENT_TYPES
-core/actor/chat_state.py   # ChatState, ChatStateError
+core/actor/__init__.py      # public surface (Actor, MailBox, EventBus, Event, Envelope, MessageType)
+core/actor/base.py          # Actor — the domain-agnostic runtime (pump, lifecycle, emit)
+core/actor/mailbox.py       # MailBox[ContentT = Any]  (point-to-point messaging endpoint)
+core/actor/envelope.py      # Envelope[ContentT = Any] (message in transit)
+core/actor/message_types.py # MessageType
+core/actor/event_bus.py     # Event (marker) + EventBus (type-keyed pub/sub)
 ```
 
-**Port ownership moves inward.** `MailBox`, `LifecycleBus`, `LifecycleEvent`, `LifecycleKind` move from
-`core/contract.py` into `core/actor/contract.py`. The harness-ring `core/contract.py` then **re-exports**
-them inward (exactly the §1.5 pattern), so `PluginServices` (references `LifecycleBus`), `JobRunner.bind_trigger`
-(references `LifecycleEvent`), `MailRoute.bind() -> MailBox`, and `Channel.run(mailbox)` keep compiling
-unchanged. After the move the actor imports **none** of these from `core.contract`. *(The three
-`Lifecycle*` names are renamed & generalized to `EventBus` / `Event` / `SessionEvent` per §2.10; the
-inward-move + re-export mechanics here are unchanged, and the old names are re-exported for back-compat.)*
+`bos.core.agent_actor.AgentActor` — the `Actor` that drives an `Agent` — is a **specialization that lives
+in the harness ring**, not in this foundation (it imports both `bos.core.agent` and `bos.core.actor`).
+The gateway subclasses it as `CoordinatedActor`, overriding `_on_turn_*` / `_build_host_sink` (a clean
+inward dependency, kept).
 
-**What stays outer.** `MailRoute`, `ep_mail_route`, and `Channel` remain in `core/contract.py` — the
-actor never touches them (it only consumes an already-bound `MailBox`). They depend inward on the
-actor-owned `MailBox`. *(See [OPEN-B] on whether messaging deserves its own ring.)*
+### 2.2 Boundary — zero outward imports (guard-enforced)
 
-**`events.py` consumers.** The harness imports `derive_event_sink` from here
-([harness.py:40](../../src/bos/core/harness.py#L40)) for its subagent runtime; that becomes a legal
-inward import (harness → actor). `bos.core.events` is imported directly by one test
-(`tests/test_host_channel_sink.py`); `bos.core.chat_state` by one test (`tests/test_actor_commands.py`).
-These either get a thin re-export shim at the old path or a one-line import update.
+`bos.core.actor` imports the **stdlib and itself only** — not `bos.protocol`, not `bos.core.agent`, not the
+harness ring. The dependency points the other way: `bos.protocol` re-exports `Envelope`/`MessageType`
+*from* this foundation. Enforced by
+[tests/test_actor_ring_isolation.py](../../tests/test_actor_ring_isolation.py) (resolves relative imports,
+so an escaping `from ..contract import` fails CI), mirroring the agent guard (§1.2).
+
+### 2.3 What it owns — generic, domain-agnostic primitives
+
+So the foundation never names the agent's `MessageContent`, the messaging primitives are **generic** (PEP
+696 defaults, so bare `Envelope`/`MailBox` still mean `[Any]` — zero call-site churn; the harness ring
+annotates `[MessageContent]` for precision):
+
+- **`Envelope[ContentT = Any]`** — moved out of `bos.protocol`. Drops the agent-specific content
+  validation (kept the generic "non-MESSAGE → str" invariant); the agent core validates message content
+  as it processes a turn.
+- **`MailBox[ContentT = Any]`** — `MailRoute.bind()` yields a bare `MailBox`; `AgentActor` can annotate
+  `MailBox[MessageContent]`.
+- **`Event`** (marker) + **`EventBus`** — the bus is **type-keyed**: `subscribe(event_type, handler)` +
+  `emit(Event)`, dispatching over the event's MRO. Domain-agnostic, so `SessionEvent` (the harness-ring
+  vocabulary) is *not* here — it subclasses `Event` in `core/contract.py`, and consumers subscribe to
+  `SessionEvent` and discriminate on `.kind`. (Mechanism in the foundation; vocabulary in the harness
+  ring — §2.10. This retired the type-keying deferral.)
+- **`Actor`** ([base.py](../../src/bos/core/actor/base.py)) — the runtime: the `run()` pump
+  (idle-tick hook → poll `receive_nowait` → `handle(env)`), `_spawn`/`aclose` task lifecycle, and
+  `emit(Event)`. It knows nothing about turns/sessions/interrupts; `AgentActor` adds those via `handle()`
+  + `_on_idle_tick()` + its `SessionEvent` emission.
+
+`core/contract.py` (harness ring) imports all of these inward and **re-exports** them, so
+`from bos.core.contract import MailBox` / `from bos.core import …` call sites are unchanged. `MailRoute` /
+`Channel` / `ep_mail_route` stay in the harness ring and reference the foundation's `MailBox` inward —
+the **[OPEN-B] → B2** decision (own the port in the foundation + re-export, not a separate messaging leaf);
+**[OPEN-F]** (EventBus home) resolves the same way.
 
 ### 2.4 `CURRENT_MAILBOX` disposition — RESOLVED (B: deleted)
 
@@ -286,13 +297,15 @@ concern, not an actor concern. Two paths:
 Recommendation: **D1 now**, and capture D2 as a named follow-up so the ring extraction isn't blocked on
 an SRP debate. To be decided in review.
 
-### 2.7 [OPEN-B] Is messaging its own ring?
+### 2.7 [OPEN-B] Is messaging its own ring? — RESOLVED (B2)
 
-`Envelope`/`MailBox`/`MailRoute` are used by channels and the gateway with **no actor involved**.
-Folding `MailBox` under the *actor* ring works (the actor is the in-core consumer), but a defensible
-alternative is a separate inner **messaging/transport** leaf (beside `bos.protocol`) that both the actor
-ring and the gateway depend on. This affects where `MailBox`/`MailRoute` are owned. Decide before moving
-the ports, since it changes the target module.
+**Decided: the actor foundation owns the messaging primitives** (`Envelope`, `MessageType`, `MailBox`)
+and the event primitives (`Event`, `EventBus`); `bos.protocol` re-exports the wire types downward.
+`MailRoute`/`Channel` stay in the harness ring and reference the foundation's `MailBox` inward (a legal
+dependency). A separate messaging *leaf* was the alternative, rejected because the actor foundation *is*
+the home of these primitives in the two-foundation model — but it remains the escape hatch if messaging
+later grows consumers for which "routing depends on an actor-foundation type" becomes wrong. **[OPEN-F]**
+(EventBus home) resolved identically — the foundation.
 
 ### 2.8 Breaking changes & blast radius (verified)
 
@@ -359,15 +372,13 @@ and generalized:
       async def emit(self, event: Event) -> None: ...
   ```
 
-- **Implemented now (rename-only step):** the renames + the `Event` base marker **landed** on
-  `re-arch` (`EventSink`→`TurnEventSink`; `LifecycleBus`/`LifecycleEvent`/`LifecycleKind` →
-  `EventBus`/`SessionEvent`/`SessionEventKind`; `DefaultLifecycleBus`→`DefaultEventBus`), with the old
-  names kept as **back-compat aliases** (tests pass untouched, pyright/ruff green). The *subscription
-  API is deliberately left kind-keyed* — `subscribe(kind: SessionEventKind, handler)` and `emit(event:
-  SessionEvent)` — because subscribe-by-type buys nothing while `SessionEvent` is the only category.
-  The switch to the type-keyed signature above (and `emit` dispatch over `type(event).__mro__`) is
-  deferred to **when the second category (`ActorEvent`) actually lands** — rule-of-three, not
-  speculation. The `E = TypeVar("E", bound=Event)` and `type[E]` machinery arrive then.
+- **Landed (type-keyed):** the renames + the `Event` base marker shipped first as a kind-keyed
+  rename-only step (with back-compat aliases); the **type-keyed bus then landed** when `Event`/`EventBus`
+  moved into the actor foundation. Making the bus a *domain-agnostic foundation primitive* was the
+  trigger that retired the deferral — a kind-keyed bus typed to `SessionEventKind` cannot live in a
+  domain-agnostic foundation. So `EventBus` is now `subscribe(event_type, handler)` + `emit(Event)`,
+  dispatching over `type(event).__mro__`; `SessionEvent` is harness-ring vocabulary and consumers
+  discriminate on `.kind`.
 - **One bus instance**, created and owned by the harness, injected into actors (the wiring is unchanged
   from today — only the type generalizes when the 2nd category lands). A new event category is a new
   `Event` subclass + an `emit` call — **never a new bus type**.
@@ -416,14 +427,12 @@ so decisions made during extraction are captured here rather than guessed up fro
 
 ## Open Questions
 
-- ~~**[OPEN-A]** `CURRENT_MAILBOX`: move-and-keep (A) or delete as dead code (B)?~~ **RESOLVED → B (deleted); §2.4.**
-- **[OPEN-B]** Does messaging (`Envelope`/`MailBox`/`MailRoute`) become its own inner leaf ring, or live
-  in the actor ring?
-- **[OPEN-C]** Give the actor `chat_store` by injection or via a public `Agent.chat_store` property?
-- **[OPEN-D]** Pure ring-move now (D1) vs. also extract the command/session subsystem (D2)?
-- **[OPEN-E]** Naming: keep `AgentActor`/`CoordinatedActor`, or rename as part of the move? (Lean: keep.)
-- **[OPEN-F]** Does the generic `EventBus` + `Event` marker live in the actor-ring contract or a shared
-  inner leaf beside `bos.protocol`? (Lean: same home as the [OPEN-B] messaging decision; §2.10.)
+- ~~**[OPEN-A]** `CURRENT_MAILBOX`: move-and-keep or delete?~~ **RESOLVED → B (deleted); §2.4.**
+- ~~**[OPEN-B]** Does messaging become its own leaf ring, or live in the actor ring?~~ **RESOLVED → actor foundation owns it + re-export; §2.7.**
+- **[OPEN-C]** Give the actor `chat_store` by injection or via a public `Agent.chat_store` property? *(still open — future increment; relates to §2.5.)*
+- **[OPEN-D]** Also extract the command/session subsystem from `AgentActor`? *(still open — deferred; §2.6.)*
+- **[OPEN-E]** Naming: keep `AgentActor`/`CoordinatedActor`? (Lean: keep — kept so far.)
+- ~~**[OPEN-F]** Where does `EventBus` + `Event` live?~~ **RESOLVED → actor foundation; §2.7/§2.10.**
 
 ---
 
@@ -435,3 +444,5 @@ so decisions made during extraction are captured here rather than guessed up fro
 | 2026-06-22 | Resolve event model (§2.10) | Rename `EventSink`→`TurnEventSink` (emit-only callback, not a bus); rename+generalize `LifecycleBus`/`LifecycleEvent`/`LifecycleKind` → a single type-keyed `EventBus` over a `SessionEvent` hierarchy rooted at `Event`; codify the messages-vs-events routing rule; add [OPEN-F] |
 | 2026-06-22 | Land the rename-only step | Implemented the §2.10 renames + `Event` base marker on `re-arch` with old names kept as back-compat aliases (subscription left kind-keyed; type-keying deferred to the 2nd event category). Gates green: 665 tests pass, ruff clean, pyright 0 errors. Tests untouched — proves the aliases hold |
 | 2026-06-22 | Resolve [OPEN-A] (§2.4) | Deleted `CURRENT_MAILBOX` as dead code (set/reset, never read): removed from `harness.py`, the actor (incl. the now-unused `contextvars`/`token`/`finally` plumbing — dropping the actor's only `.harness` import), and `core/__init__.py`. Eliminates one §2.2 outward violation. Gates green: 665 tests, ruff, pyright |
+| 2026-06-22 | **Two-foundation pivot** | Decided `actor` is a *system foundation* — a zero-dep peer of `agent`, below `bos.protocol` (which becomes a downstream facade). `agent` is the *domain foundation* and depends on nothing (guard added, §1.2). `AgentActor` becomes a harness-ring composition. Resolves [OPEN-B]/[OPEN-F] → foundation owns messaging + event primitives |
+| 2026-06-22 | Land the actor foundation (§2) | Built `bos.core.actor` as a zero-dep foundation over six green increments: relocate `AgentActor`→`agent_actor.py`; move `Envelope`(generic)/`MessageType`/`MailBox`(generic) out of `bos.protocol`/`contract` into the foundation; move `Event`/`EventBus` in and make the bus type-keyed; extract the domain-agnostic base `Actor` and reseat `AgentActor` on it. `bos.protocol` lazily re-exports; strict isolation guard added. Gates green throughout: 668 tests, ruff, pyright 0 |
