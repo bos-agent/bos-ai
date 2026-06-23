@@ -66,7 +66,7 @@ arrow reads "is depended on by":
             │     base Actor · MailBox · Envelope · EventBus · Event · MessageType
             └── bos.core.actor  (SYSTEM foundation) ──┘
                               ↓   (every outer ring imports the foundations directly, via the hierarchy)
-            bos.core:   harness · contract · registry · events · llm · defaults     (assembly ring)
+            bos.core:   harness · contract · registry · sinks · llm · defaults     (assembly ring)
                               ↓
             bos.config     (workspace/spec/schema — a consumer of the harness)
                               ↓
@@ -343,7 +343,7 @@ zero outward imports with a guard. (The `bos.protocol` shim is already retired, 
 the owning foundation directly.) Each ring gets its own numbered subsection when reached, so decisions
 made during extraction are captured here rather than guessed up front.
 
-### 3.1 The assembly ring — `bos.core` (harness · contract · registry · events · llm · `defaults`)
+### 3.1 The assembly ring — `bos.core` (harness · contract · registry · sinks · llm · `defaults`)
 
 The assembly ring wires the two foundations into a runnable agent: the `AgentHarness` that builds an
 `Agent` from config, the `contract` that owns the outer-facing ports, the `ep_*` registry, and the

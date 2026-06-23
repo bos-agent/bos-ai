@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any
 from bos.core.actor import Actor, Envelope, EventBus, MailBox, MessageType
 from bos.core.agent import AbortTurn, Agent, MessageContent, TurnEvent
 from bos.core.contract import SessionEvent, SessionEventKind
-from bos.core.events import CLIENT_TURN_EVENT_TYPES, HostChannelSink, MailboxEventSink
+from bos.core.sinks import CLIENT_TURN_EVENT_TYPES, HostChannelSink, MailboxEventSink
 
 from ..core.chat_coordinator import ChannelConversationRef, ChatCoordinationError, ChatCoordinator
 

@@ -36,9 +36,9 @@ from .contract import (
     ep_tool,
     ep_turn_interceptor,
 )
-from .events import derive_event_sink
 from .llm import LLMClient
 from .registry import ToolRegistry
+from .sinks import derive_event_sink
 
 logger = logging.getLogger(__name__)
 
