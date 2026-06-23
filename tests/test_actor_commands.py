@@ -1,13 +1,10 @@
 import asyncio
-import json
 import uuid
 
 import pytest
 from conftest import InMemChatStore, InMemMailRoute, InMemMemoryExtension, MessageOnlyConsolidator
 
-from bos.core.contract import Message
 from bos.gateway.actors.agent_actor import AgentActor
-from bos.gateway.actors.chat_state import ChatState
 from bos.protocol import Envelope, MessageType
 
 
@@ -85,34 +82,6 @@ class CleanupSlowAgent(StubAgent):
 
 
 @pytest.mark.asyncio
-async def test_new_command_returns_structured_payload():
-    mailbox = FakeMailbox("agent@main")
-    actor = AgentActor(StubAgent(), mailbox)
-    env = Envelope(
-        sender="channel@telegram",
-        recipient="agent@main",
-        content="/new",
-        content_type=MessageType.COMMAND,
-        chat_id="telegram:42",
-    )
-
-    await actor._handle_command(env)
-
-    assert len(mailbox.sent) == 1
-    result_env = mailbox.sent[0]
-    assert result_env.recipient == "channel@telegram"
-    assert result_env.content_type == MessageType.COMMAND_RESULT
-    assert result_env.chat_id == "telegram:42"
-
-    payload = json.loads(result_env.content)
-    assert payload["name"] == "new"
-    assert payload["ok"] is True
-    assert payload["chat_id"]
-    # Old session should have been popped
-    assert "telegram:42" not in actor._sessions
-
-
-@pytest.mark.asyncio
 async def test_actor_turn_hooks_receive_context_and_finish_result():
     route = InMemMailRoute()
     actor_address = f"agent@{uuid.uuid4().hex}"
@@ -158,241 +127,6 @@ async def test_actor_turn_hooks_receive_context_and_finish_result():
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
-
-
-@pytest.mark.asyncio
-async def test_command_result_preserves_channel_metadata():
-    mailbox = FakeMailbox("agent@main")
-    actor = AgentActor(StubAgent(), mailbox)
-    channel_metadata = {"channel_id": "telegram:daily", "channel_conversation_id": "tg_chat:42"}
-
-    await actor._handle_command(
-        Envelope(
-            sender="channel@telegram:daily",
-            recipient="agent@main",
-            content="/chats",
-            content_type=MessageType.COMMAND,
-            chat_id="chat-a",
-            metadata={"channel": channel_metadata},
-        )
-    )
-
-    assert mailbox.sent[-1].metadata["channel"] == channel_metadata
-
-
-@pytest.mark.asyncio
-async def test_chats_command_returns_serializable_list_sorted_by_recency():
-    from datetime import datetime
-
-    mailbox = FakeMailbox("agent@main")
-    agent = StubAgent()
-    actor = AgentActor(agent, mailbox)
-    await agent._chat_store.commit_turn(
-        "chat-old",
-        [Message(llm_message={"role": "user", "content": "older chat"}, created_at=datetime(2026, 1, 1))],
-        turn_id="t1",
-    )
-    await agent._chat_store.commit_turn(
-        "chat-new",
-        [Message(llm_message={"role": "user", "content": "newer chat"}, created_at=datetime(2026, 2, 1))],
-        turn_id="t2",
-    )
-
-    await actor._handle_command(
-        Envelope(
-            sender="channel@tui",
-            recipient="agent@main",
-            content="/chats",
-            content_type=MessageType.COMMAND,
-            chat_id="chat-new",
-        )
-    )
-
-    payload = json.loads(mailbox.sent[-1].content)
-    assert payload["ok"] is True
-    chats = payload["result"]
-    assert [c["chat_id"] for c in chats] == ["chat-new", "chat-old"]
-    assert chats[0]["description"] == "newer chat"
-    assert chats[0]["message_count"] == 1
-    assert chats[0]["last_activity"] == "2026-02-01T00:00:00"
-
-
-@pytest.mark.asyncio
-async def test_resume_uses_channel_metadata_as_cursor_identity():
-    mailbox = FakeMailbox("agent@main")
-    actor = AgentActor(StubAgent(), mailbox)
-    channel_metadata = {"channel_id": "tui-a", "channel_conversation_id": "default"}
-
-    await actor._handle_command(
-        Envelope(
-            sender="channel@tui-a",
-            recipient="agent@main",
-            content="/resume chat-b",
-            content_type=MessageType.COMMAND,
-            chat_id="chat-a",
-            metadata={"channel": channel_metadata},
-        )
-    )
-
-    payload = json.loads(mailbox.sent[-1].content)
-    assert payload["ok"] is True
-    assert payload["chat_id"] == "chat-b"
-    assert actor._chat_state.get_cursor("tui-a:default") == "chat-b"
-
-
-@pytest.mark.asyncio
-async def test_new_command_pops_old_session_and_returns_fresh_id():
-    mailbox = FakeMailbox("agent@main")
-    agent = StubAgent()
-    actor = AgentActor(agent, mailbox)
-    old_chat_id = "old-chat"
-    actor._get_or_create_session(old_chat_id)
-    await agent._chat_store.commit_turn(
-        old_chat_id,
-        [Message(llm_message={"role": "user", "content": "old message"})],
-        turn_id="seed-turn",
-    )
-    env = Envelope(
-        sender="channel@http",
-        recipient="agent@main",
-        content="/new",
-        content_type=MessageType.COMMAND,
-        chat_id=old_chat_id,
-        metadata={"routing": {"client_id": "client-1", "chat_id": "old-chat"}},
-    )
-
-    await actor._handle_command(env)
-
-    payload = json.loads(mailbox.sent[-1].content)
-    assert payload["name"] == "new"
-    assert payload["ok"] is True
-    assert payload["chat_id"] != old_chat_id
-    assert old_chat_id not in actor._sessions
-
-    # Old messages should still be retrievable from the store
-    old_messages = await agent._chat_store.get_messages(old_chat_id, active_only=True)
-    assert old_messages[0].llm_message["content"] == "old message"
-
-
-@pytest.mark.asyncio
-async def test_new_command_updates_client_cursor():
-    mailbox = FakeMailbox("agent@main")
-    state = ChatState()
-    state.set_cursor("tui:a", "old-chat")
-    actor = AgentActor(StubAgent(), mailbox, chat_state=state)
-    actor._get_or_create_session("old-chat")
-    env = Envelope(
-        sender="channel@http",
-        recipient="agent@main",
-        content="/new",
-        content_type=MessageType.COMMAND,
-        chat_id="old-chat",
-        metadata={"routing": {"client_id": "tui:a", "chat_id": "old-chat"}},
-    )
-
-    await actor._handle_command(env)
-
-    payload = json.loads(mailbox.sent[-1].content)
-    assert payload["name"] == "new"
-    assert payload["ok"] is True
-    assert payload["chat_id"]
-    assert state.get_cursor("tui:a") == payload["chat_id"]
-    assert "old-chat" not in actor._sessions
-
-
-@pytest.mark.asyncio
-async def test_resume_updates_client_cursor():
-    mailbox = FakeMailbox("agent@main")
-    state = ChatState()
-    actor = AgentActor(StubAgent(), mailbox, chat_state=state)
-    env = Envelope(
-        sender="channel@http",
-        recipient="agent@main",
-        content="/resume chat-a",
-        content_type=MessageType.COMMAND,
-        chat_id="chat-old",
-        metadata={"routing": {"client_id": "tui:a", "chat_id": "chat-old"}},
-    )
-
-    await actor._handle_command(env)
-
-    payload = json.loads(mailbox.sent[-1].content)
-    assert payload["name"] == "resume"
-    assert payload["ok"] is True
-    assert payload["chat_id"] == "chat-a"
-    assert state.get_cursor("tui:a") == "chat-a"
-
-
-@pytest.mark.asyncio
-async def test_prompt_command_returns_current_agent_system_prompt():
-    mailbox = FakeMailbox("agent@main")
-    actor = AgentActor(StubAgent(), mailbox)
-    env = Envelope(
-        sender="channel@telegram",
-        recipient="agent@main",
-        content="/prompt",
-        content_type=MessageType.COMMAND,
-        chat_id="telegram:42",
-    )
-
-    await actor._handle_command(env)
-
-    payload = json.loads(mailbox.sent[-1].content)
-    assert payload["name"] == "prompt"
-    assert payload["ok"] is True
-    assert payload["result"] == "Rendered system prompt"
-
-
-@pytest.mark.asyncio
-async def test_memory_command_is_not_registered():
-    mailbox = FakeMailbox("agent@main")
-    actor = AgentActor(StubAgent(), mailbox)
-    env = Envelope(
-        sender="channel@telegram",
-        recipient="agent@main",
-        content="/memory",
-        content_type=MessageType.COMMAND,
-        chat_id="telegram:42",
-    )
-
-    await actor._handle_command(env)
-
-    assert mailbox.sent[-1].content == "Invalid command `memory`"
-
-
-@pytest.mark.asyncio
-async def test_new_cancels_or_fences_in_flight_reply_and_drops_stale_result():
-    route = InMemMailRoute()
-    actor_mailbox = route.bind("agent@main")
-    sender_mailbox = route.bind("channel@http")
-    agent = SlowAgent()
-    actor = AgentActor(agent, actor_mailbox)
-
-    actor_task = asyncio.create_task(actor.run())
-    try:
-        await sender_mailbox.send("agent@main", "hello", chat_id="legacy-chat")
-        await asyncio.wait_for(agent.started.wait(), timeout=1)
-
-        await sender_mailbox.send(
-            "agent@main",
-            "/new",
-            content_type=MessageType.COMMAND,
-            chat_id="legacy-chat",
-        )
-
-        command_result = await asyncio.wait_for(sender_mailbox.receive(), timeout=1)
-        payload = json.loads(command_result.content)
-        assert command_result.content_type == MessageType.COMMAND_RESULT
-        assert payload["name"] == "new"
-        assert payload["ok"] is True
-
-        agent.finish.set()
-
-        with pytest.raises(asyncio.TimeoutError):
-            await asyncio.wait_for(sender_mailbox.receive(), timeout=0.2)
-    finally:
-        actor_task.cancel()
-        await asyncio.gather(actor_task, return_exceptions=True)
 
 
 @pytest.mark.asyncio
@@ -477,43 +211,27 @@ async def test_interrupt_abort_keeps_session_busy_until_cancel_cleanup_finishes(
 
 
 @pytest.mark.asyncio
-async def test_resume_retires_previous_in_flight_session():
+async def test_retire_session_cancels_in_flight_turn_and_drops_stale_result():
+    """retire_session — invoked by the gateway control plane on /new and /resume —
+    cancels the chat's in-flight turn, so its reply never reaches the client."""
     route = InMemMailRoute()
     actor_address = f"agent@{uuid.uuid4().hex}"
     sender_address = f"channel@{uuid.uuid4().hex}"
     actor_mailbox = route.bind(actor_address)
     sender_mailbox = route.bind(sender_address)
     agent = SlowAgent()
-    state = ChatState()
-    state.set_cursor("tui:a", "legacy-chat")
-    actor = AgentActor(agent, actor_mailbox, chat_state=state)
+    actor = AgentActor(agent, actor_mailbox)
 
     actor_task = asyncio.create_task(actor.run())
     try:
-        await sender_mailbox.send(
-            actor_address,
-            "hello",
-            chat_id="legacy-chat",
-            metadata={"routing": {"client_id": "tui:a", "chat_id": "legacy-chat"}},
-        )
+        await sender_mailbox.send(actor_address, "hello", chat_id="legacy-chat")
         await asyncio.wait_for(agent.started.wait(), timeout=1)
 
-        await sender_mailbox.send(
-            actor_address,
-            "/resume next-chat",
-            content_type=MessageType.COMMAND,
-            chat_id="legacy-chat",
-            metadata={"routing": {"client_id": "tui:a", "chat_id": "legacy-chat"}},
-        )
-
-        command_result = await asyncio.wait_for(sender_mailbox.receive(), timeout=1)
-        payload = json.loads(command_result.content)
-        assert payload["name"] == "resume"
-        assert payload["ok"] is True
-        assert state.get_cursor("tui:a") == "next-chat"
+        await actor.retire_session("legacy-chat")
+        assert "legacy-chat" not in actor._sessions
 
         agent.finish.set()
-
+        # The cancelled turn's reply must not be delivered.
         with pytest.raises(asyncio.TimeoutError):
             await asyncio.wait_for(sender_mailbox.receive(), timeout=0.2)
     finally:

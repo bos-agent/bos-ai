@@ -8,13 +8,12 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from bos.core.actor import Actor, Envelope, EventBus, MailBox, MessageType
-from bos.core.agent import AbortTurn, Agent, TurnContext
+from bos.core.agent import AbortTurn, Agent
 from bos.core.contract import SessionEvent, SessionEventKind
 from bos.core.events import CLIENT_TURN_EVENT_TYPES, HostChannelSink, MailboxEventSink
 from bos.protocol import MessageContent, TurnEvent
 
 from ..core.chat_coordinator import ChannelConversationRef, ChatCoordinationError, ChatCoordinator
-from .chat_state import ChatState, ChatStateError
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -101,14 +100,12 @@ class AgentActor(Actor):
         self,
         agent: Agent,
         mailbox: MailBox,
-        chat_state: ChatState | None = None,
         *,
         event_bus: EventBus | None = None,
         chat_coordinator: ChatCoordinator | None = None,
     ):
         super().__init__(mailbox, event_bus=event_bus)
         self._agent = agent
-        self._chat_state = chat_state or ChatState()
         self._sessions: dict[str, SessionState] = {}
         # Optional turn fencing for multi-client gateway hosting. When absent
         # (e.g. a bare actor in a test), the turn hooks below are no-ops beyond
@@ -142,16 +139,6 @@ class AgentActor(Actor):
         chat_id = env.chat_id
         session = self._get_or_create_session(chat_id)
 
-        if env.content_type == MessageType.COMMAND:
-            command_content = self._command_content(env)
-            if command_content is None:
-                await self._send_command_content_error(env, content_type=MessageType.SYSTEM)
-                return
-            if command_content.strip().startswith("/"):
-                self._spawn_command_task(env)
-                return
-            env.content_type = MessageType.MESSAGE
-
         if session.execution.task is None:
             if env.content_type == MessageType.MESSAGE:
                 session.interrupts.clear()
@@ -184,20 +171,6 @@ class AgentActor(Actor):
                 chat_id=env.chat_id,
             )
 
-    def current_chat_id(self, env: Envelope, explicit_input: str | None = None) -> str | None:
-        if explicit_input and explicit_input.strip():
-            return self._chat_state.resolve_alias_or_id(explicit_input.strip())
-        return env.chat_id
-
-    async def reset_chat(self, env: Envelope) -> str:
-        """Reset the session for the current chat.
-
-        Pops the old session (cancelling any in-flight task) and returns
-        a fresh chat_id.  The caller adopts the new id going forward.
-        """
-        await self.retire_session(env.chat_id)
-        return uuid.uuid4().hex
-
     async def retire_session(self, chat_id: str | None) -> None:
         if not chat_id:
             return
@@ -220,9 +193,6 @@ class AgentActor(Actor):
             turn_id=None,
             base_revision=session.execution.last_committed_revision,
         )
-
-    def _spawn_command_task(self, env: Envelope) -> None:
-        self._spawn(self._handle_command(env))
 
     def _abort_current_turn(self, session: SessionState) -> None:
         """Cancel the current execution and fence stale replies.
@@ -520,139 +490,6 @@ class AgentActor(Actor):
     def _actor_name(self) -> str:
         name = getattr(self._agent, "name", None)
         return str(name) if name is not None else self._address.removeprefix("agent@")
-
-    async def _handle_command(self, env: Envelope) -> None:
-        command_content = self._command_content(env)
-        if command_content is None:
-            await self._send_command_content_error(env, content_type=MessageType.COMMAND_RESULT)
-            return
-
-        parts = command_content.split(None, 1)
-        cmd_name, input = parts[0].lstrip("/"), "" if len(parts) == 1 else parts[1]
-
-        handler = self._COMMANDS.get(cmd_name)
-        if handler is None:
-            result: str | dict[str, Any] = f"Invalid command `{cmd_name}`"
-        else:
-            try:
-                result = await handler(self, input, env)
-            except Exception as exc:
-                result = {"name": cmd_name, "ok": False, "error": str(exc), "result": str(exc)}
-
-        if result is None:
-            result = "(done)"
-
-        if not isinstance(result, str):
-            result = json.dumps(result, default=str)
-
-        await self._mailbox.send(
-            env.sender,
-            result,
-            content_type=MessageType.COMMAND_RESULT,
-            chat_id=env.chat_id,
-            metadata=self._command_result_metadata(env),
-        )
-
-    @staticmethod
-    def _command_client_id(env: Envelope) -> str | None:
-        routing = env.metadata.get("routing")
-        if isinstance(routing, dict):
-            client_id = routing.get("client_id")
-            if isinstance(client_id, str) and client_id.strip():
-                return client_id.strip()
-        channel = env.metadata.get("channel")
-        if isinstance(channel, dict):
-            channel_id = channel.get("channel_id")
-            conversation_id = channel.get("channel_conversation_id")
-            if (
-                isinstance(channel_id, str)
-                and channel_id.strip()
-                and isinstance(conversation_id, str)
-                and conversation_id
-            ):
-                return f"{channel_id}:{conversation_id}"
-        return None
-
-    async def _cmd_chats(self, input: str, env: Envelope) -> dict[str, Any]:
-        """List all chats, most recently active first."""
-        chats = await self._agent._chat_store.list_chats()
-        metas = sorted(
-            chats.values(),
-            key=lambda m: (m.last_activity is not None, m.last_activity),
-            reverse=True,
-        )
-        result = [
-            {
-                "chat_id": m.chat_id,
-                "message_count": m.message_count,
-                "last_activity": m.last_activity.isoformat() if m.last_activity else None,
-                "description": m.description,
-            }
-            for m in metas
-        ]
-        return {"name": "chats", "ok": True, "result": result}
-
-    async def _cmd_prompt(self, input: str, env: Envelope) -> dict[str, Any]:
-        """Show the current agent system prompt."""
-        # Rendered outside a real turn, so pass a throwaway context.
-        ctx = TurnContext(agent_name=self._agent.name, chat_id="introspection", turn_id="introspection")
-        return {"name": "prompt", "ok": True, "result": await self._agent._build_system_prompt(ctx)}
-
-    async def _cmd_new(self, input: str, env: Envelope) -> dict[str, Any]:
-        """Start a new chat for the current client."""
-        client_id = self._command_client_id(env)
-        if client_id:
-            chat_id = self._chat_state.new_chat_for_client(client_id)
-        else:
-            chat_id = await self.reset_chat(env)
-        await self.retire_session(env.chat_id)
-        return {"name": "new", "ok": True, "result": "chat reset", "chat_id": chat_id}
-
-    async def _cmd_resume(self, input: str, env: Envelope) -> dict[str, Any]:
-        """Resume a chat by id for the current client."""
-        client_id = self._command_client_id(env)
-        if not client_id:
-            return {"name": "resume", "ok": False, "error": "Cannot resume without channel metadata."}
-        if not input.strip():
-            return {"name": "resume", "ok": False, "error": "Usage: /resume <chat-id>"}
-        try:
-            chat_id = self._chat_state.resolve_alias_or_id(input.strip())
-            self._chat_state.set_cursor(client_id, chat_id)
-        except ChatStateError as exc:
-            return {"name": "resume", "ok": False, "error": str(exc)}
-        if env.chat_id != chat_id:
-            await self.retire_session(env.chat_id)
-        return {"name": "resume", "ok": True, "result": f"resumed {chat_id}", "chat_id": chat_id}
-
-    _COMMANDS = {
-        "chats": _cmd_chats,
-        "prompt": _cmd_prompt,
-        "new": _cmd_new,
-        "resume": _cmd_resume,
-    }
-
-    @staticmethod
-    def _command_result_metadata(env: Envelope) -> dict[str, Any]:
-        metadata: dict[str, Any] = {}
-        routing = env.metadata.get("routing")
-        if isinstance(routing, dict) and routing:
-            metadata["routing"] = routing
-        channel = env.metadata.get("channel")
-        if isinstance(channel, dict) and channel:
-            metadata["channel"] = dict(channel)
-        return metadata
-
-    @staticmethod
-    def _command_content(env: Envelope) -> str | None:
-        return env.content if isinstance(env.content, str) else None
-
-    async def _send_command_content_error(self, env: Envelope, *, content_type: MessageType) -> None:
-        await self._mailbox.send(
-            env.sender,
-            "(error: command content must be text)",
-            content_type=content_type,
-            chat_id=env.chat_id,
-        )
 
     def _make_interrupt(self, chat_id: str, generation: int) -> Callable[[], dict[str, Any] | None]:
         def _interrupt() -> dict[str, Any] | None:
