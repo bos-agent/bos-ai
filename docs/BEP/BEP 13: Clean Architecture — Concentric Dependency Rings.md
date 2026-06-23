@@ -10,8 +10,9 @@ shape; the outer rings adopt the same rules when they are extracted.
 | `bos.core.actor` — **system foundation** | ✅ done — a zero-dep peer of `agent` (§2) |
 | `bos.protocol` — **migration shim** | ✅ **retired** — deleted; every call site imports the owning foundation directly. A guard ([test_no_protocol_shim.py](../../tests/test_no_protocol_shim.py)) fails CI if it returns (see topology) |
 | `bos.core` (harness · contract · registry · `defaults`) — assembly ring | ✅ done — zero outward imports, guard-enforced (§3.1) |
-| `bos.config` — config ring (consumer of the harness) | ✅ done — imports only inward, guard-enforced (§3.2) |
-| `gateway`, then `cli` · `runner` — outer rings | ⬜ not yet formally extracted (gateway already hosts `AgentActor` + the control plane, §2.4–§2.5) |
+| `bos.gateway` — gateway ring (owns its config shapes) | ✅ done — imports only inward, guard-enforced (§3.3) |
+| `bos.config` — config *loader* (outer to gateway; produces both rings' shapes) | ✅ done — imports only inward, guard-enforced (§3.2) |
+| `cli` · `runner` — process entrypoints (outermost) | ⬜ not yet formally extracted (§3.4) |
 
 **Motivation.** BOS grew outward from a single agent loop into a harness, plugin system, gateway,
 channels, and CLI. Dependencies accreted in both directions — inner code reaching out to outer modules,
@@ -69,11 +70,13 @@ arrow reads "is depended on by":
                               ↓   (every outer ring imports the foundations directly, via the hierarchy)
             bos.core:   harness · contract · registry · sinks · llm · defaults     (assembly ring)
                               ↓
-            bos.config     (workspace/spec/schema — a consumer of the harness)
+            bos.gateway    (AgentActor · channels · CommandHandler · ChatCoordinator;
+                            owns its config shapes: GatewayRuntimeConfig + Resolved*)
                               ↓
-            bos.gateway    (AgentActor · channels · CommandHandler · ChatCoordinator)
+            bos.config     (the config *loader*: reads storage → produces the inner
+                            rings' config shapes; builds AgentHarness. imports core + gateway)
                               ↓
-            bos.cli · bos.runner    (process entrypoints — outermost)
+            bos.cli · bos.runner    (process entrypoints / composition roots — outermost)
 
   bos.extensions — adapters (chat stores · mailboxes · providers · channels), injected inward via ep_*.
   bos.exts — composition root: importing it registers all built-in adapters/plugins. Both are outer to
@@ -100,8 +103,12 @@ arrow reads "is depended on by":
   on it as a shared inner ring, which is exactly why it could be removed without restructuring.
 - **`AgentActor`** composes *both* foundations (an `Actor` that drives an `Agent`). It is not part of
   either foundation — it lives in the gateway, the ring that actually consumes it (§2.4).
-- **Gateway is outer to the harness ring**: it imports `bos.core`/`bos.config` (`AgentHarness`,
-  `MailRoute`, contracts); nothing in `bos.core` imports the gateway. `cli`/`runner` are outer still.
+- **Gateway is outer to the assembly ring, but inner to `bos.config`.** It imports `bos.core`
+  (`AgentHarness`, `MailRoute`, contracts) and **owns the shape of its own configuration**
+  (`GatewayRuntimeConfig` + the `Resolved*` value objects). It does **not** import `bos.config`: the
+  config *loader* is an outer ring that depends inward on the gateway's shapes to produce them, and the
+  composition root injects a `GatewayRuntimeConfig` via `Gateway(runtime=…)` (§3.3). `config`, then
+  `cli`/`runner`, are outer still.
 
 ---
 
@@ -336,7 +343,7 @@ the ring that emits them (`SessionEvent` with the session/actor layer).
 
 ---
 
-## 3. Outer Rings — the assembly ring, then `config` · `gateway` · `cli` · `runner`
+## 3. Outer Rings — the assembly ring, then `gateway` · `config` · `cli` · `runner`
 
 These adopt the same approach as each is formally extracted: identify outward imports and inner-privacy
 reaches, move owned ports inward, re-export for compatibility, give each port an inner default, and verify
@@ -394,38 +401,63 @@ asserts two things: (1) **no outward import** to `bos.gateway`/`bos.cli`/`bos.ru
 `bos.core.actor.<sub>`). It allows stdlib + third-party + `bos.core.*` — the ring is defined by import
 *direction*, not by a zero-third-party rule.
 
-### 3.2 The config ring — `bos.config`
+### 3.2 The gateway ring — `bos.gateway`
 
-`bos.config` (workspace loading, the TOML `schema`, the `default_agent_spec`) is the first ring outward of
-the assembly ring: a **consumer of the harness**. It imports `bos.core` (`AgentHarness`, `ep_agent`,
-`ExtensionPoint`, contract types like `ReasoningEffort`/`ToolNoiseFilter`, and published helpers); nothing
-in `bos.core` imports `bos.config` (§3.1). It owns no ports — it reads/validates configuration and hands a
-built `AgentHarness` outward to the gateway/cli — so the §1.6 checklist reduces to the boundary rule.
+`bos.gateway` is the actor/channel runtime that drives the agent (`AgentActor`, `ChannelManager`,
+`ChatCoordinator`, the `CommandHandler` control plane, §2.4–§2.5), organized into `core/`/`actors/`/
+`channels/`. It is *policy*, so it owns the **shape of the configuration it consumes** and depends on no
+configuration machinery.
 
-**Boundary.** Two things hold (now guard-enforced):
+**The config-shape inversion (the key decision).** Configuration loading is a *detail* (I/O from TOML/env);
+the gateway is *policy*. By the dependency rule, policy must not depend on the detail's types — so the
+gateway **owns** its config shapes and the loader depends inward on them:
 
-- **No outward imports.** Nothing under `bos/config/` imports `bos.gateway`/`bos.cli`/`bos.runner`/
-  `bos.extensions`/`bos.exts`. Config *names* `"bos.exts"` and `"./extensions"` as **string defaults** for
-  the extension loader (`schema.py`, `workspace.py`) — those are data the loader resolves at runtime, not
-  import-time dependencies, so they do not couple the ring outward.
-- **Published-API only (rule 4).** It imports the assembly ring and foundations through their public
-  surface, never an underscore-prefixed private module. The one prior reach — `workspace.py` importing
+- `gateway/config.py` defines `ResolvedGatewayConfig`, `ResolvedActorConfig`, `ResolvedGatewayChannelConfig`,
+  and the aggregate **`GatewayRuntimeConfig`** — frozen value objects, stdlib-only.
+- `bos.config` (the loader, §3.3) imports these and *produces* them (`config → gateway`).
+- The composition root builds a `GatewayRuntimeConfig` from a `Workspace` and injects it:
+  `Gateway(runtime=…)`. The gateway no longer takes a `Workspace`, and `ActorManager` takes a
+  `dict[str, ResolvedActorConfig]` — so `bos.gateway` has **zero** `bos.config` imports.
+  (This mirrors what `bos.core` already did: it owns `ReasoningEffort`/`ToolNoiseFilter` and the loader
+  fills them. The gateway was the lone inverted case; this aligns it.)
+
+**Boundary (guard-enforced).** (1) No import to `bos.config` (the loader), `bos.runner`/`bos.cli`
+(entrypoints), `bos.extensions` (adapters, injected via `ep_*`), or `bos.exts`. (2) No underscore-private
+`bos.core` reach (rule 4). `WS_TAKEOVER_*` already live here (Track A).
+**Guard:** [test_gateway_ring_isolation.py](../../tests/test_gateway_ring_isolation.py).
+
+### 3.3 The config loader — `bos.config`
+
+`bos.config` (workspace loading, the TOML `schema`, the `default_agent_spec`) is the **configuration
+loader**: it reads storage and *produces* the typed config the inner rings consume. It imports `bos.core`
+(`AgentHarness`, `ep_agent`, contract types like `ReasoningEffort`/`ToolNoiseFilter`, published helpers)
+**and `bos.gateway`** (the gateway-owned shapes it fills, §3.2); neither imports it back. It is therefore a
+ring *outward* of both — just inside the process entrypoints — not, as an earlier draft of this BEP placed
+it, *inner* to the gateway. It owns no ports; it reads/validates config, builds an `AgentHarness`, and hands
+a `GatewayRuntimeConfig` outward.
+
+**Boundary (guard-enforced).**
+
+- **No outward imports.** Nothing under `bos/config/` imports `bos.cli`/`bos.runner`/`bos.extensions`/
+  `bos.exts`. Config *names* `"bos.exts"` and `"./extensions"` as **string defaults** for the extension
+  loader — data it resolves at runtime, not import-time dependencies. Importing `bos.core` and `bos.gateway`
+  is the legal inward direction. (To keep `import bos.config` light — the gateway package pulls aiohttp —
+  the gateway shapes are imported *lazily inside* the `resolve_*` methods, with a `TYPE_CHECKING` import for
+  annotations; the AST guard still records the `config → gateway` edge.)
+- **Published-API only (rule 4).** It imports `bos.core`/`bos.gateway` through their public surface, never an
+  underscore-prefixed private module. The one prior reach — `workspace.py` importing
   `from bos.core._utils import _deep_merge, _get_bos_home, _resolve_path` — was resolved by publishing
-  `_resolve_path` from `bos.core`'s `__init__` (the other two were already there) and re-pointing the
-  import to `from bos.core import …`.
+  `_resolve_path` from `bos.core`'s `__init__` and re-pointing to `from bos.core import …`.
 
-**Guard.** [test_config_ring_isolation.py](../../tests/test_config_ring_isolation.py) AST-scans
-`bos/config/**` and asserts (1) no import to `gateway`/`cli`/`runner`/`extensions`/`exts`, and (2) no
-`bos.core`-rooted import with an underscore-prefixed segment (the private-reach rule). String literals are
-not imports, so the `"bos.exts"` defaults are not flagged.
+**Guard.** [test_config_ring_isolation.py](../../tests/test_config_ring_isolation.py): no import to
+`cli`/`runner`/`extensions`/`exts`; no underscore-private reach into `bos.core`/`bos.gateway`.
 
-### 3.3 `gateway` · `cli` · `runner`
+### 3.4 `cli` · `runner`
 
-Reserved. The gateway already hosts `AgentActor` and the control plane (§2.4–§2.5), with its internals
-organized into `core/` (coordinator, resolver, command handler, channel context), `actors/`, and
-`channels/` subpackages — but its ring boundary has not yet been audited to the §1.6 checklist. The
-gateway is outward of the config ring; `cli`/`runner` are the outermost process entrypoints. Each gets its
-own subsection when reached.
+Reserved. The outermost process entrypoints and composition roots: they load a `Workspace` (via
+`bos.config`), open the harness, build a `GatewayRuntimeConfig`, and inject it into the gateway. Their ring
+boundary (importing inward only; no `cli ↔ runner` cycle) has not yet been audited to the §1.6 checklist.
+Each gets its own subsection when reached.
 
 ---
 
@@ -442,3 +474,4 @@ own subsection when reached.
 | 2026-06-23 | **Track A complete — `bos.protocol` shim retired and deleted.** Re-pointed every wire-type call site (`Envelope`/`MessageType` → `bos.core.actor`; `MessageContent`/`MessageContentPart`/`TurnEvent` → `bos.core.agent`) across src + tests; moved the shim's `content.py` helpers into the agent ring's `._content` leaf (§1.3) and the `WS_TAKEOVER_*` constants into the gateway's WS channel (re-exported from `bos.gateway`); added [test_no_protocol_shim.py](../../tests/test_no_protocol_shim.py) to fail CI on reintroduction. |
 | 2026-06-23 | **Track B / B1 — assembly ring (`bos.core`) extracted (§3.1).** Confirmed zero outward imports and added [test_assembly_ring_isolation.py](../../tests/test_assembly_ring_isolation.py) (forbids imports to `gateway`/`cli`/`runner`/`extensions`/`config`/`exts` and foundation-private reaches). Settled the boundary: `defaults` is *in* the ring; `extensions` (adapters) and `exts` (composition root) are out; **corrected the topology** — `bos.config` is a *consumer* of the harness (it imports `bos.core`, not the reverse), so it is a ring *outward* of the assembly ring, not part of it. Resolved the one rule-4 reach by publishing the shared `_`-helpers from `bos.core.agent`'s `__init__`. |
 | 2026-06-23 | **Track B / B2a — config ring (`bos.config`) extracted (§3.2).** Added [test_config_ring_isolation.py](../../tests/test_config_ring_isolation.py) (no imports to `gateway`/`cli`/`runner`/`extensions`/`exts`; no underscore-private `bos.core` reach). Resolved its one rule-4 reach by publishing `_resolve_path` from `bos.core` and re-pointing `workspace.py` off `bos.core._utils`. Also tidied two non-ring items en route: renamed `core/events.py`→`core/sinks.py` and `core/defaults/lifecycle.py`→`core/defaults/eventbus.py`, dropped the `Lifecycle*` back-compat aliases, and removed the `bos.core.llm` re-export of `LLMResponse`/`ToolCallRequest` (consumers now import the agent ring directly). |
+| 2026-06-23 | **Track B / B2b — gateway ring (`bos.gateway`) extracted, with the config-shape inversion (§3.2/§3.3).** The gateway now **owns** its config shapes (`gateway/config.py`: `Resolved*` + `GatewayRuntimeConfig`); `bos.config` imports and *produces* them (`config → gateway`), reversing the former `gateway → config` edge. `Gateway(runtime=…)` and `ActorManager(actors=…)` replace the `Workspace` parameter; the composition root injects via `workspace.resolve_gateway_runtime()`. Added [test_gateway_ring_isolation.py](../../tests/test_gateway_ring_isolation.py) and updated the config guard (config→gateway now legal; private-reach check covers both inner rings). **Reordered the topology:** `core < gateway < config < cli/runner` — config is the *loader* (a detail), outer to the gateway it configures, correcting B2a's placement. |

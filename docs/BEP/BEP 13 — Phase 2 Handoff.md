@@ -28,7 +28,12 @@ The two innermost rings are extracted, isolated, and guard-enforced:
   with `config`/`extensions`/`exts` confirmed outside it. See BEP §3.1 and §4 below.
 - **Track B / B2a is also done now (2026-06-23): the config ring (`bos.config`) is extracted** — imports
   only inward, guard-enforced ([test_config_ring_isolation.py](../../tests/test_config_ring_isolation.py)).
-  See BEP §3.2. Remaining in Track B: the gateway, then cli/runner.
+  See BEP §3.2.
+- **Track B / B2b is also done now (2026-06-23): the gateway ring (`bos.gateway`) is extracted, with the
+  config-shape inversion** — the gateway owns `GatewayRuntimeConfig` + the `Resolved*` shapes; `bos.config`
+  *produces* them (`config → gateway`), reversing the old edge. `Gateway(runtime=…)` replaces the
+  `Workspace` parameter. Guard: [test_gateway_ring_isolation.py](../../tests/test_gateway_ring_isolation.py).
+  **Topology reordered:** `core < gateway < config < cli/runner`. See BEP §3.2/§3.3. Remaining: cli/runner.
 
 Gate is green: `uv run pytest -q` (662), `uv run ruff check src tests`, `npx -y pyright src` (0), all four
 ring guards (agent, actor, assembly) + the no-shim guard.
@@ -99,14 +104,19 @@ settled during extraction:
 loader, not imports — the AST guard does not flag them. Resolved the one rule-4 reach by publishing
 `_resolve_path` from `bos.core` and re-pointing `workspace.py` off `bos.core._utils`.
 
-**B2b — `bos.gateway`** (next). Already structurally organized (`core/`, `actors/`, `channels/`) with **no
-inner-privacy reaches** into agent/actor (verified — the `_`-prefixed hits are its own methods).
-`AgentActor` + control plane are seated here. Audit that it imports only inward (foundations + assembly
-ring + config, no `cli`/`runner`), give it a guard. The ws-takeover constants already landed here
-(Track A): `WS_TAKEOVER_CLOSE_CODE`/`WS_TAKEOVER_CLOSE_REASON` in `gateway/channels/ws_channel.py`,
-re-exported from `bos.gateway`.
+**B2b — `bos.gateway`. ✅ DONE (2026-06-23, BEP §3.2/§3.3), with the config-shape inversion.** The gateway
+is *policy* and now **owns the shape of the config it consumes**: `gateway/config.py` holds the `Resolved*`
+value objects + the `GatewayRuntimeConfig` aggregate. `bos.config` imports and *produces* them, so the edge
+flipped from `gateway → config` to `config → gateway`. `Gateway(runtime=GatewayRuntimeConfig)` and
+`ActorManager(actors=…)` replace the `Workspace` parameter; `runner.start()` injects
+`workspace.resolve_gateway_runtime()`. Guard
+[test_gateway_ring_isolation.py](../../tests/test_gateway_ring_isolation.py): no import to
+`config`/`cli`/`runner`/`extensions`/`exts`; no underscore-private `bos.core` reach. **This reordered the
+topology** — `core < gateway < config < cli/runner` — superseding B2a's placement of config inner to the
+gateway. Import-hygiene note: `bos.config` imports the gateway shapes *lazily inside* its `resolve_*`
+methods (the gateway package pulls aiohttp), keeping `import bos.config` light.
 
-**B3 — `bos.cli` / `bos.runner` (outermost).** Process entrypoints. Audit + guard last.
+**B3 — `bos.cli` / `bos.runner` (outermost).** Process entrypoints / composition roots. Audit + guard last.
 
 Each extracted ring gets its own numbered subsection appended to BEP §3, capturing decisions made *during*
 extraction (per the BEP's ring-by-ring method) — don't pre-guess them here.
@@ -133,10 +143,10 @@ extraction (per the BEP's ring-by-ring method) — don't pre-guess them here.
 ## 6. How to verify (every step)
 
 ```
-uv run pytest -q                      # full suite (currently 664)
+uv run pytest -q                      # full suite (currently 666)
 uv run ruff check src tests           # no new findings
 npx -y pyright src                    # must stay at 0 errors
-uv run pytest -q tests/test_agent_ring_isolation.py tests/test_actor_ring_isolation.py tests/test_assembly_ring_isolation.py tests/test_config_ring_isolation.py tests/test_no_protocol_shim.py
+uv run pytest -q tests/test_agent_ring_isolation.py tests/test_actor_ring_isolation.py tests/test_assembly_ring_isolation.py tests/test_gateway_ring_isolation.py tests/test_config_ring_isolation.py tests/test_no_protocol_shim.py
 ```
 
 Commit in small, reversible diffs with conventional titles (`refactor(...)`, `docs(bep): ...`). Keep all
@@ -146,13 +156,13 @@ three gates + the ring guards green per commit.
 
 ## 7. Suggested next move
 
-Track A, B1, and B2a are done. Continue **Track B — extract the remaining outer rings, inside → out** (§4):
+Track A, B1, B2a, and B2b are done. One ring remains:
 
-1. **B2b — `bos.gateway`** (next). Audit it imports only inward (foundations + assembly ring + config, no
-   `cli`/`runner`), then guard it — model on
-   [test_config_ring_isolation.py](../../tests/test_config_ring_isolation.py). Watch for the same rule-4
-   reaches (any underscore-private `bos.core`/foundation import) and decide whether the guard scans the
-   whole `bos/gateway/**` tree (it has `core/`/`actors/`/`channels/` subpackages).
-2. **B3 — `bos.cli` / `bos.runner`** (outermost) last.
+**B3 — `bos.cli` / `bos.runner`** (outermost; §3.4). They load a `Workspace` via `bos.config`, open the
+harness, build a `GatewayRuntimeConfig`, and inject it into the gateway. Audit that each imports only
+inward (`bos.core`/`bos.gateway`/`bos.config` + foundations, no other-entrypoint import — i.e. no
+`cli ↔ runner` cycle) and no underscore-private reach, then add a guard per package, modeled on
+[test_gateway_ring_isolation.py](../../tests/test_gateway_ring_isolation.py). Decide whether `cli` and
+`runner` are one ring (peers) or `cli` is outer to `runner` (cli imports runner today — verify direction).
 
 Append a numbered subsection to BEP §3 per ring as you go, capturing decisions made *during* extraction.
