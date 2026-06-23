@@ -12,6 +12,7 @@ from .channels.ws_channel import WSChannel
 from .core.actor_resolver import ActorDescriptor, ActorResolver
 from .core.channel_context import ChannelRuntimeContext
 from .core.chat_coordinator import ChannelConversationRef, ChatCoordinator
+from .core.command_handler import CommandHandler
 from .http import create_gateway_app, resolve_gateway_api_key
 from .state import GatewayRunDir, write_gateway_state
 
@@ -55,11 +56,17 @@ class Gateway:
             chat_coordinator=self.chat_coordinator,
             state_changed=self._write_state,
         )
+        self.command_handler = CommandHandler(
+            self.chat_coordinator,
+            harness.chat_store,
+            self.actor_manager.retire_session,
+        )
         self.channel_manager = ChannelManager(
             runtime=ChannelRuntimeContext(
                 actor_resolver=self.actor_resolver,
                 chat_coordinator=self.chat_coordinator,
                 mail_route=harness.mail_route,
+                command_handler=self.command_handler,
                 state_changed=self._write_state,
             )
         )

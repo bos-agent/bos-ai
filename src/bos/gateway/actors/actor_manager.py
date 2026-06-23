@@ -68,6 +68,14 @@ class ActorManager:
     def actors(self) -> dict[str, ManagedActor]:
         return dict(self._actors)
 
+    async def retire_session(self, actor_name: str, chat_id: str) -> None:
+        """Retire a chat's session on a running actor (cancel any in-flight turn
+        and emit session_close). The control plane (CommandHandler) calls this on
+        /new and /resume; a no-op if the actor isn't running."""
+        record = self._actors.get(actor_name)
+        if record is not None and record.actor is not None:
+            await record.actor.retire_session(chat_id)
+
     async def start_all(self) -> None:
         for record in self._actors.values():
             if record.task is None:
