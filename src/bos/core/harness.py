@@ -286,6 +286,13 @@ class AgentHarness:
                 "the current harness instead of re-entering."
             )
 
+        # The assembly ring registers its own ``_default`` adapters (consolidator,
+        # litellm provider, jsonl chat store/mailbox, job runner) — the harness
+        # depends on them being resolvable by name below, so it does not rely on an
+        # outer ring (``bos.exts``) having imported them. Idempotent; deferred to
+        # open-time to avoid import-order coupling during ``bos.core`` package init.
+        import bos.core.defaults  # noqa: F401
+
         self.mail_route = await self._create_and_own("ep_mail_route", MailRoute, None, impl=self._mail_route_impl)
         self.chat_store = await self._create_and_own("ep_chat_store", ChatStore, None, impl=self._chat_store_impl)
         assert self.chat_store is not None  # ep_chat_store has a _default, so creation never returns None
