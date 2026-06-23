@@ -8,7 +8,7 @@ shape; the outer rings adopt the same rules when they are extracted.
 |---|---|
 | `bos.core.agent` — **domain foundation** | ✅ done — the reference shape (§1) |
 | `bos.core.actor` — **system foundation** | ✅ done — a zero-dep peer of `agent` (§2) |
-| `bos.protocol` — **migration shim** | ⏳ transitional — re-exports foundation types for legacy call sites; **to be eliminated** (not a ring; see topology) |
+| `bos.protocol` — **migration shim** | ✅ **retired** — deleted; every call site imports the owning foundation directly. A guard ([test_no_protocol_shim.py](../../tests/test_no_protocol_shim.py)) fails CI if it returns (see topology) |
 | `harness` · `config` · `extension (+defaults)` — assembly ring | ⬜ not yet formally extracted |
 | `gateway`, then `cli` · `runner` — outermost | ⬜ not yet formally extracted (already hosts `AgentActor` + the control plane, §2.4–§2.5) |
 
@@ -72,10 +72,12 @@ arrow reads "is depended on by":
                               ↓
             bos.cli · bos.runner    (process entrypoints — outermost)
 
-  bos.protocol — MIGRATION SHIM, not a ring. Re-exports the foundations' wire types so legacy
-  `from bos.protocol import …` call sites keep working. To be eliminated: internal code imports
-  the owning foundation directly. (A shared facade that *everyone* imported would itself become a
-  universal innermost dependency — exactly the coupling the two-foundation model removes.)
+  bos.protocol — RETIRED. Was a migration shim re-exporting the foundations' wire types for legacy
+  `from bos.protocol import …` call sites; now deleted, with every call site importing the owning
+  foundation directly. (A shared facade that *everyone* imported would itself become a universal
+  innermost dependency — exactly the coupling the two-foundation model removes.) Its non-wire surface
+  moved to real homes: the content helpers to the agent ring (§1.3), the WS-takeover constants to the
+  gateway (a WS-transport concern).
 ```
 
 - **`bos.core.agent`** and **`bos.core.actor`** each import the stdlib and themselves *only* — not each
@@ -83,12 +85,12 @@ arrow reads "is depended on by":
   ([test_agent_ring_isolation.py](../../tests/test_agent_ring_isolation.py),
   [test_actor_ring_isolation.py](../../tests/test_actor_ring_isolation.py)). Either could be lifted out
   to build a different application.
-- **`bos.protocol` is a transitional shim, not a permanent ring.** It owns no types; it *lazily*
-  re-exports `Envelope`/`MessageType` from `actor` and `MessageContent`/`TurnEvent` from `agent` for
-  call sites that still say `from bos.protocol import …`. The end state is that those call sites import
-  the owning foundation directly and the shim is deleted. In-tree `bos.core` code already imports the
-  foundations directly; the shim exists only to retire the remaining historical imports gradually. It is
-  deliberately *not* in the dependency spine — nothing should depend on it as a shared inner ring.
+- **`bos.protocol` was a transitional shim and is now deleted.** It owned no types — it re-exported
+  `Envelope`/`MessageType` from `actor` and `MessageContent`/`TurnEvent` from `agent` for legacy
+  `from bos.protocol import …` call sites. Every call site now imports the owning foundation directly,
+  so the package is gone; [test_no_protocol_shim.py](../../tests/test_no_protocol_shim.py) fails CI if it
+  (or an import of it) reappears. It was deliberately *never* in the dependency spine — nothing depended
+  on it as a shared inner ring, which is exactly why it could be removed without restructuring.
 - **`AgentActor`** composes *both* foundations (an `Actor` that drives an `Agent`). It is not part of
   either foundation — it lives in the gateway, the ring that actually consumes it (§2.4).
 - **Gateway is outer to the harness ring**: it imports `bos.core`/`bos.config` (`AgentHarness`,
@@ -126,11 +128,11 @@ and no mailbox — those belong to the actor ring (§2). It is instantiated by t
 ### 1.2 Boundary — what it imports
 
 `bos.core.agent` imports **stdlib only**, plus its own package-internal leaves (`._content`, `._utils`).
-It imports nothing from `core.contract`, `core.harness`, `bos.protocol`, `bos.gateway`, or any extension.
-**This is firm: the agent core is the absolute innermost ring and depends on *nothing* — not even
-`bos.protocol`.** The direction is the reverse — the shim re-exports `TurnEvent`/`MessageContent` *from*
-the agent core. This keeps the agent core a standalone library that can be lifted out to build other
-agent applications with no actor/mailbox/harness baggage. An automated guard
+It imports nothing from `core.contract`, `core.harness`, `bos.gateway`, or any extension.
+**This is firm: the agent core is the absolute innermost ring and depends on *nothing*.** The direction
+is the reverse — outer rings import `TurnEvent`/`MessageContent` *from* the agent core. This keeps the
+agent core a standalone library that can be lifted out to build other agent applications with no
+actor/mailbox/harness baggage. An automated guard
 ([test_agent_ring_isolation.py](../../tests/test_agent_ring_isolation.py)) statically asserts every import
 under `bos/core/agent/` resolves to stdlib or the package itself, so a regression fails CI.
 
@@ -144,6 +146,11 @@ Every contract the Agent defines or depends on lives in
 - **Data crossing the boundary**: `TurnContext`, `TurnEvent`, `Message`, `ContextResult`, `ChatCommit`,
   `ChatMeta`, `LLMResponse`, `ToolCallRequest`, `ToolContext`, `ToolAttributes`, `MessageContent`, and the
   event-vocabulary namespaces (`AgentEventType`/`TurnEventPhase`/`TurnEventStage`/`TurnEventDetail`).
+- **Content helpers over `MessageContent`** (in the `._content` leaf): `validate_message_content`,
+  `content_as_parts`, and the rendering/encoding helpers `content_to_plain_text`, `content_preview`,
+  `content_length`, `image_source_to_model_url`. These operate on the agent's content shape, so they are
+  owned here and imported inward by chat stores (previews) and providers (image encoding) — the home the
+  retired shim's `content.py` collapsed into.
 
 These are `Protocol`s and dataclasses — the agent depends on the *shape*, never on a concrete adapter or
 on the registry that produces adapters.
@@ -170,19 +177,19 @@ can introspect the prompt without reaching into privates.)
 
 Ownership moves inward without churning call sites via re-export: an outer module re-exports an inner
 symbol, so the import keeps resolving while the symbol's *home* moves in. `core.contract` does this for
-the agent's contracts (`from bos.core.contract import ChatStore` still resolves to the agent-ring type),
-and `bos.protocol` does it for the wire types as a **temporary shim** (lazy `__getattr__`, so importing
-it never triggers `bos.core` at module-init time). Re-export is the mechanism every ring uses while
-ownership migrates inward; for `bos.protocol` specifically the end state is *deletion* once the remaining
-`from bos.protocol import …` call sites move to direct foundation imports.
+the agent's contracts (`from bos.core.contract import ChatStore` still resolves to the agent-ring type).
+`bos.protocol` was a second use of this mechanism — a **temporary shim** re-exporting the wire types —
+and has now served its purpose and been deleted: every call site imports the owning foundation directly.
+Re-export remains the mechanism every ring uses while ownership migrates inward; the shim's deletion is
+the worked example of its intended end state (re-export only to bridge a migration, then retire it).
 
 ### 1.6 The rules distilled (the checklist for every ring)
 
 A ring is "done" when:
 
-1. It imports only stdlib and inner rings — **zero outward imports** (guard-verifiable) — and does **not**
-   depend on `bos.protocol` (the removable shim); it imports the owning foundation directly. (The two
-   foundations import even less — stdlib + their own leaves only.)
+1. It imports only stdlib and inner rings — **zero outward imports** (guard-verifiable) — importing the
+   owning foundation directly (the `bos.protocol` shim is gone, so there is no longer any indirection to
+   route through). (The two foundations import even less — stdlib + their own leaves only.)
 2. It **owns** the ports its inner-facing dependencies are expressed as; outer rings implement and inject.
 3. Each port has an inner default (noop/empty) so the ring is standalone-testable.
 4. It reaches into **no inner ring's privates** — only published API.
@@ -213,9 +220,9 @@ core/actor/event_bus.py     # Event (marker) + EventBus (type-keyed pub/sub)
 
 ### 2.2 Boundary — zero outward imports (guard-enforced)
 
-`bos.core.actor` imports the **stdlib and itself only** — not `bos.protocol`, not `bos.core.agent`, not
-the harness ring. The dependency points the other way: the shim re-exports `Envelope`/`MessageType`
-*from* this foundation. Enforced by
+`bos.core.actor` imports the **stdlib and itself only** — not `bos.core.agent`, not the harness ring.
+The dependency points the other way: outer rings import `Envelope`/`MessageType` *from* this foundation.
+Enforced by
 [test_actor_ring_isolation.py](../../tests/test_actor_ring_isolation.py), which resolves relative imports
 so an escaping `from ..contract import` fails CI, mirroring the agent guard (§1.2).
 
@@ -325,9 +332,10 @@ the ring that emits them (`SessionEvent` with the session/actor layer).
 ## 3. Outer Rings — `harness` · `config` · `extension`, then `gateway` · `cli` · `runner`
 
 Reserved. These adopt the same approach as each is formally extracted: identify outward imports and
-inner-privacy reaches, move owned ports inward, re-export for compatibility, retire the `bos.protocol`
-shim as call sites switch to direct foundation imports, give each port an inner default, and verify zero
-outward imports with a guard. The gateway already hosts `AgentActor` and the control plane (§2.4–§2.5),
+inner-privacy reaches, move owned ports inward, re-export for compatibility, give each port an inner
+default, and verify zero outward imports with a guard. (The `bos.protocol` shim is already retired, so
+new ring work imports the owning foundation directly.) The gateway already hosts `AgentActor` and the
+control plane (§2.4–§2.5),
 with its internals organized into `core/` (coordinator, resolver, command handler, channel context),
 `actors/`, and `channels/` subpackages — but its ring boundary has not yet been audited to the §1.6
 checklist. Each ring gets its own numbered section when reached, so decisions made during extraction are
@@ -345,3 +353,4 @@ captured here rather than guessed up front.
 | 2026-06-23 | Seat `AgentActor` in the gateway (its only consumer), folding in `CoordinatedActor`; organize gateway internals into `core/`/`actors/`/`channels/`. |
 | 2026-06-23 | Extract the slash-command **control plane** out of the actor into a mailbox-free gateway `CommandHandler` over the `ChatCoordinator` (§2.5); `AgentActor` is now pure data plane. Remove the last agent-private reach by making `Agent.build_system_prompt` public. |
 | 2026-06-23 | Consolidate this BEP into a design doc: correct the topology (gateway is outer to the harness ring; `bos.protocol` is a removable shim, not a layer), present the actor ring as finished design, and remove implementation footage. |
+| 2026-06-23 | **Track A complete — `bos.protocol` shim retired and deleted.** Re-pointed every wire-type call site (`Envelope`/`MessageType` → `bos.core.actor`; `MessageContent`/`MessageContentPart`/`TurnEvent` → `bos.core.agent`) across src + tests; moved the shim's `content.py` helpers into the agent ring's `._content` leaf (§1.3) and the `WS_TAKEOVER_*` constants into the gateway's WS channel (re-exported from `bos.gateway`); added [test_no_protocol_shim.py](../../tests/test_no_protocol_shim.py) to fail CI on reintroduction. |
