@@ -17,8 +17,7 @@ from bos.config.schema import (
     validate_agent_config,
     validate_config,
 )
-from bos.core import AgentHarness
-from bos.core._utils import _deep_merge, _get_bos_home, _resolve_path
+from bos.core import AgentHarness, _deep_merge, _get_bos_home, _resolve_path
 
 
 class WorkspaceResolutionError(RuntimeError):
