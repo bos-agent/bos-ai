@@ -87,8 +87,9 @@ finished ring.
 `gateway`/`cli`/`runner`/`extensions`/`config`/`exts` and (2) no foundation-private reach. Decisions
 settled during extraction:
 - **`defaults` is *in* the ring.** The harness imports `DefaultEventBus`/`DefaultBackgroundLLM` directly
-  (intra-ring); the other five defaults are `@ep_*(name="_default")`, resolved by name and force-imported
-  by the composition root `bos.exts`.
+  (intra-ring); the other five (`@ep_*(name="_default")`) are resolved by name, and the harness registers
+  them itself by importing `bos.core.defaults` in `AgentHarness.__aenter__` — the ring no longer depends on
+  the composition root `bos.exts` to register its own defaults.
 - **`bos.extensions` and `bos.exts` are *out*** (your call): adapters injected via `ep_*`, and the
   composition root. Neither is imported by `bos.core`.
 - **Topology correction: `bos.config` is *out*, a consumer of the harness** — it imports `bos.core`, never

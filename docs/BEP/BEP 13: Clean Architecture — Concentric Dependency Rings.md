@@ -369,17 +369,21 @@ neighbours are deliberately **outside** it:
   `ep_agent`, `ExtensionPoint`, contract types); `bos.core` imports **nothing** from `bos.config`. By the
   dependency rule it is therefore a ring *outward* of the assembly ring, not part of it — a correction to
   the earlier "harness · config · extension" grouping, which the import direction does not support.
-- **`bos.exts` — outer (the composition root).** A single module whose import triggers registration of all
-  built-ins (`import bos.core.defaults` for the `_default` adapters; `import bos.extensions.channels.*`).
-  It sits at the very outside, wiring adapters into the registry the inner rings expose.
+- **`bos.exts` — outer (the composition root).** A single module whose import triggers registration of the
+  built-in *extensions* (`import bos.extensions.channels.*`, etc.). It sits at the very outside, wiring
+  optional adapters into the registry the inner rings expose. (It no longer registers the core `_default`
+  adapters — the assembly ring does that itself; see below.)
 
-**`defaults` is *in* the ring (verified), and reaches the harness two ways.** `core/defaults` ships the
-ring's default adapters, and the harness has a genuine compile-time dependency on it, so it is part of the
-ring, not a separate adapter layer:
+**`defaults` is *in* the ring (verified), and the ring registers its own defaults.** `core/defaults` ships
+the ring's default adapters, and the harness has a genuine compile-time dependency on them, so it is part
+of the ring, not a separate adapter layer. The harness reaches them two ways, and in both the assembly ring
+is self-contained — it does **not** rely on an outer composition root to register its own defaults:
 
 - **Registry-resolved** (`@ep_*(name="_default")`): `jsonl_chat_store`, `litellm_provider`, `consolidator`,
-  `jobs`, `jsonl_mailbox`. The harness resolves these *by name* through the `ep_*` registry; it never
-  imports them. They are force-imported (for registration) by the composition root `bos.exts`.
+  `jobs`, `jsonl_mailbox`. The harness resolves these *by name* through the `ep_*` registry. It guarantees
+  their registration by importing `bos.core.defaults` at the top of `AgentHarness.__aenter__` (idempotent,
+  deferred to open-time to avoid import-order coupling during package init) — so opening a harness always
+  has its defaults, with no dependency on `bos.exts`.
 - **Imported directly** by the harness as concrete fallback wiring: `DefaultEventBus` and
   `DefaultBackgroundLLM` ([harness.py](../../src/bos/core/harness.py)). Both are intra-ring imports, so
   neither breaks ring purity — they are the ring's inner defaults for the `EventBus` / background-LLM ports.
