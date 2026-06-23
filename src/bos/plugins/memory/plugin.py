@@ -13,6 +13,7 @@ from bos.core._utils import _allowed, _xml_attr
 from bos.core.contract import (
     AgentPlugin,
     PluginServices,
+    SessionEvent,
     TurnInterceptor,
     ep_plugin,
 )
@@ -31,7 +32,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from bos.core.agent import TurnContext
-    from bos.core.contract import Job, SessionEvent
+    from bos.core.contract import Job
 
     from ._watermark import WatermarkStore
     from .consolidator import DefaultMemoryConsolidator
@@ -171,7 +172,7 @@ class MemoryHarnessPlugin:
         # is the generic trigger; it carries no memory-specific payload.
         retrieval_cfg = dict(cfg.get("retrieval", {}))
         if services.events is not None and (retrieval_cfg.get("auto_recall", True) or self._policy.enabled):
-            services.events.subscribe("turn_complete", self._handle_turn_complete_flush)
+            services.events.subscribe(SessionEvent, self._handle_turn_complete_flush)
 
     def _build_for(self, agent_name: str) -> _PerAgentMemory:
         """Construct an isolated memory subsystem for one agent."""
@@ -203,9 +204,11 @@ class MemoryHarnessPlugin:
             self._per_agent[agent_name] = self._build_for(agent_name)
         return self._per_agent[agent_name]
 
-    async def _handle_turn_complete_flush(self, event) -> None:
+    async def _handle_turn_complete_flush(self, event: SessionEvent) -> None:
         from .recall_flush import RecallFlushSubscriber
 
+        if event.kind != "turn_complete":
+            return
         if not event.actor_name:
             return
         bundle = self._per_agent.get(event.actor_name)

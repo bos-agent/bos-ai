@@ -114,7 +114,7 @@ async def test_coordinated_actor_emits_generic_turn_complete(stub_provider):
     async def _collect(e: LifecycleEvent) -> None:
         events.append(e)
 
-    bus.subscribe("turn_complete", _collect)
+    bus.subscribe(LifecycleEvent, _collect)
 
     route = InMemMailRoute()
     actor_addr = f"agent@coord-{stub_provider}"

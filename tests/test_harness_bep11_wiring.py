@@ -4,6 +4,7 @@ import pytest
 
 import bos.exts  # noqa: F401 — registers default ep impls (mail_route, chat_store, ...)
 from bos.config.schema import HarnessConfig
+from bos.core.contract import SessionEvent
 
 
 class TestHarnessConfig:
@@ -92,7 +93,7 @@ class TestTurnCompleteEmission:
         async def handler(e):
             seen.append(e)
 
-        bus.subscribe("turn_complete", handler)
+        bus.subscribe(SessionEvent, handler)
 
         actor = CoordinatedActor.__new__(CoordinatedActor)
         actor._lifecycle_bus = bus
@@ -126,7 +127,7 @@ class TestTurnCompleteEmission:
         async def handler(e):
             seen.append(e)
 
-        bus.subscribe("turn_complete", handler)
+        bus.subscribe(SessionEvent, handler)
         actor = CoordinatedActor.__new__(CoordinatedActor)
         actor._lifecycle_bus = bus
         actor._chat_coordinator = _DummyCoordinator()
@@ -171,7 +172,7 @@ class TestSessionCloseEmission:
         async def handler(e):
             seen.append(e)
 
-        bus.subscribe("session_close", handler)
+        bus.subscribe(SessionEvent, handler)
 
         actor = AgentActor.__new__(AgentActor)
         actor._sessions = {"c1": SessionState(chat_id="c1")}
@@ -196,7 +197,7 @@ class TestSessionCloseEmission:
         async def handler(e):
             seen.append(e)
 
-        bus.subscribe("session_close", handler)
+        bus.subscribe(SessionEvent, handler)
 
         actor = AgentActor.__new__(AgentActor)
         session = SessionState(chat_id="c1")

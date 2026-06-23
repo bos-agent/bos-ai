@@ -15,11 +15,14 @@ agent ring and live one ring out (the harness ring).
 from __future__ import annotations
 
 from .envelope import Envelope
+from .event_bus import Event, EventBus
 from .mailbox import MailBox
 from .message_types import MessageType
 
 __all__ = [
     "Envelope",
+    "Event",
+    "EventBus",
     "MailBox",
     "MessageType",
 ]

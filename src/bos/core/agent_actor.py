@@ -7,12 +7,12 @@ import uuid
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from bos.core.actor import Envelope, MailBox, MessageType
+from bos.core.actor import Envelope, EventBus, MailBox, MessageType
 from bos.protocol import MessageContent, TurnEvent
 
 from .agent import AbortTurn, Agent, TurnContext
 from .chat_state import ChatState, ChatStateError
-from .contract import EventBus, SessionEvent, SessionEventKind
+from .contract import SessionEvent, SessionEventKind
 from .events import CLIENT_TURN_EVENT_TYPES, HostChannelSink, MailboxEventSink
 
 if TYPE_CHECKING:

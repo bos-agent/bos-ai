@@ -1,15 +1,16 @@
-"""LifecycleBus — in-process pub/sub for turn_complete / session_close."""
+"""EventBus — in-process, type-keyed pub/sub over platform Events (BEP 13 §2.10)."""
 
 import logging
 
 import pytest
 
-from bos.core.contract import LifecycleEvent
-from bos.core.defaults.lifecycle import DefaultLifecycleBus
+from bos.core.actor import Event
+from bos.core.contract import SessionEvent
+from bos.core.defaults.lifecycle import DefaultEventBus
 
 
 def _event(kind="turn_complete", chat_id="c1", actor_name="A", base_revision=1, payload=None):
-    return LifecycleEvent(
+    return SessionEvent(
         kind=kind,
         chat_id=chat_id,
         actor_name=actor_name,
@@ -18,39 +19,50 @@ def _event(kind="turn_complete", chat_id="c1", actor_name="A", base_revision=1, 
     )
 
 
-class TestLifecycleBus:
+class TestEventBus:
     @pytest.mark.asyncio
-    async def test_subscriber_receives_event(self):
-        bus = DefaultLifecycleBus()
+    async def test_subscriber_receives_its_event_type(self):
+        bus = DefaultEventBus()
         seen = []
 
         async def handler(e):
             seen.append(e)
 
-        bus.subscribe("turn_complete", handler)
+        bus.subscribe(SessionEvent, handler)
         await bus.emit(_event())
         assert len(seen) == 1
         assert seen[0].base_revision == 1
 
     @pytest.mark.asyncio
-    async def test_subscribers_only_get_their_kind(self):
-        bus = DefaultLifecycleBus()
-        turns, closes = [], []
+    async def test_subscriber_gets_all_events_of_its_type(self):
+        # Type-keyed: a SessionEvent subscriber receives every SessionEvent
+        # regardless of .kind; discriminating on kind is the subscriber's job.
+        bus = DefaultEventBus()
+        seen = []
 
-        async def t_handler(e):
-            turns.append(e)
+        async def handler(e):
+            seen.append(e.kind)
 
-        async def c_handler(e):
-            closes.append(e)
-
-        bus.subscribe("turn_complete", t_handler)
-        bus.subscribe("session_close", c_handler)
+        bus.subscribe(SessionEvent, handler)
+        await bus.emit(_event(kind="turn_complete"))
         await bus.emit(_event(kind="session_close"))
-        assert closes and not turns
+        assert seen == ["turn_complete", "session_close"]
+
+    @pytest.mark.asyncio
+    async def test_subscribing_to_base_event_taps_subclasses(self):
+        bus = DefaultEventBus()
+        seen = []
+
+        async def handler(e):
+            seen.append(e)
+
+        bus.subscribe(Event, handler)  # base marker → receives any Event subclass
+        await bus.emit(_event())
+        assert len(seen) == 1
 
     @pytest.mark.asyncio
     async def test_subscriber_failure_does_not_break_fanout(self, caplog):
-        bus = DefaultLifecycleBus()
+        bus = DefaultEventBus()
         delivered = []
 
         async def angry(e):
@@ -59,8 +71,8 @@ class TestLifecycleBus:
         async def calm(e):
             delivered.append(e)
 
-        bus.subscribe("turn_complete", angry)
-        bus.subscribe("turn_complete", calm)
+        bus.subscribe(SessionEvent, angry)
+        bus.subscribe(SessionEvent, calm)
         with caplog.at_level(logging.ERROR):
             await bus.emit(_event())
         assert len(delivered) == 1
@@ -72,5 +84,5 @@ class TestLifecycleBus:
 
     @pytest.mark.asyncio
     async def test_no_subscribers_is_noop(self):
-        bus = DefaultLifecycleBus()
+        bus = DefaultEventBus()
         await bus.emit(_event())

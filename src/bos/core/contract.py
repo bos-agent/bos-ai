@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar, Generic, Literal, Protocol, TypeVar, runtime_checkable
 
-from bos.core.actor import Envelope, MailBox, MessageType
+from bos.core.actor import Envelope, Event, EventBus, MailBox, MessageType
 
 # Outer-ring contracts (extension registry, jobs, lifecycle, channels, mailbox
 # wire, plugins). These depend *inward* on the agent core.
@@ -130,19 +130,13 @@ ep_turn_interceptor = ExtensionPoint(
 )
 
 
-# ── BEP 11 §1 / BEP 13 §2.10: Platform event bus ──────────────────────────
+# ── BEP 13 §2.10: SessionEvent vocabulary (harness ring) ───────────────────
 #
-# ``Event`` is the ring-neutral marker for the platform event hierarchy. Each
-# category (today only ``SessionEvent``; later ``ActorEvent``, …) subclasses it
-# and carries its own typed ``kind`` discriminator. The bus stays keyed by
-# ``kind`` while ``SessionEvent`` is the sole category; it generalizes to
-# subscribe-by-type once a second category lands (BEP 13 §2.10).
-
-
-@dataclass(frozen=True)
-class Event:
-    """Marker base for platform events broadcast on the ``EventBus``."""
-
+# The Event marker and the domain-agnostic EventBus are owned by the actor
+# foundation (imported/re-exported above). SessionEvent is the harness-ring
+# *vocabulary* an AgentActor emits — it subclasses the foundation's Event and
+# carries the session discriminator. (Mechanism in the foundation; vocabulary
+# here. See BEP 13 §2.10.)
 
 SessionEventKind = Literal["turn_complete", "session_close"]
 
@@ -159,14 +153,7 @@ class SessionEvent(Event):
     payload: dict[str, Any] = field(default_factory=dict)
 
 
-@runtime_checkable
-class EventBus(Protocol):
-    def subscribe(self, kind: SessionEventKind, handler: Callable[[SessionEvent], Awaitable[None]]) -> None: ...
-    async def emit(self, event: SessionEvent) -> None: ...
-
-
-# Back-compat aliases — historical names before BEP 13 §2.10 renamed the bus
-# and its events for their subject (the session). Old imports keep resolving.
+# Back-compat aliases — historical names before BEP 13 §2.10.
 LifecycleKind = SessionEventKind
 LifecycleEvent = SessionEvent
 LifecycleBus = EventBus

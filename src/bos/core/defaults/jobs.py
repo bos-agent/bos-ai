@@ -135,11 +135,13 @@ class InProcJobRunner:
         self._trigger_factories[trigger] = factory
         if self._bus is None:
             return
+        # Type-keyed bus: subscribe to the SessionEvent class and discriminate
+        # on .kind inside the handler (BEP 13 §2.10).
         if trigger == "session_close":
-            self._bus.subscribe("session_close", self._on_session_close)
+            self._bus.subscribe(SessionEvent, self._on_session_close)
         elif trigger == "idle":
             # arm/refresh per-chat timer on each turn_complete
-            self._bus.subscribe("turn_complete", self._on_turn_complete_for_idle)
+            self._bus.subscribe(SessionEvent, self._on_turn_complete_for_idle)
 
     async def status(self, job_id: str) -> JobStatus:
         rec = self._records.get(job_id)
@@ -237,6 +239,8 @@ class InProcJobRunner:
                 self._release_key(job.key, job_id)
 
     async def _on_session_close(self, event: SessionEvent) -> None:
+        if event.kind != "session_close":
+            return
         factory = self._trigger_factories.get("session_close")
         if factory is None:
             return
@@ -245,6 +249,8 @@ class InProcJobRunner:
             await self.submit(job)
 
     async def _on_turn_complete_for_idle(self, event: SessionEvent) -> None:
+        if event.kind != "turn_complete":
+            return
         if "idle" not in self._trigger_factories:
             return
         existing = self._idle_timers.pop(event.chat_id, None)
