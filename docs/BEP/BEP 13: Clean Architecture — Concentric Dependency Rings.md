@@ -281,21 +281,20 @@ additive to the *agent* ring):
 **[OPEN-C]** Inject `chat_store` into the actor vs. expose it as an `Agent` property — which is the
 cleaner ownership story?
 
-### 2.6 [OPEN-D] Single-responsibility: does command/session handling belong in the actor?
+### 2.6 [OPEN-D] Does command/session handling belong in the actor? — RESOLVED (control plane extracted)
 
-`AgentActor` today bundles five concerns: (1) turn execution & concurrency — its true job; (2) slash-command
-dispatch; (3) chat-cursor/alias state (`ChatState`); (4) lifecycle emission; (5) host event-sink wiring.
-Commands like `/new` and `/resume` manipulate *client cursors* — arguably a **session/transport**
-concern, not an actor concern. Two paths:
+`AgentActor` bundled turn execution + slash-command dispatch + chat-cursor state (`ChatState`). Commands
+(`/new`, `/resume`, `/chats`) manipulate *client cursors* — a session/transport concern, not an actor
+one — and `ChatState` duplicated the gateway's `ChatCoordinator` cursor store.
 
-- **D1 — Pure ring-move:** keep all five in `AgentActor`; only fix import direction and privacy. Smallest
-  diff, fastest to green. The seams become visible but unaddressed.
-- **D2 — Also split:** extract the command/session subsystem (commands + `ChatState`) into its own
-  collaborator the actor delegates to. Cleaner SRP, larger diff, and it raises a follow-on question of
-  whether that collaborator is part of the actor ring or the harness ring.
-
-Recommendation: **D1 now**, and capture D2 as a named follow-up so the ring extraction isn't blocked on
-an SRP debate. To be decided in review.
+**Resolved beyond the original D1/D2 framing: the control plane moved out of the actor entirely.** A
+mailbox-free gateway `CommandHandler` (`core/command_handler.py`) runs `/new`/`/resume`/`/chats` against
+the `ChatCoordinator` (the single cursor authority) + `ActorManager.retire_session`. Each channel
+(ws/telegram/lark) detects a slash-command on inbound and calls the handler directly — commands never
+become `COMMAND` envelopes and never reach the actor. `AgentActor` is now a **pure data-plane actor**
+(pump → MESSAGE/INTERRUPT → run turns → emit `SessionEvent`s, plus `retire_session`); `ChatState`,
+`_handle_command`, `_cmd_*`, and `current_chat_id`/`reset_chat` are deleted. Aliases and `/prompt` were
+dropped as unneeded (the latter also kept OPEN-C out of scope). See the OPEN-D step commits on `re-arch`.
 
 ### 2.7 [OPEN-B] Is messaging its own ring? — RESOLVED (B2)
 
@@ -430,7 +429,7 @@ so decisions made during extraction are captured here rather than guessed up fro
 - ~~**[OPEN-A]** `CURRENT_MAILBOX`: move-and-keep or delete?~~ **RESOLVED → B (deleted); §2.4.**
 - ~~**[OPEN-B]** Does messaging become its own leaf ring, or live in the actor ring?~~ **RESOLVED → actor foundation owns it + re-export; §2.7.**
 - **[OPEN-C]** Give the actor `chat_store` by injection or via a public `Agent.chat_store` property? *(still open — future increment; relates to §2.5.)*
-- **[OPEN-D]** Also extract the command/session subsystem from `AgentActor`? *(still open — deferred; §2.6.)*
+- ~~**[OPEN-D]** Also extract the command/session subsystem from `AgentActor`?~~ **RESOLVED → control plane moved out to a gateway `CommandHandler`; actor is pure data plane; §2.6.**
 - **[OPEN-E]** Naming: keep `AgentActor`/`CoordinatedActor`? (Lean: keep — kept so far.)
 - ~~**[OPEN-F]** Where does `EventBus` + `Event` live?~~ **RESOLVED → actor foundation; §2.7/§2.10.**
 
@@ -446,3 +445,5 @@ so decisions made during extraction are captured here rather than guessed up fro
 | 2026-06-22 | Resolve [OPEN-A] (§2.4) | Deleted `CURRENT_MAILBOX` as dead code (set/reset, never read): removed from `harness.py`, the actor (incl. the now-unused `contextvars`/`token`/`finally` plumbing — dropping the actor's only `.harness` import), and `core/__init__.py`. Eliminates one §2.2 outward violation. Gates green: 665 tests, ruff, pyright |
 | 2026-06-22 | **Two-foundation pivot** | Decided `actor` is a *system foundation* — a zero-dep peer of `agent`, below `bos.protocol` (which becomes a downstream facade). `agent` is the *domain foundation* and depends on nothing (guard added, §1.2). `AgentActor` becomes a harness-ring composition. Resolves [OPEN-B]/[OPEN-F] → foundation owns messaging + event primitives |
 | 2026-06-22 | Land the actor foundation (§2) | Built `bos.core.actor` as a zero-dep foundation over six green increments: relocate `AgentActor`→`agent_actor.py`; move `Envelope`(generic)/`MessageType`/`MailBox`(generic) out of `bos.protocol`/`contract` into the foundation; move `Event`/`EventBus` in and make the bus type-keyed; extract the domain-agnostic base `Actor` and reseat `AgentActor` on it. `bos.protocol` lazily re-exports; strict isolation guard added. Gates green throughout: 668 tests, ruff, pyright 0 |
+| 2026-06-23 | Move `AgentActor` to the gateway; fold `CoordinatedActor` | `AgentActor`'s only consumer is the gateway, so it moved to `bos.gateway` and absorbed `CoordinatedActor` (optional `chat_coordinator`); dropped from `bos.core`'s public surface. Then consolidated the gateway internals into `core/` (coordinator, resolver, command_handler, channel_context) / `actors/` / `channels/` subpackages |
+| 2026-06-23 | Resolve [OPEN-D] (§2.6) | Extracted the slash-command control plane out of the actor into a mailbox-free gateway `CommandHandler` over the `ChatCoordinator`; rewired ws/telegram/lark to call it on inbound `/`; stripped the actor's command subsystem + deleted `ChatState`. `AgentActor` is now pure data plane. Dropped aliases + `/prompt`. Gates green: 658 tests, ruff, pyright 0; both ring guards green |
