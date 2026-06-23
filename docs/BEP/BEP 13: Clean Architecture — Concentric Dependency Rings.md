@@ -9,8 +9,8 @@ shape; the outer rings adopt the same rules when they are extracted.
 | `bos.core.agent` — **domain foundation** | ✅ done — the reference shape (§1) |
 | `bos.core.actor` — **system foundation** | ✅ done — a zero-dep peer of `agent` (§2) |
 | `bos.protocol` — **migration shim** | ✅ **retired** — deleted; every call site imports the owning foundation directly. A guard ([test_no_protocol_shim.py](../../tests/test_no_protocol_shim.py)) fails CI if it returns (see topology) |
-| `harness` · `config` · `extension (+defaults)` — assembly ring | ⬜ not yet formally extracted |
-| `gateway`, then `cli` · `runner` — outermost | ⬜ not yet formally extracted (already hosts `AgentActor` + the control plane, §2.4–§2.5) |
+| `bos.core` (harness · contract · registry · `defaults`) — assembly ring | ✅ done — zero outward imports, guard-enforced (§3.1) |
+| `config`, `gateway`, then `cli` · `runner` — outer rings | ⬜ not yet formally extracted (gateway already hosts `AgentActor` + the control plane, §2.4–§2.5) |
 
 **Motivation.** BOS grew outward from a single agent loop into a harness, plugin system, gateway,
 channels, and CLI. Dependencies accreted in both directions — inner code reaching out to outer modules,
@@ -66,11 +66,17 @@ arrow reads "is depended on by":
             │     base Actor · MailBox · Envelope · EventBus · Event · MessageType
             └── bos.core.actor  (SYSTEM foundation) ──┘
                               ↓   (every outer ring imports the foundations directly, via the hierarchy)
-            bos.core:   harness · config · extension (+defaults)        (assembly ring)
+            bos.core:   harness · contract · registry · events · llm · defaults     (assembly ring)
+                              ↓
+            bos.config     (workspace/spec/schema — a consumer of the harness)
                               ↓
             bos.gateway    (AgentActor · channels · CommandHandler · ChatCoordinator)
                               ↓
             bos.cli · bos.runner    (process entrypoints — outermost)
+
+  bos.extensions — adapters (chat stores · mailboxes · providers · channels), injected inward via ep_*.
+  bos.exts — composition root: importing it registers all built-in adapters/plugins. Both are outer to
+  bos.core (they import it; it never imports them).
 
   bos.protocol — RETIRED. Was a migration shim re-exporting the foundations' wire types for legacy
   `from bos.protocol import …` call sites; now deleted, with every call site importing the owning
@@ -329,17 +335,71 @@ the ring that emits them (`SessionEvent` with the session/actor layer).
 
 ---
 
-## 3. Outer Rings — `harness` · `config` · `extension`, then `gateway` · `cli` · `runner`
+## 3. Outer Rings — the assembly ring, then `config` · `gateway` · `cli` · `runner`
 
-Reserved. These adopt the same approach as each is formally extracted: identify outward imports and
-inner-privacy reaches, move owned ports inward, re-export for compatibility, give each port an inner
-default, and verify zero outward imports with a guard. (The `bos.protocol` shim is already retired, so
-new ring work imports the owning foundation directly.) The gateway already hosts `AgentActor` and the
-control plane (§2.4–§2.5),
-with its internals organized into `core/` (coordinator, resolver, command handler, channel context),
-`actors/`, and `channels/` subpackages — but its ring boundary has not yet been audited to the §1.6
-checklist. Each ring gets its own numbered section when reached, so decisions made during extraction are
-captured here rather than guessed up front.
+These adopt the same approach as each is formally extracted: identify outward imports and inner-privacy
+reaches, move owned ports inward, re-export for compatibility, give each port an inner default, and verify
+zero outward imports with a guard. (The `bos.protocol` shim is already retired, so new ring work imports
+the owning foundation directly.) Each ring gets its own numbered subsection when reached, so decisions
+made during extraction are captured here rather than guessed up front.
+
+### 3.1 The assembly ring — `bos.core` (harness · contract · registry · events · llm · `defaults`)
+
+The assembly ring wires the two foundations into a runnable agent: the `AgentHarness` that builds an
+`Agent` from config, the `contract` that owns the outer-facing ports, the `ep_*` registry, and the
+shipped `_default` adapters. Unlike the foundations it is **not** third-party-free (it imports `litellm`,
+`jsonschema`, …); what makes it a ring is that every source dependency points **inward**.
+
+**Boundary (what's in, what's out).** The ring is everything under `bos/core/` *except* the two
+foundation subpackages (`core/agent`, `core/actor`), which keep their own stricter zero-dep guards. Three
+neighbours are deliberately **outside** it:
+
+- **`bos.extensions` — outer (adapters).** The built-in adapter implementations (chat stores, mailboxes,
+  providers, channels). They import `bos.core` inward and register via `@ep_*`; nothing in `bos.core`
+  imports them. They are injected inward at runtime, never named at import time.
+- **`bos.config` — outer (a consumer of the harness).** `bos.config` imports `bos.core` (`AgentHarness`,
+  `ep_agent`, `ExtensionPoint`, contract types); `bos.core` imports **nothing** from `bos.config`. By the
+  dependency rule it is therefore a ring *outward* of the assembly ring, not part of it — a correction to
+  the earlier "harness · config · extension" grouping, which the import direction does not support.
+- **`bos.exts` — outer (the composition root).** A single module whose import triggers registration of all
+  built-ins (`import bos.core.defaults` for the `_default` adapters; `import bos.extensions.channels.*`).
+  It sits at the very outside, wiring adapters into the registry the inner rings expose.
+
+**`defaults` is *in* the ring (verified), and reaches the harness two ways.** `core/defaults` ships the
+ring's default adapters, and the harness has a genuine compile-time dependency on it, so it is part of the
+ring, not a separate adapter layer:
+
+- **Registry-resolved** (`@ep_*(name="_default")`): `jsonl_chat_store`, `litellm_provider`, `consolidator`,
+  `jobs`, `jsonl_mailbox`. The harness resolves these *by name* through the `ep_*` registry; it never
+  imports them. They are force-imported (for registration) by the composition root `bos.exts`.
+- **Imported directly** by the harness as concrete fallback wiring: `DefaultEventBus` and
+  `DefaultBackgroundLLM` ([harness.py](../../src/bos/core/harness.py)). Both are intra-ring imports, so
+  neither breaks ring purity — they are the ring's inner defaults for the `EventBus` / background-LLM ports.
+
+**Ports it owns (rule 2).** `contract.py` owns the outer-facing ports the adapter ring implements —
+`MailRoute`, `Channel`/`BaseChannel`, `AgentPlugin`, the `ep_*` extension points — and re-exports the
+foundations' contracts inward so `from bos.core import ChatStore` / `MailBox` keep resolving.
+
+**Foundation access is package-API-only (rule 4).** The assembly ring imports the foundations through
+their package surface (`bos.core.agent` / `bos.core.actor`), never a private submodule. The one prior
+exception — `core/_utils` importing `from .agent._utils import …` — was resolved by **publishing** those
+shared `_`-prefixed helpers from `bos.core.agent`'s `__init__` (consistent with the convention that
+`_`-prefixed helpers are an exported-but-unstable surface) and re-pointing the re-export to the package.
+
+**Guard.** [test_assembly_ring_isolation.py](../../tests/test_assembly_ring_isolation.py) AST-scans every
+assembly-ring file (excluding the foundation subpackages, resolving relative imports to absolute) and
+asserts two things: (1) **no outward import** to `bos.gateway`/`bos.cli`/`bos.runner`/`bos.extensions`/
+`bos.config`/`bos.exts`; (2) **no foundation-private reach** (`bos.core.agent.<sub>` /
+`bos.core.actor.<sub>`). It allows stdlib + third-party + `bos.core.*` — the ring is defined by import
+*direction*, not by a zero-third-party rule.
+
+### 3.2 `config` · `gateway` · `cli` · `runner`
+
+Reserved. The gateway already hosts `AgentActor` and the control plane (§2.4–§2.5), with its internals
+organized into `core/` (coordinator, resolver, command handler, channel context), `actors/`, and
+`channels/` subpackages — but its ring boundary has not yet been audited to the §1.6 checklist. `config`
+sits between the assembly ring and the gateway/cli (§3.1); `cli`/`runner` are the outermost process
+entrypoints. Each gets its own subsection when reached.
 
 ---
 
@@ -354,3 +414,4 @@ captured here rather than guessed up front.
 | 2026-06-23 | Extract the slash-command **control plane** out of the actor into a mailbox-free gateway `CommandHandler` over the `ChatCoordinator` (§2.5); `AgentActor` is now pure data plane. Remove the last agent-private reach by making `Agent.build_system_prompt` public. |
 | 2026-06-23 | Consolidate this BEP into a design doc: correct the topology (gateway is outer to the harness ring; `bos.protocol` is a removable shim, not a layer), present the actor ring as finished design, and remove implementation footage. |
 | 2026-06-23 | **Track A complete — `bos.protocol` shim retired and deleted.** Re-pointed every wire-type call site (`Envelope`/`MessageType` → `bos.core.actor`; `MessageContent`/`MessageContentPart`/`TurnEvent` → `bos.core.agent`) across src + tests; moved the shim's `content.py` helpers into the agent ring's `._content` leaf (§1.3) and the `WS_TAKEOVER_*` constants into the gateway's WS channel (re-exported from `bos.gateway`); added [test_no_protocol_shim.py](../../tests/test_no_protocol_shim.py) to fail CI on reintroduction. |
+| 2026-06-23 | **Track B / B1 — assembly ring (`bos.core`) extracted (§3.1).** Confirmed zero outward imports and added [test_assembly_ring_isolation.py](../../tests/test_assembly_ring_isolation.py) (forbids imports to `gateway`/`cli`/`runner`/`extensions`/`config`/`exts` and foundation-private reaches). Settled the boundary: `defaults` is *in* the ring; `extensions` (adapters) and `exts` (composition root) are out; **corrected the topology** — `bos.config` is a *consumer* of the harness (it imports `bos.core`, not the reverse), so it is a ring *outward* of the assembly ring, not part of it. Resolved the one rule-4 reach by publishing the shared `_`-helpers from `bos.core.agent`'s `__init__`. |
