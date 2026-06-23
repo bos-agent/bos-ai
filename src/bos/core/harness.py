@@ -296,7 +296,7 @@ class AgentHarness:
         # BEP 11 services: in-process EventBus, JobRunner, BackgroundLLM.
         from bos.core.contract import ep_job_runner
         from bos.core.defaults.background_llm import DefaultBackgroundLLM
-        from bos.core.defaults.lifecycle import DefaultEventBus
+        from bos.core.defaults.eventbus import DefaultEventBus
 
         self.events = DefaultEventBus()
         self.jobs = await ep_job_runner.invoke(self._job_runner_impl, {"bus": self.events})

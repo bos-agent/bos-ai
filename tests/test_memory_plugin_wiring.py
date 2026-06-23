@@ -6,8 +6,8 @@ import pytest
 import bos.exts  # noqa: F401 — registers default extensions
 from bos.core.contract import PluginServices
 from bos.core.defaults.background_llm import DefaultBackgroundLLM
+from bos.core.defaults.eventbus import DefaultEventBus
 from bos.core.defaults.jobs import InProcJobRunner
-from bos.core.defaults.lifecycle import DefaultEventBus
 from bos.plugins.memory.operation_service import DefaultMemoryOperationService
 from bos.plugins.memory.plugin import MemoryHarnessPlugin
 

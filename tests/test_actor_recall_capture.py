@@ -29,7 +29,7 @@ from test_event_sink import create_test_agent
 from bos.core import LLMResponse, ep_provider
 from bos.core.actor import MessageType
 from bos.core.contract import Message, PluginServices, SessionEvent
-from bos.core.defaults.lifecycle import DefaultEventBus
+from bos.core.defaults.eventbus import DefaultEventBus
 from bos.extensions.chat_stores.in_memory import InMemChatStore
 from bos.gateway import AgentActor, ChatCoordinator
 from bos.plugins.memory.plugin import MemoryAgentPlugin, MemoryHarnessPlugin

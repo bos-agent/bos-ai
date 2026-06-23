@@ -6,7 +6,7 @@ import pytest
 
 from bos.core.actor import Event
 from bos.core.contract import SessionEvent
-from bos.core.defaults.lifecycle import DefaultEventBus
+from bos.core.defaults.eventbus import DefaultEventBus
 
 
 def _event(kind="turn_complete", chat_id="c1", actor_name="A", base_revision=1, payload=None):

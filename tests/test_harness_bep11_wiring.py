@@ -83,7 +83,7 @@ class TestTurnCompleteEmission:
     async def test_turn_complete_emits_with_base_revision(self):
         """When AgentActor's _on_turn_finished sees status='completed',
         a SessionEvent fires on the injected bus with the committed revision."""
-        from bos.core.defaults.lifecycle import DefaultEventBus
+        from bos.core.defaults.eventbus import DefaultEventBus
         from bos.gateway.actors.agent_actor import ActorTurnContext, ActorTurnResult, AgentActor
 
         seen = []
@@ -116,7 +116,7 @@ class TestTurnCompleteEmission:
 
     @pytest.mark.asyncio
     async def test_turn_complete_skipped_when_not_completed(self):
-        from bos.core.defaults.lifecycle import DefaultEventBus
+        from bos.core.defaults.eventbus import DefaultEventBus
         from bos.gateway.actors.agent_actor import ActorTurnContext, ActorTurnResult, AgentActor
 
         seen = []
@@ -161,7 +161,7 @@ class TestSessionCloseEmission:
     @pytest.mark.asyncio
     async def test_retire_session_emits_session_close_with_none_revision_when_empty(self):
         """A session that never committed a turn closes with base_revision=None."""
-        from bos.core.defaults.lifecycle import DefaultEventBus
+        from bos.core.defaults.eventbus import DefaultEventBus
         from bos.gateway.actors.agent_actor import AgentActor, SessionState
 
         seen = []
@@ -186,7 +186,7 @@ class TestSessionCloseEmission:
     @pytest.mark.asyncio
     async def test_retire_session_forwards_last_committed_revision(self):
         """When the session has observed a commit, retire_session forwards that revision."""
-        from bos.core.defaults.lifecycle import DefaultEventBus
+        from bos.core.defaults.eventbus import DefaultEventBus
         from bos.gateway.actors.agent_actor import AgentActor, SessionState
 
         seen = []
