@@ -16,7 +16,7 @@ class _CannedLLM:
         self._payload = payload
 
     async def complete(self, messages, **kwargs):
-        from bos.core.llm import LLMResponse
+        from bos.core.agent import LLMResponse
 
         return LLMResponse(content=json.dumps(self._payload))
 

@@ -4,8 +4,8 @@ import json
 
 import pytest
 
+from bos.core.agent import LLMResponse
 from bos.core.defaults.background_llm import BackgroundLLMError, DefaultBackgroundLLM
-from bos.core.llm import LLMResponse
 
 
 class _StubLLM:

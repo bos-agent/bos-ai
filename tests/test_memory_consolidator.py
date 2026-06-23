@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from bos.core.llm import LLMResponse
+from bos.core.agent import LLMResponse
 
 
 class TestStructural:

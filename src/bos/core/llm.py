@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from typing import Any
 
-from .agent import LLMResponse, ToolCallRequest  # noqa: F401 — re-exported for back-compat
+from .agent import LLMResponse
 from .contract import ep_provider
 
 

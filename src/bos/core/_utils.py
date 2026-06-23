@@ -26,7 +26,7 @@ from .agent import (
 )
 
 if TYPE_CHECKING:
-    from .llm import LLMResponse, ToolCallRequest
+    from .agent import LLMResponse, ToolCallRequest
 
 __all__ = [
     "_apply_async",
@@ -135,7 +135,7 @@ def _flock(path: Path | str):
 
 
 def _litellm_response_to_llm_response(raw: Any) -> LLMResponse:
-    from .llm import LLMResponse
+    from .agent import LLMResponse
 
     if isinstance(raw, LLMResponse):
         return raw
@@ -159,7 +159,7 @@ def _litellm_response_to_llm_response(raw: Any) -> LLMResponse:
 
 
 def _litellm_tool_calls_to_requests(raw_tool_calls: Any) -> list[ToolCallRequest]:
-    from .llm import ToolCallRequest
+    from .agent import ToolCallRequest
 
     if not raw_tool_calls:
         return []

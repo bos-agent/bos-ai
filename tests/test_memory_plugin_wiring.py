@@ -20,7 +20,7 @@ async def _setup_plugin(tmp_path, *, consolidation_enabled=False, idle_after=300
 
     class _StubLLM:
         async def complete(self, messages, **kwargs):
-            from bos.core.llm import LLMResponse
+            from bos.core.agent import LLMResponse
 
             return LLMResponse(content='{"operations": []}')
 

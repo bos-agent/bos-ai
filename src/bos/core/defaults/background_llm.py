@@ -11,8 +11,8 @@ from typing import Any
 
 import jsonschema
 
+from bos.core.agent import LLMResponse
 from bos.core.contract import ReasoningEffort
-from bos.core.llm import LLMResponse
 
 logger = logging.getLogger(__name__)
 
