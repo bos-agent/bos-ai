@@ -5,16 +5,15 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from bos.config.workspace import ResolvedActorConfig
 from bos.core import MailBox
 
+from ..config import ResolvedActorConfig
 from ..core.chat_coordinator import ChatCoordinator
 from .agent_actor import AgentActor
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-    from bos.config import Workspace
     from bos.core import AgentHarness
 
 logger = logging.getLogger(__name__)
@@ -51,18 +50,15 @@ class ActorManager:
     def __init__(
         self,
         *,
-        workspace: Workspace,
+        actors: dict[str, ResolvedActorConfig],
         harness: AgentHarness,
         chat_coordinator: ChatCoordinator,
         state_changed: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
-        self.workspace = workspace
         self.harness = harness
         self.chat_coordinator = chat_coordinator
         self._state_changed = state_changed
-        self._actors = {
-            name: ManagedActor(name=name, config=config) for name, config in workspace.resolve_gateway_actors().items()
-        }
+        self._actors = {name: ManagedActor(name=name, config=config) for name, config in actors.items()}
 
     @property
     def actors(self) -> dict[str, ManagedActor]:

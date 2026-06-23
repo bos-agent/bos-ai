@@ -3,10 +3,15 @@ from dataclasses import dataclass
 
 import pytest
 
-from bos.config.workspace import ResolvedGatewayChannelConfig
 from bos.core import BaseChannel, MailBox, ep_channel
 from bos.extensions.chat_stores.in_memory import InMemChatStore
-from bos.gateway import ActorResolver, ChannelFactoryError, ChannelManager, ChannelRuntimeContext
+from bos.gateway import (
+    ActorResolver,
+    ChannelFactoryError,
+    ChannelManager,
+    ChannelRuntimeContext,
+    ResolvedGatewayChannelConfig,
+)
 from bos.gateway.core.chat_coordinator import ChatCoordinator
 
 

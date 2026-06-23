@@ -6,9 +6,9 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
-from bos.config.workspace import ResolvedGatewayChannelConfig
 from bos.core import Channel, MailBox, ep_channel
 
+from ..config import ResolvedGatewayChannelConfig
 from ..core.channel_context import ChannelRuntimeContext
 
 logger = logging.getLogger(__name__)

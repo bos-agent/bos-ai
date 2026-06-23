@@ -8,7 +8,7 @@ from typing import Any
 
 from aiohttp import BodyPartReader, web
 
-from bos.config.workspace import ResolvedGatewayConfig
+from .config import ResolvedGatewayConfig
 
 JsonDict = dict[str, Any]
 StatusProvider = Callable[[], JsonDict]

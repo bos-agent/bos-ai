@@ -286,7 +286,7 @@ async def test_actor_manager_enables_history_attribution_only_for_multi_agent_ru
     )
     multi_harness = _FakeHarness()
     multi_manager = ActorManager(
-        workspace=multi_ws,
+        actors=multi_ws.resolve_gateway_actors(),
         harness=multi_harness,
         chat_coordinator=ChatCoordinator(InMemChatStore()),
     )
@@ -303,7 +303,7 @@ async def test_actor_manager_enables_history_attribution_only_for_multi_agent_ru
     )
     single_harness = _FakeHarness()
     single_manager = ActorManager(
-        workspace=single_ws,
+        actors=single_ws.resolve_gateway_actors(),
         harness=single_harness,
         chat_coordinator=ChatCoordinator(InMemChatStore()),
     )
@@ -340,7 +340,7 @@ async def test_actor_manager_passes_explicit_actor_agent_cfg_to_harness():
     )
     harness = _FakeHarness()
     manager = ActorManager(
-        workspace=ws,
+        actors=ws.resolve_gateway_actors(),
         harness=harness,
         chat_coordinator=ChatCoordinator(InMemChatStore()),
     )
@@ -396,7 +396,7 @@ async def test_actor_manager_clears_active_turns_on_actor_task_failure(monkeypat
         notifications += 1
 
     manager = ActorManager(
-        workspace=ws,
+        actors=ws.resolve_gateway_actors(),
         harness=_FakeHarness(),
         chat_coordinator=coordinator,
         state_changed=state_changed,

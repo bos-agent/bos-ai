@@ -21,5 +21,5 @@ async def start(workspace: Workspace) -> None:
 
     logger.info("Starting BOS gateway runtime")
     async with workspace.harness() as harness:
-        gateway = Gateway(workspace=workspace, harness=harness)
+        gateway = Gateway(runtime=workspace.resolve_gateway_runtime(), harness=harness)
         await gateway.run()

@@ -6,9 +6,9 @@ import os
 import re
 import shutil
 import tomllib
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from bos.config.schema import (
     AgentConfig,
@@ -18,6 +18,18 @@ from bos.config.schema import (
     validate_config,
 )
 from bos.core import AgentHarness, _deep_merge, _get_bos_home, _resolve_path
+
+if TYPE_CHECKING:
+    # The gateway owns these config *shapes* (BEP 13 §3.3); the loader (this ring)
+    # imports them only to produce them. Constructed via lazy imports inside the
+    # resolve_* methods so ``import bos.config`` stays light (the gateway package
+    # pulls aiohttp); annotations are strings via ``from __future__ import annotations``.
+    from bos.gateway.config import (
+        GatewayRuntimeConfig,
+        ResolvedActorConfig,
+        ResolvedGatewayChannelConfig,
+        ResolvedGatewayConfig,
+    )
 
 
 class WorkspaceResolutionError(RuntimeError):
@@ -405,45 +417,6 @@ class AgentRuntimeConfig:
     bos_dir: str | None = None
 
 
-@dataclass(frozen=True)
-class ResolvedGatewayConfig:
-    host: str = "127.0.0.1"
-    port: int = 5920
-    upload_dir: str = ".bos/uploads/http"
-    max_upload_bytes: int = 20 * 1024 * 1024
-    api_key_env: str = "BOS_GATEWAY_API_KEY"
-
-
-@dataclass(frozen=True)
-class ResolvedActorConfig:
-    name: str
-    agent: str
-    address: str
-    display_name: str | None = None
-    restart_on_error: bool = True
-    max_restarts: int = 5
-    agent_overrides: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass(frozen=True)
-class ResolvedGatewayChannelConfig:
-    type: str
-    channel_id: str
-    address: str
-    target_actor: str
-    display_name: str | None = None
-    settings: dict[str, Any] = field(default_factory=dict)
-
-    def extension_config(self) -> dict[str, Any]:
-        return {
-            "name": self.type,
-            "channel_id": self.channel_id,
-            "target_actor": self.target_actor,
-            "display_name": self.display_name,
-            "settings": self.settings,
-        }
-
-
 class Workspace:
     def __init__(
         self,
@@ -653,6 +626,8 @@ class Workspace:
         return actor.agent
 
     def resolve_gateway_config(self) -> ResolvedGatewayConfig:
+        from bos.gateway.config import ResolvedGatewayConfig
+
         gateway = self.config.runtime.gateway if self.config.runtime else None
         if gateway is None:
             return ResolvedGatewayConfig()
@@ -665,6 +640,8 @@ class Workspace:
         )
 
     def resolve_gateway_actors(self) -> dict[str, ResolvedActorConfig]:
+        from bos.gateway.config import ResolvedActorConfig
+
         runtime = self.config.runtime
         actors_cfg = runtime.actors if runtime else {}
         if not actors_cfg:
@@ -694,6 +671,8 @@ class Workspace:
         return default_actor
 
     def resolve_gateway_channels(self) -> list[ResolvedGatewayChannelConfig]:
+        from bos.gateway.config import ResolvedGatewayChannelConfig
+
         runtime = self.config.runtime
         raw_channels = runtime.channels if runtime else []
         actors = self.resolve_gateway_actors()
@@ -731,6 +710,26 @@ class Workspace:
                 )
             )
         return channels
+
+    def resolve_gateway_runtime(self) -> GatewayRuntimeConfig:
+        """Assemble the single gateway-owned aggregate the gateway is built from.
+
+        The gateway never reads a ``Workspace``; the composition root calls this
+        and injects the result via ``Gateway(runtime=...)`` (BEP 13 §3.3)."""
+        from bos.gateway.config import GatewayRuntimeConfig
+
+        runtime = self.config.runtime
+        mention_prefix = runtime.actor_resolver.mention_prefix if runtime else "@"
+        return GatewayRuntimeConfig(
+            gateway=self.resolve_gateway_config(),
+            actors=self.resolve_gateway_actors(),
+            default_actor=self.resolve_default_actor(),
+            channels=self.resolve_gateway_channels(),
+            mention_prefix=mention_prefix,
+            workdir=str(self.workspace),
+            bos_dir=self.bos_dir,
+            runtime_kind=self.get_runtime_config().kind,
+        )
 
     def get_runtime_config(self, *, force_kind: str | None = None) -> AgentRuntimeConfig:
         runtime = self.config.runtime
