@@ -6,14 +6,14 @@ from typing import TYPE_CHECKING, Any
 
 from aiohttp import web
 
-from .actor_manager import ActorManager
-from .actor_resolver import ActorDescriptor, ActorResolver
-from .channel_context import ChannelRuntimeContext
-from .channel_manager import ChannelManager
-from .chat_coordinator import ChannelConversationRef, ChatCoordinator
+from .actors.actor_manager import ActorManager
+from .channels.channel_manager import ChannelManager
+from .channels.ws_channel import WSChannel
+from .core.actor_resolver import ActorDescriptor, ActorResolver
+from .core.channel_context import ChannelRuntimeContext
+from .core.chat_coordinator import ChannelConversationRef, ChatCoordinator
 from .http import create_gateway_app, resolve_gateway_api_key
 from .state import GatewayRunDir, write_gateway_state
-from .ws_channel import WSChannel
 
 if TYPE_CHECKING:
     from bos.config import Workspace

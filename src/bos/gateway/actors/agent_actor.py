@@ -13,7 +13,7 @@ from bos.core.contract import SessionEvent, SessionEventKind
 from bos.core.events import CLIENT_TURN_EVENT_TYPES, HostChannelSink, MailboxEventSink
 from bos.protocol import MessageContent, TurnEvent
 
-from .chat_coordinator import ChannelConversationRef, ChatCoordinationError, ChatCoordinator
+from ..core.chat_coordinator import ChannelConversationRef, ChatCoordinationError, ChatCoordinator
 from .chat_state import ChatState, ChatStateError
 
 if TYPE_CHECKING:

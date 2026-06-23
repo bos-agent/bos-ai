@@ -8,8 +8,8 @@ from typing import TYPE_CHECKING, Any
 from bos.config.workspace import ResolvedActorConfig
 from bos.core import MailBox
 
+from ..core.chat_coordinator import ChatCoordinator
 from .agent_actor import AgentActor
-from .chat_coordinator import ChatCoordinator
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable

@@ -11,9 +11,9 @@ from aiohttp import WSMsgType, web
 from bos.core import BaseChannel, MailBox
 from bos.protocol import WS_TAKEOVER_CLOSE_CODE, WS_TAKEOVER_CLOSE_REASON, Envelope, MessageContent, MessageType
 
-from .actor_resolver import ActorResolutionError
-from .channel_context import ChannelRuntimeContext
-from .chat_coordinator import ChannelConversationRef
+from ..core.actor_resolver import ActorResolutionError
+from ..core.channel_context import ChannelRuntimeContext
+from ..core.chat_coordinator import ChannelConversationRef
 
 
 class WSChannel(BaseChannel[dict[str, Any]]):

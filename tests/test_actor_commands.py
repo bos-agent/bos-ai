@@ -6,8 +6,8 @@ import pytest
 from conftest import InMemChatStore, InMemMailRoute, InMemMemoryExtension, MessageOnlyConsolidator
 
 from bos.core.contract import Message
-from bos.gateway.agent_actor import AgentActor
-from bos.gateway.chat_state import ChatState
+from bos.gateway.actors.agent_actor import AgentActor
+from bos.gateway.actors.chat_state import ChatState
 from bos.protocol import Envelope, MessageType
 
 

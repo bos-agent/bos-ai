@@ -84,7 +84,7 @@ class TestTurnCompleteEmission:
         """When AgentActor's _on_turn_finished sees status='completed',
         a LifecycleEvent fires on the injected bus with the committed revision."""
         from bos.core.defaults.lifecycle import DefaultLifecycleBus
-        from bos.gateway.agent_actor import ActorTurnContext, ActorTurnResult, AgentActor
+        from bos.gateway.actors.agent_actor import ActorTurnContext, ActorTurnResult, AgentActor
 
         seen = []
         bus = DefaultLifecycleBus()
@@ -117,7 +117,7 @@ class TestTurnCompleteEmission:
     @pytest.mark.asyncio
     async def test_turn_complete_skipped_when_not_completed(self):
         from bos.core.defaults.lifecycle import DefaultLifecycleBus
-        from bos.gateway.agent_actor import ActorTurnContext, ActorTurnResult, AgentActor
+        from bos.gateway.actors.agent_actor import ActorTurnContext, ActorTurnResult, AgentActor
 
         seen = []
         bus = DefaultLifecycleBus()
@@ -162,7 +162,7 @@ class TestSessionCloseEmission:
     async def test_retire_session_emits_session_close_with_none_revision_when_empty(self):
         """A session that never committed a turn closes with base_revision=None."""
         from bos.core.defaults.lifecycle import DefaultLifecycleBus
-        from bos.gateway.agent_actor import AgentActor, SessionState
+        from bos.gateway.actors.agent_actor import AgentActor, SessionState
 
         seen = []
         bus = DefaultLifecycleBus()
@@ -187,7 +187,7 @@ class TestSessionCloseEmission:
     async def test_retire_session_forwards_last_committed_revision(self):
         """When the session has observed a commit, retire_session forwards that revision."""
         from bos.core.defaults.lifecycle import DefaultLifecycleBus
-        from bos.gateway.agent_actor import AgentActor, SessionState
+        from bos.gateway.actors.agent_actor import AgentActor, SessionState
 
         seen = []
         bus = DefaultLifecycleBus()
@@ -210,7 +210,7 @@ class TestSessionCloseEmission:
 
     @pytest.mark.asyncio
     async def test_retire_session_no_bus_is_silent(self):
-        from bos.gateway.agent_actor import AgentActor, SessionState
+        from bos.gateway.actors.agent_actor import AgentActor, SessionState
 
         actor = AgentActor.__new__(AgentActor)
         actor._sessions = {"c1": SessionState(chat_id="c1")}

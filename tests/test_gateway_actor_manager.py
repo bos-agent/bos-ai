@@ -8,7 +8,7 @@ from bos.core import Message
 from bos.extensions.chat_stores.in_memory import InMemChatStore
 from bos.extensions.mailboxes.in_memory import InMemMailRoute
 from bos.gateway import AgentActor, ChannelConversationRef, ChatCoordinator
-from bos.gateway.actor_manager import ActorManager
+from bos.gateway.actors.actor_manager import ActorManager
 from bos.protocol import Envelope, MessageType
 
 
@@ -372,7 +372,7 @@ async def test_actor_manager_clears_active_turns_on_actor_task_failure(monkeypat
         async def run(self):
             raise RuntimeError("boom")
 
-    import bos.gateway.actor_manager as actor_manager_module
+    import bos.gateway.actors.actor_manager as actor_manager_module
 
     monkeypatch.setattr(actor_manager_module, "AgentActor", ExplodingActor)
     store = InMemChatStore()

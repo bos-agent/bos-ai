@@ -7,7 +7,7 @@ from bos.config.workspace import ResolvedGatewayChannelConfig
 from bos.core import BaseChannel, MailBox, ep_channel
 from bos.extensions.chat_stores.in_memory import InMemChatStore
 from bos.gateway import ActorResolver, ChannelFactoryError, ChannelManager, ChannelRuntimeContext
-from bos.gateway.chat_coordinator import ChatCoordinator
+from bos.gateway.core.chat_coordinator import ChatCoordinator
 
 
 @dataclass(frozen=True)

@@ -4,8 +4,8 @@ from datetime import datetime
 
 import pytest
 
-from bos.gateway.chat_coordinator import ChannelConversationRef
-from bos.gateway.command_handler import CommandHandler
+from bos.gateway.core.chat_coordinator import ChannelConversationRef
+from bos.gateway.core.command_handler import CommandHandler
 
 
 class FakeCoordinator:
