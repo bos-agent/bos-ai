@@ -262,24 +262,17 @@ plumbing + empty `finally`), and the `core/__init__.py` export. This also drops 
 for any out-of-tree tool that read it — accepted, since nothing in-tree did and the value was never
 populated for readers anyway. Gates green (665 tests, ruff, pyright). No re-export/alias kept.
 
-### 2.5 The Agent public-API boundary (the real design issue)
+### 2.5 The Agent public-API boundary — RESOLVED (by OPEN-D + a public method)
 
-The actor currently reaches into **`Agent` privates**, which is an inner-ring privacy violation even
-though Python allows it:
+The actor used to reach into `Agent` privates from its command subsystem:
+`_cmd_chats` → `agent._chat_store.list_chats()`, `_cmd_prompt` → `agent._build_system_prompt(ctx)`.
 
-- `_cmd_chats` → `self._agent._chat_store.list_chats()` ([actor.py:558](../../src/bos/core/actor.py#L558))
-- `_cmd_prompt` → `self._agent._build_system_prompt(ctx)` ([actor.py:579](../../src/bos/core/actor.py#L579))
-
-Per rule §1.6.4, an outer ring talks to an inner ring only through published API. Proposed fix (small,
-additive to the *agent* ring):
-
-- Inject `chat_store: ChatStore` into `AgentActor` directly (it is available at construction — the
-  harness already holds it), so commands stop borrowing the agent's. This is symmetric with the existing
-  optional `chat_state` parameter. *Alternative:* add a public `Agent.chat_store` property.
-- Promote `Agent._build_system_prompt` to public `Agent.build_system_prompt(ctx)` (drop the underscore).
-
-**[OPEN-C]** Inject `chat_store` into the actor vs. expose it as an `Agent` property — which is the
-cleaner ownership story?
+**OPEN-D dissolved most of this:** the command subsystem moved out of the actor entirely (§2.6), so the
+`_chat_store` reach is gone — the gateway `CommandHandler` holds its *own injected* `ChatStore`, not the
+agent's. The `chat_store`-injection-vs-property question (**[OPEN-C]**) is therefore moot; no actor
+reaches the agent's chat store. The only residual private reach was `cli/commands/debug.py` introspecting
+the prompt, fixed by promoting `Agent._build_system_prompt` → public **`Agent.build_system_prompt(ctx)`**.
+No outer ring now touches `Agent` privates.
 
 ### 2.6 [OPEN-D] Does command/session handling belong in the actor? — RESOLVED (control plane extracted)
 
@@ -321,10 +314,11 @@ later grows consumers for which "routing depends on an actor-foundation type" be
 
 ### 2.9 Readiness
 
-The pure ring-move (§2.3–§2.5, path **D1**) depends on nothing outside this branch and is implementable
-now. It is smaller than the agent extraction was. **Gate:** [OPEN-A] (CURRENT_MAILBOX) ✅ resolved (§2.4);
-[OPEN-B] (messaging ring), [OPEN-C] (chat_store injection) should be resolved before the remaining code;
-[OPEN-D] (SRP split) and [OPEN-F] (EventBus home) can be deferred without blocking.
+The actor ring landed on `re-arch` as the system foundation (§2.1–§2.3). **All open questions are now
+resolved:** [OPEN-A] CURRENT_MAILBOX deleted (§2.4); [OPEN-B] messaging owned by the actor foundation
+(§2.7); [OPEN-C] agent-private reaches removed + `build_system_prompt` made public (§2.5); [OPEN-D]
+control plane extracted to a gateway `CommandHandler`, actor is pure data plane (§2.6); [OPEN-F] EventBus
+in the actor foundation (§2.7/§2.10). [OPEN-E] (naming) — kept `AgentActor` (now in the gateway ring).
 
 ### 2.10 Event model — resolved (supersedes the event-port plan in §2.3)
 
@@ -428,9 +422,9 @@ so decisions made during extraction are captured here rather than guessed up fro
 
 - ~~**[OPEN-A]** `CURRENT_MAILBOX`: move-and-keep or delete?~~ **RESOLVED → B (deleted); §2.4.**
 - ~~**[OPEN-B]** Does messaging become its own leaf ring, or live in the actor ring?~~ **RESOLVED → actor foundation owns it + re-export; §2.7.**
-- **[OPEN-C]** Give the actor `chat_store` by injection or via a public `Agent.chat_store` property? *(still open — future increment; relates to §2.5.)*
+- ~~**[OPEN-C]** Give the actor `chat_store` by injection or via a public property?~~ **RESOLVED → moot (OPEN-D removed the reach); `Agent.build_system_prompt` made public for the debug CLI; §2.5.**
 - ~~**[OPEN-D]** Also extract the command/session subsystem from `AgentActor`?~~ **RESOLVED → control plane moved out to a gateway `CommandHandler`; actor is pure data plane; §2.6.**
-- **[OPEN-E]** Naming: keep `AgentActor`/`CoordinatedActor`? (Lean: keep — kept so far.)
+- ~~**[OPEN-E]** Naming: keep `AgentActor`/`CoordinatedActor`?~~ **RESOLVED → kept `AgentActor` (moved to the gateway ring); `CoordinatedActor` folded into it.**
 - ~~**[OPEN-F]** Where does `EventBus` + `Event` live?~~ **RESOLVED → actor foundation; §2.7/§2.10.**
 
 ---
@@ -447,3 +441,4 @@ so decisions made during extraction are captured here rather than guessed up fro
 | 2026-06-22 | Land the actor foundation (§2) | Built `bos.core.actor` as a zero-dep foundation over six green increments: relocate `AgentActor`→`agent_actor.py`; move `Envelope`(generic)/`MessageType`/`MailBox`(generic) out of `bos.protocol`/`contract` into the foundation; move `Event`/`EventBus` in and make the bus type-keyed; extract the domain-agnostic base `Actor` and reseat `AgentActor` on it. `bos.protocol` lazily re-exports; strict isolation guard added. Gates green throughout: 668 tests, ruff, pyright 0 |
 | 2026-06-23 | Move `AgentActor` to the gateway; fold `CoordinatedActor` | `AgentActor`'s only consumer is the gateway, so it moved to `bos.gateway` and absorbed `CoordinatedActor` (optional `chat_coordinator`); dropped from `bos.core`'s public surface. Then consolidated the gateway internals into `core/` (coordinator, resolver, command_handler, channel_context) / `actors/` / `channels/` subpackages |
 | 2026-06-23 | Resolve [OPEN-D] (§2.6) | Extracted the slash-command control plane out of the actor into a mailbox-free gateway `CommandHandler` over the `ChatCoordinator`; rewired ws/telegram/lark to call it on inbound `/`; stripped the actor's command subsystem + deleted `ChatState`. `AgentActor` is now pure data plane. Dropped aliases + `/prompt`. Gates green: 658 tests, ruff, pyright 0; both ring guards green |
+| 2026-06-23 | Resolve [OPEN-C]/[OPEN-E] (§2.5) | OPEN-D removed the actor's agent-private reaches, mooting the chat_store question; promoted `Agent._build_system_prompt` → public `build_system_prompt` for the debug CLI (the last private reach). [OPEN-E]: kept `AgentActor` (gateway ring), folded away `CoordinatedActor`. **All §2 open questions resolved.** 658 tests, ruff, pyright 0 |
