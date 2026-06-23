@@ -7,7 +7,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from bos.core.actor import Envelope, EventBus, MailBox, MessageType
+from bos.core.actor import Actor, Envelope, EventBus, MailBox, MessageType
 from bos.protocol import MessageContent, TurnEvent
 
 from .agent import AbortTurn, Agent, TurnContext
@@ -84,12 +84,16 @@ class _RouteAwareMailboxEventSink(MailboxEventSink):
         )
 
 
-class AgentActor:
+class AgentActor(Actor):
     """Actor that drives an Agent via a bound MailBox.
 
     Sessions are keyed by ``chat_id``.  Each distinct ``chat_id`` gets its
     own concurrent task slot, interrupt buffer, and generation counter.
     Messages arriving during an active turn are rejected immediately.
+
+    Specializes the foundation ``Actor``: the mailbox pump, background-task
+    lifecycle, and event emission come from the base; this class adds the
+    turn/session/interrupt model and the ``SessionEvent`` vocabulary.
     """
 
     def __init__(
@@ -100,92 +104,79 @@ class AgentActor:
         *,
         lifecycle_bus: EventBus | None = None,
     ):
-        self._address = mailbox.address
+        super().__init__(mailbox, event_bus=lifecycle_bus)
         self._agent = agent
-        self._mailbox = mailbox
         self._chat_state = chat_state or ChatState()
         self._sessions: dict[str, SessionState] = {}
-        self._lifecycle_bus = lifecycle_bus
-        self._command_tasks: set[asyncio.Task] = set()
 
     async def aclose(self) -> None:
-        tasks = [session.execution.task for session in self._sessions.values() if session.execution.task is not None]
-        tasks.extend(self._command_tasks)
-        for task in tasks:
+        session_tasks = [s.execution.task for s in self._sessions.values() if s.execution.task is not None]
+        for task in session_tasks:
             task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
-        self._command_tasks.clear()
+        if session_tasks:
+            await asyncio.gather(*session_tasks, return_exceptions=True)
         for session in self._sessions.values():
             session.execution.task = None
+        await super().aclose()  # drains command tasks tracked by the base
 
-    async def run(self) -> None:
-        try:
-            while True:
-                for chat_id in list(self._sessions.keys()):
-                    await self._finalize_done_task(chat_id)
+    async def _on_idle_tick(self) -> None:
+        # Reap completed turn tasks (and surface their errors) once per loop.
+        for chat_id in list(self._sessions.keys()):
+            await self._finalize_done_task(chat_id)
 
-                env = await self._mailbox.receive_nowait()
-                if env is None:
-                    await asyncio.sleep(0.1)
-                    continue
+    async def handle(self, env: Envelope) -> None:
+        if not env.chat_id:
+            await self._mailbox.send(
+                env.sender,
+                "(error: missing chat_id)",
+                content_type=MessageType.SYSTEM,
+            )
+            return
 
-                if not env.chat_id:
-                    await self._mailbox.send(
-                        env.sender,
-                        "(error: missing chat_id)",
-                        content_type=MessageType.SYSTEM,
+        chat_id = env.chat_id
+        session = self._get_or_create_session(chat_id)
+
+        if env.content_type == MessageType.COMMAND:
+            command_content = self._command_content(env)
+            if command_content is None:
+                await self._send_command_content_error(env, content_type=MessageType.SYSTEM)
+                return
+            if command_content.strip().startswith("/"):
+                self._spawn_command_task(env)
+                return
+            env.content_type = MessageType.MESSAGE
+
+        if session.execution.task is None:
+            if env.content_type == MessageType.MESSAGE:
+                session.interrupts.clear()
+                session.execution.reply_recipient = env.sender
+                session.execution.reply_chat_id = env.chat_id
+                generation = session.execution.generation
+                turn_id = uuid.uuid4().hex
+                session.execution.task = asyncio.create_task(
+                    self._run_ask(
+                        chat_id=chat_id,
+                        generation=generation,
+                        turn_id=turn_id,
+                        reply_recipient=env.sender,
+                        reply_chat_id=env.chat_id,
+                        content=env.content,
+                        inbound_env=env,
                     )
-                    continue
+                )
+            return
 
-                chat_id = env.chat_id
-                session = self._get_or_create_session(chat_id)
-
-                if env.content_type == MessageType.COMMAND:
-                    command_content = self._command_content(env)
-                    if command_content is None:
-                        await self._send_command_content_error(env, content_type=MessageType.SYSTEM)
-                        continue
-                    if command_content.strip().startswith("/"):
-                        self._spawn_command_task(env)
-                        continue
-                    env.content_type = MessageType.MESSAGE
-
-                if session.execution.task is None:
-                    if env.content_type == MessageType.MESSAGE:
-                        session.interrupts.clear()
-                        session.execution.reply_recipient = env.sender
-                        session.execution.reply_chat_id = env.chat_id
-                        generation = session.execution.generation
-                        turn_id = uuid.uuid4().hex
-                        session.execution.task = asyncio.create_task(
-                            self._run_ask(
-                                chat_id=chat_id,
-                                generation=generation,
-                                turn_id=turn_id,
-                                reply_recipient=env.sender,
-                                reply_chat_id=env.chat_id,
-                                content=env.content,
-                                inbound_env=env,
-                            )
-                        )
-                    continue
-
-                if env.content_type == MessageType.INTERRUPT_ABORT:
-                    self._abort_current_turn(session)
-                elif env.content_type == MessageType.INTERRUPT_MESSAGE:
-                    session.interrupts.append(env)
-                else:
-                    await self._mailbox.send(
-                        env.sender,
-                        "(busy: a response is already in progress for this chat)",
-                        content_type=MessageType.SYSTEM,
-                        chat_id=env.chat_id,
-                    )
-
-        except asyncio.CancelledError:
-            await self.aclose()
-            raise
+        if env.content_type == MessageType.INTERRUPT_ABORT:
+            self._abort_current_turn(session)
+        elif env.content_type == MessageType.INTERRUPT_MESSAGE:
+            session.interrupts.append(env)
+        else:
+            await self._mailbox.send(
+                env.sender,
+                "(busy: a response is already in progress for this chat)",
+                content_type=MessageType.SYSTEM,
+                chat_id=env.chat_id,
+            )
 
     def current_chat_id(self, env: Envelope, explicit_input: str | None = None) -> str | None:
         if explicit_input and explicit_input.strip():
@@ -225,9 +216,7 @@ class AgentActor:
         )
 
     def _spawn_command_task(self, env: Envelope) -> None:
-        task = asyncio.create_task(self._handle_command(env))
-        self._command_tasks.add(task)
-        task.add_done_callback(self._command_tasks.discard)
+        self._spawn(self._handle_command(env))
 
     def _abort_current_turn(self, session: SessionState) -> None:
         """Cancel the current execution and fence stale replies.
@@ -409,25 +398,21 @@ class AgentActor:
         turn_id: str | None,
         base_revision: int | None,
     ) -> None:
-        """Emit a lifecycle event on the bus, if one is wired. The bus is the
-        single generic channel for turn_complete / session_close — the actor
-        names no plugin, and plugins subscribe to react (e.g. recall flush,
+        """Emit a session lifecycle event on the bus (via the base ``emit``,
+        which no-ops when no bus is wired and isolates handler failures). The
+        bus is the single generic channel for turn_complete / session_close —
+        the actor names no plugin; plugins subscribe to react (recall flush,
         consolidation)."""
-        if self._lifecycle_bus is None:
-            return
-        try:
-            await self._lifecycle_bus.emit(
-                SessionEvent(
-                    kind=kind,
-                    chat_id=chat_id,
-                    actor_name=actor_name,
-                    base_revision=base_revision,
-                    turn_id=turn_id,
-                    payload={},
-                )
+        await self.emit(
+            SessionEvent(
+                kind=kind,
+                chat_id=chat_id,
+                actor_name=actor_name,
+                base_revision=base_revision,
+                turn_id=turn_id,
+                payload={},
             )
-        except Exception:
-            logger.exception("%s lifecycle emit raised", kind)
+        )
 
     def _build_host_sink(self, ctx: ActorTurnContext, mailbox_sink: MailboxEventSink) -> HostChannelSink:
         """Construct the per-turn event sink. The base actor registers the

@@ -96,7 +96,7 @@ class TestTurnCompleteEmission:
         bus.subscribe(SessionEvent, handler)
 
         actor = CoordinatedActor.__new__(CoordinatedActor)
-        actor._lifecycle_bus = bus
+        actor._event_bus = bus
         actor._chat_coordinator = _DummyCoordinator()
         actor._mailbox = None
 
@@ -129,7 +129,7 @@ class TestTurnCompleteEmission:
 
         bus.subscribe(SessionEvent, handler)
         actor = CoordinatedActor.__new__(CoordinatedActor)
-        actor._lifecycle_bus = bus
+        actor._event_bus = bus
         actor._chat_coordinator = _DummyCoordinator()
         actor._mailbox = _NoopMailbox()
         ctx = ActorTurnContext(
@@ -176,7 +176,7 @@ class TestSessionCloseEmission:
 
         actor = AgentActor.__new__(AgentActor)
         actor._sessions = {"c1": SessionState(chat_id="c1")}
-        actor._lifecycle_bus = bus
+        actor._event_bus = bus
         actor._agent = _StubAgent()
         actor._address = "agent@A"
         await actor.retire_session("c1")
@@ -203,7 +203,7 @@ class TestSessionCloseEmission:
         session = SessionState(chat_id="c1")
         session.execution.last_committed_revision = 7
         actor._sessions = {"c1": session}
-        actor._lifecycle_bus = bus
+        actor._event_bus = bus
         actor._agent = _StubAgent()
         actor._address = "agent@A"
         await actor.retire_session("c1")
@@ -218,7 +218,7 @@ class TestSessionCloseEmission:
         actor._sessions = {"c1": SessionState(chat_id="c1")}
         actor._agent = _StubAgent()
         actor._address = "agent@A"
-        actor._lifecycle_bus = None  # no bus → emit is a silent no-op
+        actor._event_bus = None  # no bus → emit is a silent no-op
         await actor.retire_session("c1")
 
 
