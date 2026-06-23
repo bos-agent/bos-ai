@@ -21,6 +21,15 @@ from ._content import (
     validate_message_content,
     validate_message_part,
 )
+from ._utils import (
+    _apply_async,
+    _as_parts,
+    _build_params,
+    _compact,
+    _strip_reply_artifacts,
+    _strip_think,
+    _xml_attr,
+)
 from .agent import AbortTurn, Agent
 from .contract import (
     LLM,
@@ -93,4 +102,11 @@ __all__ = [
     "image_source_to_model_url",
     "validate_message_content",
     "validate_message_part",
+    "_apply_async",
+    "_as_parts",
+    "_build_params",
+    "_compact",
+    "_strip_reply_artifacts",
+    "_strip_think",
+    "_xml_attr",
 ]

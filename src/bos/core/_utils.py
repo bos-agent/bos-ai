@@ -9,10 +9,13 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-# The agent-core helpers are owned by ``core.agent._utils`` (an inner ring).
-# They are re-exported here so the shared ``_``-prefixed helper surface (and
-# ``bos.core``'s public re-exports) keep resolving without duplicating code.
-from .agent._utils import (
+# The agent-core helpers are owned by the agent foundation and published from
+# its package API (``bos.core.agent``). They are re-exported here so the shared
+# ``_``-prefixed helper surface (and ``bos.core``'s public re-exports) keep
+# resolving without duplicating code — imported from the package, not the
+# foundation's private ``._utils`` leaf, so the assembly ring touches only
+# published API (BEP 13 §1.6 rule 4).
+from .agent import (
     _apply_async,
     _as_parts,
     _build_params,
