@@ -153,12 +153,6 @@ class SessionEvent(Event):
     payload: dict[str, Any] = field(default_factory=dict)
 
 
-# Back-compat aliases — historical names before BEP 13 §2.10.
-LifecycleKind = SessionEventKind
-LifecycleEvent = SessionEvent
-LifecycleBus = EventBus
-
-
 # ── BEP 11 §2: Job runner ──────────────────────────────────────────────────
 
 JobTrigger = Literal["session_close", "idle", "manual"]
@@ -391,9 +385,6 @@ __all__ = [
     "JobRunner",
     "JobStatus",
     "JobTrigger",
-    "LifecycleBus",
-    "LifecycleEvent",
-    "LifecycleKind",
     "MailBox",
     "MailRoute",
     "MessageType",

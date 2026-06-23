@@ -5,9 +5,9 @@ from dataclasses import dataclass
 
 import pytest
 
-from bos.core.contract import LifecycleEvent
+from bos.core.contract import SessionEvent
 from bos.core.defaults.jobs import InProcJobRunner
-from bos.core.defaults.lifecycle import DefaultLifecycleBus
+from bos.core.defaults.lifecycle import DefaultEventBus
 
 
 @dataclass
@@ -49,7 +49,7 @@ class TestStructural:
 class TestSubmitAndDrain:
     @pytest.mark.asyncio
     async def test_submit_runs_job(self, tmp_path):
-        bus = DefaultLifecycleBus()
+        bus = DefaultEventBus()
         runner = InProcJobRunner(bus, max_concurrency=2, idle_after=300)
         await runner.start()
         try:
@@ -63,7 +63,7 @@ class TestSubmitAndDrain:
 
     @pytest.mark.asyncio
     async def test_dedup_on_key_in_flight(self):
-        bus = DefaultLifecycleBus()
+        bus = DefaultEventBus()
         runner = InProcJobRunner(bus, max_concurrency=1, idle_after=300)
         await runner.start()
         try:
@@ -80,7 +80,7 @@ class TestSubmitAndDrain:
     async def test_drain_drops_queued_when_timeout_exhausted(self):
         """When drain's timeout elapses with work still queued behind an in-flight
         job, the queued job is dropped — never starts."""
-        bus = DefaultLifecycleBus()
+        bus = DefaultEventBus()
         runner = InProcJobRunner(bus, max_concurrency=1, idle_after=300)
         await runner.start()
         try:
@@ -99,7 +99,7 @@ class TestSubmitAndDrain:
         running it. The cancel flips the record to 'cancelled' but leaves the
         tuple in the queue; the worker must drop it on dequeue rather than
         overwrite the status with 'running' and execute job.run()."""
-        bus = DefaultLifecycleBus()
+        bus = DefaultEventBus()
         runner = InProcJobRunner(bus, max_concurrency=1, idle_after=300)
         await runner.start()
         try:
@@ -124,7 +124,7 @@ class TestSubmitAndDrain:
         submit B (key=k, takes k). When the worker later drops the cancelled A,
         a blind pop(k) would evict B's reservation, breaking dedup and letting a
         third same-key submit run concurrently with B."""
-        bus = DefaultLifecycleBus()
+        bus = DefaultEventBus()
         runner = InProcJobRunner(bus, max_concurrency=1, idle_after=300)
         await runner.start()
         gate = asyncio.Event()
@@ -166,7 +166,7 @@ class TestSubmitAndDrain:
         not leave the JobRecord stuck at 'running'. Otherwise the phantom keeps
         drain's wait-loop condition true and every subsequent drain busy-waits
         to its own timeout."""
-        bus = DefaultLifecycleBus()
+        bus = DefaultEventBus()
         runner = InProcJobRunner(bus, max_concurrency=1, idle_after=300)
         await runner.start()
         try:
@@ -190,7 +190,7 @@ class TestSubmitAndDrain:
         """Regression: if the drain() coroutine is itself cancelled (cooperative
         shutdown) while awaiting workers, that cancellation must propagate out —
         not be swallowed by the worker-reaping await and silently complete."""
-        bus = DefaultLifecycleBus()
+        bus = DefaultEventBus()
         runner = InProcJobRunner(bus, max_concurrency=1, idle_after=300)
         await runner.start()
         try:
@@ -225,7 +225,7 @@ class TestSubmitAndDrain:
             async def run(self):
                 raise RuntimeError("kaboom")
 
-        bus = DefaultLifecycleBus()
+        bus = DefaultEventBus()
         runner = InProcJobRunner(bus, max_concurrency=1, idle_after=300)
         await runner.start()
         try:
@@ -241,7 +241,7 @@ class TestSubmitAndDrain:
 class TestTriggers:
     @pytest.mark.asyncio
     async def test_session_close_factory_enqueues_a_job(self):
-        bus = DefaultLifecycleBus()
+        bus = DefaultEventBus()
         runner = InProcJobRunner(bus, max_concurrency=1, idle_after=300)
         await runner.start()
         try:
@@ -252,7 +252,7 @@ class TestTriggers:
 
             runner.bind_trigger("session_close", factory)
             await bus.emit(
-                LifecycleEvent(
+                SessionEvent(
                     kind="session_close",
                     chat_id="c1",
                     actor_name="A",
@@ -267,7 +267,7 @@ class TestTriggers:
 
     @pytest.mark.asyncio
     async def test_idle_timer_fires_after_idle_after(self):
-        bus = DefaultLifecycleBus()
+        bus = DefaultEventBus()
         runner = InProcJobRunner(bus, max_concurrency=1, idle_after=0.05)
         await runner.start()
         try:
@@ -278,7 +278,7 @@ class TestTriggers:
 
             runner.bind_trigger("idle", factory)
             await bus.emit(
-                LifecycleEvent(
+                SessionEvent(
                     kind="turn_complete",
                     chat_id="c1",
                     actor_name="A",
@@ -294,14 +294,14 @@ class TestTriggers:
 
     @pytest.mark.asyncio
     async def test_idle_timer_resets_on_subsequent_turn(self):
-        bus = DefaultLifecycleBus()
+        bus = DefaultEventBus()
         runner = InProcJobRunner(bus, max_concurrency=1, idle_after=0.10)
         await runner.start()
         try:
             log: list[str] = []
             runner.bind_trigger("idle", lambda e: _RecJob(key="idle1", log=log))
             await bus.emit(
-                LifecycleEvent(
+                SessionEvent(
                     kind="turn_complete",
                     chat_id="c1",
                     actor_name="A",
@@ -311,7 +311,7 @@ class TestTriggers:
             )
             await asyncio.sleep(0.05)
             await bus.emit(
-                LifecycleEvent(
+                SessionEvent(
                     kind="turn_complete",
                     chat_id="c1",
                     actor_name="A",
@@ -335,13 +335,13 @@ class TestTriggers:
         it, silently dropping the idle consolidation."""
         import gc
 
-        bus = DefaultLifecycleBus()
+        bus = DefaultEventBus()
         runner = InProcJobRunner(bus, max_concurrency=1, idle_after=300)
         await runner.start()
         try:
             log: list[str] = []
             runner.bind_trigger("idle", lambda e: _RecJob(key=f"idle:{e.chat_id}", log=log))
-            event = LifecycleEvent(
+            event = SessionEvent(
                 kind="turn_complete", chat_id="c1", actor_name="A", base_revision=1, payload={}
             )
             runner._spawn_idle(event)  # what the call_later timer callback invokes
@@ -358,14 +358,14 @@ class TestTriggers:
 
     @pytest.mark.asyncio
     async def test_factory_returning_none_is_skipped(self):
-        bus = DefaultLifecycleBus()
+        bus = DefaultEventBus()
         runner = InProcJobRunner(bus, max_concurrency=1, idle_after=300)
         await runner.start()
         try:
             log: list[str] = []
             runner.bind_trigger("session_close", lambda e: None)
             await bus.emit(
-                LifecycleEvent(
+                SessionEvent(
                     kind="session_close",
                     chat_id="c1",
                     actor_name="A",

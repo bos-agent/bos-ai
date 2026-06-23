@@ -35,8 +35,3 @@ class DefaultEventBus:
                     await handler(event)
                 except Exception:
                     logger.exception("EventBus handler raised on %r", type(event).__name__)
-
-
-# Back-compat alias — historical name before BEP 13 §2.10. Tests and any
-# out-of-tree importers of ``DefaultLifecycleBus`` keep resolving.
-DefaultLifecycleBus = DefaultEventBus
