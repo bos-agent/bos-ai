@@ -20,6 +20,7 @@ from bos.extensions.channels.lark import (
 )
 from bos.extensions.chat_stores.in_memory import InMemChatStore
 from bos.gateway import ActorDescriptor, ActorResolver, ChannelConversationRef, ChannelRuntimeContext, ChatCoordinator
+from bos.gateway.core.command_handler import CommandHandler
 from bos.protocol import Envelope, MessageType
 
 
@@ -601,3 +602,68 @@ async def test_forward_replies_clears_ack_reaction_on_final_reply():
     assert delivered == [("oc_42", "final answer")]
     assert deleted == [("om_x", "rk_1")]
     assert "chat-a" not in channel._chat_to_ack_reaction
+
+
+def _command_channel(store: InMemChatStore):
+    coordinator = ChatCoordinator(store)
+    retired: list[tuple[str, str]] = []
+
+    async def retire(actor: str, chat_id: str) -> None:
+        retired.append((actor, chat_id))
+
+    runtime = ChannelRuntimeContext(
+        actor_resolver=ActorResolver(
+            {"main": ActorDescriptor(name="main", address="agent@main")},
+            default_actor="main",
+        ),
+        chat_coordinator=coordinator,
+        mail_route=FakeMailRoute(),
+        command_handler=CommandHandler(coordinator, store, retire),
+    )
+    channel = LarkChannel(
+        channel_id="lark:daily",
+        target_actor="main",
+        settings=LarkSettings(app_id="cli_app", app_secret="secret"),
+        runtime=runtime,
+    )
+    return channel, coordinator, retired
+
+
+@pytest.mark.asyncio
+async def test_new_command_handled_via_control_plane_not_actor():
+    """'/new' is handled off the gateway control plane: a new chat is minted,
+    the cursor switches, the old session is retired, and the result is delivered
+    to Lark — with no COMMAND envelope reaching the actor."""
+    store = InMemChatStore()
+    channel, coordinator, retired = _command_channel(store)
+    delivered = _capture_deliver(channel)
+    mailbox = FakeSendMailbox()
+    ref = ChannelConversationRef("lark:daily", _conversation_id_for_lark_chat("oc_42"))
+    coordinator.set_cursor(ref, "chat-old", observed_revision=0)
+
+    await channel._handle_inbound(mailbox, _text_event("oc_42", "/new"))
+
+    assert mailbox.sent == []
+    assert len(delivered) == 1 and delivered[0][0] == "oc_42"
+    payload = json.loads(delivered[0][1])
+    assert payload["name"] == "new" and payload["ok"]
+    new_chat = payload["chat_id"]
+    assert new_chat != "chat-old"
+    assert coordinator.get_cursor(ref) == new_chat
+    assert retired == [("main", "chat-old")]
+
+
+@pytest.mark.asyncio
+async def test_resume_command_switches_cursor_via_control_plane():
+    store = InMemChatStore()
+    channel, coordinator, retired = _command_channel(store)
+    _capture_deliver(channel)
+    mailbox = FakeSendMailbox()
+    ref = ChannelConversationRef("lark:daily", _conversation_id_for_lark_chat("oc_42"))
+    coordinator.set_cursor(ref, "chat-old", observed_revision=0)
+
+    await channel._handle_inbound(mailbox, _text_event("oc_42", "/resume chat-target"))
+
+    assert mailbox.sent == []
+    assert coordinator.get_cursor(ref) == "chat-target"
+    assert retired == [("main", "chat-old")]

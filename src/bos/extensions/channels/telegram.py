@@ -369,6 +369,11 @@ class TelegramChannel(BaseChannel[TelegramSettings]):
                         continue
 
                     ref = ChannelConversationRef(self.channel_id, inbound["channel_conversation_id"])
+                    if inbound["content_type"] == MessageType.COMMAND:
+                        # Control plane: handle slash-commands off the gateway,
+                        # never as envelopes through the agent actor (BEP 13 / OPEN-D).
+                        await self._handle_command(inbound["text"], ref, telegram_chat_id)
+                        continue
                     chat_id = self._runtime.chat_coordinator.get_cursor(ref)
                     if chat_id is None:
                         chat_id = self._runtime.chat_coordinator.new_chat(ref)
@@ -476,6 +481,32 @@ class TelegramChannel(BaseChannel[TelegramSettings]):
         else:
             text = "A response is already in progress for this chat."
         await self._api_call("sendMessage", {"chat_id": telegram_chat_id, "text": text})
+
+    async def _handle_command(self, command: str, ref: ChannelConversationRef, telegram_chat_id: str) -> None:
+        """Run a slash-command through the gateway control plane and send the
+        result back to Telegram. No COMMAND envelope, no actor mailbox."""
+        handler = self._runtime.command_handler
+        if handler is None:
+            await self._api_call("sendMessage", {"chat_id": telegram_chat_id, "text": "Commands are unavailable."})
+            return
+        result = await handler.run(ref, command, target_actor=self.target_actor)
+        if result.ok and result.name in ("new", "resume") and result.chat_id:
+            # Re-map this Telegram chat to the newly selected internal chat
+            # (the coordinator cursor was already moved by the handler).
+            self._conversation_to_telegram_chat[ref.channel_conversation_id] = telegram_chat_id
+            for old_chat, mapped in list(self._chat_to_telegram_chat.items()):
+                if mapped == telegram_chat_id and old_chat != result.chat_id:
+                    self._chat_to_telegram_chat.pop(old_chat, None)
+            self._chat_to_telegram_chat[result.chat_id] = telegram_chat_id
+        body: dict[str, Any] = {"name": result.name, "ok": result.ok}
+        if result.result is not None:
+            body["result"] = result.result
+        if result.error is not None:
+            body["error"] = result.error
+            body.setdefault("result", result.error)
+        if result.chat_id is not None:
+            body["chat_id"] = result.chat_id
+        await self._api_call("sendMessage", {"chat_id": telegram_chat_id, "text": json.dumps(body, default=str)})
 
     async def _forward_replies(self, mailbox: MailBox) -> None:
         while True:

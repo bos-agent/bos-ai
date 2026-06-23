@@ -21,6 +21,7 @@ from bos.extensions.channels.telegram import (
 )
 from bos.extensions.chat_stores.in_memory import InMemChatStore
 from bos.gateway import ActorDescriptor, ActorResolver, ChannelConversationRef, ChannelRuntimeContext, ChatCoordinator
+from bos.gateway.core.command_handler import CommandHandler
 from bos.protocol import Envelope, MessageType, TurnEvent
 
 
@@ -627,3 +628,114 @@ async def test_forward_replies_updates_telegram_cursor_from_new_result():
             {"chat_id": "42", "text": '{"name":"new","ok":true,"chat_id":"chat-b"}'},
         )
     ]
+
+
+def _command_runtime(store: InMemChatStore):
+    coordinator = ChatCoordinator(store)
+    retired: list[tuple[str, str]] = []
+
+    async def retire(actor: str, chat_id: str) -> None:
+        retired.append((actor, chat_id))
+
+    runtime = ChannelRuntimeContext(
+        actor_resolver=ActorResolver(
+            {"main": ActorDescriptor(name="main", address="agent@main")},
+            default_actor="main",
+        ),
+        chat_coordinator=coordinator,
+        mail_route=FakeMailRoute(),
+        command_handler=CommandHandler(coordinator, store, retire),
+    )
+    return runtime, coordinator, retired
+
+
+@pytest.mark.asyncio
+async def test_new_command_handled_via_control_plane_not_actor():
+    """A '/new' is handled off the gateway control plane: a new chat is minted,
+    the cursor switches, the old session is retired, and the result is sent back
+    to Telegram — with no COMMAND envelope reaching the actor."""
+    store = InMemChatStore()
+    runtime, coordinator, retired = _command_runtime(store)
+    channel = TelegramChannel(
+        channel_id="telegram:daily",
+        target_actor="main",
+        settings=TelegramSettings(token="x", bot_id="bot-1"),
+        runtime=runtime,
+    )
+    ref = ChannelConversationRef("telegram:daily", _conversation_id_for_telegram_chat(42))
+    coordinator.set_cursor(ref, "chat-old", observed_revision=0)
+
+    mailbox = FakeSendMailbox()
+    send_calls: list[dict] = []
+    get_updates = 0
+
+    async def fake_api_call(method: str, payload: dict):
+        nonlocal get_updates
+        if method == "getUpdates":
+            get_updates += 1
+            if get_updates == 1:
+                return {"ok": True, "result": [{"update_id": 1, "message": {"chat": {"id": 42}, "text": "/new"}}]}
+            raise asyncio.CancelledError()
+        if method == "sendMessage":
+            send_calls.append(payload)
+            return {"ok": True, "result": True}
+        raise AssertionError(f"unexpected Telegram method {method}")
+
+    channel._api_call = fake_api_call  # type: ignore[method-assign]
+
+    with pytest.raises(asyncio.CancelledError):
+        await channel._poll_updates(mailbox)
+
+    # Handled inline — no COMMAND envelope forwarded to the actor.
+    assert mailbox.sent == []
+    # A result was sent back to Telegram.
+    assert len(send_calls) == 1 and send_calls[0]["chat_id"] == "42"
+    payload = json.loads(send_calls[0]["text"])
+    assert payload["name"] == "new" and payload["ok"]
+    new_chat = payload["chat_id"]
+    assert new_chat != "chat-old"
+    # Cursor switched to the new chat; old session retired on the actor.
+    assert coordinator.get_cursor(ref) == new_chat
+    assert retired == [("main", "chat-old")]
+
+
+@pytest.mark.asyncio
+async def test_resume_command_switches_cursor_via_control_plane():
+    store = InMemChatStore()
+    runtime, coordinator, retired = _command_runtime(store)
+    channel = TelegramChannel(
+        channel_id="telegram:daily",
+        target_actor="main",
+        settings=TelegramSettings(token="x", bot_id="bot-1"),
+        runtime=runtime,
+    )
+    ref = ChannelConversationRef("telegram:daily", _conversation_id_for_telegram_chat(42))
+    coordinator.set_cursor(ref, "chat-old", observed_revision=0)
+
+    mailbox = FakeSendMailbox()
+    send_calls: list[dict] = []
+    get_updates = 0
+
+    async def fake_api_call(method: str, payload: dict):
+        nonlocal get_updates
+        if method == "getUpdates":
+            get_updates += 1
+            if get_updates == 1:
+                return {
+                    "ok": True,
+                    "result": [{"update_id": 1, "message": {"chat": {"id": 42}, "text": "/resume chat-target"}}],
+                }
+            raise asyncio.CancelledError()
+        if method == "sendMessage":
+            send_calls.append(payload)
+            return {"ok": True, "result": True}
+        raise AssertionError(f"unexpected Telegram method {method}")
+
+    channel._api_call = fake_api_call  # type: ignore[method-assign]
+
+    with pytest.raises(asyncio.CancelledError):
+        await channel._poll_updates(mailbox)
+
+    assert mailbox.sent == []
+    assert coordinator.get_cursor(ref) == "chat-target"
+    assert retired == [("main", "chat-old")]
