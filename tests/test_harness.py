@@ -73,7 +73,7 @@ async def test_subagent_plugin_hides_prompt_and_tool_when_no_subagents():
         assert local_tools.get("AskSubagent") is None
         assert await subagent.get_system_prompt_section(None) is None
         assert "AskSubagent" not in await agent._prompt_section_tools()
-        assert "<subagent_workflow>" not in await agent.build_system_prompt(dummy_turn_context())
+        assert "<subagent_workflow>" not in await agent._build_system_prompt(dummy_turn_context())
     finally:
         AgentRegistry._registry.clear()
         AgentRegistry._registry.update(snapshot)
@@ -131,7 +131,7 @@ async def test_harness_binds_subagent_plugin_bindings_from_validated_config(tmp_
 
         async with ws.harness() as harness:
             agent = await harness.create_agent("_default")
-            prompt = await agent.build_system_prompt(dummy_turn_context())
+            prompt = await agent._build_system_prompt(dummy_turn_context())
 
         assert agent._tools.has("AskSubagent")
         assert "<subagent_workflow>" in prompt
@@ -824,7 +824,7 @@ async def test_plugin_prompt_sections_render_inside_system_prompt():
             SubagentAgentPlugin(_MockSubagentRuntime(), enabled=None, disabled=[]),
         ]
     )
-    prompt = await agent.build_system_prompt(dummy_turn_context())
+    prompt = await agent._build_system_prompt(dummy_turn_context())
     system_end = prompt.index("</system_prompt>")
 
     assert prompt.index("<memory_workflow>") < system_end

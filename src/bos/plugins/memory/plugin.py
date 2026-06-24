@@ -99,7 +99,7 @@ _RECALL_BUFFER_CAP = 512
 
 
 @dataclass
-class _PerAgentMemory:
+class PerAgentMemory:
     """All scoped-to-one-agent memory state (Ω: storage-level isolation)."""
 
     backend: MemoryBackend
@@ -145,7 +145,7 @@ class MemoryHarnessPlugin:
         self._maxim_keys = set(cfg.get("maxims", []))
 
         # Per-agent memory subtrees: built lazily on first bind() per agent_name.
-        self._per_agent: dict[str, _PerAgentMemory] = {}
+        self._per_agent: dict[str, PerAgentMemory] = {}
 
         cons_cfg = dict(cfg.get("consolidation", {}))
         self._policy = ConsolidationPolicy(
@@ -174,7 +174,7 @@ class MemoryHarnessPlugin:
         if services.events is not None and (retrieval_cfg.get("auto_recall", True) or self._policy.enabled):
             services.events.subscribe(SessionEvent, self._handle_turn_complete_flush)
 
-    def _build_for(self, agent_name: str) -> _PerAgentMemory:
+    def _build_for(self, agent_name: str) -> PerAgentMemory:
         """Construct an isolated memory subsystem for one agent."""
         from ._watermark import WatermarkStore
         from .consolidator import DefaultMemoryConsolidator
@@ -197,9 +197,9 @@ class MemoryHarnessPlugin:
             if self._services.background_llm is not None
             else None
         )
-        return _PerAgentMemory(backend, op_service, watermarks, consolidator)
+        return PerAgentMemory(backend, op_service, watermarks, consolidator)
 
-    def _for(self, agent_name: str) -> _PerAgentMemory:
+    def _for(self, agent_name: str) -> PerAgentMemory:
         if agent_name not in self._per_agent:
             self._per_agent[agent_name] = self._build_for(agent_name)
         return self._per_agent[agent_name]

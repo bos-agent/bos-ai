@@ -16,7 +16,7 @@ import click
 import bos.exts  # noqa: F401 — registers default ep impls (chat_store, mail_route, ...)
 from bos.cli.commands.scaffolding import _discover_project
 from bos.core import _deep_merge
-from bos.plugins.memory.plugin import MemoryHarnessPlugin, _PerAgentMemory
+from bos.plugins.memory.plugin import MemoryHarnessPlugin, PerAgentMemory
 
 
 def _memory_config(ws) -> dict[str, Any]:
@@ -43,7 +43,7 @@ def _resolve_agent_name(ws, explicit: str | None) -> str:
 
 
 def _run(
-    coro_factory: Callable[[_PerAgentMemory, MemoryHarnessPlugin, Any], Awaitable[Any]],
+    coro_factory: Callable[[PerAgentMemory, MemoryHarnessPlugin, Any], Awaitable[Any]],
     *,
     agent: str | None,
 ) -> Any:

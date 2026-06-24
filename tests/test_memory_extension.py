@@ -162,7 +162,7 @@ class TestInContextIndex:
         store = InMemMemoryExtension()
         await store.ingest_memory("deploys happen on Fridays", tags=["ops"], summary="Friday deploys")
         agent = _create_memory_agent(memory=store, maxim_keys={"user"})
-        prompt = await agent.build_system_prompt(dummy_turn_context())
+        prompt = await agent._build_system_prompt(dummy_turn_context())
         assert "<memory_index>" in prompt
         assert "Friday deploys" in prompt
 
@@ -173,7 +173,7 @@ class TestInContextIndex:
             await store.ingest_memory(f"fact {i}", importance=i + 1)
         plugin = MemoryAgentPlugin(store, {"user"}, index_max=2)
         agent = create_test_agent(plugins=[plugin])
-        prompt = await agent.build_system_prompt(dummy_turn_context())
+        prompt = await agent._build_system_prompt(dummy_turn_context())
         # only the 2 highest-importance summaries appear
         assert prompt.count("<index_entry") == 2
 
@@ -394,7 +394,7 @@ class TestSystemPromptIntegration:
         store = InMemMemoryExtension()
         await store.set_maxim("user", "test user content")
         agent = _create_memory_agent(memory=store, maxim_keys={"user"})
-        prompt = await agent.build_system_prompt(dummy_turn_context())
+        prompt = await agent._build_system_prompt(dummy_turn_context())
         assert "<active_maxims>" in prompt
         assert '<maxim name="user" scope="your knowledge about the user' in prompt
         assert "test user content" in prompt
@@ -405,7 +405,7 @@ class TestSystemPromptIntegration:
         await store.set_maxim("user", "user content")
         await store.set_maxim("soul", "soul content")
         agent = _create_memory_agent(memory=store, maxim_keys={"user"})
-        prompt = await agent.build_system_prompt(dummy_turn_context())
+        prompt = await agent._build_system_prompt(dummy_turn_context())
         assert "user content" in prompt
         assert "soul content" not in prompt
 
@@ -415,14 +415,14 @@ class TestSystemPromptIntegration:
         await store.set_maxim("rules", "rule content")
         await store.set_maxim("self", "self content")
         agent = _create_memory_agent(memory=store, maxim_keys={"rules", "self"})
-        prompt = await agent.build_system_prompt(dummy_turn_context())
+        prompt = await agent._build_system_prompt(dummy_turn_context())
         assert '<maxim name="rules" scope="hard constraints' in prompt
         assert '<maxim name="self" scope="who you are' in prompt
 
     @pytest.mark.asyncio
     async def test_empty_maxims_are_not_injected_into_prompt(self):
         agent = _create_memory_agent(maxim_keys={"user"})
-        prompt = await agent.build_system_prompt(dummy_turn_context())
+        prompt = await agent._build_system_prompt(dummy_turn_context())
         assert "<memory_workflow>" in prompt
         assert "<active_maxims>" in prompt
         assert '<maxim name="user" scope="your knowledge about the user' in prompt

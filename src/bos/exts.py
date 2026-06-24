@@ -46,11 +46,6 @@ the bos builtins and before workspace skill dirs — so workspace skills win
 on name clashes.
 """
 
-# Core ``_default`` adapters (consolidator, litellm provider, jsonl chat store/
-# mailbox, job runner) are registered by the assembly ring itself when an
-# ``AgentHarness`` is opened — see ``AgentHarness.__aenter__`` — so they are not
-# imported here; the harness no longer depends on this composition root for them.
-
 # Channels
 import bos.extensions.channels.lark  # noqa: F401
 import bos.extensions.channels.telegram  # noqa: F401

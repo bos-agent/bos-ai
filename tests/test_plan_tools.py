@@ -92,7 +92,7 @@ async def test_plan_plugin_keeps_current_plan_out_of_system_prompt():
         open_questions=["Proceed?"],
         status="needs_input",
     )
-    prompt = await agent.build_system_prompt(dummy_turn_context())
+    prompt = await agent._build_system_prompt(dummy_turn_context())
     system_end = prompt.index("</system_prompt>")
 
     assert prompt.index("<plan_workflow>") < system_end
