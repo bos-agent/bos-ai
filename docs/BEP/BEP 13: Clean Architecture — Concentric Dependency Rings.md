@@ -1,8 +1,10 @@
 # BEP 13: Clean Architecture — Concentric Dependency Rings
 
-Status: **living design** — graduated **ring by ring**, because the right boundary for each ring only
-becomes clear while extracting it. The two innermost rings are done and documented here as the reference
-shape; the outer rings adopt the same rules when they are extracted.
+Status: **complete** — graduated **ring by ring**, because the right boundary for each ring only became
+clear while extracting it. **Every ring is now extracted and guard-enforced**: the two foundations are the
+reference shape (§1–§2), and the outer rings (`bos.core` assembly · `bos.gateway` · `bos.config` ·
+`bos.runner` · `bos.cli`) each import only inward with a CI guard that fails on regression (§3). The
+`bos.protocol` shim is retired.
 
 | Ring | Status |
 |---|---|
@@ -12,7 +14,7 @@ shape; the outer rings adopt the same rules when they are extracted.
 | `bos.core` (harness · contract · registry · `defaults`) — assembly ring | ✅ done — zero outward imports, guard-enforced (§3.1) |
 | `bos.gateway` — gateway ring (owns its config shapes) | ✅ done — imports only inward, guard-enforced (§3.3) |
 | `bos.config` — config *loader* (outer to gateway; produces both rings' shapes) | ✅ done — imports only inward, guard-enforced (§3.2) |
-| `cli` · `runner` — process entrypoints (outermost) | ⬜ not yet formally extracted (§3.4) |
+| `bos.runner` — process supervisor, then `bos.cli` — leaf composition root | ✅ done — imports only inward, guard-enforced (§3.4) |
 
 **Motivation.** BOS grew outward from a single agent loop into a harness, plugin system, gateway,
 channels, and CLI. Dependencies accreted in both directions — inner code reaching out to outer modules,
@@ -76,7 +78,10 @@ arrow reads "is depended on by":
             bos.config     (the config *loader*: reads storage → produces the inner
                             rings' config shapes; builds AgentHarness. imports core + gateway)
                               ↓
-            bos.cli · bos.runner    (process entrypoints / composition roots — outermost)
+            bos.runner     (process supervisor: start/stop gateway, PID/lock files)
+                              ↓
+            bos.cli        (user-facing entrypoint + leaf composition root — outermost;
+                            wires adapters via bos.exts/extensions/plugins)
 
   bos.extensions — adapters (chat stores · mailboxes · providers · channels), injected inward via ep_*.
   bos.exts — composition root: importing it registers all built-in adapters/plugins. Both are outer to
@@ -456,12 +461,30 @@ a `GatewayRuntimeConfig` outward.
 **Guard.** [test_config_ring_isolation.py](../../tests/test_config_ring_isolation.py): no import to
 `cli`/`runner`/`extensions`/`exts`; no underscore-private reach into `bos.core`/`bos.gateway`.
 
-### 3.4 `cli` · `runner`
+### 3.4 The entrypoint rings — `bos.runner`, then `bos.cli`
 
-Reserved. The outermost process entrypoints and composition roots: they load a `Workspace` (via
-`bos.config`), open the harness, build a `GatewayRuntimeConfig`, and inject it into the gateway. Their ring
-boundary (importing inward only; no `cli ↔ runner` cycle) has not yet been audited to the §1.6 checklist.
-Each gets its own subsection when reached.
+The two outermost rings. They are not peers: `cli` imports `runner` (`runner.proc`, `runner.runner`),
+`runner` imports nothing from `cli` — so `runner` is inner, `cli` outermost.
+
+- **`bos.runner` — the process supervisor.** Starts/stops the gateway process, manages PID/lock files and
+  background spawn. Imports `bos.core`/`bos.gateway`/`bos.config` inward; it is *not* the composition root,
+  so it must not import `bos.cli`, `bos.extensions`, or `bos.exts`.
+  **Guard:** [test_runner_ring_isolation.py](../../tests/test_runner_ring_isolation.py) — no
+  `cli`/`extensions`/`exts` import; no underscore-private reach into the inner rings.
+- **`bos.cli` — the leaf composition root.** The user-facing entrypoint: loads a `Workspace`, opens the
+  harness, builds a `GatewayRuntimeConfig`, drives the runner, and — *as the composition root* — wires
+  concrete adapters/plugins (it legitimately imports `bos.exts`/`bos.extensions`/`bos.plugins`). Two
+  invariants place it: **nothing depends on it** (a true leaf — verified), and it touches no inner-ring
+  privates (rule 4). **Guard:** [test_cli_ring_isolation.py](../../tests/test_cli_ring_isolation.py) —
+  asserts no module outside `bos/cli/` imports `bos.cli`, and no underscore-private reach into
+  `core`/`gateway`/`config`/`runner`.
+
+One rule-4 reach was resolved en route: `cli/scaffold` imported the private `_find_discovered_config` from
+`bos.config.workspace`; it is now the public `find_discovered_config`.
+
+With this, **every ring in the topology is extracted and guard-enforced** — the program of work this BEP
+set out (§"The Dependency Rule") is complete: each ring imports only inward, owns its ports, and a CI guard
+fails on regression.
 
 ---
 
@@ -478,4 +501,5 @@ Each gets its own subsection when reached.
 | 2026-06-23 | **Track A complete — `bos.protocol` shim retired and deleted.** Re-pointed every wire-type call site (`Envelope`/`MessageType` → `bos.core.actor`; `MessageContent`/`MessageContentPart`/`TurnEvent` → `bos.core.agent`) across src + tests; moved the shim's `content.py` helpers into the agent ring's `._content` leaf (§1.3) and the `WS_TAKEOVER_*` constants into the gateway's WS channel (re-exported from `bos.gateway`); added [test_no_protocol_shim.py](../../tests/test_no_protocol_shim.py) to fail CI on reintroduction. |
 | 2026-06-23 | **Track B / B1 — assembly ring (`bos.core`) extracted (§3.1).** Confirmed zero outward imports and added [test_assembly_ring_isolation.py](../../tests/test_assembly_ring_isolation.py) (forbids imports to `gateway`/`cli`/`runner`/`extensions`/`config`/`exts` and foundation-private reaches). Settled the boundary: `defaults` is *in* the ring; `extensions` (adapters) and `exts` (composition root) are out; **corrected the topology** — `bos.config` is a *consumer* of the harness (it imports `bos.core`, not the reverse), so it is a ring *outward* of the assembly ring, not part of it. Resolved the one rule-4 reach by publishing the shared `_`-helpers from `bos.core.agent`'s `__init__`. |
 | 2026-06-23 | **Track B / B2a — config ring (`bos.config`) extracted (§3.2).** Added [test_config_ring_isolation.py](../../tests/test_config_ring_isolation.py) (no imports to `gateway`/`cli`/`runner`/`extensions`/`exts`; no underscore-private `bos.core` reach). Resolved its one rule-4 reach by publishing `_resolve_path` from `bos.core` and re-pointing `workspace.py` off `bos.core._utils`. Also tidied two non-ring items en route: renamed `core/events.py`→`core/sinks.py` and `core/defaults/lifecycle.py`→`core/defaults/eventbus.py`, dropped the `Lifecycle*` back-compat aliases, and removed the `bos.core.llm` re-export of `LLMResponse`/`ToolCallRequest` (consumers now import the agent ring directly). |
+| 2026-06-23 | **Track B / B3 — entrypoint rings (`bos.runner`, `bos.cli`) extracted (§3.4) — Track B complete.** Added [test_runner_ring_isolation.py](../../tests/test_runner_ring_isolation.py) (runner imports no `cli`/`extensions`/`exts`; no private reach) and [test_cli_ring_isolation.py](../../tests/test_cli_ring_isolation.py) (nothing imports `bos.cli` — it is a true leaf; no private reach). Confirmed layering `… < config < runner < cli` (cli imports runner, not the reverse). Published `find_discovered_config` (was the private `_find_discovered_config`) to clear cli's one rule-4 reach. **Every ring is now extracted and guard-enforced.** |
 | 2026-06-23 | **Track B / B2b — gateway ring (`bos.gateway`) extracted, with the config-shape inversion (§3.2/§3.3).** The gateway now **owns** its config shapes (`gateway/config.py`: `Resolved*` + `GatewayRuntimeConfig`); `bos.config` imports and *produces* them (`config → gateway`), reversing the former `gateway → config` edge. `Gateway(runtime=…)` and `ActorManager(actors=…)` replace the `Workspace` parameter; the composition root injects via `workspace.resolve_gateway_runtime()`. Added [test_gateway_ring_isolation.py](../../tests/test_gateway_ring_isolation.py) and updated the config guard (config→gateway now legal; private-reach check covers both inner rings). **Reordered the topology:** `core < gateway < config < cli/runner` — config is the *loader* (a detail), outer to the gateway it configures, correcting B2a's placement. |

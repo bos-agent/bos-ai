@@ -33,7 +33,11 @@ The two innermost rings are extracted, isolated, and guard-enforced:
   config-shape inversion** — the gateway owns `GatewayRuntimeConfig` + the `Resolved*` shapes; `bos.config`
   *produces* them (`config → gateway`), reversing the old edge. `Gateway(runtime=…)` replaces the
   `Workspace` parameter. Guard: [test_gateway_ring_isolation.py](../../tests/test_gateway_ring_isolation.py).
-  **Topology reordered:** `core < gateway < config < cli/runner`. See BEP §3.2/§3.3. Remaining: cli/runner.
+- **Track B / B3 is also done now (2026-06-23): the entrypoint rings (`bos.runner`, `bos.cli`) are extracted
+  — Track B COMPLETE.** Layering confirmed `… < config < runner < cli`; `cli` is a true leaf. Guards:
+  [test_runner_ring_isolation.py](../../tests/test_runner_ring_isolation.py),
+  [test_cli_ring_isolation.py](../../tests/test_cli_ring_isolation.py). **Every ring is now extracted and
+  guard-enforced** (full topology: `core < gateway < config < runner < cli`). See BEP §3.4.
 
 Gate is green: `uv run pytest -q` (662), `uv run ruff check src tests`, `npx -y pyright src` (0), all four
 ring guards (agent, actor, assembly) + the no-shim guard.
@@ -117,7 +121,13 @@ topology** — `core < gateway < config < cli/runner` — superseding B2a's plac
 gateway. Import-hygiene note: `bos.config` imports the gateway shapes *lazily inside* its `resolve_*`
 methods (the gateway package pulls aiohttp), keeping `import bos.config` light.
 
-**B3 — `bos.cli` / `bos.runner` (outermost).** Process entrypoints / composition roots. Audit + guard last.
+**B3 — `bos.runner`, then `bos.cli`. ✅ DONE (2026-06-23, BEP §3.4).** Confirmed `cli` imports `runner`
+(not the reverse), so `runner` is inner and `cli` the outermost leaf — verified nothing imports `bos.cli`.
+`runner` guard ([test_runner_ring_isolation.py](../../tests/test_runner_ring_isolation.py)): no
+`cli`/`extensions`/`exts` import; no private reach. `cli` guard
+([test_cli_ring_isolation.py](../../tests/test_cli_ring_isolation.py)): nothing imports it; no private
+reach (cli, as composition root, may import `bos.exts`/`extensions`/`plugins`). Published
+`find_discovered_config` (was private `_find_discovered_config`) to clear cli's one rule-4 reach.
 
 Each extracted ring gets its own numbered subsection appended to BEP §3, capturing decisions made *during*
 extraction (per the BEP's ring-by-ring method) — don't pre-guess them here.
@@ -144,10 +154,11 @@ extraction (per the BEP's ring-by-ring method) — don't pre-guess them here.
 ## 6. How to verify (every step)
 
 ```
-uv run pytest -q                      # full suite (currently 666)
+uv run pytest -q                      # full suite (currently 670)
 uv run ruff check src tests           # no new findings
 npx -y pyright src                    # must stay at 0 errors
-uv run pytest -q tests/test_agent_ring_isolation.py tests/test_actor_ring_isolation.py tests/test_assembly_ring_isolation.py tests/test_gateway_ring_isolation.py tests/test_config_ring_isolation.py tests/test_no_protocol_shim.py
+# all seven ring guards + the no-shim guard:
+uv run pytest -q tests/test_agent_ring_isolation.py tests/test_actor_ring_isolation.py tests/test_assembly_ring_isolation.py tests/test_gateway_ring_isolation.py tests/test_config_ring_isolation.py tests/test_runner_ring_isolation.py tests/test_cli_ring_isolation.py tests/test_no_protocol_shim.py
 ```
 
 Commit in small, reversible diffs with conventional titles (`refactor(...)`, `docs(bep): ...`). Keep all
@@ -155,15 +166,20 @@ three gates + the ring guards green per commit.
 
 ---
 
-## 7. Suggested next move
+## 7. Status — Track B COMPLETE
 
-Track A, B1, B2a, and B2b are done. One ring remains:
+Track A and all of Track B (B1 assembly, B2a config, B2b gateway + inversion, B3 runner/cli) are done.
+**Every ring is extracted and guard-enforced**; the full topology is
 
-**B3 — `bos.cli` / `bos.runner`** (outermost; §3.4). They load a `Workspace` via `bos.config`, open the
-harness, build a `GatewayRuntimeConfig`, and inject it into the gateway. Audit that each imports only
-inward (`bos.core`/`bos.gateway`/`bos.config` + foundations, no other-entrypoint import — i.e. no
-`cli ↔ runner` cycle) and no underscore-private reach, then add a guard per package, modeled on
-[test_gateway_ring_isolation.py](../../tests/test_gateway_ring_isolation.py). Decide whether `cli` and
-`runner` are one ring (peers) or `cli` is outer to `runner` (cli imports runner today — verify direction).
+```
+core (agent ⋅ actor foundations)  <  bos.core assembly  <  bos.gateway  <  bos.config  <  bos.runner  <  bos.cli
+```
 
-Append a numbered subsection to BEP §3 per ring as you go, capturing decisions made *during* extraction.
+with `bos.extensions`/`bos.exts` as the adapter/composition-root concerns off the spine, and `bos.protocol`
+retired. Seven ring guards + the no-shim guard fail CI on any inward-only regression (§6).
+
+**Keeping it that way (for future work):** when adding a module, put it in the ring that matches its
+dependency direction and let the guard confirm it. A new outer-facing capability should define its *port*
+in the consuming (inner) ring and be injected from an outer ring — never add an inner→outer import. If you
+genuinely need a new shared primitive, extend a foundation (and its zero-dep guard), don't create a new
+facade. There is no remaining Track B work; this doc can be archived once the BEP is marked complete.
