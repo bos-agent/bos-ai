@@ -460,6 +460,7 @@ def start(ctx, foreground: bool, docker: bool, workspace_dir: str | None):
 
     from bos.runner.proc import (
         _pid_alive,
+        _pid_is_gateway,
         is_running,
         read_state,
         reap_stale,
@@ -526,7 +527,14 @@ def start(ctx, foreground: bool, docker: bool, workspace_dir: str | None):
             return
         # No endpoint yet: if the spawned process has already exited (lost the singleton
         # lock, crashed at startup, …), surface it now instead of waiting out the timeout.
-        if pid and runtime.kind == "process" and not _pid_alive(int(pid)):
+        # A child that exits becomes a zombie under this CLI process (we never reap it),
+        # and os.kill(pid, 0) reports zombies as alive — so also require the pid to still
+        # be a live gateway (a zombie has an empty /proc cmdline), matching is_running.
+        if (
+            pid
+            and runtime.kind == "process"
+            and not (_pid_alive(int(pid)) and _pid_is_gateway(int(pid)))
+        ):
             click.echo(
                 f"Gateway process {pid} exited during startup — check {rd.log_file} for the cause.",
                 err=True,
@@ -652,18 +660,25 @@ def restart(ctx):
     """Restart the gateway (stop then start)."""
     # Re-invoke stop (ignore failure if not running)
     _, rd = _get_ws_and_rd(ctx)
-    from bos.runner.proc import is_running, read_state
+    from bos.runner.proc import is_running, lock_is_free, read_state
 
     if is_running(rd):
         state = read_state(rd)
+        is_docker = state.get("runtime") == "docker"
         ctx.invoke(stop)
-        # Wait for the old process to fully release the run dir (and its lock)
-        # before starting again, so the fresh gateway doesn't race a still-exiting
-        # one and lose the singleton lock.
+        # Wait for the old gateway to fully release the singleton lock before
+        # starting again, so the fresh gateway doesn't race a still-exiting one
+        # and lose the lock. `stop` reports done once the pid file is gone, but
+        # a dying process unlinks its pid file *before* it has fully exited and
+        # the OS has dropped the flock — so waiting on is_running (which keys off
+        # the now-absent pid file) is a no-op. For a local process we poll the
+        # lock itself; for Docker, container teardown is observable via
+        # is_running (and `docker stop` already blocks until the container dies).
+        released = (lambda: not is_running(rd)) if is_docker else (lambda: lock_is_free(rd))
         deadline = time.monotonic() + 5
-        while time.monotonic() < deadline and is_running(rd):
+        while time.monotonic() < deadline and not released():
             time.sleep(0.1)
-        ctx.invoke(start, docker=state.get("runtime") == "docker")
+        ctx.invoke(start, docker=is_docker)
         return
 
     ctx.invoke(start)
