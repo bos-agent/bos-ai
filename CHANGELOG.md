@@ -2,6 +2,61 @@
 
 <!-- version list -->
 
+## v1.5.0 (2026-06-24)
+
+### Bug Fixes
+
+- **cli**: Wait for singleton lock release on gateway restart
+  ([#53](https://github.com/bos-agent/bos-ai/pull/53),
+  [`b8ef93a`](https://github.com/bos-agent/bos-ai/commit/b8ef93af5919533e25360bfdf23578e7ab4f8ac0))
+
+- **config**: Remove incorrect ._default suffix from ep_tool config keys
+  ([#46](https://github.com/bos-agent/bos-ai/pull/46),
+  [`652d058`](https://github.com/bos-agent/bos-ai/commit/652d058e0e5b004c2e17890431ec9de4740e23d1))
+
+### Documentation
+
+- **bep**: BEP 14 — Multi-Agent Project Collaboration
+  ([#55](https://github.com/bos-agent/bos-ai/pull/55),
+  [`8ef0d89`](https://github.com/bos-agent/bos-ai/commit/8ef0d8900e98be9e83f250aa32fbfde51a1526ef))
+
+- **bep**: Platform-managed memory (BEP 10) + async tasks (BEP 11)
+  ([#50](https://github.com/bos-agent/bos-ai/pull/50),
+  [`2bef7ae`](https://github.com/bos-agent/bos-ai/commit/2bef7ae461161233088fa00fbf3ea20549a60a76))
+
+### Features
+
+- **cli**: Interactive boscli init wizard with key detection and live model listing
+  ([#47](https://github.com/bos-agent/bos-ai/pull/47),
+  [`68a79b5`](https://github.com/bos-agent/bos-ai/commit/68a79b50208e3ee1ceb74a441dfadc6e1d4566c8))
+
+- **harness, memory**: BEP 10 (ready-now + off-turn) + BEP 11 v1
+  ([#51](https://github.com/bos-agent/bos-ai/pull/51),
+  [`7083ef7`](https://github.com/bos-agent/bos-ai/commit/7083ef7c76e18fa569ffcf7172a76d232e2ea2f7))
+
+- **lark**: Add Lark/Feishu channel over lark-oapi WebSocket long connection
+  ([#49](https://github.com/bos-agent/bos-ai/pull/49),
+  [`9f597e5`](https://github.com/bos-agent/bos-ai/commit/9f597e5d4b056ae71ca987e602ff5545fae9847d))
+
+- **telegram**: Rich status replies + gateway/mailbox hardening
+  ([#48](https://github.com/bos-agent/bos-ai/pull/48),
+  [`ba431de`](https://github.com/bos-agent/bos-ai/commit/ba431de1b2fc01c67a21b70026d46d45da2faeaf))
+
+### Refactoring
+
+- BEP 13 — Clean Architecture concentric dependency rings
+  ([#52](https://github.com/bos-agent/bos-ai/pull/52),
+  [`941657a`](https://github.com/bos-agent/bos-ai/commit/941657a16cc4499662c0018ae2be1ca60088b059))
+
+- **cli**: Flatten project group and small fixes
+  ([#45](https://github.com/bos-agent/bos-ai/pull/45),
+  [`c6648e7`](https://github.com/bos-agent/bos-ai/commit/c6648e73fe1df7a5838cf45bcb545ed556f2210f))
+
+- **providers**: Remove OAuth provider extensions and `boscli auth`
+  ([#54](https://github.com/bos-agent/bos-ai/pull/54),
+  [`90cbb0e`](https://github.com/bos-agent/bos-ai/commit/90cbb0e2fd6c30a234be13dc11a2920394b93d04))
+
+
 ## v1.4.0 (2026-06-12)
 
 ### Chores
