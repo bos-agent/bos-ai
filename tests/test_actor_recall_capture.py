@@ -1,7 +1,7 @@
 """Recall capture/flush after the dependency inversion.
 
 The base AgentActor stays generic — it knows nothing about memory.recalled and
-emits a payload-free turn_complete LifecycleEvent on its bus. The memory plugin
+emits a payload-free turn_complete SessionEvent on its bus. The memory plugin
 owns the recall ids end to end: its auto-recall interceptor records the surfaced
 ids into the per-agent bundle keyed by turn_id, and its turn_complete subscriber
 drains that buffer to flush last_used. The gateway is no longer involved.
@@ -10,7 +10,7 @@ This file verifies:
 
   * AgentActor still forwards client-facing events but does NOT leak
     memory.recalled to the client mailbox.
-  * CoordinatedActor emits a generic turn_complete (chat_id + turn_id, no
+  * AgentActor emits a generic turn_complete (chat_id + turn_id, no
     memory-specific payload).
   * The plugin records recalled ids per turn and the turn_complete flush touches
     only that turn's ids — even for two chats interleaved on one agent.
@@ -26,13 +26,13 @@ import pytest
 from conftest import InMemMailRoute, InMemMemoryExtension
 from test_event_sink import create_test_agent
 
-from bos.core import AgentActor, LLMResponse, ep_provider
-from bos.core.contract import LifecycleEvent, Message, PluginServices
-from bos.core.defaults.lifecycle import DefaultLifecycleBus
+from bos.core import LLMResponse, ep_provider
+from bos.core.actor import MessageType
+from bos.core.contract import Message, PluginServices, SessionEvent
+from bos.core.defaults.eventbus import DefaultEventBus
 from bos.extensions.chat_stores.in_memory import InMemChatStore
-from bos.gateway import ChatCoordinator, CoordinatedActor
+from bos.gateway import AgentActor, ChatCoordinator
 from bos.plugins.memory.plugin import MemoryAgentPlugin, MemoryHarnessPlugin
-from bos.protocol import MessageType
 
 
 @pytest.fixture
@@ -108,13 +108,13 @@ async def test_coordinated_actor_emits_generic_turn_complete(stub_provider):
 
     chat_store = InMemChatStore()
     coordinator = ChatCoordinator(chat_store)
-    bus = DefaultLifecycleBus()
-    events: list[LifecycleEvent] = []
+    bus = DefaultEventBus()
+    events: list[SessionEvent] = []
 
-    async def _collect(e: LifecycleEvent) -> None:
+    async def _collect(e: SessionEvent) -> None:
         events.append(e)
 
-    bus.subscribe("turn_complete", _collect)
+    bus.subscribe(SessionEvent, _collect)
 
     route = InMemMailRoute()
     actor_addr = f"agent@coord-{stub_provider}"
@@ -126,7 +126,7 @@ async def test_coordinated_actor_emits_generic_turn_complete(stub_provider):
     agent = create_test_agent(
         model=f"{stub_provider}/coord", agent_name="main", plugins=[plugin], chat_store=chat_store
     )
-    actor = CoordinatedActor(agent, actor_mb, chat_coordinator=coordinator, lifecycle_bus=bus)
+    actor = AgentActor(agent, actor_mb, chat_coordinator=coordinator, event_bus=bus)
 
     task = asyncio.create_task(actor.run())
     try:
@@ -181,7 +181,7 @@ async def test_plugin_records_recalled_per_turn_and_flush_touches_only_that_turn
     on one agent must not cross-contaminate (the prior _current_context leak)."""
     import bos.exts  # noqa: F401  — registers the in_memory backend
 
-    bus = DefaultLifecycleBus()
+    bus = DefaultEventBus()
     plugin = await _make_harness_plugin(tmp_path, bus)
 
     agent_plugin = plugin.bind({**plugin._cfg, "agent_name": "main"})
@@ -200,7 +200,7 @@ async def test_plugin_records_recalled_per_turn_and_flush_touches_only_that_turn
 
     # Flushing turn A touches only PostgreSQL and drains only A's buffer.
     await bus.emit(
-        LifecycleEvent(kind="turn_complete", chat_id="chat-A", actor_name="main", base_revision=1, turn_id="t-A")
+        SessionEvent(kind="turn_complete", chat_id="chat-A", actor_name="main", base_revision=1, turn_id="t-A")
     )
     assert (await bundle.backend.get_memory(eid_pg)).metadata["last_used"] is not None
     assert (await bundle.backend.get_memory(eid_rs)).metadata["last_used"] is None
@@ -208,7 +208,7 @@ async def test_plugin_records_recalled_per_turn_and_flush_touches_only_that_turn
 
     # Flushing turn B touches Rust.
     await bus.emit(
-        LifecycleEvent(kind="turn_complete", chat_id="chat-B", actor_name="main", base_revision=1, turn_id="t-B")
+        SessionEvent(kind="turn_complete", chat_id="chat-B", actor_name="main", base_revision=1, turn_id="t-B")
     )
     assert (await bundle.backend.get_memory(eid_rs)).metadata["last_used"] is not None
     assert bundle.recalled_by_turn == {}

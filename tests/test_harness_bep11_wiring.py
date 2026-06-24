@@ -4,6 +4,7 @@ import pytest
 
 import bos.exts  # noqa: F401 — registers default ep impls (mail_route, chat_store, ...)
 from bos.config.schema import HarnessConfig
+from bos.core.contract import SessionEvent
 
 
 class TestHarnessConfig:
@@ -80,22 +81,21 @@ class TestHarnessServices:
 class TestTurnCompleteEmission:
     @pytest.mark.asyncio
     async def test_turn_complete_emits_with_base_revision(self):
-        """When CoordinatedActor's _on_turn_finished sees status='completed',
-        a LifecycleEvent fires on the injected bus with the committed revision."""
-        from bos.core.actor import ActorTurnContext, ActorTurnResult
-        from bos.core.defaults.lifecycle import DefaultLifecycleBus
-        from bos.gateway.actor_manager import CoordinatedActor
+        """When AgentActor's _on_turn_finished sees status='completed',
+        a SessionEvent fires on the injected bus with the committed revision."""
+        from bos.core.defaults.eventbus import DefaultEventBus
+        from bos.gateway.actors.agent_actor import ActorTurnContext, ActorTurnResult, AgentActor
 
         seen = []
-        bus = DefaultLifecycleBus()
+        bus = DefaultEventBus()
 
         async def handler(e):
             seen.append(e)
 
-        bus.subscribe("turn_complete", handler)
+        bus.subscribe(SessionEvent, handler)
 
-        actor = CoordinatedActor.__new__(CoordinatedActor)
-        actor._lifecycle_bus = bus
+        actor = AgentActor.__new__(AgentActor)
+        actor._event_bus = bus
         actor._chat_coordinator = _DummyCoordinator()
         actor._mailbox = None
 
@@ -116,19 +116,18 @@ class TestTurnCompleteEmission:
 
     @pytest.mark.asyncio
     async def test_turn_complete_skipped_when_not_completed(self):
-        from bos.core.actor import ActorTurnContext, ActorTurnResult
-        from bos.core.defaults.lifecycle import DefaultLifecycleBus
-        from bos.gateway.actor_manager import CoordinatedActor
+        from bos.core.defaults.eventbus import DefaultEventBus
+        from bos.gateway.actors.agent_actor import ActorTurnContext, ActorTurnResult, AgentActor
 
         seen = []
-        bus = DefaultLifecycleBus()
+        bus = DefaultEventBus()
 
         async def handler(e):
             seen.append(e)
 
-        bus.subscribe("turn_complete", handler)
-        actor = CoordinatedActor.__new__(CoordinatedActor)
-        actor._lifecycle_bus = bus
+        bus.subscribe(SessionEvent, handler)
+        actor = AgentActor.__new__(AgentActor)
+        actor._event_bus = bus
         actor._chat_coordinator = _DummyCoordinator()
         actor._mailbox = _NoopMailbox()
         ctx = ActorTurnContext(
@@ -162,20 +161,20 @@ class TestSessionCloseEmission:
     @pytest.mark.asyncio
     async def test_retire_session_emits_session_close_with_none_revision_when_empty(self):
         """A session that never committed a turn closes with base_revision=None."""
-        from bos.core.actor import AgentActor, SessionState
-        from bos.core.defaults.lifecycle import DefaultLifecycleBus
+        from bos.core.defaults.eventbus import DefaultEventBus
+        from bos.gateway.actors.agent_actor import AgentActor, SessionState
 
         seen = []
-        bus = DefaultLifecycleBus()
+        bus = DefaultEventBus()
 
         async def handler(e):
             seen.append(e)
 
-        bus.subscribe("session_close", handler)
+        bus.subscribe(SessionEvent, handler)
 
         actor = AgentActor.__new__(AgentActor)
         actor._sessions = {"c1": SessionState(chat_id="c1")}
-        actor._lifecycle_bus = bus
+        actor._event_bus = bus
         actor._agent = _StubAgent()
         actor._address = "agent@A"
         await actor.retire_session("c1")
@@ -187,22 +186,22 @@ class TestSessionCloseEmission:
     @pytest.mark.asyncio
     async def test_retire_session_forwards_last_committed_revision(self):
         """When the session has observed a commit, retire_session forwards that revision."""
-        from bos.core.actor import AgentActor, SessionState
-        from bos.core.defaults.lifecycle import DefaultLifecycleBus
+        from bos.core.defaults.eventbus import DefaultEventBus
+        from bos.gateway.actors.agent_actor import AgentActor, SessionState
 
         seen = []
-        bus = DefaultLifecycleBus()
+        bus = DefaultEventBus()
 
         async def handler(e):
             seen.append(e)
 
-        bus.subscribe("session_close", handler)
+        bus.subscribe(SessionEvent, handler)
 
         actor = AgentActor.__new__(AgentActor)
         session = SessionState(chat_id="c1")
         session.execution.last_committed_revision = 7
         actor._sessions = {"c1": session}
-        actor._lifecycle_bus = bus
+        actor._event_bus = bus
         actor._agent = _StubAgent()
         actor._address = "agent@A"
         await actor.retire_session("c1")
@@ -211,13 +210,13 @@ class TestSessionCloseEmission:
 
     @pytest.mark.asyncio
     async def test_retire_session_no_bus_is_silent(self):
-        from bos.core.actor import AgentActor, SessionState
+        from bos.gateway.actors.agent_actor import AgentActor, SessionState
 
         actor = AgentActor.__new__(AgentActor)
         actor._sessions = {"c1": SessionState(chat_id="c1")}
         actor._agent = _StubAgent()
         actor._address = "agent@A"
-        actor._lifecycle_bus = None  # no bus → emit is a silent no-op
+        actor._event_bus = None  # no bus → emit is a silent no-op
         await actor.retire_session("c1")
 
 
@@ -226,7 +225,7 @@ class TestSessionCloseFactoryGuard:
     async def test_factory_returns_none_when_event_has_no_revision(self, tmp_path):
         """An empty-session session_close (base_revision=None) → factory returns
         None → JobRunner does not enqueue a no-op consolidation job."""
-        from bos.core.contract import LifecycleEvent
+        from bos.core.contract import SessionEvent
         from bos.core.harness import AgentHarness
         from bos.plugins.memory.plugin import MemoryHarnessPlugin
 
@@ -239,7 +238,7 @@ class TestSessionCloseFactoryGuard:
             }
             await plugin.setup(h._plugin_services)
             await h.events.emit(
-                LifecycleEvent(
+                SessionEvent(
                     kind="session_close",
                     chat_id="c-empty",
                     actor_name="A",
@@ -260,7 +259,7 @@ class TestE2E:
         via the bus, the bound factory builds a Job, the runner runs it,
         the side effect is observable. This is the BEP 10 consolidation flow's
         contract."""
-        from bos.core.contract import LifecycleEvent
+        from bos.core.contract import SessionEvent
         from bos.core.harness import AgentHarness
 
         async with AgentHarness(bos_dir=tmp_path, workspace=tmp_path) as h:
@@ -281,7 +280,7 @@ class TestE2E:
 
             h.jobs.bind_trigger("session_close", factory)
             await h.events.emit(
-                LifecycleEvent(
+                SessionEvent(
                     kind="session_close",
                     chat_id="c1",
                     actor_name="A",

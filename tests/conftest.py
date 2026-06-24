@@ -4,20 +4,70 @@ from __future__ import annotations
 
 from typing import Any
 
-from bos.core.agent import Agent, ChainInterceptor
-from bos.core.contract import Message, ep_consolidator
+from bos.core.agent import Agent, TurnContext
+from bos.core.contract import Message, TurnInterceptor, ep_consolidator, ep_tool
+from bos.core.harness import ChainInterceptor, ResolvedToolSet, _CompositePluginInterceptor, _PluginPromptProvider
+from bos.core.llm import LLMClient
+from bos.core.registry import ToolRegistry
 from bos.extensions.chat_stores.in_memory import InMemChatStore
 from bos.extensions.mailboxes.in_memory import InMemMailRoute  # noqa: F401
 from bos.extensions.memory_stores.in_memory import InMemMemoryExtension  # noqa: F401
 
 
-def create_test_agent(*, plugins: list[Any] | None = None, **kwargs: Any) -> Agent:
+def resolve_test_tools(
+    *,
+    plugins: list[Any] | None = None,
+    local_tools: ToolRegistry | None = None,
+    include: list[str] | None = None,
+    exclude: list[str] | None = None,
+) -> tuple[ToolRegistry, ResolvedToolSet]:
+    """Mirror the harness tool resolution for direct-construction tests:
+    register plugin tools into a local registry and expose a filtered view
+    over [local, global]. Returns (local_registry, resolved) so tests can
+    still inspect/extend the local registry."""
+    local = local_tools or ToolRegistry("_local_tools:test", "Agent-scoped local tools.")
+    for plugin in plugins or []:
+        plugin.register_tools(local)
+    return local, ResolvedToolSet([local, ep_tool], include=include, exclude=exclude)
+
+
+def dummy_turn_context() -> TurnContext:
+    """A throwaway TurnContext for introspection-style calls — e.g. building the
+    system prompt outside a real turn."""
+    return TurnContext(agent_name="test", chat_id="test", turn_id="test")
+
+
+def compose_test_interceptors(
+    plugins: list[Any] | None = None, fallback: TurnInterceptor | None = None
+) -> _CompositePluginInterceptor:
+    """Mirror the harness interceptor assembly for direct-construction tests:
+    plugin interceptors (best-effort) ahead of a fallback chain."""
+    plugin_interceptors = [i for plugin in plugins or [] for i in plugin.get_interceptors()]
+    return _CompositePluginInterceptor(plugin_interceptors, fallback or ChainInterceptor())
+
+
+def create_test_agent(
+    *,
+    plugins: list[Any] | None = None,
+    local_tools: ToolRegistry | None = None,
+    tools: list[str] | None = None,
+    exclude_tools: list[str] | None = None,
+    interceptor: TurnInterceptor | None = None,
+    **kwargs: Any,
+) -> Agent:
+    plugins = plugins or []
+    _, resolved = resolve_test_tools(plugins=plugins, local_tools=local_tools, include=tools, exclude=exclude_tools)
     kwargs.setdefault("kind", "test")
     kwargs.setdefault("agent_name", "test")
     kwargs.setdefault("chat_store", InMemChatStore())
     kwargs.setdefault("consolidator", MessageOnlyConsolidator())
-    kwargs.setdefault("interceptor", ChainInterceptor())
-    return Agent(plugins=plugins or [], **kwargs)
+    kwargs.setdefault("llm", LLMClient())
+    return Agent(
+        tools=resolved,
+        interceptor=compose_test_interceptors(plugins, interceptor),
+        prompt_provider=_PluginPromptProvider(plugins),
+        **kwargs,
+    )
 
 
 class RecordingConsolidator:

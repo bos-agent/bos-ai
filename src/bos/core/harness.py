@@ -11,27 +11,34 @@ from typing import Any
 
 from ._utils import (
     _aclose,
+    _allowed,
     _apply,
     _create_extension_instance,
     _deep_merge,
+    _pick_collection,
 )
-from .agent import Agent, ChainInterceptor
+from .agent import AbortTurn, Agent, TurnContext
 from .contract import (
     AgentPlugin,
     BackgroundLLM,
     ChatStore,
     Consolidator,
+    EventBus,
     HarnessPlugin,
+    InterceptorStage,
     JobRunner,
-    LifecycleBus,
-    MailBox,
     MailRoute,
     PluginServices,
+    ToolAttributes,
     ToolContext,
+    TurnInterceptor,
     ep_plugin,
+    ep_tool,
+    ep_turn_interceptor,
 )
-from .events import derive_event_sink
 from .llm import LLMClient
+from .registry import ToolRegistry
+from .sinks import derive_event_sink
 
 logger = logging.getLogger(__name__)
 
@@ -48,12 +55,12 @@ class AgentRegistry:
 
         plugins = kwargs.get("plugins")
         if plugins is None:
-            kwargs["plugins"] = {"enabled": [], "disabled": [], "prompts": {}}
+            kwargs["plugins"] = {"enabled": [], "disabled": []}
         elif not isinstance(plugins, dict):
             raise TypeError(f"plugins must be a dict or None, got {type(plugins).__name__}")
 
         kwargs.setdefault("tools", [])
-        kwargs.setdefault("plugins", {"enabled": [], "disabled": [], "prompts": {}})
+        kwargs.setdefault("plugins", {"enabled": [], "disabled": []})
         kwargs["kind"] = name
         cls._registry[name] = {
             "defaults": kwargs,
@@ -75,7 +82,130 @@ class AgentRegistry:
 
 
 CURRENT_HARNESS: contextvars.ContextVar[AgentHarness] = contextvars.ContextVar("current_harness")
-CURRENT_MAILBOX: contextvars.ContextVar[MailBox] = contextvars.ContextVar("current_mailbox")
+
+
+class ResolvedToolSet:
+    """A live, filtered view over one or more source tool collections.
+
+    Satisfies the core ``ToolSet`` protocol. This is where tool *resolution*
+    lives (outer layer): merge of sources with earlier sources taking
+    precedence, plus include/exclude policy. The Agent receives the resolved
+    view and stays ignorant of registries, globals, and filtering.
+    """
+
+    def __init__(
+        self,
+        sources: list[ToolRegistry],
+        *,
+        include: list[str] | None = None,
+        exclude: list[str] | None = None,
+    ) -> None:
+        # Precedence: earlier sources win on name conflicts (local before global).
+        self._sources = sources
+        self._include = include
+        self._exclude = exclude
+
+    def has(self, name: str) -> bool:
+        return _allowed(name, self._include, self._exclude) and any(s.has(name) for s in self._sources)
+
+    def _merged(self, get: str) -> dict[str, Any]:
+        merged: dict[str, Any] = {}
+        for source in reversed(self._sources):  # later sources are lower precedence
+            merged |= getattr(source, get)()
+        return _pick_collection(merged, self._include, self._exclude)
+
+    def to_openai_schema(self) -> dict[str, dict[str, Any]]:
+        return self._merged("to_openai_schema")
+
+    def describe_usage(self) -> dict[str, str]:
+        return self._merged("describe_usage")
+
+    def attributes(self, name: str) -> ToolAttributes:
+        # Adapt the registry's raw (untyped) metadata into core's typed,
+        # core-owned ToolAttributes.
+        for source in self._sources:
+            if source.has(name):
+                metadata = source.metadata_for(name)
+                return ToolAttributes(parallel_safe=bool(metadata.get("parallel_safe", False)))
+        return ToolAttributes()
+
+    async def invoke(self, name: str, kwargs: dict[str, Any] | None = None) -> str:
+        if not _allowed(name, self._include, self._exclude):
+            raise Exception(f"Tool {name} is not allowed")
+        for source in self._sources:
+            if source.has(name):
+                return await source.invoke(name, kwargs)
+        raise Exception(f"Tool {name} not found")
+
+
+class ChainInterceptor:
+    """Runs a sequence of resolved interceptor instances in the given order.
+
+    Resolution of interceptor names/configs into instances is the outer layer's
+    job; this only runs what it is handed.
+    """
+
+    def __init__(self, interceptors: list[TurnInterceptor] | None = None) -> None:
+        self._interceptors = list(interceptors or [])
+
+    async def aclose(self) -> None:
+        for interceptor in self._interceptors:
+            await _aclose(interceptor)
+
+    async def intercept(self, stage: InterceptorStage, context: TurnContext) -> None:
+        for interceptor in self._interceptors:
+            await interceptor.intercept(stage, context)
+
+
+class _CompositePluginInterceptor:
+    """Runs plugin interceptors (best-effort), then a fallback interceptor chain.
+
+    Plugin interceptors are best-effort: a failing one is logged and skipped so
+    a buggy plugin cannot crash the turn. AbortTurn still propagates, and the
+    configured fallback chain runs with normal error propagation.
+    """
+
+    def __init__(self, plugin_interceptors: list[TurnInterceptor], fallback: TurnInterceptor) -> None:
+        self._plugin = plugin_interceptors
+        self._fallback = fallback
+
+    async def aclose(self) -> None:
+        for interceptor in self._plugin:
+            await _aclose(interceptor)
+        await _aclose(self._fallback)
+
+    async def intercept(self, stage: InterceptorStage, context: TurnContext) -> None:
+        for interceptor in self._plugin:
+            try:
+                await interceptor.intercept(stage, context)
+            except AbortTurn:
+                raise
+            except Exception as e:
+                logger.error("Error in plugin interceptor: %s", e, exc_info=True)
+        await self._fallback.intercept(stage, context)
+
+
+class _PluginPromptProvider:
+    """Builds per-turn system-prompt sections from the agent's plugins, in order.
+
+    Satisfies the core ``PromptProvider`` protocol; the Agent asks it each turn
+    and stays unaware of plugins.
+    """
+
+    def __init__(self, plugins: list[AgentPlugin]) -> None:
+        self._plugins = plugins
+
+    async def sections(self, context: TurnContext) -> list[str]:
+        out: list[str] = []
+        for plugin in self._plugins:
+            try:
+                section = await plugin.get_system_prompt_section(context)
+            except Exception as e:
+                logger.error("Error in plugin prompt section %s: %s", plugin.name, e, exc_info=True)
+                continue
+            if section:
+                out.append(section)
+        return out
 
 
 class _HarnessSubagentRuntime:
@@ -138,7 +268,7 @@ class AgentHarness:
         self.consolidator: Consolidator | None = None
         self.interceptor: ChainInterceptor | None = None
         self.llm: LLMClient | None = None
-        self.events: LifecycleBus | None = None
+        self.events: EventBus | None = None
         self.jobs: JobRunner | None = None
         self.background_llm: BackgroundLLM | None = None
 
@@ -156,19 +286,26 @@ class AgentHarness:
                 "the current harness instead of re-entering."
             )
 
+        # The assembly ring registers its own ``_default`` adapters (consolidator,
+        # litellm provider, jsonl chat store/mailbox, job runner) — the harness
+        # depends on them being resolvable by name below, so it does not rely on an
+        # outer ring (``bos.exts``) having imported them. Idempotent; deferred to
+        # open-time to avoid import-order coupling during ``bos.core`` package init.
+        import bos.core.defaults  # noqa: F401
+
         self.mail_route = await self._create_and_own("ep_mail_route", MailRoute, None, impl=self._mail_route_impl)
         self.chat_store = await self._create_and_own("ep_chat_store", ChatStore, None, impl=self._chat_store_impl)
         assert self.chat_store is not None  # ep_chat_store has a _default, so creation never returns None
         self.llm = LLMClient()
         self.consolidator = await self._create_consolidator()
-        self.interceptor = ChainInterceptor(self._interceptors_impl)
+        self.interceptor = ChainInterceptor(await self._resolve_interceptors(self._interceptors_impl))
 
-        # BEP 11 services: in-process LifecycleBus, JobRunner, BackgroundLLM.
+        # BEP 11 services: in-process EventBus, JobRunner, BackgroundLLM.
         from bos.core.contract import ep_job_runner
         from bos.core.defaults.background_llm import DefaultBackgroundLLM
-        from bos.core.defaults.lifecycle import DefaultLifecycleBus
+        from bos.core.defaults.eventbus import DefaultEventBus
 
-        self.events = DefaultLifecycleBus()
+        self.events = DefaultEventBus()
         self.jobs = await ep_job_runner.invoke(self._job_runner_impl, {"bus": self.events})
         assert self.jobs is not None  # ep_job_runner has a _default, so creation never returns None
         await self.jobs.start()
@@ -236,13 +373,34 @@ class AgentHarness:
 
         merged_cfg = _deep_merge(dict(agent_defaults), agent_cfg or {})
 
+        agent_name = kind or merged_cfg.get("kind") or "undef"
+        plugins = await self._bind_plugins_for_agent(merged_cfg)
+
+        # Resolve this agent's tools (outer layer's job): register plugin tools
+        # into an agent-local registry, then expose a filtered view over
+        # [local, global] honoring the agent's include/exclude config.
+        local_tools = ToolRegistry(f"_local_tools:{agent_name}", "Agent-scoped local tools.")
+        for plugin in plugins:
+            plugin.register_tools(local_tools)
+        tools = ResolvedToolSet(
+            [local_tools, ep_tool],
+            include=merged_cfg.get("tools"),
+            exclude=merged_cfg.get("exclude_tools"),
+        )
+
+        # Assemble this agent's single interceptor (outer layer's job): plugin
+        # interceptors (best-effort) ahead of the configured/workspace chain.
+        plugin_interceptors = [i for plugin in plugins for i in plugin.get_interceptors()]
+        interceptor = _CompositePluginInterceptor(plugin_interceptors, self.interceptor or ChainInterceptor())
+
         kwargs = merged_cfg | {
-            "kind": kind or merged_cfg.get("kind") or "undef",
+            "kind": agent_name,
             "llm": self.llm,
             "chat_store": self.chat_store,
             "consolidator": self.consolidator,
-            "interceptor": self.interceptor,
-            "plugins": await self._bind_plugins_for_agent(merged_cfg),
+            "tools": tools,
+            "interceptor": interceptor,
+            "prompt_provider": _PluginPromptProvider(plugins),
             "chat_compaction_lock": self._get_compaction_lock,
             "workspace": str(self._workspace),
         }
@@ -345,6 +503,24 @@ class AgentHarness:
             raise RuntimeError(f"Consolidator extension {self._consolidator_impl!r} could not be created")
         self._owned.append(instance)
         return instance
+
+    async def _resolve_interceptors(self, configs: list[str | dict[str, Any]]) -> list[TurnInterceptor]:
+        """Resolve interceptor names/configs into instances via ep_turn_interceptor.
+
+        A name that is not registered is skipped; one that fails to instantiate
+        is logged and skipped — a bad interceptor never breaks the chain.
+        """
+        resolved: list[TurnInterceptor] = []
+        for entry in configs:
+            cfg = {"name": entry} if isinstance(entry, str) else entry
+            name = cfg.get("name")
+            if not name or not ep_turn_interceptor.has(name):
+                continue
+            try:
+                resolved.append(await _create_extension_instance(ep_turn_interceptor, TurnInterceptor, cfg))
+            except Exception as e:
+                logger.error("Failed to create interceptor %s: %s", name, e)
+        return resolved
 
     def _get_compaction_lock(self, chat_id: str) -> asyncio.Lock:
         if chat_id not in self._compaction_locks:

@@ -13,8 +13,9 @@ from typing import Any
 from aiohttp import ClientSession, ClientTimeout, FormData
 
 from bos.core import BaseChannel, MailBox, ep_channel
+from bos.core.actor import Envelope, MessageType
+from bos.core.agent import TurnEvent
 from bos.gateway import ChannelConversationRef, ChannelRuntimeContext
-from bos.protocol import Envelope, MessageType, TurnEvent
 
 logger = logging.getLogger(__name__)
 
@@ -173,21 +174,6 @@ def _assistant_text(message: dict[str, Any]) -> str | None:
         ]
         return "".join(parts).strip() or None
     return None
-
-
-def _selected_chat_from_command_result(env: Envelope) -> str | None:
-    if env.content_type != MessageType.COMMAND_RESULT:
-        return None
-    try:
-        payload = json.loads(env.content) if isinstance(env.content, str) else env.content
-    except Exception:
-        return None
-    if not isinstance(payload, dict) or not payload.get("ok"):
-        return None
-    if payload.get("name") not in {"new", "resume"}:
-        return None
-    chat_id = payload.get("chat_id")
-    return chat_id if isinstance(chat_id, str) and chat_id.strip() else None
 
 
 def _turn_event_label(event: TurnEvent) -> str:
@@ -369,6 +355,11 @@ class TelegramChannel(BaseChannel[TelegramSettings]):
                         continue
 
                     ref = ChannelConversationRef(self.channel_id, inbound["channel_conversation_id"])
+                    if inbound["content_type"] == MessageType.COMMAND:
+                        # Control plane: handle slash-commands off the gateway,
+                        # never as envelopes through the agent actor (BEP 13 / OPEN-D).
+                        await self._handle_command(inbound["text"], ref, telegram_chat_id)
+                        continue
                     chat_id = self._runtime.chat_coordinator.get_cursor(ref)
                     if chat_id is None:
                         chat_id = self._runtime.chat_coordinator.new_chat(ref)
@@ -477,6 +468,32 @@ class TelegramChannel(BaseChannel[TelegramSettings]):
             text = "A response is already in progress for this chat."
         await self._api_call("sendMessage", {"chat_id": telegram_chat_id, "text": text})
 
+    async def _handle_command(self, command: str, ref: ChannelConversationRef, telegram_chat_id: str) -> None:
+        """Run a slash-command through the gateway control plane and send the
+        result back to Telegram. No COMMAND envelope, no actor mailbox."""
+        handler = self._runtime.command_handler
+        if handler is None:
+            await self._api_call("sendMessage", {"chat_id": telegram_chat_id, "text": "Commands are unavailable."})
+            return
+        result = await handler.run(ref, command, target_actor=self.target_actor)
+        if result.ok and result.name in ("new", "resume") and result.chat_id:
+            # Re-map this Telegram chat to the newly selected internal chat
+            # (the coordinator cursor was already moved by the handler).
+            self._conversation_to_telegram_chat[ref.channel_conversation_id] = telegram_chat_id
+            for old_chat, mapped in list(self._chat_to_telegram_chat.items()):
+                if mapped == telegram_chat_id and old_chat != result.chat_id:
+                    self._chat_to_telegram_chat.pop(old_chat, None)
+            self._chat_to_telegram_chat[result.chat_id] = telegram_chat_id
+        body: dict[str, Any] = {"name": result.name, "ok": result.ok}
+        if result.result is not None:
+            body["result"] = result.result
+        if result.error is not None:
+            body["error"] = result.error
+            body.setdefault("result", result.error)
+        if result.chat_id is not None:
+            body["chat_id"] = result.chat_id
+        await self._api_call("sendMessage", {"chat_id": telegram_chat_id, "text": json.dumps(body, default=str)})
+
     async def _forward_replies(self, mailbox: MailBox) -> None:
         while True:
             env = await mailbox.receive()
@@ -484,17 +501,6 @@ class TelegramChannel(BaseChannel[TelegramSettings]):
             if telegram_chat_id is None:
                 logger.warning("Dropping Telegram reply without chat mapping (chat_id=%r)", env.chat_id)
                 continue
-            selected_chat_id = _selected_chat_from_command_result(env)
-            if selected_chat_id:
-                ref = self._ref_from_env(env)
-                if ref is not None:
-                    current_revision = await self._runtime.chat_coordinator.current_revision(selected_chat_id)
-                    # The command result is the channel's handoff point for the selected chat.
-                    # Future normal messages must use the selected chat's delivered revision.
-                    self._runtime.chat_coordinator.set_cursor(ref, selected_chat_id, observed_revision=current_revision)
-                if env.chat_id and env.chat_id != selected_chat_id:
-                    self._chat_to_telegram_chat.pop(env.chat_id, None)
-                self._chat_to_telegram_chat[selected_chat_id] = telegram_chat_id
 
             if env.content_type == MessageType.TURN_EVENT:
                 try:

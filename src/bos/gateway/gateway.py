@@ -6,29 +6,30 @@ from typing import TYPE_CHECKING, Any
 
 from aiohttp import web
 
-from .actor_manager import ActorManager
-from .actor_resolver import ActorDescriptor, ActorResolver
-from .channel_context import ChannelRuntimeContext
-from .channel_manager import ChannelManager
-from .chat_coordinator import ChannelConversationRef, ChatCoordinator
+from .actors.actor_manager import ActorManager
+from .channels.channel_manager import ChannelManager
+from .channels.ws_channel import WSChannel
+from .config import GatewayRuntimeConfig
+from .core.actor_resolver import ActorDescriptor, ActorResolver
+from .core.channel_context import ChannelRuntimeContext
+from .core.chat_coordinator import ChannelConversationRef, ChatCoordinator
+from .core.command_handler import CommandHandler
 from .http import create_gateway_app, resolve_gateway_api_key
 from .state import GatewayRunDir, write_gateway_state
-from .ws_channel import WSChannel
 
 if TYPE_CHECKING:
-    from bos.config import Workspace
     from bos.core import AgentHarness
 
 
 class Gateway:
-    def __init__(self, *, workspace: Workspace, harness: AgentHarness) -> None:
-        self.workspace = workspace
+    def __init__(self, *, runtime: GatewayRuntimeConfig, harness: AgentHarness) -> None:
+        self.runtime = runtime
+        self.bos_dir = runtime.bos_dir
         self.harness = harness
-        self.config = workspace.resolve_gateway_config()
+        self.config = runtime.gateway
         self.started_at = datetime.now(timezone.utc).isoformat()
         self.actual_port = self.config.port
         self.actual_host = self.config.host
-        actors = workspace.resolve_gateway_actors()
         self.actor_resolver = ActorResolver(
             {
                 name: ActorDescriptor(
@@ -36,35 +37,42 @@ class Gateway:
                     address=actor.address,
                     display_name=actor.display_name,
                     agent_kind=actor.agent,
-                    is_default=name == workspace.resolve_default_actor(),
+                    is_default=name == runtime.default_actor,
                 )
-                for name, actor in actors.items()
+                for name, actor in runtime.actors.items()
             },
-            default_actor=workspace.resolve_default_actor(),
-            mention_prefix=workspace.config.runtime.actor_resolver.mention_prefix if workspace.config.runtime else "@",
-            workdir=str(workspace.workspace),
+            default_actor=runtime.default_actor,
+            mention_prefix=runtime.mention_prefix,
+            workdir=runtime.workdir,
         )
+        self.default_actor = runtime.default_actor
         if harness.chat_store is None or harness.mail_route is None:
             raise RuntimeError("Gateway requires an active AgentHarness with chat_store and mail_route services.")
         self.chat_coordinator = ChatCoordinator(
-            harness.chat_store, cursor_path=GatewayRunDir(workspace.bos_dir).cursors_file
+            harness.chat_store, cursor_path=GatewayRunDir(self.bos_dir).cursors_file
         )
         self.actor_manager = ActorManager(
-            workspace=workspace,
+            actors=runtime.actors,
             harness=harness,
             chat_coordinator=self.chat_coordinator,
             state_changed=self._write_state,
+        )
+        self.command_handler = CommandHandler(
+            self.chat_coordinator,
+            harness.chat_store,
+            self.actor_manager.retire_session,
         )
         self.channel_manager = ChannelManager(
             runtime=ChannelRuntimeContext(
                 actor_resolver=self.actor_resolver,
                 chat_coordinator=self.chat_coordinator,
                 mail_route=harness.mail_route,
+                command_handler=self.command_handler,
                 state_changed=self._write_state,
             )
         )
         # Channel instantiation is async (ep_channel.invoke); deferred to run().
-        self._persistent_channel_configs = workspace.resolve_gateway_channels()
+        self._persistent_channel_configs = runtime.channels
 
     def status_snapshot(self) -> dict[str, Any]:
         gateway = {
@@ -76,7 +84,7 @@ class Gateway:
         actors = self.actor_manager.status_payload()
         channels = self.channel_manager.status_payload()
         return {
-            "runtime": self.workspace.get_runtime_config().kind,
+            "runtime": self.runtime.runtime_kind,
             "pid": os.getpid(),
             "started_at": self.started_at,
             "updated_at": datetime.now(timezone.utc).isoformat(),
@@ -122,7 +130,7 @@ class Gateway:
         await ws.prepare(request)
         channel = WSChannel(
             channel_id=channel_id,
-            target_actor=self.workspace.resolve_default_actor(),
+            target_actor=self.default_actor,
             display_name=f"WebSocket {channel_id}",
             settings={},
             runtime=self.channel_manager.runtime,
@@ -146,7 +154,7 @@ class Gateway:
         return ws
 
     async def _write_state(self) -> None:
-        write_gateway_state(GatewayRunDir(self.workspace.bos_dir), self.status_snapshot())
+        write_gateway_state(GatewayRunDir(self.bos_dir), self.status_snapshot())
 
     async def run(self) -> None:
         await self.channel_manager.create_persistent(self._persistent_channel_configs)
@@ -162,7 +170,7 @@ class Gateway:
         self.actual_host = self.config.host
         await self.actor_manager.start_all()
         await self.channel_manager.start_all()
-        write_gateway_state(GatewayRunDir(self.workspace.bos_dir), self.status_snapshot())
+        write_gateway_state(GatewayRunDir(self.bos_dir), self.status_snapshot())
         try:
             import asyncio
 
@@ -170,5 +178,5 @@ class Gateway:
         finally:
             await self.channel_manager.stop_all()
             await self.actor_manager.stop_all()
-            write_gateway_state(GatewayRunDir(self.workspace.bos_dir), self.status_snapshot() | {"status": "stopped"})
+            write_gateway_state(GatewayRunDir(self.bos_dir), self.status_snapshot() | {"status": "stopped"})
             await runner.cleanup()

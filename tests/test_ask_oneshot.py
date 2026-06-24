@@ -5,7 +5,7 @@ import json
 import pytest
 
 from bos.config.workspace import WorkspaceResolutionError, resolve_config_source
-from bos.protocol import Envelope, MessageType
+from bos.core.actor import Envelope, MessageType
 
 
 def test_resolve_config_source_builtin_preset():

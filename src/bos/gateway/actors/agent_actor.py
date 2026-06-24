@@ -1,20 +1,18 @@
 from __future__ import annotations
 
 import asyncio
-import contextvars
 import json
 import logging
 import uuid
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from bos.protocol import Envelope, MessageContent, MessageType, TurnEvent
+from bos.core.actor import Actor, Envelope, EventBus, MailBox, MessageType
+from bos.core.agent import AbortTurn, Agent, MessageContent, TurnEvent
+from bos.core.contract import SessionEvent, SessionEventKind
+from bos.core.sinks import CLIENT_TURN_EVENT_TYPES, HostChannelSink, MailboxEventSink
 
-from .agent import AbortTurn, Agent
-from .chat_state import ChatState, ChatStateError
-from .contract import LifecycleBus, LifecycleEvent, LifecycleKind, MailBox
-from .events import CLIENT_TURN_EVENT_TYPES, HostChannelSink, MailboxEventSink
-from .harness import CURRENT_MAILBOX
+from ..core.chat_coordinator import ChannelConversationRef, ChatCoordinationError, ChatCoordinator
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -85,122 +83,92 @@ class _RouteAwareMailboxEventSink(MailboxEventSink):
         )
 
 
-class AgentActor:
+class AgentActor(Actor):
     """Actor that drives an Agent via a bound MailBox.
 
     Sessions are keyed by ``chat_id``.  Each distinct ``chat_id`` gets its
     own concurrent task slot, interrupt buffer, and generation counter.
     Messages arriving during an active turn are rejected immediately.
+
+    Specializes the foundation ``Actor``: the mailbox pump, background-task
+    lifecycle, and event emission come from the base; this class adds the
+    turn/session/interrupt model and the ``SessionEvent`` vocabulary.
     """
 
     def __init__(
         self,
         agent: Agent,
         mailbox: MailBox,
-        chat_state: ChatState | None = None,
         *,
-        lifecycle_bus: LifecycleBus | None = None,
+        event_bus: EventBus | None = None,
+        chat_coordinator: ChatCoordinator | None = None,
     ):
-        self._address = mailbox.address
+        super().__init__(mailbox, event_bus=event_bus)
         self._agent = agent
-        self._mailbox = mailbox
-        self._chat_state = chat_state or ChatState()
         self._sessions: dict[str, SessionState] = {}
-        self._lifecycle_bus = lifecycle_bus
-        self._command_tasks: set[asyncio.Task] = set()
+        # Optional turn fencing for multi-client gateway hosting. When absent
+        # (e.g. a bare actor in a test), the turn hooks below are no-ops beyond
+        # the session-event emit.
+        self._chat_coordinator = chat_coordinator
 
     async def aclose(self) -> None:
-        tasks = [session.execution.task for session in self._sessions.values() if session.execution.task is not None]
-        tasks.extend(self._command_tasks)
-        for task in tasks:
+        session_tasks = [s.execution.task for s in self._sessions.values() if s.execution.task is not None]
+        for task in session_tasks:
             task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
-        self._command_tasks.clear()
+        if session_tasks:
+            await asyncio.gather(*session_tasks, return_exceptions=True)
         for session in self._sessions.values():
             session.execution.task = None
+        await super().aclose()  # drains command tasks tracked by the base
 
-    async def run(self) -> None:
-        try:
-            while True:
-                for chat_id in list(self._sessions.keys()):
-                    await self._finalize_done_task(chat_id)
+    async def _on_idle_tick(self) -> None:
+        # Reap completed turn tasks (and surface their errors) once per loop.
+        for chat_id in list(self._sessions.keys()):
+            await self._finalize_done_task(chat_id)
 
-                env = await self._mailbox.receive_nowait()
-                if env is None:
-                    await asyncio.sleep(0.1)
-                    continue
+    async def handle(self, env: Envelope) -> None:
+        if not env.chat_id:
+            await self._mailbox.send(
+                env.sender,
+                "(error: missing chat_id)",
+                content_type=MessageType.SYSTEM,
+            )
+            return
 
-                if not env.chat_id:
-                    await self._mailbox.send(
-                        env.sender,
-                        "(error: missing chat_id)",
-                        content_type=MessageType.SYSTEM,
+        chat_id = env.chat_id
+        session = self._get_or_create_session(chat_id)
+
+        if session.execution.task is None:
+            if env.content_type == MessageType.MESSAGE:
+                session.interrupts.clear()
+                session.execution.reply_recipient = env.sender
+                session.execution.reply_chat_id = env.chat_id
+                generation = session.execution.generation
+                turn_id = uuid.uuid4().hex
+                session.execution.task = asyncio.create_task(
+                    self._run_ask(
+                        chat_id=chat_id,
+                        generation=generation,
+                        turn_id=turn_id,
+                        reply_recipient=env.sender,
+                        reply_chat_id=env.chat_id,
+                        content=env.content,
+                        inbound_env=env,
                     )
-                    continue
+                )
+            return
 
-                chat_id = env.chat_id
-                session = self._get_or_create_session(chat_id)
-
-                if env.content_type == MessageType.COMMAND:
-                    command_content = self._command_content(env)
-                    if command_content is None:
-                        await self._send_command_content_error(env, content_type=MessageType.SYSTEM)
-                        continue
-                    if command_content.strip().startswith("/"):
-                        self._spawn_command_task(env)
-                        continue
-                    env.content_type = MessageType.MESSAGE
-
-                if session.execution.task is None:
-                    if env.content_type == MessageType.MESSAGE:
-                        session.interrupts.clear()
-                        session.execution.reply_recipient = env.sender
-                        session.execution.reply_chat_id = env.chat_id
-                        generation = session.execution.generation
-                        turn_id = uuid.uuid4().hex
-                        session.execution.task = asyncio.create_task(
-                            self._run_ask(
-                                chat_id=chat_id,
-                                generation=generation,
-                                turn_id=turn_id,
-                                reply_recipient=env.sender,
-                                reply_chat_id=env.chat_id,
-                                content=env.content,
-                                inbound_env=env,
-                            )
-                        )
-                    continue
-
-                if env.content_type == MessageType.INTERRUPT_ABORT:
-                    self._abort_current_turn(session)
-                elif env.content_type == MessageType.INTERRUPT_MESSAGE:
-                    session.interrupts.append(env)
-                else:
-                    await self._mailbox.send(
-                        env.sender,
-                        "(busy: a response is already in progress for this chat)",
-                        content_type=MessageType.SYSTEM,
-                        chat_id=env.chat_id,
-                    )
-
-        except asyncio.CancelledError:
-            await self.aclose()
-            raise
-
-    def current_chat_id(self, env: Envelope, explicit_input: str | None = None) -> str | None:
-        if explicit_input and explicit_input.strip():
-            return self._chat_state.resolve_alias_or_id(explicit_input.strip())
-        return env.chat_id
-
-    async def reset_chat(self, env: Envelope) -> str:
-        """Reset the session for the current chat.
-
-        Pops the old session (cancelling any in-flight task) and returns
-        a fresh chat_id.  The caller adopts the new id going forward.
-        """
-        await self.retire_session(env.chat_id)
-        return uuid.uuid4().hex
+        if env.content_type == MessageType.INTERRUPT_ABORT:
+            self._abort_current_turn(session)
+        elif env.content_type == MessageType.INTERRUPT_MESSAGE:
+            session.interrupts.append(env)
+        else:
+            await self._mailbox.send(
+                env.sender,
+                "(busy: a response is already in progress for this chat)",
+                content_type=MessageType.SYSTEM,
+                chat_id=env.chat_id,
+            )
 
     async def retire_session(self, chat_id: str | None) -> None:
         if not chat_id:
@@ -217,18 +185,13 @@ class AgentActor:
         if task is not None:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
-        await self._emit_lifecycle(
+        await self._emit_session_event(
             "session_close",
             chat_id=chat_id,
             actor_name=self._actor_name(),
             turn_id=None,
             base_revision=session.execution.last_committed_revision,
         )
-
-    def _spawn_command_task(self, env: Envelope) -> None:
-        task = asyncio.create_task(self._handle_command(env))
-        self._command_tasks.add(task)
-        task.add_done_callback(self._command_tasks.discard)
 
     def _abort_current_turn(self, session: SessionState) -> None:
         """Cancel the current execution and fence stale replies.
@@ -302,7 +265,6 @@ class AgentActor:
         content: MessageContent,
         inbound_env: Envelope | None = None,
     ) -> None:
-        token: contextvars.Token | None = None
         committed_revision: int | None = None
         turn_ctx = ActorTurnContext(
             chat_id=chat_id,
@@ -328,7 +290,6 @@ class AgentActor:
             return
 
         try:
-            token = CURRENT_MAILBOX.set(self._mailbox)
             mailbox_sink = _RouteAwareMailboxEventSink(
                 self._mailbox,
                 reply_recipient,
@@ -365,9 +326,6 @@ class AgentActor:
                 ActorTurnResult(status="error", committed_revision=committed_revision, error=exc),
             )
             raise
-        finally:
-            if token is not None:
-                CURRENT_MAILBOX.reset(token)
 
         if not self._execution_is_current(chat_id, generation):
             await self._on_turn_finished(
@@ -392,48 +350,79 @@ class AgentActor:
         )
 
     async def _on_turn_started(self, ctx: ActorTurnContext) -> None:
-        pass
+        # Fence the turn through the coordinator (multi-client gateway hosting).
+        if self._chat_coordinator is None:
+            return
+        ref = _ctx_channel_ref(ctx)
+        if ref is None:
+            raise ChatCoordinationError("Gateway actor turn is missing channel metadata.")
+        if ctx.base_revision is None:
+            raise ChatCoordinationError("Gateway actor turn is missing base_revision.")
+        await self._chat_coordinator.begin_turn(
+            chat_id=ctx.chat_id,
+            ref=ref,
+            actor=ctx.actor_name,
+            turn_id=ctx.turn_id,
+            base_revision=ctx.base_revision,
+        )
 
     async def _on_turn_finished(self, ctx: ActorTurnContext, result: ActorTurnResult) -> None:
-        # A completed turn is a generic platform lifecycle event. Subclasses
-        # that override this MUST call super() to preserve the emit.
+        if self._chat_coordinator is not None:
+            self._chat_coordinator.end_turn(
+                chat_id=ctx.chat_id,
+                turn_id=ctx.turn_id,
+                committed_revision=result.committed_revision,
+            )
+        # A completed turn is a generic platform session event.
         if result.status == "completed":
-            await self._emit_lifecycle(
+            await self._emit_session_event(
                 "turn_complete",
                 chat_id=ctx.chat_id,
                 actor_name=ctx.actor_name,
                 turn_id=ctx.turn_id,
                 base_revision=result.committed_revision,
             )
+        if self._chat_coordinator is not None and result.status in ("aborted", "error") and ctx.reply_recipient:
+            # Aborted/errored turns send no reply envelope, but may have
+            # committed history and advanced the chat revision. Notify the
+            # originating channel so its revision cursor re-syncs; otherwise the
+            # client's next send is rejected as stale.
+            if result.status == "aborted":
+                content, event = "Turn aborted.", "turn_aborted"
+            else:
+                content, event = f"Turn failed: {result.error}", "turn_error"
+            await self._mailbox.send(
+                ctx.reply_recipient,
+                content,
+                content_type=MessageType.SYSTEM,
+                chat_id=ctx.chat_id,
+                metadata={"event": event},
+            )
 
-    async def _emit_lifecycle(
+    async def _emit_session_event(
         self,
-        kind: LifecycleKind,
+        kind: SessionEventKind,
         *,
         chat_id: str,
         actor_name: str | None,
         turn_id: str | None,
         base_revision: int | None,
     ) -> None:
-        """Emit a lifecycle event on the bus, if one is wired. The bus is the
-        single generic channel for turn_complete / session_close — the actor
-        names no plugin, and plugins subscribe to react (e.g. recall flush,
+        """Emit a session event on the bus (via the base ``emit``,
+        which no-ops when no bus is wired and isolates handler failures). The
+        bus is the single generic channel for turn_complete / session_close —
+        the actor names no plugin; plugins subscribe to react (recall flush,
         consolidation)."""
-        if self._lifecycle_bus is None:
-            return
-        try:
-            await self._lifecycle_bus.emit(
-                LifecycleEvent(
-                    kind=kind,
-                    chat_id=chat_id,
-                    actor_name=actor_name,
-                    base_revision=base_revision,
-                    turn_id=turn_id,
-                    payload={},
-                )
+        await self.emit(
+            SessionEvent(
+                kind=kind,
+                chat_id=chat_id,
+                actor_name=actor_name,
+                base_revision=base_revision,
+                turn_id=turn_id,
+                payload={},
             )
-        except Exception:
-            logger.exception("%s lifecycle emit raised", kind)
+        )
 
     def _build_host_sink(self, ctx: ActorTurnContext, mailbox_sink: MailboxEventSink) -> HostChannelSink:
         """Construct the per-turn event sink. The base actor registers the
@@ -501,140 +490,7 @@ class AgentActor:
         name = getattr(self._agent, "name", None)
         return str(name) if name is not None else self._address.removeprefix("agent@")
 
-    async def _handle_command(self, env: Envelope) -> None:
-        command_content = self._command_content(env)
-        if command_content is None:
-            await self._send_command_content_error(env, content_type=MessageType.COMMAND_RESULT)
-            return
-
-        parts = command_content.split(None, 1)
-        cmd_name, input = parts[0].lstrip("/"), "" if len(parts) == 1 else parts[1]
-
-        handler = self._COMMANDS.get(cmd_name)
-        if handler is None:
-            result: str | dict[str, Any] = f"Invalid command `{cmd_name}`"
-        else:
-            try:
-                result = await handler(self, input, env)
-            except Exception as exc:
-                result = {"name": cmd_name, "ok": False, "error": str(exc), "result": str(exc)}
-
-        if result is None:
-            result = "(done)"
-
-        if not isinstance(result, str):
-            result = json.dumps(result, default=str)
-
-        await self._mailbox.send(
-            env.sender,
-            result,
-            content_type=MessageType.COMMAND_RESULT,
-            chat_id=env.chat_id,
-            metadata=self._command_result_metadata(env),
-        )
-
-    @staticmethod
-    def _command_client_id(env: Envelope) -> str | None:
-        routing = env.metadata.get("routing")
-        if isinstance(routing, dict):
-            client_id = routing.get("client_id")
-            if isinstance(client_id, str) and client_id.strip():
-                return client_id.strip()
-        channel = env.metadata.get("channel")
-        if isinstance(channel, dict):
-            channel_id = channel.get("channel_id")
-            conversation_id = channel.get("channel_conversation_id")
-            if (
-                isinstance(channel_id, str)
-                and channel_id.strip()
-                and isinstance(conversation_id, str)
-                and conversation_id
-            ):
-                return f"{channel_id}:{conversation_id}"
-        return None
-
-    async def _cmd_chats(self, input: str, env: Envelope) -> dict[str, Any]:
-        """List all chats, most recently active first."""
-        chats = await self._agent._chat_store.list_chats()
-        metas = sorted(
-            chats.values(),
-            key=lambda m: (m.last_activity is not None, m.last_activity),
-            reverse=True,
-        )
-        result = [
-            {
-                "chat_id": m.chat_id,
-                "message_count": m.message_count,
-                "last_activity": m.last_activity.isoformat() if m.last_activity else None,
-                "description": m.description,
-            }
-            for m in metas
-        ]
-        return {"name": "chats", "ok": True, "result": result}
-
-    async def _cmd_prompt(self, input: str, env: Envelope) -> dict[str, Any]:
-        """Show the current agent system prompt."""
-        return {"name": "prompt", "ok": True, "result": await self._agent._build_system_prompt()}
-
-    async def _cmd_new(self, input: str, env: Envelope) -> dict[str, Any]:
-        """Start a new chat for the current client."""
-        client_id = self._command_client_id(env)
-        if client_id:
-            chat_id = self._chat_state.new_chat_for_client(client_id)
-        else:
-            chat_id = await self.reset_chat(env)
-        await self.retire_session(env.chat_id)
-        return {"name": "new", "ok": True, "result": "chat reset", "chat_id": chat_id}
-
-    async def _cmd_resume(self, input: str, env: Envelope) -> dict[str, Any]:
-        """Resume a chat by id for the current client."""
-        client_id = self._command_client_id(env)
-        if not client_id:
-            return {"name": "resume", "ok": False, "error": "Cannot resume without channel metadata."}
-        if not input.strip():
-            return {"name": "resume", "ok": False, "error": "Usage: /resume <chat-id>"}
-        try:
-            chat_id = self._chat_state.resolve_alias_or_id(input.strip())
-            self._chat_state.set_cursor(client_id, chat_id)
-        except ChatStateError as exc:
-            return {"name": "resume", "ok": False, "error": str(exc)}
-        if env.chat_id != chat_id:
-            await self.retire_session(env.chat_id)
-        return {"name": "resume", "ok": True, "result": f"resumed {chat_id}", "chat_id": chat_id}
-
-    _COMMANDS = {
-        "chats": _cmd_chats,
-        "prompt": _cmd_prompt,
-        "new": _cmd_new,
-        "resume": _cmd_resume,
-    }
-
-    @staticmethod
-    def _command_result_metadata(env: Envelope) -> dict[str, Any]:
-        metadata: dict[str, Any] = {}
-        routing = env.metadata.get("routing")
-        if isinstance(routing, dict) and routing:
-            metadata["routing"] = routing
-        channel = env.metadata.get("channel")
-        if isinstance(channel, dict) and channel:
-            metadata["channel"] = dict(channel)
-        return metadata
-
-    @staticmethod
-    def _command_content(env: Envelope) -> str | None:
-        return env.content if isinstance(env.content, str) else None
-
-    async def _send_command_content_error(self, env: Envelope, *, content_type: MessageType) -> None:
-        await self._mailbox.send(
-            env.sender,
-            "(error: command content must be text)",
-            content_type=content_type,
-            chat_id=env.chat_id,
-        )
-
-    def _make_interrupt(
-        self, chat_id: str, generation: int
-    ) -> Callable[[], dict[str, Any] | None]:
+    def _make_interrupt(self, chat_id: str, generation: int) -> Callable[[], dict[str, Any] | None]:
         def _interrupt() -> dict[str, Any] | None:
             if not self._generation_is_current(chat_id, generation):
                 raise AbortTurn()
@@ -668,3 +524,14 @@ class AgentActor:
     def _execution_is_current(self, chat_id: str, generation: int) -> bool:
         session = self._sessions.get(chat_id)
         return session is not None and session.execution.generation == generation and session.execution.task is not None
+
+
+def _ctx_channel_ref(ctx: ActorTurnContext) -> ChannelConversationRef | None:
+    raw = ctx.channel_ref
+    if not isinstance(raw, dict):
+        return None
+    channel_id = raw.get("channel_id")
+    conversation_id = raw.get("channel_conversation_id")
+    if not isinstance(channel_id, str) or not isinstance(conversation_id, str):
+        return None
+    return ChannelConversationRef(channel_id=channel_id, channel_conversation_id=conversation_id)

@@ -30,8 +30,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from bos.core import BaseChannel, MailBox, ep_channel
+from bos.core.actor import Envelope, MessageType
 from bos.gateway import ChannelConversationRef, ChannelRuntimeContext
-from bos.protocol import Envelope, MessageType
 
 logger = logging.getLogger(__name__)
 
@@ -183,21 +183,6 @@ def _assistant_text(message: dict[str, Any]) -> str | None:
         ]
         return "".join(parts).strip() or None
     return None
-
-
-def _selected_chat_from_command_result(env: Envelope) -> str | None:
-    if env.content_type != MessageType.COMMAND_RESULT:
-        return None
-    try:
-        payload = json.loads(env.content) if isinstance(env.content, str) else env.content
-    except Exception:
-        return None
-    if not isinstance(payload, dict) or not payload.get("ok"):
-        return None
-    if payload.get("name") not in {"new", "resume"}:
-        return None
-    chat_id = payload.get("chat_id")
-    return chat_id if isinstance(chat_id, str) and chat_id.strip() else None
 
 
 def _import_lark():
@@ -444,6 +429,11 @@ class LarkChannel(BaseChannel[LarkSettings]):
             return
 
         ref = ChannelConversationRef(self.channel_id, inbound["channel_conversation_id"])
+        if inbound["content_type"] == MessageType.COMMAND:
+            # Control plane: handle slash-commands off the gateway, never as
+            # envelopes through the agent actor (BEP 13 / OPEN-D).
+            await self._handle_command(inbound["text"], ref, lark_chat_id)
+            return
         chat_id = self._runtime.chat_coordinator.get_cursor(ref)
         if chat_id is None:
             chat_id = self._runtime.chat_coordinator.new_chat(ref)
@@ -559,16 +549,6 @@ class LarkChannel(BaseChannel[LarkSettings]):
                 logger.warning("Dropping Lark reply without chat mapping (chat_id=%r)", env.chat_id)
                 continue
 
-            selected_chat_id = _selected_chat_from_command_result(env)
-            if selected_chat_id:
-                ref = self._ref_from_env(env)
-                if ref is not None:
-                    current_revision = await self._runtime.chat_coordinator.current_revision(selected_chat_id)
-                    self._runtime.chat_coordinator.set_cursor(ref, selected_chat_id, observed_revision=current_revision)
-                if env.chat_id and env.chat_id != selected_chat_id:
-                    self._chat_to_lark_chat.pop(env.chat_id, None)
-                self._chat_to_lark_chat[selected_chat_id] = lark_chat_id
-
             # Intermediate turn-event status streaming is not supported on Lark yet
             # (text-message editing is rate-limit-prone); deliver final replies only.
             if env.content_type == MessageType.TURN_EVENT:
@@ -583,6 +563,32 @@ class LarkChannel(BaseChannel[LarkSettings]):
             # The reply is the end of handling this turn — drop the receipt reaction.
             await self._clear_ack_reaction(env.chat_id)
             await self._deliver_text(lark_chat_id, content)
+
+    async def _handle_command(self, command: str, ref: ChannelConversationRef, lark_chat_id: str) -> None:
+        """Run a slash-command through the gateway control plane and send the
+        result back to Lark. No COMMAND envelope, no actor mailbox."""
+        handler = self._runtime.command_handler
+        if handler is None:
+            await self._deliver_text(lark_chat_id, "Commands are unavailable.")
+            return
+        result = await handler.run(ref, command, target_actor=self.target_actor)
+        if result.ok and result.name in ("new", "resume") and result.chat_id:
+            # Re-map this Lark chat to the newly selected internal chat
+            # (the coordinator cursor was already moved by the handler).
+            self._conversation_to_lark_chat[ref.channel_conversation_id] = lark_chat_id
+            for old_chat, mapped in list(self._chat_to_lark_chat.items()):
+                if mapped == lark_chat_id and old_chat != result.chat_id:
+                    self._chat_to_lark_chat.pop(old_chat, None)
+            self._chat_to_lark_chat[result.chat_id] = lark_chat_id
+        body: dict[str, Any] = {"name": result.name, "ok": result.ok}
+        if result.result is not None:
+            body["result"] = result.result
+        if result.error is not None:
+            body["error"] = result.error
+            body.setdefault("result", result.error)
+        if result.chat_id is not None:
+            body["chat_id"] = result.chat_id
+        await self._deliver_text(lark_chat_id, json.dumps(body, default=str))
 
     async def _deliver_text(self, lark_chat_id: str, text: str) -> None:
         # Long replies go out as a file attachment instead of flooding the chat as

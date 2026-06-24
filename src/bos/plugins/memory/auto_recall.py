@@ -8,7 +8,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Literal, cast
 from xml.sax.saxutils import escape
 
-from bos.protocol import TurnEvent
+from bos.core.agent import TurnEvent
 
 from .scoped_memory import MemoryBackend
 

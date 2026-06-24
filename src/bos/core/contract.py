@@ -1,23 +1,51 @@
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, ClassVar, Generic, Literal, Protocol, TypeVar, runtime_checkable
+from typing import Any, ClassVar, Generic, Literal, Protocol, TypeVar, runtime_checkable
 
-from bos.protocol import Envelope, MessageContent, MessageType, TurnEvent
+from bos.core.actor import Envelope, Event, EventBus, MailBox, MessageType
 
+# Outer-ring contracts (extension registry, jobs, lifecycle, channels, mailbox
+# wire, plugins). These depend *inward* on the agent core.
+#
+# The agent core (``bos.core.agent``) owns the contracts the Agent defines and
+# depends on. They are re-exported here so existing ``from bos.core.contract
+# import X`` call sites keep working — ``core.contract`` is an outer ring that
+# depends inward on ``core.agent``; the dependency direction is preserved.
+from .agent import (
+    LLM,
+    AgentEventType,
+    ChatCommit,
+    ChatMeta,
+    ChatStore,
+    Consolidator,
+    ContextResult,
+    InterceptorStage,
+    LLMResponse,
+    Message,
+    MessageContent,
+    PromptProvider,
+    ReasoningEffort,
+    TokenEstimate,
+    TokenEstimateSource,
+    ToolAttributes,
+    ToolCallRequest,
+    ToolContext,
+    ToolNoiseFilter,
+    ToolSet,
+    TurnContext,
+    TurnEvent,
+    TurnEventDetail,
+    TurnEventPhase,
+    TurnEventSink,
+    TurnEventStage,
+    TurnInterceptor,
+)
 from .registry import ExtensionPoint, ToolRegistry
 
 # ── BEP 5: Shared literals ─────────────────────────────────────────────────
-
-ToolNoiseFilter = Literal["strip_all", "keep_all"]
-TokenEstimateSource = Literal["litellm", "fallback", "fallback-error"]
-ReasoningEffort = Literal["low", "medium", "high"]
-InterceptorStage = Literal[
-    "prepare", "before_llm", "after_llm", "after_tool", "final_response", "max_iteration", "error"
-]
 
 
 @runtime_checkable
@@ -82,110 +110,10 @@ ep_agent = ExtensionPoint(
 )
 
 
-@dataclass
-class Message:
-    llm_message: dict[str, Any]
-    created_at: datetime = field(default_factory=datetime.now)
-    turn_id: str | None = None
-    # BEP 5: is_summary marks this message as a compaction boundary.
-    # get_context() and get_messages(active_only=True) use the latest
-    # is_summary=True message to determine the active-context window.
-    is_summary: bool = False
-    metadata: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass(frozen=True)
-class TokenEstimate:
-    count: int
-    tokenizer_model: str | None
-    source: TokenEstimateSource
-
-
-@dataclass(frozen=True)
-class ContextResult:
-    """Provider-ready context assembled by get_context()."""
-
-    messages: list[dict[str, Any]]
-    source_messages: list[Message]
-    estimated_tokens: int
-    tokenizer_model: str | None
-    estimation_source: TokenEstimateSource
-    filter_mode: ToolNoiseFilter
-    summary_applied: bool
-    summary_message_count_excluded: int
-    latest_summary: Message | None = None
-
-
-@dataclass(frozen=True)
-class ChatMeta:
-    chat_id: str
-    message_count: int
-    last_activity: datetime | None
-    has_summary: bool
-    latest_summary_at: datetime | None = None
-    description: str | None = None
-    extra: dict[str, Any] = field(default_factory=dict)
-
-
 ep_chat_store = ExtensionPoint(
     name="ep_chat_store",
     description="Chat store factory. Creates ChatStore implementations for persistence + context assembly.",
 )
-
-
-@dataclass(frozen=True)
-class ChatCommit:
-    chat_id: str
-    turn_id: str
-    revision: int
-    messages: list[Message]
-    committed_at: datetime
-
-
-@runtime_checkable
-class ChatStore(Protocol):
-    # ── Turn persistence ──
-    async def commit_turn(self, chat_id: str, messages: Iterable[Message], *, turn_id: str) -> ChatCommit: ...
-
-    # ── Context assembly: pure read, no consolidation ──
-    async def get_context(
-        self,
-        chat_id: str,
-        *,
-        tokenizer_model: str | None = None,
-        filter_mode: ToolNoiseFilter | None = None,
-    ) -> ContextResult: ...
-
-    # ── Compaction input: active + filtered but not provider-projected ──
-    async def get_compaction_messages(
-        self,
-        chat_id: str,
-        *,
-        filter_mode: ToolNoiseFilter | None = None,
-    ) -> list[Message]: ...
-
-    # ── Token estimation for diagnostics and commands ──
-    async def estimate_tokens(
-        self,
-        chat_id: str,
-        *,
-        tokenizer_model: str | None = None,
-        filter_mode: ToolNoiseFilter | None = None,
-    ) -> TokenEstimate: ...
-
-    # ── Compaction boundary persistence and inspection ──
-    async def save_summary(self, chat_id: str, summary: str) -> None: ...
-    async def get_summary(self, chat_id: str) -> Message | None: ...
-
-    # ── Raw access ──
-    async def get_messages(self, chat_id: str, *, active_only: bool = True) -> list[Message]: ...
-
-    # ── Revision-window read (BEP 5 amendment for BEP 10 consolidation) ──
-    async def get_revision(self, chat_id: str) -> int: ...
-    async def get_messages_since(self, chat_id: str, *, revision: int) -> list[Message]: ...
-
-    # ── Metadata ──
-    async def list_chats(self) -> dict[str, ChatMeta]: ...
 
 
 ep_consolidator = ExtensionPoint(
@@ -196,43 +124,26 @@ ep_consolidator = ExtensionPoint(
 )
 
 
-@runtime_checkable
-class Consolidator(Protocol):
-    async def consolidate(self, messages: list[Message], instruction: str | None = None) -> str: ...
-
-
 ep_turn_interceptor = ExtensionPoint(
     name="ep_turn_interceptor",
     description="Turn Interceptor. A factory that creates interceptors implementing the TurnInterceptor protocol.",
 )
 
 
-if TYPE_CHECKING:
-    from .agent import TurnContext
+# ── BEP 13 §2.10: SessionEvent vocabulary (harness ring) ───────────────────
+#
+# The Event marker and the domain-agnostic EventBus are owned by the actor
+# foundation (imported/re-exported above). SessionEvent is the harness-ring
+# *vocabulary* an AgentActor emits — it subclasses the foundation's Event and
+# carries the session discriminator. (Mechanism in the foundation; vocabulary
+# here. See BEP 13 §2.10.)
 
-
-@runtime_checkable
-class TurnInterceptor(Protocol):
-    async def intercept(
-        self,
-        stage: InterceptorStage,
-        context: TurnContext,
-    ) -> None: ...
-
-
-@runtime_checkable
-class EventSink(Protocol):
-    async def emit(self, event: TurnEvent) -> None: ...
-
-
-# ── BEP 11 §1: Lifecycle bus ───────────────────────────────────────────────
-
-LifecycleKind = Literal["turn_complete", "session_close"]
+SessionEventKind = Literal["turn_complete", "session_close"]
 
 
 @dataclass(frozen=True)
-class LifecycleEvent:
-    kind: LifecycleKind
+class SessionEvent(Event):
+    kind: SessionEventKind
     chat_id: str
     actor_name: str | None
     base_revision: int | None
@@ -240,15 +151,6 @@ class LifecycleEvent:
     # ``session_close`` (which spans the whole session, not one turn).
     turn_id: str | None = None
     payload: dict[str, Any] = field(default_factory=dict)
-
-
-@runtime_checkable
-class LifecycleBus(Protocol):
-    def subscribe(self, kind: LifecycleKind, handler: Callable[[LifecycleEvent], Awaitable[None]]) -> None: ...
-    async def emit(self, event: LifecycleEvent) -> None: ...
-
-
-# ── BEP 11 §3: Background LLM ──────────────────────────────────────────────
 
 
 # ── BEP 11 §2: Job runner ──────────────────────────────────────────────────
@@ -282,7 +184,7 @@ class JobRunner(Protocol):
     def bind_trigger(
         self,
         trigger: JobTrigger,
-        factory: Callable[[LifecycleEvent | None], Job | None],
+        factory: Callable[[SessionEvent | None], Job | None],
     ) -> None: ...
     async def drain(self, *, timeout: float) -> None: ...
     async def status(self, job_id: str) -> JobStatus: ...
@@ -295,6 +197,9 @@ ep_job_runner = ExtensionPoint(
     name="ep_job_runner",
     description="Off-critical-path job runner implementations (BEP 11 §2).",
 )
+
+
+# ── BEP 11 §3: Background LLM ──────────────────────────────────────────────
 
 
 @runtime_checkable
@@ -317,24 +222,8 @@ ep_mail_route = ExtensionPoint(
 )
 
 
-@runtime_checkable
-class MailBox(Protocol):
-    @property
-    def address(self) -> str: ...
-
-    async def receive(self) -> Envelope: ...
-
-    async def send(
-        self,
-        recipient: str,
-        content: MessageContent,
-        *,
-        content_type: MessageType | str = MessageType.MESSAGE,
-        chat_id: str | None = None,
-        metadata: dict[str, Any] | None = None,
-    ) -> None: ...
-
-    async def receive_nowait(self) -> Envelope | None: ...
+# MailBox (point-to-point messaging endpoint) is owned by the actor foundation
+# (bos.core.actor) — imported and re-exported above (BEP 13 §2.7).
 
 
 @runtime_checkable
@@ -420,17 +309,6 @@ ep_plugin = ExtensionPoint(
 )
 
 
-@dataclass(frozen=True)
-class ToolContext:
-    agent_name: str
-    chat_id: str
-    turn_id: str
-    event_sink: EventSink | None = None
-    # Escape hatch for plugin/runtime-specific context that is intentionally
-    # not modeled as a core ToolContext field.
-    extra_data: Mapping[str, Any] = field(default_factory=dict)
-
-
 class SubagentRuntime(Protocol):
     async def ask(
         self,
@@ -452,7 +330,7 @@ class PluginServices:
     consolidator: Consolidator
     subagents: SubagentRuntime
     chat_store: ChatStore
-    events: LifecycleBus | None = None
+    events: EventBus | None = None
     jobs: JobRunner | None = None
     background_llm: BackgroundLLM | None = None
 
@@ -489,3 +367,68 @@ class HarnessPlugin(Protocol):
     ) -> AgentPlugin: ...
 
     async def teardown(self) -> None: ...
+
+
+__all__ = [
+    # ── Outer-ring contracts owned here ──
+    "AgentPlugin",
+    "BackgroundLLM",
+    "BaseChannel",
+    "Channel",
+    "Closeable",
+    "Envelope",
+    "Event",
+    "EventBus",
+    "HarnessPlugin",
+    "Job",
+    "JobRecord",
+    "JobRunner",
+    "JobStatus",
+    "JobTrigger",
+    "MailBox",
+    "MailRoute",
+    "MessageType",
+    "PluginServices",
+    "SessionEvent",
+    "SessionEventKind",
+    "SettingsT",
+    "SubagentRuntime",
+    "ep_agent",
+    "ep_channel",
+    "ep_chat_store",
+    "ep_consolidator",
+    "ep_job_runner",
+    "ep_mail_route",
+    "ep_plugin",
+    "ep_provider",
+    "ep_tool",
+    "ep_turn_interceptor",
+    # ── Re-exported from the agent core (bos.core.agent) ──
+    "LLM",
+    "AgentEventType",
+    "ChatCommit",
+    "ChatMeta",
+    "ChatStore",
+    "Consolidator",
+    "ContextResult",
+    "TurnEventDetail",
+    "TurnEventPhase",
+    "TurnEventStage",
+    "InterceptorStage",
+    "LLMResponse",
+    "Message",
+    "MessageContent",
+    "PromptProvider",
+    "ReasoningEffort",
+    "TokenEstimate",
+    "TokenEstimateSource",
+    "ToolAttributes",
+    "ToolCallRequest",
+    "ToolContext",
+    "ToolNoiseFilter",
+    "ToolSet",
+    "TurnContext",
+    "TurnEvent",
+    "TurnEventSink",
+    "TurnInterceptor",
+]

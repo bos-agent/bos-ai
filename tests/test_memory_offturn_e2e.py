@@ -16,21 +16,21 @@ class _CannedLLM:
         self._payload = payload
 
     async def complete(self, messages, **kwargs):
-        from bos.core.llm import LLMResponse
+        from bos.core.agent import LLMResponse
 
         return LLMResponse(content=json.dumps(self._payload))
 
 
 @pytest.mark.asyncio
 async def test_mid_chat_fact_persists_into_next_session(tmp_path):
-    from bos.core.contract import LifecycleEvent, Message, PluginServices
+    from bos.core.contract import Message, PluginServices, SessionEvent
     from bos.core.defaults.background_llm import DefaultBackgroundLLM
+    from bos.core.defaults.eventbus import DefaultEventBus
     from bos.core.defaults.jobs import InProcJobRunner
-    from bos.core.defaults.lifecycle import DefaultLifecycleBus
     from bos.extensions.chat_stores.in_memory import InMemChatStore
     from bos.plugins.memory.plugin import MemoryHarnessPlugin
 
-    bus = DefaultLifecycleBus()
+    bus = DefaultEventBus()
     runner = InProcJobRunner(bus, max_concurrency=1, idle_after=300)
     await runner.start()
     chat_store = InMemChatStore()
@@ -80,7 +80,7 @@ async def test_mid_chat_fact_persists_into_next_session(tmp_path):
         )
         head = await chat_store.get_revision("c1")
         await bus.emit(
-            LifecycleEvent(
+            SessionEvent(
                 kind="session_close",
                 chat_id="c1",
                 actor_name="alice",

@@ -1088,7 +1088,7 @@ Write timing:
 | `HttpChannel._actors_handler()` | Actor listing endpoint | `bos.gateway` using core actor model |
 | `HttpChannel._upload_image_handler()` | Image upload endpoint | `bos.gateway` |
 | `HttpChannel._cleanup_runtime_state()` | Shutdown cleanup | `bos.gateway` shutdown sequence |
-| `WS_TAKEOVER_CLOSE_CODE` constant | Shared contract | `bos.protocol` |
+| `WS_TAKEOVER_CLOSE_CODE` constant | WS-transport constant | `bos.gateway` (defined in `gateway/channels/ws_channel.py`, re-exported from `bos.gateway`; see BEP 13 Track A) |
 | `HttpChannelClient` (in `http_client.py`) | Client library | Update to gateway API-key auth and `channel_id` |
 | `src/bos/named_actors/*` | Separate named-actor runtime path | Fold into `src/bos/core` actor model and `src/bos/gateway` managers |
 | `ChatStore.save_turn()` | Passive turn persistence | Replace with `ChatStore.commit_turn()` returning `ChatCommit.revision` |
@@ -1177,7 +1177,7 @@ Write timing:
 ### Final-shape notes
 
 - TUI/HTTP clients use `channel_id` and gateway API-key auth.
-- `WS_TAKEOVER_CLOSE_CODE` constant moves to `bos.protocol`.
+- `WS_TAKEOVER_CLOSE_CODE` constant lives in `bos.gateway` (`gateway/channels/ws_channel.py`, re-exported from `bos.gateway`; per BEP 13 Track A).
 - Config goes directly to the final `[runtime.gateway]`, `[runtime.actors]`, `channel_id`, `target_actor`, and `runtime.default_actor` shape.
 
 ---

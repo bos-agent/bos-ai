@@ -7,47 +7,44 @@ import logging
 import os
 import platform
 import uuid
-from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal, Sequence
 from xml.sax.saxutils import escape
 
-from bos.protocol import MessageContent, TurnEvent
-
 from ._utils import (
-    _aclose,
-    _allowed,
     _apply_async,
-    _as_parts,
     _compact,
-    _create_extension_instance,
-    _pick_collection,
     _strip_reply_artifacts,
     _xml_attr,
 )
 from .contract import (
-    AgentPlugin,
+    LLM,
+    AgentEventType,
     ChatStore,
     ContextResult,
-    EventSink,
     InterceptorStage,
     Message,
+    MessageContent,
+    PromptProvider,
     ReasoningEffort,
+    ToolAttributes,
+    ToolCallRequest,
     ToolContext,
     ToolNoiseFilter,
+    ToolSet,
+    TurnContext,
+    TurnEvent,
+    TurnEventDetail,
+    TurnEventPhase,
+    TurnEventSink,
+    TurnEventStage,
     TurnInterceptor,
-    ep_tool,
-    ep_turn_interceptor,
 )
-from .llm import LLMClient, ToolCallRequest
-from .registry import ToolRegistry
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
     from contextlib import AbstractAsyncContextManager
 
     from .contract import Consolidator
-    from .llm import LLMResponse
 
 logger = logging.getLogger(__name__)
 
@@ -59,82 +56,6 @@ Intermediate assistant/tool state from the aborted turn was intentionally not
 committed as conversation context. If the user asks to continue, start a fresh
 attempt from the preceding user request and redo any necessary checks or tool
 work."""
-
-
-@dataclass
-class TurnContext:
-    agent_name: str
-    chat_id: str
-    turn_id: str
-    system: list[dict[str, Any]] = field(default_factory=list)
-    history: list[dict[str, Any]] = field(default_factory=list)
-    current: list[Message] = field(default_factory=list)
-    ephemeral: list[dict[str, Any]] = field(default_factory=list)
-    tool_defs: list[dict[str, Any]] = field(default_factory=list)
-    current_llm_response: LLMResponse | None = None
-    final_content: str | None = None
-    event_sink: EventSink | None = None
-    metadata: dict[str, Any] = field(default_factory=dict)
-    current_message_projector: Callable[[Message], dict[str, Any]] | None = None
-
-    def set_system_prompt(self, content: MessageContent) -> None:
-        self.system = [{"role": "system", "content": content}]
-
-    def add_message(self, llm_message: dict[str, Any], *, merge: bool = False, **kwargs) -> None:
-        if merge and self.current and self.current[-1].llm_message["role"] == llm_message["role"]:
-            parts = _as_parts(self.current[-1].llm_message["content"]) + _as_parts(llm_message["content"])
-            self.current[-1].llm_message["content"] = parts
-        else:
-            self.current.append(Message(llm_message=llm_message, turn_id=self.turn_id, metadata=kwargs))
-
-    def get_llm_messages(self) -> list[dict[str, Any]]:
-        project = self.current_message_projector or (lambda m: m.llm_message)
-        return (
-            self.system
-            + self.history
-            + [project(m) for m in self.current]
-            + [{k: v for k, v in message.items() if not k.startswith("_")} for message in self.ephemeral]
-        )
-
-    def set_ephemeral_message(self, key: str, llm_message: dict[str, Any]) -> None:
-        """Set or replace a keyed ephemeral message for this turn.
-
-        Ephemeral messages are sent to the LLM after persisted/current messages, but are not
-        persisted to chat history. A stable key lets interceptors refresh dynamic context without
-        accumulating stale duplicates across LLM iterations in the same turn.
-        """
-        self.clear_ephemeral_message(key)
-        self.ephemeral.append(llm_message | {"_ephemeral_key": key})
-
-    def clear_ephemeral_message(self, key: str) -> None:
-        self.ephemeral = [message for message in self.ephemeral if message.get("_ephemeral_key") != key]
-
-    def get_last_user_text(self) -> str:
-        """Return the most-recent user message's text from this turn's `current` messages.
-
-        Iterates `self.current` in reverse and returns the first user message's text
-        content. Multimodal content (a list of parts) is flattened to its text parts
-        concatenated; non-text parts are skipped. Returns "" if no user message is
-        present in this turn — interceptors use this on `prepare` to read the
-        incoming user message without depending on the underlying Message shape.
-        """
-        for message in reversed(self.current):
-            llm_msg = message.llm_message
-            if llm_msg.get("role") != "user":
-                continue
-            content = llm_msg.get("content", "")
-            if isinstance(content, str):
-                return content
-            if isinstance(content, list):
-                return "".join(
-                    part.get("text", "") for part in content if isinstance(part, dict) and part.get("type") == "text"
-                )
-            return str(content)
-        return ""
-
-    @property
-    def final_response(self) -> str:
-        return self.final_content or self.current[-1].llm_message["content"] if self.current else "(no response)"
 
 
 def _attribute_history_message(
@@ -228,66 +149,41 @@ class AbortTurn(Exception):
     pass
 
 
-class ChainInterceptor:
-    """
-    An interceptor that takes a list of interceptor names (or configurations)
-    and runs them sequentially in the provided order.
-    """
+class _NoopInterceptor:
+    """Does nothing. The default when an Agent is constructed without an
+    injected interceptor — combining plugin/configured interceptors into a
+    single TurnInterceptor is the outer layer's job."""
 
-    def __init__(self, interceptors: list[str | dict[str, Any]] | None = None) -> None:
-        self._configs = [
-            cfg.copy() if isinstance(cfg, dict) else {"name": cfg}
-            for cfg in (interceptors or [])
-            if isinstance(cfg, str) or (isinstance(cfg, dict) and "name" in cfg)
-        ]
-        self._instances: list[TurnInterceptor | None | Exception] = [None] * len(self._configs)
-
-    async def aclose(self) -> None:
-        for interceptor in self._instances:
-            await _aclose(interceptor)
-
-    async def intercept(
-        self,
-        stage: InterceptorStage,
-        context: TurnContext,
-    ) -> None:
-        for i, cfg in enumerate(self._configs):
-            if self._instances[i] is None and ep_turn_interceptor.has(cfg["name"]):
-                try:
-                    self._instances[i] = await _create_extension_instance(ep_turn_interceptor, TurnInterceptor, cfg)
-                except Exception as e:
-                    self._instances[i] = e
-                    logger.error(f"Failed to create interceptor {cfg['name']}: {e}")
-            inst = self._instances[i]
-            if isinstance(inst, TurnInterceptor):
-                await inst.intercept(stage, context)
+    async def intercept(self, stage: InterceptorStage, context: TurnContext) -> None:
+        return None
 
 
-class _CompositePluginInterceptor:
-    """Runs plugin interceptors, then a fallback interceptor chain."""
+class _NoopPromptProvider:
+    """Contributes no extra prompt sections. The default when an Agent is
+    constructed without an injected provider."""
 
-    def __init__(self, plugin_interceptors: list[TurnInterceptor], fallback: TurnInterceptor) -> None:
-        self._plugin = plugin_interceptors
-        self._fallback = fallback
+    async def sections(self, context: TurnContext) -> list[str]:
+        return []
 
-    async def aclose(self) -> None:
-        for interceptor in self._plugin:
-            await _aclose(interceptor)
-        await _aclose(self._fallback)
 
-    async def intercept(
-        self,
-        stage: InterceptorStage,
-        context: TurnContext,
-    ) -> None:
-        for interceptor in self._plugin:
-            try:
-                await interceptor.intercept(stage, context)
-            except AbortTurn:
-                raise
-            except Exception as e:
-                logger.error("Error in plugin interceptor: %s", e, exc_info=True)
-        await self._fallback.intercept(stage, context)
+class _EmptyToolSet:
+    """A ToolSet with no tools. Default when an Agent is constructed without
+    an injected, resolved tool collection."""
+
+    def has(self, name: str) -> bool:
+        return False
+
+    def to_openai_schema(self) -> dict[str, dict[str, Any]]:
+        return {}
+
+    def describe_usage(self) -> dict[str, str]:
+        return {}
+
+    def attributes(self, name: str) -> ToolAttributes:
+        return ToolAttributes()
+
+    async def invoke(self, name: str, kwargs: dict[str, Any] | None = None) -> str:
+        raise Exception(f"Tool {name} not found")
 
 
 class Agent:
@@ -298,16 +194,13 @@ class Agent:
         chat_store: ChatStore,
         consolidator: Consolidator,
         system_prompt: str | None = None,
-        plugins: Sequence[AgentPlugin] = (),
-        plugins_prompt: dict[str, str] | None = None,
-        tools: list[str] | None = None,
+        prompt_provider: PromptProvider | None = None,
+        tools: ToolSet | None = None,
         tools_usage: dict[str, str] | None = None,
-        exclude_tools: list[str] | None = None,
         model: str | None = None,
         agent_name: str | None = None,
         reasoning_effort: ReasoningEffort | None = None,
-        llm: LLMClient | None = None,
-        local_tools: ToolRegistry | None = None,
+        llm: LLM,
         interceptor: TurnInterceptor | None = None,
         max_tokens: int = 128 * 1024,
         max_iterations: int = 80,
@@ -319,36 +212,29 @@ class Agent:
         if system_prompt is not None and not isinstance(system_prompt, str):
             raise TypeError("system_prompt must be a string or None")
         self._system_prompt = system_prompt or ""
-        self._tools = tools
+        # The resolved set of tools this agent may call. Resolution (merge of
+        # global + plugin-local tools, plus include/exclude filtering) is done
+        # by the outer layer; the entity only consumes the result.
+        self._tools: ToolSet = tools or _EmptyToolSet()
         self._tools_usage = tools_usage or {}
-        self._exclude_tools = exclude_tools
         self._model = model
         self._reasoning_effort = reasoning_effort
         self._max_tokens = max_tokens
         self._max_iterations = max_iterations
-        self._llm = llm or LLMClient()
+        self._llm = llm
         self._chat_store = chat_store
         self._consolidator = consolidator
         self._kind = kind
         self._name = agent_name or kind
-        self._local_tools = local_tools or ToolRegistry(f"_local_tools:{self._name}", "Agent-scoped local tools.")
-        self._plugins = plugins
-        self._plugins_prompt = plugins_prompt or {}
+        self._prompt_provider: PromptProvider = prompt_provider or _NoopPromptProvider()
         self._tool_noise_filter: ToolNoiseFilter | None = tool_noise_filter
         self._compaction_lock = chat_compaction_lock
         self._history_attribution = history_attribution
         self._workspace = str(workspace) if workspace else None
 
-        # Compose interceptors: plugin interceptors first, then configured harness/workspace interceptors
-        plugin_interceptors = [i for plugin in self._plugins for i in plugin.get_interceptors()]
-        self._interceptor = _CompositePluginInterceptor(
-            plugin_interceptors=plugin_interceptors,
-            fallback=interceptor or ChainInterceptor(),
-        )
-
-        # Register plugin tools into the agent-local tool registry
-        for plugin in self._plugins:
-            plugin.register_tools(self._local_tools)
+        # The agent runs a single interceptor; assembling plugin + configured
+        # interceptors into one is the outer layer's job.
+        self._interceptor: TurnInterceptor = interceptor or _NoopInterceptor()
 
     @property
     def name(self) -> str:
@@ -361,7 +247,7 @@ class Agent:
         interrupt: Callable[[], dict[str, Any] | Awaitable[dict[str, Any]] | None] | None = None,
         ctx_metadata: dict[str, Any] | None = None,
         llm_args: dict[str, Any] | None = None,
-        event_sink: EventSink | None = None,
+        event_sink: TurnEventSink | None = None,
         turn_id: str | None = None,
         commit_observer: Callable[[Any], Any | Awaitable[Any]] | None = None,
     ) -> str:
@@ -381,7 +267,6 @@ class Agent:
             metadata=(ctx_metadata or {}).copy(),
             current_message_projector=self._project_current_message,
         )
-        ctx.set_system_prompt(await self._build_system_prompt(ctx))
         user_message_metadata = ctx.metadata.get("user_message_metadata")
         ctx.add_message(
             {"role": "user", "content": content or ""},
@@ -508,24 +393,39 @@ class Agent:
 
         try:
             await _run_interceptor("prepare")
-            await _emit_event("turn", "start", stage="prepare", detail="start")
+            # Build the system prompt once per turn (after prepare). It is not
+            # rebuilt per iteration: intra-turn state the agent produces (e.g. a
+            # memory write) is already present in the turn's message context, so
+            # re-rendering it into the system prompt mid-turn is redundant and
+            # would needlessly churn the prompt-cache prefix.
+            ctx.set_system_prompt(await self._build_system_prompt(ctx))
+            await _emit_event(
+                AgentEventType.turn,
+                TurnEventPhase.start,
+                stage=TurnEventStage.prepare,
+                detail=TurnEventDetail.start,
+            )
             iteration = 0
             while True:
                 if iteration >= self._max_iterations:
                     # max iterations reached
                     ctx.add_message({"role": "assistant", "content": "(max iterations reached)"})
                     await _run_interceptor("max_iteration")
-                    await _emit_event("turn", "fail", stage="max_iteration", detail="max_iteration")
+                    await _emit_event(
+                        AgentEventType.turn,
+                        TurnEventPhase.fail,
+                        stage=TurnEventStage.max_iteration,
+                        detail=TurnEventDetail.max_iteration,
+                    )
                     break
                 iteration += 1
                 await _interrupt()
-                ctx.set_system_prompt(await self._build_system_prompt(ctx))
                 await _run_interceptor("before_llm")
                 await _emit_event(
-                    "llm",
-                    "start",
-                    stage="before_llm",
-                    detail="thinking",
+                    AgentEventType.llm,
+                    TurnEventPhase.start,
+                    stage=TurnEventStage.before_llm,
+                    detail=TurnEventDetail.thinking,
                     metadata={"iteration": iteration, "max_iterations": self._max_iterations},
                 )
 
@@ -542,10 +442,10 @@ class Agent:
                 # model's thinking content and any tool calls.
                 thinking = _resolve_thinking(response)
                 await _emit_event(
-                    "llm",
-                    "finish",
-                    stage="after_llm",
-                    detail="tool_calls" if response.tool_calls else "response_ready",
+                    AgentEventType.llm,
+                    TurnEventPhase.finish,
+                    stage=TurnEventStage.after_llm,
+                    detail=TurnEventDetail.tool_calls if response.tool_calls else TurnEventDetail.response_ready,
                     content=thinking,
                     tool_calls=(
                         [{"name": tc.name, "arguments": tc.arguments} for tc in response.tool_calls]
@@ -582,10 +482,10 @@ class Agent:
                     ctx.final_content = final_content
                     await _run_interceptor("final_response")
                     await _emit_event(
-                        "response",
-                        "finish",
-                        stage="final_response",
-                        detail="final",
+                        AgentEventType.response,
+                        TurnEventPhase.finish,
+                        stage=TurnEventStage.final_response,
+                        detail=TurnEventDetail.final,
                         content=final_content,
                     )
                     break
@@ -603,9 +503,9 @@ class Agent:
                 for batch in self._tool_call_batches(response.tool_calls):
                     for tc in batch:
                         await _emit_event(
-                            "tool",
-                            "start",
-                            detail="tool_call",
+                            AgentEventType.tool,
+                            TurnEventPhase.start,
+                            detail=TurnEventDetail.tool_call,
                             tool_name=tc.name,
                             content=json.dumps(tc.arguments, default=str),
                         )
@@ -624,10 +524,10 @@ class Agent:
                         })
                         await _run_interceptor("after_tool")
                         await _emit_event(
-                            "tool",
-                            "finish",
-                            stage="after_tool",
-                            detail="tool_result",
+                            AgentEventType.tool,
+                            TurnEventPhase.finish,
+                            stage=TurnEventStage.after_tool,
+                            detail=TurnEventDetail.tool_result,
                             tool_name=tc.name,
                             content=tool_result,
                         )
@@ -645,24 +545,16 @@ class Agent:
             logger.error("Error in agent: %s", e, exc_info=True)
             ctx.add_message({"role": "assistant", "content": f"(error: {e})"})
             await _run_interceptor("error")
-            await _emit_event("turn", "fail", detail="error", content=str(e))
+            await _emit_event(AgentEventType.turn, TurnEventPhase.fail, detail=TurnEventDetail.error, content=str(e))
         finally:
             await _persist_turn()
         return ctx.final_response
 
     def _get_tool_defs(self) -> list[dict[str, Any]]:
-        tool_defs = ep_tool.to_openai_schema() | self._local_tools.to_openai_schema()
-        return list(_pick_collection(tool_defs, self._tools, self._exclude_tools).values())
-
-    def _tool_metadata(self, tool_name: str) -> dict[str, Any]:
-        if self._local_tools.has(tool_name):
-            return self._local_tools.metadata_for(tool_name)
-        if ep_tool.has(tool_name):
-            return ep_tool.metadata_for(tool_name)
-        return {}
+        return list(self._tools.to_openai_schema().values())
 
     def _tool_parallel_safe(self, tool_name: str) -> bool:
-        return bool(self._tool_metadata(tool_name).get("parallel_safe", False))
+        return self._tools.attributes(tool_name).parallel_safe
 
     def _tool_call_batches(self, tool_calls: Sequence[ToolCallRequest]) -> list[list[ToolCallRequest]]:
         batches: list[list[ToolCallRequest]] = []
@@ -679,10 +571,8 @@ class Agent:
             batches.append(pending_safe)
         return batches
 
-    async def _call_tool(self, tc: ToolCallRequest, ctx: TurnContext, event_sink: EventSink | None = None) -> str:
+    async def _call_tool(self, tc: ToolCallRequest, ctx: TurnContext, event_sink: TurnEventSink | None = None) -> str:
         try:
-            if not _allowed(tc.name, self._tools, self._exclude_tools):
-                raise Exception(f"Tool {tc.name} is not allowed")
             return await self._invoke_tool(
                 tc.name,
                 **tc.arguments,
@@ -710,10 +600,8 @@ class Agent:
                 event_sink=event_sink,
             ),
         }
-        if self._local_tools.has(tool_name):
-            return await self._local_tools.invoke(tool_name, kwargs)
-        if ep_tool.has(tool_name):
-            return await ep_tool.invoke(tool_name, kwargs)
+        if self._tools.has(tool_name):
+            return await self._tools.invoke(tool_name, kwargs)
         raise Exception(f"Tool {tool_name} not found")
 
     async def _load_and_compact_history(self, chat_id: str, *, budget_model: str | None) -> list[dict[str, Any]]:
@@ -784,16 +672,8 @@ class Agent:
             )
         return formatted
 
-    async def _build_system_prompt(self, ctx: TurnContext | None = None) -> str:
-        system_sections = [self._system_prompt]
-        # Plugin prompt sections, in resolved plugin order
-        for plugin in self._plugins:
-            if plugin.name in self._plugins_prompt:
-                section = self._plugins_prompt[plugin.name]
-            else:
-                section = await plugin.get_system_prompt_section(ctx)
-            if section:
-                system_sections.append(section)
+    async def _build_system_prompt(self, ctx: TurnContext) -> str:
+        system_sections = [self._system_prompt, *await self._prompt_provider.sections(ctx)]
         sections = [
             self._prompt_section_base(system_sections),
             await self._prompt_section_tools(),
@@ -806,11 +686,7 @@ class Agent:
         return f"<system_prompt>\n{content}\n</system_prompt>"
 
     async def _prompt_section_tools(self) -> str:
-        all_tools = ep_tool.describe_usage() | self._local_tools.describe_usage()
-        available_tools = self._limit_prompt_collection(
-            _pick_collection(all_tools, self._tools, self._exclude_tools),
-            "tools",
-        )
+        available_tools = self._limit_prompt_collection(self._tools.describe_usage(), "tools")
         available_tools = {k: (self._tools_usage.get(k, v) or "").strip() for k, v in available_tools.items()}
 
         if not available_tools:

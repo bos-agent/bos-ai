@@ -41,13 +41,12 @@ class ToolsConfig(BaseModel):
 
 
 class PluginsConfig(BaseModel):
-    """Per-agent plugins enable/disable/prompts configuration."""
+    """Per-agent plugins enable/disable configuration."""
 
     model_config = ConfigDict(extra="forbid")
 
     enabled: list[str] = Field(default_factory=list)
     disabled: list[str] = Field(default_factory=list)
-    prompts: dict[str, str] = Field(default_factory=dict)
 
 
 # ── Agent config ────────────────────────────────────────────────────

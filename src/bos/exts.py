@@ -46,9 +46,6 @@ the bos builtins and before workspace skill dirs — so workspace skills win
 on name clashes.
 """
 
-# Core defaults (consolidator, litellm provider, etc.)
-import bos.core.defaults  # noqa: F401
-
 # Channels
 import bos.extensions.channels.lark  # noqa: F401
 import bos.extensions.channels.telegram  # noqa: F401

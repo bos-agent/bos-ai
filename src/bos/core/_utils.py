@@ -2,20 +2,41 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
-import inspect
 import json
 import logging
-import re
 from collections.abc import Callable, Collection
 from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
-from xml.sax.saxutils import escape
 
-from bos.protocol.content import MessageContent, content_as_parts
+# The agent-core helpers are owned by the agent foundation and published from
+# its package API (``bos.core.agent``). They are re-exported here so the shared
+# ``_``-prefixed helper surface (and ``bos.core``'s public re-exports) keep
+# resolving without duplicating code — imported from the package, not the
+# foundation's private ``._utils`` leaf, so the assembly ring touches only
+# published API (BEP 13 §1.6 rule 4).
+from .agent import (
+    _apply_async,
+    _as_parts,
+    _build_params,
+    _compact,
+    _strip_reply_artifacts,
+    _strip_think,
+    _xml_attr,
+)
 
 if TYPE_CHECKING:
-    from .llm import LLMResponse, ToolCallRequest
+    from .agent import LLMResponse, ToolCallRequest
+
+__all__ = [
+    "_apply_async",
+    "_as_parts",
+    "_build_params",
+    "_compact",
+    "_strip_reply_artifacts",
+    "_strip_think",
+    "_xml_attr",
+]
 
 logger = logging.getLogger("bos")
 
@@ -41,12 +62,6 @@ async def _create_extension_instance(ext_point: Any, ext_protocol: type, config:
     return await ext_point.invoke(cfg.pop("name", "_default"), cfg)
 
 
-def _compact(*dicts: dict, **kwargs: Any) -> dict[str, Any]:
-    merged = {}
-    [merged.update(d) for d in (*dicts, kwargs) if d is not None]
-    return {k: v for k, v in merged.items() if v is not None}
-
-
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
     for k, v in override.items():
         if k in base and isinstance(base[k], dict) and isinstance(v, dict):
@@ -56,59 +71,9 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
     return base
 
 
-def _build_params(fn: Callable, params: dict[str, Any]) -> tuple[tuple[Any, ...], dict[str, Any]]:
-    sig = inspect.signature(fn)
-    has_varkw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
-    valid_params = params if has_varkw else {k: v for k, v in params.items() if k in sig.parameters}
-    bound = sig.bind_partial(**valid_params)
-    bound.apply_defaults()
-    return bound.args, bound.kwargs
-
-
 def _apply(fn: Callable, params: dict[str, Any]) -> Any:
     args, kwargs = _build_params(fn, params)
     return fn(*args, **kwargs)
-
-
-async def _apply_async(fn: Callable, params: dict[str, Any]) -> Any:
-    args, kwargs = _build_params(fn, params)
-    result = fn(*args, **kwargs)
-    return await result if inspect.isawaitable(result) else result
-
-
-_THINK_RE = re.compile(r"<think>[\s\S]*?</think>")
-# Multi-actor history attribution labels assistant turns ("[assistant: Main]",
-# "[assistant Main said]"). Thinking models tend to parrot the format they see
-# in history straight back into their own reply.
-_ECHOED_LABEL_RE = re.compile(r"\[assistant(?::[^\]\n]*|\s[^\]\n]*?\ssaid)\]")
-# A leading "[thought: ...]" chain-of-thought prefix some models emit inline.
-_LEADING_THOUGHT_RE = re.compile(r"^\s*\[thought:[^\]]*\]\s*", re.IGNORECASE)
-
-
-def _strip_think(text: str | None) -> str | None:
-    if not text:
-        return None
-    return _THINK_RE.sub("", text).strip() or None
-
-
-def _strip_reply_artifacts(text: str | None, *, strip_labels: bool = False) -> str | None:
-    """Clean reasoning/attribution noise a model leaks into a user-facing reply.
-
-    - removes ``<think>...</think>`` blocks
-    - when *strip_labels* (multi-actor chats), drops everything up to and
-      including the last parroted ``[assistant: X]`` / ``[assistant X said]``
-      label, which also discards any ``[thought: ...]`` that preceded it
-    - removes a leading ``[thought: ...]`` chain-of-thought prefix
-    """
-    if not text:
-        return None
-    text = _THINK_RE.sub("", text)
-    if strip_labels:
-        labels = list(_ECHOED_LABEL_RE.finditer(text))
-        if labels:
-            text = text[labels[-1].end() :]
-    text = _LEADING_THOUGHT_RE.sub("", text)
-    return text.strip() or None
 
 
 def _safe_format(template: str, **kwargs: Any) -> str:
@@ -117,10 +82,6 @@ def _safe_format(template: str, **kwargs: Any) -> str:
             return f"{{{key}}}"
 
     return template.format_map(SafeMapping(kwargs))
-
-
-def _xml_attr(value: str) -> str:
-    return escape(value, {'"': "&quot;"})
 
 
 def _load_json(source: Path | str, from_string: bool = False) -> dict[str, Any]:
@@ -159,11 +120,6 @@ def _allowed(name: str, include: Collection[str] | None = None, exclude: Collect
     return (include is None or name in include) and (exclude is None or name not in exclude)
 
 
-def _as_parts(content: MessageContent, cache: bool = False) -> list[dict[str, Any]]:
-    parts = content_as_parts(content)
-    return parts if not cache else parts[:-1] + [parts[-1] | {"cache_control": {"type": "ephemeral"}}]
-
-
 @contextmanager
 def _flock(path: Path | str):
     from filelock import FileLock
@@ -179,7 +135,7 @@ def _flock(path: Path | str):
 
 
 def _litellm_response_to_llm_response(raw: Any) -> LLMResponse:
-    from .llm import LLMResponse
+    from .agent import LLMResponse
 
     if isinstance(raw, LLMResponse):
         return raw
@@ -203,7 +159,7 @@ def _litellm_response_to_llm_response(raw: Any) -> LLMResponse:
 
 
 def _litellm_tool_calls_to_requests(raw_tool_calls: Any) -> list[ToolCallRequest]:
-    from .llm import ToolCallRequest
+    from .agent import ToolCallRequest
 
     if not raw_tool_calls:
         return []

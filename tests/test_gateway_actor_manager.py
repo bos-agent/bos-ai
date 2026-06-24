@@ -5,11 +5,11 @@ import pytest
 
 from bos.config import Workspace
 from bos.core import Message
+from bos.core.actor import Envelope, MessageType
 from bos.extensions.chat_stores.in_memory import InMemChatStore
 from bos.extensions.mailboxes.in_memory import InMemMailRoute
-from bos.gateway import ChannelConversationRef, ChatCoordinator, CoordinatedActor
-from bos.gateway.actor_manager import ActorManager
-from bos.protocol import Envelope, MessageType
+from bos.gateway import AgentActor, ChannelConversationRef, ChatCoordinator
+from bos.gateway.actors.actor_manager import ActorManager
 
 
 class CommitAgent:
@@ -39,7 +39,7 @@ async def test_coordinated_actor_begins_and_ends_turn_with_revision_commit():
     route = InMemMailRoute()
     actor_box = route.bind("agent@main")
     client_box = route.bind("channel@demo")
-    actor = CoordinatedActor(CommitAgent(store), actor_box, chat_coordinator=coordinator)
+    actor = AgentActor(CommitAgent(store), actor_box, chat_coordinator=coordinator)
     task = asyncio.create_task(actor.run())
     try:
         await client_box.send(
@@ -99,7 +99,7 @@ async def test_aborted_turn_notifies_channel_so_revision_cursor_resyncs():
     actor_box = route.bind("agent@abort-main")
     client_box = route.bind("channel@abort-demo")
     agent = AbortPersistAgent(store)
-    actor = CoordinatedActor(agent, actor_box, chat_coordinator=coordinator)
+    actor = AgentActor(agent, actor_box, chat_coordinator=coordinator)
     task = asyncio.create_task(actor.run())
     try:
         await client_box.send(
@@ -157,7 +157,7 @@ async def test_errored_turn_notifies_channel_so_revision_cursor_resyncs():
     # Unique addresses: InMemMailRoute queues are class-level and loop-bound.
     actor_box = route.bind("agent@error-main")
     client_box = route.bind("channel@error-demo")
-    actor = CoordinatedActor(ErrorPersistAgent(store), actor_box, chat_coordinator=coordinator)
+    actor = AgentActor(ErrorPersistAgent(store), actor_box, chat_coordinator=coordinator)
     task = asyncio.create_task(actor.run())
     try:
         await client_box.send(
@@ -189,7 +189,7 @@ def test_actor_turn_metadata_marks_user_target_and_assistant_actor():
     store = InMemChatStore()
     coordinator = ChatCoordinator(store)
     route = InMemMailRoute()
-    actor = CoordinatedActor(LibaiCommitAgent(store), route.bind("agent@libai"), chat_coordinator=coordinator)
+    actor = AgentActor(LibaiCommitAgent(store), route.bind("agent@libai"), chat_coordinator=coordinator)
     inbound = Envelope(
         sender="channel@demo",
         recipient="agent@libai",
@@ -221,7 +221,7 @@ def test_actor_turn_metadata_keeps_workdir_without_target():
     store = InMemChatStore()
     coordinator = ChatCoordinator(store)
     route = InMemMailRoute()
-    actor = CoordinatedActor(CommitAgent(store), route.bind("agent@main"), chat_coordinator=coordinator)
+    actor = AgentActor(CommitAgent(store), route.bind("agent@main"), chat_coordinator=coordinator)
     inbound = Envelope(
         sender="channel@demo",
         recipient="agent@main",
@@ -245,7 +245,7 @@ async def test_coordinated_actor_rejects_missing_channel_metadata():
     route = InMemMailRoute()
     actor_box = route.bind("agent@main")
     client_box = route.bind("client@direct")
-    actor = CoordinatedActor(CommitAgent(store), actor_box, chat_coordinator=coordinator)
+    actor = AgentActor(CommitAgent(store), actor_box, chat_coordinator=coordinator)
     task = asyncio.create_task(actor.run())
     try:
         await client_box.send("agent@main", "hello", chat_id="chat-1", metadata={"base_revision": 0})
@@ -286,7 +286,7 @@ async def test_actor_manager_enables_history_attribution_only_for_multi_agent_ru
     )
     multi_harness = _FakeHarness()
     multi_manager = ActorManager(
-        workspace=multi_ws,
+        actors=multi_ws.resolve_gateway_actors(),
         harness=multi_harness,
         chat_coordinator=ChatCoordinator(InMemChatStore()),
     )
@@ -303,7 +303,7 @@ async def test_actor_manager_enables_history_attribution_only_for_multi_agent_ru
     )
     single_harness = _FakeHarness()
     single_manager = ActorManager(
-        workspace=single_ws,
+        actors=single_ws.resolve_gateway_actors(),
         harness=single_harness,
         chat_coordinator=ChatCoordinator(InMemChatStore()),
     )
@@ -340,7 +340,7 @@ async def test_actor_manager_passes_explicit_actor_agent_cfg_to_harness():
     )
     harness = _FakeHarness()
     manager = ActorManager(
-        workspace=ws,
+        actors=ws.resolve_gateway_actors(),
         harness=harness,
         chat_coordinator=ChatCoordinator(InMemChatStore()),
     )
@@ -372,9 +372,9 @@ async def test_actor_manager_clears_active_turns_on_actor_task_failure(monkeypat
         async def run(self):
             raise RuntimeError("boom")
 
-    import bos.gateway.actor_manager as actor_manager_module
+    import bos.gateway.actors.actor_manager as actor_manager_module
 
-    monkeypatch.setattr(actor_manager_module, "CoordinatedActor", ExplodingActor)
+    monkeypatch.setattr(actor_manager_module, "AgentActor", ExplodingActor)
     store = InMemChatStore()
     coordinator = ChatCoordinator(store)
     ref = ChannelConversationRef("demo", "default")
@@ -396,7 +396,7 @@ async def test_actor_manager_clears_active_turns_on_actor_task_failure(monkeypat
         notifications += 1
 
     manager = ActorManager(
-        workspace=ws,
+        actors=ws.resolve_gateway_actors(),
         harness=_FakeHarness(),
         chat_coordinator=coordinator,
         state_changed=state_changed,

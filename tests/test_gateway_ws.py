@@ -8,11 +8,11 @@ from aiohttp import web
 
 from bos.config import Workspace
 from bos.core import Message
+from bos.core.actor import MessageType
 from bos.extensions.chat_stores.in_memory import InMemChatStore
 from bos.extensions.mailboxes.in_memory import InMemMailRoute
 from bos.gateway import Gateway
 from bos.gateway.client import GatewayClient
-from bos.protocol import MessageType
 
 
 class EchoCommitAgent:
@@ -74,7 +74,7 @@ async def _start_gateway_app(gateway: Gateway):
 async def test_gateway_ws_dynamic_channel_sends_message_to_actor(tmp_path, monkeypatch):
     monkeypatch.setenv("BOS_TEST_GATEWAY_KEY", "secret")
     harness = FakeHarness()
-    gateway = Gateway(workspace=_workspace(tmp_path), harness=harness)
+    gateway = Gateway(runtime=_workspace(tmp_path).resolve_gateway_runtime(), harness=harness)
     runner, base_url = await _start_gateway_app(gateway)
     try:
         async with aiohttp.ClientSession(headers={"Authorization": "Bearer secret"}) as session:
@@ -101,7 +101,7 @@ async def test_gateway_ws_dynamic_channel_sends_message_to_actor(tmp_path, monke
 @pytest.mark.asyncio
 async def test_gateway_ws_duplicate_channel_id_rejected_without_takeover(tmp_path, monkeypatch):
     monkeypatch.setenv("BOS_TEST_GATEWAY_KEY", "secret")
-    gateway = Gateway(workspace=_workspace(tmp_path), harness=FakeHarness())
+    gateway = Gateway(runtime=_workspace(tmp_path).resolve_gateway_runtime(), harness=FakeHarness())
     runner, base_url = await _start_gateway_app(gateway)
     try:
         async with aiohttp.ClientSession(headers={"Authorization": "Bearer secret"}) as session:
@@ -126,7 +126,7 @@ async def test_gateway_ws_stale_message_returns_missing_history(tmp_path, monkey
         [Message(llm_message={"role": "assistant", "content": "already here"})],
         turn_id="turn-1",
     )
-    gateway = Gateway(workspace=_workspace(tmp_path), harness=harness)
+    gateway = Gateway(runtime=_workspace(tmp_path).resolve_gateway_runtime(), harness=harness)
     runner, base_url = await _start_gateway_app(gateway)
     try:
         async with aiohttp.ClientSession(headers={"Authorization": "Bearer secret"}) as session:
@@ -150,7 +150,7 @@ async def test_gateway_ws_stale_message_returns_missing_history(tmp_path, monkey
 @pytest.mark.asyncio
 async def test_gateway_ws_missing_base_revision_is_rejected(tmp_path, monkeypatch):
     monkeypatch.setenv("BOS_TEST_GATEWAY_KEY", "secret")
-    gateway = Gateway(workspace=_workspace(tmp_path), harness=FakeHarness())
+    gateway = Gateway(runtime=_workspace(tmp_path).resolve_gateway_runtime(), harness=FakeHarness())
     runner, base_url = await _start_gateway_app(gateway)
     try:
         async with aiohttp.ClientSession(headers={"Authorization": "Bearer secret"}) as session:
@@ -179,7 +179,7 @@ async def test_gateway_ws_client_tracks_ack_revision_before_send(tmp_path, monke
         [Message(llm_message={"role": "assistant", "content": "already here"})],
         turn_id="turn-1",
     )
-    gateway = Gateway(workspace=_workspace(tmp_path), harness=harness)
+    gateway = Gateway(runtime=_workspace(tmp_path).resolve_gateway_runtime(), harness=harness)
     runner, base_url = await _start_gateway_app(gateway)
     parsed = urlparse(base_url)
     client = GatewayClient(
@@ -214,7 +214,7 @@ async def test_gateway_ws_client_tracks_ack_revision_before_send(tmp_path, monke
 @pytest.mark.asyncio
 async def test_gateway_ws_channel_id_can_reconnect_after_normal_close(tmp_path, monkeypatch):
     monkeypatch.setenv("BOS_TEST_GATEWAY_KEY", "secret")
-    gateway = Gateway(workspace=_workspace(tmp_path), harness=FakeHarness())
+    gateway = Gateway(runtime=_workspace(tmp_path).resolve_gateway_runtime(), harness=FakeHarness())
     runner, base_url = await _start_gateway_app(gateway)
     try:
         async with aiohttp.ClientSession(headers={"Authorization": "Bearer secret"}) as session:
@@ -240,7 +240,7 @@ async def test_gateway_ws_channel_id_can_reconnect_after_normal_close(tmp_path, 
 @pytest.mark.asyncio
 async def test_gateway_ws_new_command_updates_channel_cursor(tmp_path, monkeypatch):
     monkeypatch.setenv("BOS_TEST_GATEWAY_KEY", "secret")
-    gateway = Gateway(workspace=_workspace(tmp_path), harness=FakeHarness())
+    gateway = Gateway(runtime=_workspace(tmp_path).resolve_gateway_runtime(), harness=FakeHarness())
     runner, base_url = await _start_gateway_app(gateway)
     try:
         async with aiohttp.ClientSession(headers={"Authorization": "Bearer secret"}) as session:

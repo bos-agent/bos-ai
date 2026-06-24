@@ -2,10 +2,9 @@ import aiohttp
 import pytest
 from aiohttp import FormData, web
 
-from bos.config.workspace import ResolvedGatewayConfig
 from bos.core import BaseChannel, ep_channel
 from bos.extensions.chat_stores.in_memory import InMemChatStore
-from bos.gateway import Gateway
+from bos.gateway import Gateway, ResolvedGatewayConfig
 from bos.gateway.http import create_gateway_app, resolve_gateway_api_key
 from bos.gateway.state import GatewayRunDir, read_gateway_state, write_gateway_state
 
@@ -77,7 +76,7 @@ async def test_gateway_status_uses_channel_manager_payload(monkeypatch):
         },
     )
 
-    gateway = Gateway(workspace=ws, harness=_FakeHarness())
+    gateway = Gateway(runtime=ws.resolve_gateway_runtime(), harness=_FakeHarness())
     # Persistent channels are instantiated by run(); replicate that step only.
     await gateway.channel_manager.create_persistent(gateway._persistent_channel_configs)
     snapshot = gateway.status_snapshot()

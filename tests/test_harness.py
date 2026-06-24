@@ -9,6 +9,7 @@ from conftest import (
     InMemMemoryExtension,
     MessageOnlyConsolidator,
     create_test_agent,
+    dummy_turn_context,
 )
 
 import bos.extensions.tools.filesystem  # noqa: F401  — registers ep_tool entries
@@ -44,18 +45,18 @@ def test_react_agent_local_tools_describe_ask_subagent(caplog):
         AgentRegistry._registry.pop(role, None)
 
     assert local_tools.get("AskSubagent") is not None
-    ask_subagent = agent._local_tools.get("AskSubagent")
+    ask_subagent = local_tools.get("AskSubagent")
     assert ask_subagent.description.lstrip().startswith("Delegate a task to a named subagent and return its response.")
     assert not any("Tool AskSubagent is missing description" in record.message for record in caplog.records)
 
-    schema = agent._local_tools.to_openai_schema()["AskSubagent"]
+    schema = agent._tools.to_openai_schema()["AskSubagent"]
     assert schema["function"]["description"] == ask_subagent.description
     properties = schema["function"]["parameters"]["properties"]
     assert set(properties) == {"role", "task"}
     assert schema["function"]["parameters"]["required"] == ["role", "task"]
-    assert agent._local_tools.metadata_for("AskSubagent")["parallel_safe"] is True
-    assert agent._local_tools.get("ListAgents") is None
-    assert agent._local_tools.get("SearchSkills") is None
+    assert agent._tools.attributes("AskSubagent").parallel_safe is True
+    assert local_tools.get("ListAgents") is None
+    assert local_tools.get("SearchSkills") is None
 
 
 @pytest.mark.asyncio
@@ -69,10 +70,10 @@ async def test_subagent_plugin_hides_prompt_and_tool_when_no_subagents():
 
         agent = create_test_agent(local_tools=local_tools, plugins=[subagent])
 
-        assert agent._local_tools.get("AskSubagent") is None
+        assert local_tools.get("AskSubagent") is None
         assert await subagent.get_system_prompt_section(None) is None
         assert "AskSubagent" not in await agent._prompt_section_tools()
-        assert "<subagent_workflow>" not in await agent._build_system_prompt()
+        assert "<subagent_workflow>" not in await agent._build_system_prompt(dummy_turn_context())
     finally:
         AgentRegistry._registry.clear()
         AgentRegistry._registry.update(snapshot)
@@ -90,7 +91,7 @@ async def test_subagent_plugin_string_star_matches_list_star():
         plugin = provider.bind({"enabled": "*"})
         agent = create_test_agent(plugins=[plugin])
 
-        assert agent._local_tools.get("AskSubagent") is not None
+        assert agent._tools.has("AskSubagent")
         prompt_section = await plugin.get_system_prompt_section(None)
         assert prompt_section is not None
         assert "<subagent_workflow>" in prompt_section
@@ -130,9 +131,9 @@ async def test_harness_binds_subagent_plugin_bindings_from_validated_config(tmp_
 
         async with ws.harness() as harness:
             agent = await harness.create_agent("_default")
-            prompt = await agent._build_system_prompt()
+            prompt = await agent._build_system_prompt(dummy_turn_context())
 
-        assert agent._local_tools.get("AskSubagent") is not None
+        assert agent._tools.has("AskSubagent")
         assert "<subagent_workflow>" in prompt
         assert f'<agent role="{role}"></agent>' in prompt
     finally:
@@ -151,7 +152,7 @@ async def test_harness_create_agent_defaults_to_no_capabilities(tmp_path):
     ) as harness:
         agent = await harness.create_agent()
 
-        assert agent._tools == []
+        assert agent._tools.to_openai_schema() == {}
         assert agent._get_tool_defs() == []
 
 
@@ -365,7 +366,7 @@ async def test_registered_agent_defaults_to_no_capabilities(tmp_path):
         ) as harness:
             agent = await harness.create_agent(agent_name)
 
-            assert agent._tools == []
+            assert agent._tools.to_openai_schema() == {}
             assert agent._get_tool_defs() == []
     finally:
         AgentRegistry._registry.pop(agent_name, None)
@@ -392,7 +393,9 @@ async def test_registered_agent_star_capabilities_enable_all(tmp_path):
             agent = await harness.create_agent(agent_name)
             tool_names = {tool_def["function"]["name"] for tool_def in agent._get_tool_defs()}
 
-            assert agent._tools is None
+            # tools=None means no include filter (all globally-registered tools allowed);
+            # ListAgents/SearchSkills are simply absent because their plugins aren't enabled here.
+            assert agent._tools._include is None
             assert "ListAgents" not in tool_names
             assert "SearchSkills" not in tool_names
     finally:
@@ -516,7 +519,7 @@ Use this skill to search YouTube.
     )
     skills_prompt = await skills_plugin.get_system_prompt_section(None)
     skill_metas = await loader.search_skills("YouTube")
-    load_result = await agent._local_tools.invoke("LoadSkill", {"name": "youtube-searcher"})
+    load_result = await agent._tools.invoke("LoadSkill", {"name": "youtube-searcher"})
 
     assert "<skills_workflow>" in skills_prompt
     assert "Use the exact name attribute from available_skills as the LoadSkill name." in skills_prompt
@@ -821,7 +824,7 @@ async def test_plugin_prompt_sections_render_inside_system_prompt():
             SubagentAgentPlugin(_MockSubagentRuntime(), enabled=None, disabled=[]),
         ]
     )
-    prompt = await agent._build_system_prompt()
+    prompt = await agent._build_system_prompt(dummy_turn_context())
     system_end = prompt.index("</system_prompt>")
 
     assert prompt.index("<memory_workflow>") < system_end
@@ -833,31 +836,6 @@ async def test_plugin_prompt_sections_render_inside_system_prompt():
     assert prompt.index("<available_tools>") > system_end
 
     AgentRegistry._registry.pop("test-subagent", None)
-
-
-@pytest.mark.asyncio
-async def test_plugins_prompt_overrides_plugin_section():
-    class DummyPlugin:
-        @property
-        def name(self) -> str:
-            return "DummyPlugin"
-
-        def register_tools(self, registry) -> None:
-            pass
-
-        async def get_system_prompt_section(self, context) -> str | None:
-            return "Original dummy prompt section"
-
-        def get_interceptors(self):
-            return []
-
-    agent = create_test_agent(
-        plugins=[DummyPlugin()],
-        plugins_prompt={"DummyPlugin": "Overridden dummy prompt section"},
-    )
-    prompt = await agent._build_system_prompt()
-    assert "Overridden dummy prompt section" in prompt
-    assert "Original dummy prompt section" not in prompt
 
 
 @pytest.mark.asyncio
@@ -1274,18 +1252,19 @@ async def test_harness_passes_tool_config_to_agent_tools(tmp_path):
             bos_dir=bos_dir,
             workspace=tmp_path,
         ) as harness:
+            ep_tool.register(tools.get("EchoWithConfig"))
             agent = await harness.create_agent(
                 agent_cfg={
                     "model": f"{provider_name}/tool-config",
                     "tools": ["EchoWithConfig"],
                 }
             )
-            agent._local_tools.register(tools.get("EchoWithConfig"))
             result = await agent.ask("tool-config-chat", "Use the tool.")
 
         assert '"text": "from model"' in result
     finally:
         ep_provider._extensions.pop(provider_name, None)
+        ep_tool._extensions.pop("EchoWithConfig", None)
 
 
 @pytest.mark.asyncio
@@ -1562,16 +1541,18 @@ async def test_cache_hint_offsets_for_ephemeral_messages():
         return "tool result"
 
     try:
-        agent = create_test_agent(
-            model=f"{provider_name}/model",
-            interceptor=EphemeralInterceptor(),
-            tools=["Echo"],
-        )
-        agent._local_tools(
+        local_tools = ToolRegistry("_local_tools:test", "Agent-scoped local tools.")
+        local_tools(
             name="Echo",
             description="Echo test tool.",
             parameters={"type": "object", "properties": {}, "required": []},
         )(echo)
+        agent = create_test_agent(
+            model=f"{provider_name}/model",
+            interceptor=EphemeralInterceptor(),
+            local_tools=local_tools,
+            tools=["Echo"],
+        )
 
         await agent.ask("cache-ephemeral-chat", "run tool")
 

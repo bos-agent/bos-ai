@@ -17,9 +17,12 @@ def test_runner_start_bootstraps_gateway(monkeypatch):
         def harness(self):
             return HarnessContext()
 
+        def resolve_gateway_runtime(self):
+            return "runtime"
+
     class FakeGateway:
-        def __init__(self, *, workspace, harness):
-            calls.append(("gateway_init", (workspace, harness)))
+        def __init__(self, *, runtime, harness):
+            calls.append(("gateway_init", (runtime, harness)))
 
         async def run(self):
             calls.append(("gateway_run", None))

@@ -5,7 +5,10 @@ import mimetypes
 from pathlib import Path
 from typing import Any, Literal, TypeAlias, TypedDict, cast
 
-from .message_types import MessageType
+# Message content types, validation, and rendering/encoding helpers owned by the
+# agent core. These are the shape of the agent's input (``Agent.ask(content=...)``)
+# and turn-context system prompt. The module is a stdlib-only leaf; outer rings
+# import these inward (e.g. chat stores render previews, providers encode images).
 
 
 class ContentSource(TypedDict):
@@ -31,18 +34,6 @@ class FilePart(TypedDict):
 
 MessageContentPart: TypeAlias = TextPart | ImagePart | FilePart
 MessageContent: TypeAlias = str | list[MessageContentPart]
-
-
-def is_message_content_type(content_type: MessageType | str) -> bool:
-    return str(content_type) == MessageType.MESSAGE
-
-
-def validate_envelope_content(content: Any, content_type: MessageType | str) -> None:
-    if is_message_content_type(content_type):
-        validate_message_content(content)
-        return
-    if not isinstance(content, str):
-        raise TypeError("Non-message envelopes require string content.")
 
 
 def validate_message_content(content: Any) -> None:
@@ -78,6 +69,18 @@ def content_as_parts(content: MessageContent) -> list[dict[str, Any]]:
     if isinstance(content, str):
         return [{"type": "text", "text": content}]
     return cast("list[dict[str, Any]]", list(content))
+
+
+def _validate_source(source: Any, *, allow_path: bool) -> None:
+    if not isinstance(source, dict):
+        raise TypeError("Image/file parts require a `source` object.")
+    allowed_kinds = {"url", "path"} if allow_path else {"url"}
+    if source.get("kind") not in allowed_kinds:
+        if allow_path:
+            raise TypeError("Content source `kind` must be `url` or `path`.")
+        raise TypeError('Image parts currently require `source.kind == "url"`.')
+    if not isinstance(source.get("value"), str) or not source["value"].strip():
+        raise TypeError("Content source `value` must be a non-empty string.")
 
 
 def content_to_plain_text(content: Any) -> str:
@@ -132,15 +135,3 @@ def image_source_to_model_url(source: Any) -> str:
 
     encoded = base64.b64encode(path.read_bytes()).decode("ascii")
     return f"data:{mime_type};base64,{encoded}"
-
-
-def _validate_source(source: Any, *, allow_path: bool) -> None:
-    if not isinstance(source, dict):
-        raise TypeError("Image/file parts require a `source` object.")
-    allowed_kinds = {"url", "path"} if allow_path else {"url"}
-    if source.get("kind") not in allowed_kinds:
-        if allow_path:
-            raise TypeError("Content source `kind` must be `url` or `path`.")
-        raise TypeError('Image parts currently require `source.kind == "url"`.')
-    if not isinstance(source.get("value"), str) or not source["value"].strip():
-        raise TypeError("Content source `value` must be a non-empty string.")

@@ -21,8 +21,9 @@ from rich.text import Text
 
 from bos.config import ConfigNotFoundError, Workspace, WorkspaceResolutionError, resolve_config_source
 from bos.config.workspace import _resolve_path, presets_dir
+from bos.core.actor import MessageType
+from bos.core.agent import TurnEvent
 from bos.gateway.state import GatewayRunDir
-from bos.protocol import MessageType, TurnEvent
 
 
 def _build_workspace_for_ask(ctx, workspace_override: str | None = None) -> Workspace:

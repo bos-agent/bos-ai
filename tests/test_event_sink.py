@@ -3,26 +3,42 @@ import json
 import uuid
 
 import pytest
-from conftest import InMemChatStore, InMemMailRoute, MessageOnlyConsolidator
+from conftest import (
+    InMemChatStore,
+    InMemMailRoute,
+    MessageOnlyConsolidator,
+    compose_test_interceptors,
+    resolve_test_tools,
+)
 
 from bos.core import (
-    AgentActor,
     LLMResponse,
     ToolCallRequest,
     ep_provider,
 )
-from bos.core.agent import Agent, ChainInterceptor
+from bos.core.actor import MessageType
+from bos.core.agent import Agent
+from bos.core.harness import _PluginPromptProvider
+from bos.core.llm import LLMClient
+from bos.core.registry import ToolRegistry
+from bos.gateway.actors.agent_actor import AgentActor
 from bos.plugins.subagent import SubagentAgentPlugin  # noqa: F401  registers SubagentPlugin
-from bos.protocol import MessageType
 
 
-def create_test_agent(**kwargs):
+def create_test_agent(*, plugins=None, local_tools=None, tools=None, exclude_tools=None, interceptor=None, **kwargs):
+    plugins = plugins or []
+    _, resolved = resolve_test_tools(plugins=plugins, local_tools=local_tools, include=tools, exclude=exclude_tools)
     kwargs.setdefault("kind", "test")
     kwargs.setdefault("agent_name", "test")
     kwargs.setdefault("chat_store", InMemChatStore())
     kwargs.setdefault("consolidator", MessageOnlyConsolidator())
-    kwargs.setdefault("interceptor", ChainInterceptor())
-    return Agent(**kwargs)
+    kwargs.setdefault("llm", LLMClient())
+    return Agent(
+        tools=resolved,
+        interceptor=compose_test_interceptors(plugins, interceptor),
+        prompt_provider=_PluginPromptProvider(plugins),
+        **kwargs,
+    )
 
 
 class CaptureSink:
@@ -108,8 +124,8 @@ async def test_react_agent_emits_tool_events_and_injects_event_sink():
 
     try:
         sink = CaptureSink()
-        agent = create_test_agent(model=f"{provider_name}/tool", tools=["EchoWithContext"])
-        agent._local_tools(
+        local_tools = ToolRegistry("_local_tools:test", "Agent-scoped local tools.")
+        local_tools(
             name="EchoWithContext",
             description="Echo the user text plus injected runtime identifiers.",
             parameters={
@@ -118,6 +134,7 @@ async def test_react_agent_emits_tool_events_and_injects_event_sink():
                 "required": ["text"],
             },
         )(echo_with_context)
+        agent = create_test_agent(model=f"{provider_name}/tool", local_tools=local_tools, tools=["EchoWithContext"])
 
         result = await agent.ask("tool-chat", "Use the tool.", event_sink=sink)
 
@@ -250,8 +267,8 @@ async def test_actor_turn_event_tool_payload_uses_canonical_shape():
         sender_address = f"channel@http-{suffix}"
         actor_mailbox = route.bind(actor_address)
         sender_mailbox = route.bind(sender_address)
-        agent = create_test_agent(model=f"{provider_name}/actor-tool", agent_name="main", tools=["EchoWithContext"])
-        agent._local_tools(
+        local_tools = ToolRegistry("_local_tools:test", "Agent-scoped local tools.")
+        local_tools(
             name="EchoWithContext",
             description="Return a long string for tool result previews.",
             parameters={
@@ -260,6 +277,9 @@ async def test_actor_turn_event_tool_payload_uses_canonical_shape():
                 "required": ["text"],
             },
         )(echo_with_context)
+        agent = create_test_agent(
+            model=f"{provider_name}/actor-tool", agent_name="main", local_tools=local_tools, tools=["EchoWithContext"]
+        )
         actor = AgentActor(agent, actor_mailbox)
 
         task = asyncio.create_task(actor.run())

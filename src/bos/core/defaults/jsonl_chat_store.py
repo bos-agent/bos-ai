@@ -18,7 +18,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from bos.protocol.content import content_preview
+from bos.core.agent import content_preview
 
 from .._chat_store_utils import filter_tool_noise, project_message
 from .._utils import _flock

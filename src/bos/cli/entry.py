@@ -20,9 +20,6 @@ _LAZY_COMMANDS: dict[str, str] = {
     "memory": "bos.cli.commands.memory:memory",
 }
 
-if os.environ.get("BOS_DEV"):
-    _LAZY_COMMANDS["debug"] = "bos.cli.commands.debug:debug"
-
 
 def _load_lazy_command(dotted: str) -> click.Command:
     """Import a command from a 'module.path:attr' string."""
@@ -158,7 +155,6 @@ LOG_LEVELS = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 def cli(ctx, config, log_level):
     """BOS AI CLI"""
     import logging
-    import os
     import sys
 
     if log_level is None:

@@ -424,7 +424,7 @@ class PlanEventInterceptor:
                 return
             self._emitted[context.chat_id] = plan.updated_at
             payload = plan.to_payload()
-        from bos.protocol import TurnEvent
+        from bos.core.agent import TurnEvent
 
         await event_sink.emit(
             TurnEvent(

@@ -7,25 +7,35 @@ from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from typing import Any
 
-from bos.protocol import MessageType, TurnEvent
+from bos.core.actor import MailBox, MessageType
+from bos.core.agent import TurnEvent
 
-from .contract import EventSink, MailBox
+from .contract import AgentEventType, TurnEventSink
 
 logger = logging.getLogger(__name__)
 
 HostEventHandler = Callable[[TurnEvent], Awaitable[None] | None]
 
-CLIENT_TURN_EVENT_TYPES: tuple[str, ...] = ("turn", "llm", "response", "tool", "task", "plan")
+# The first four are the Agent's own event types; "task"/"plan" are emitted by
+# the task/plan plugins (the event vocabulary is an open extension point).
+CLIENT_TURN_EVENT_TYPES: tuple[str, ...] = (
+    AgentEventType.turn,
+    AgentEventType.llm,
+    AgentEventType.response,
+    AgentEventType.tool,
+    "task",
+    "plan",
+)
 
 
-def derive_event_sink(event_sink: EventSink | None, **defaults: Any) -> EventSink | None:
+def derive_event_sink(event_sink: TurnEventSink | None, **defaults: Any) -> TurnEventSink | None:
     if event_sink is None:
         return None
     return DerivedEventSink(event_sink, defaults)
 
 
 class DerivedEventSink:
-    def __init__(self, inner: EventSink, defaults: dict[str, Any]) -> None:
+    def __init__(self, inner: TurnEventSink, defaults: dict[str, Any]) -> None:
         self._inner = inner
         self._defaults = {key: value for key, value in defaults.items() if value is not None}
 

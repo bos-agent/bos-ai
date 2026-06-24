@@ -18,7 +18,7 @@ class _StubBLM:
     async def ask(self, **kwargs):
         import json as _json
 
-        from bos.core.llm import LLMResponse
+        from bos.core.agent import LLMResponse
 
         content = self._raw if self._raw is not None else _json.dumps(self._payload)
         return LLMResponse(content=content)

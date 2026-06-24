@@ -18,7 +18,10 @@ from urllib.parse import urlencode
 
 from aiohttp import WSMsgType
 
-from bos.protocol import WS_TAKEOVER_CLOSE_CODE, WS_TAKEOVER_CLOSE_REASON, Envelope, MessageContent, MessageType
+from bos.core.actor import Envelope, MessageType
+from bos.core.agent import MessageContent
+
+from .channels.ws_channel import WS_TAKEOVER_CLOSE_CODE, WS_TAKEOVER_CLOSE_REASON
 
 # Type alias for the optional endpoint resolver callback.
 # Returns (host, port) or None if the endpoint cannot be determined.

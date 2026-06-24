@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from bos.core import MailBox, Message
+from bos.core.actor import Envelope, MessageType
 from bos.extensions.channels.lark import (
     LARK_ATTACHMENT_THRESHOLD,
     LARK_MESSAGE_LIMIT,
@@ -13,14 +14,13 @@ from bos.extensions.channels.lark import (
     _conversation_id_for_lark_chat,
     _extract_inbound_message,
     _resolve_domain,
-    _selected_chat_from_command_result,
     _split_message,
     _strip_mentions,
     _unsupported_message_chat_id,
 )
 from bos.extensions.chat_stores.in_memory import InMemChatStore
 from bos.gateway import ActorDescriptor, ActorResolver, ChannelConversationRef, ChannelRuntimeContext, ChatCoordinator
-from bos.protocol import Envelope, MessageType
+from bos.gateway.core.command_handler import CommandHandler
 
 
 class FakeMailbox:
@@ -192,16 +192,6 @@ def test_resolve_domain_maps_aliases_and_urls():
     assert _resolve_domain(lark, "lark") == "https://open.larksuite.com"
     assert _resolve_domain(lark, "LarkSuite") == "https://open.larksuite.com"
     assert _resolve_domain(lark, "https://open.larksuite.com") == "https://open.larksuite.com"
-
-
-def test_selected_chat_from_command_result():
-    env = Envelope(
-        sender="agent@main",
-        recipient="channel@lark:daily",
-        content='{"name":"new","ok":true,"chat_id":"chat-b"}',
-        content_type=MessageType.COMMAND_RESULT,
-    )
-    assert _selected_chat_from_command_result(env) == "chat-b"
 
 
 def test_event_to_dict_flattens_sdk_object():
@@ -391,39 +381,6 @@ async def test_forward_replies_skips_turn_events():
 
 
 @pytest.mark.asyncio
-async def test_forward_replies_updates_cursor_from_new_result():
-    channel = _channel()
-    _capture_deliver(channel)
-    channel._conversation_to_lark_chat["lark_chat:oc_42"] = "oc_42"
-    channel._chat_to_lark_chat["chat-a"] = "oc_42"
-
-    metadata = {"channel": {"channel_id": "lark:daily", "channel_conversation_id": "lark_chat:oc_42"}}
-    mailbox = FakeMailbox([
-        Envelope(
-            sender="agent@main",
-            recipient="channel@lark:daily",
-            content='{"name":"new","ok":true,"chat_id":"chat-b"}',
-            content_type=MessageType.COMMAND_RESULT,
-            chat_id="chat-a",
-            metadata=metadata,
-        ),
-    ])
-
-    task = asyncio.create_task(channel._forward_replies(mailbox))
-    await asyncio.sleep(0)
-    task.cancel()
-    await asyncio.gather(task, return_exceptions=True)
-
-    ref = ChannelConversationRef("lark:daily", "lark_chat:oc_42")
-    assert channel._runtime.chat_coordinator.get_cursor(ref) == "chat-b"
-    assert "chat-a" not in channel._chat_to_lark_chat
-    assert channel._chat_to_lark_chat["chat-b"] == "oc_42"
-
-
-# ── outbound: attachment threshold + acknowledgement reaction ──────────────────
-
-
-@pytest.mark.asyncio
 async def test_deliver_text_under_threshold_sends_inline():
     channel = _channel()
     texts: list[tuple[str, str]] = []
@@ -601,3 +558,68 @@ async def test_forward_replies_clears_ack_reaction_on_final_reply():
     assert delivered == [("oc_42", "final answer")]
     assert deleted == [("om_x", "rk_1")]
     assert "chat-a" not in channel._chat_to_ack_reaction
+
+
+def _command_channel(store: InMemChatStore):
+    coordinator = ChatCoordinator(store)
+    retired: list[tuple[str, str]] = []
+
+    async def retire(actor: str, chat_id: str) -> None:
+        retired.append((actor, chat_id))
+
+    runtime = ChannelRuntimeContext(
+        actor_resolver=ActorResolver(
+            {"main": ActorDescriptor(name="main", address="agent@main")},
+            default_actor="main",
+        ),
+        chat_coordinator=coordinator,
+        mail_route=FakeMailRoute(),
+        command_handler=CommandHandler(coordinator, store, retire),
+    )
+    channel = LarkChannel(
+        channel_id="lark:daily",
+        target_actor="main",
+        settings=LarkSettings(app_id="cli_app", app_secret="secret"),
+        runtime=runtime,
+    )
+    return channel, coordinator, retired
+
+
+@pytest.mark.asyncio
+async def test_new_command_handled_via_control_plane_not_actor():
+    """'/new' is handled off the gateway control plane: a new chat is minted,
+    the cursor switches, the old session is retired, and the result is delivered
+    to Lark — with no COMMAND envelope reaching the actor."""
+    store = InMemChatStore()
+    channel, coordinator, retired = _command_channel(store)
+    delivered = _capture_deliver(channel)
+    mailbox = FakeSendMailbox()
+    ref = ChannelConversationRef("lark:daily", _conversation_id_for_lark_chat("oc_42"))
+    coordinator.set_cursor(ref, "chat-old", observed_revision=0)
+
+    await channel._handle_inbound(mailbox, _text_event("oc_42", "/new"))
+
+    assert mailbox.sent == []
+    assert len(delivered) == 1 and delivered[0][0] == "oc_42"
+    payload = json.loads(delivered[0][1])
+    assert payload["name"] == "new" and payload["ok"]
+    new_chat = payload["chat_id"]
+    assert new_chat != "chat-old"
+    assert coordinator.get_cursor(ref) == new_chat
+    assert retired == [("main", "chat-old")]
+
+
+@pytest.mark.asyncio
+async def test_resume_command_switches_cursor_via_control_plane():
+    store = InMemChatStore()
+    channel, coordinator, retired = _command_channel(store)
+    _capture_deliver(channel)
+    mailbox = FakeSendMailbox()
+    ref = ChannelConversationRef("lark:daily", _conversation_id_for_lark_chat("oc_42"))
+    coordinator.set_cursor(ref, "chat-old", observed_revision=0)
+
+    await channel._handle_inbound(mailbox, _text_event("oc_42", "/resume chat-target"))
+
+    assert mailbox.sent == []
+    assert coordinator.get_cursor(ref) == "chat-target"
+    assert retired == [("main", "chat-old")]

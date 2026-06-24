@@ -6,21 +6,21 @@ import pytest
 import bos.exts  # noqa: F401 — registers default extensions
 from bos.core.contract import PluginServices
 from bos.core.defaults.background_llm import DefaultBackgroundLLM
+from bos.core.defaults.eventbus import DefaultEventBus
 from bos.core.defaults.jobs import InProcJobRunner
-from bos.core.defaults.lifecycle import DefaultLifecycleBus
 from bos.plugins.memory.operation_service import DefaultMemoryOperationService
 from bos.plugins.memory.plugin import MemoryHarnessPlugin
 
 
 async def _setup_plugin(tmp_path, *, consolidation_enabled=False, idle_after=300):
-    bus = DefaultLifecycleBus()
+    bus = DefaultEventBus()
     runner = InProcJobRunner(bus, max_concurrency=1, idle_after=idle_after)
     await runner.start()
     from bos.extensions.chat_stores.in_memory import InMemChatStore
 
     class _StubLLM:
         async def complete(self, messages, **kwargs):
-            from bos.core.llm import LLMResponse
+            from bos.core.agent import LLMResponse
 
             return LLMResponse(content='{"operations": []}')
 
@@ -113,10 +113,10 @@ async def test_two_agents_get_isolated_bundles(tmp_path):
 async def test_consolidation_disabled_does_not_bind_trigger(tmp_path):
     h, runner = await _setup_plugin(tmp_path, consolidation_enabled=False)
     try:
-        from bos.core.contract import LifecycleEvent
+        from bos.core.contract import SessionEvent
 
         await runner._bus.emit(
-            LifecycleEvent(
+            SessionEvent(
                 kind="session_close",
                 chat_id="c1",
                 actor_name="alice",
@@ -134,7 +134,7 @@ async def test_consolidation_disabled_does_not_bind_trigger(tmp_path):
 async def test_consolidation_enabled_binds_session_close(tmp_path):
     h, runner = await _setup_plugin(tmp_path, consolidation_enabled=True)
     try:
-        from bos.core.contract import LifecycleEvent, Message
+        from bos.core.contract import Message, SessionEvent
 
         # Bind the agent so the factory finds a bundle
         h.bind({**h._cfg, "agent_name": "alice"})
@@ -144,7 +144,7 @@ async def test_consolidation_enabled_binds_session_close(tmp_path):
             turn_id="t1",
         )
         await runner._bus.emit(
-            LifecycleEvent(
+            SessionEvent(
                 kind="session_close",
                 chat_id="c1",
                 actor_name="alice",
@@ -167,7 +167,7 @@ async def test_consolidation_enabled_binds_idle(tmp_path):
     # Tiny idle window so the per-chat timer fires within the test.
     h, runner = await _setup_plugin(tmp_path, consolidation_enabled=True, idle_after=0.05)
     try:
-        from bos.core.contract import LifecycleEvent, Message
+        from bos.core.contract import Message, SessionEvent
 
         h.bind({**h._cfg, "agent_name": "alice"})
         await h._services.chat_store.commit_turn(
@@ -178,7 +178,7 @@ async def test_consolidation_enabled_binds_idle(tmp_path):
         # A completed turn arms the per-chat idle timer; no further turns means
         # it fires after idle_after and spawns an idle-triggered consolidation.
         await runner._bus.emit(
-            LifecycleEvent(
+            SessionEvent(
                 kind="turn_complete",
                 chat_id="c1",
                 actor_name="alice",
@@ -202,10 +202,10 @@ async def test_factory_returns_none_for_unbound_actor(tmp_path):
     """An event for an actor we never bound is dropped (no bundle to dispatch against)."""
     h, runner = await _setup_plugin(tmp_path, consolidation_enabled=True)
     try:
-        from bos.core.contract import LifecycleEvent
+        from bos.core.contract import SessionEvent
 
         await runner._bus.emit(
-            LifecycleEvent(
+            SessionEvent(
                 kind="session_close",
                 chat_id="c1",
                 actor_name="ghost-actor",

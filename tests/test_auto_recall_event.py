@@ -7,10 +7,9 @@ import asyncio
 import pytest
 from conftest import InMemMemoryExtension
 
-from bos.core.agent import TurnContext
+from bos.core.agent import TurnContext, TurnEvent
 from bos.core.contract import Message
 from bos.plugins.memory.auto_recall import AutoRecallInterceptor
-from bos.protocol import TurnEvent
 
 
 class CaptureSink:
