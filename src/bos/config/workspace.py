@@ -64,7 +64,7 @@ class _LoadedAgentCandidate:
 _EXTERNAL_AGENT_SUFFIXES = {".toml", ".md"}
 
 
-def _find_discovered_config(workspace: Path) -> Path | None:
+def find_discovered_config(workspace: Path) -> Path | None:
     for parent in [workspace] + list(workspace.parents):
         has_dotbos = (parent / ".bos").exists()
         has_bostoml = (parent / "bos.toml").is_file()
@@ -91,7 +91,7 @@ def _resolve_config(workspace: Path) -> Path:
 
     Checks ``BOS_CONFIG`` env var and raises on ambiguity.
     """
-    discovered_config = _find_discovered_config(workspace)
+    discovered_config = find_discovered_config(workspace)
     configured_bos_config = os.environ.get("BOS_CONFIG")
     env_bos_config = Path(configured_bos_config).expanduser().resolve() if configured_bos_config else None
 
@@ -163,7 +163,7 @@ def resolve_config_source(config_arg: str) -> tuple[Path, Path, RootConfig]:
 def initialize_workspace(workspace: str | Path = ".", *, dotbos: bool = True) -> Path:
     workspace = _resolve_path(workspace)
 
-    existing_config = _find_discovered_config(workspace)
+    existing_config = find_discovered_config(workspace)
     if existing_config is not None:
         raise WorkspaceResolutionError(
             f"Workspace already initialized: found {existing_config}. Remove it before re-initializing."

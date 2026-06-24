@@ -13,7 +13,7 @@ from pathlib import Path
 from string import Template
 
 from bos.config import WorkspaceResolutionError, validate_config
-from bos.config.workspace import _find_discovered_config
+from bos.config.workspace import find_discovered_config
 
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
 
@@ -69,7 +69,7 @@ def scaffold_workspace(
         raise ValueError(f"Unknown archetype {archetype!r}. Available: {', '.join(ARCHETYPES)}")
 
     workspace = Path(workspace).expanduser().resolve()
-    existing = _find_discovered_config(workspace)
+    existing = find_discovered_config(workspace)
     if existing is not None:
         raise WorkspaceResolutionError(
             f"Workspace already initialized: found {existing}. Use `boscli gen` to extend it."
