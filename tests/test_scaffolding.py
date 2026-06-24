@@ -75,10 +75,10 @@ def test_init_flat_rejected_for_package_archetype(tmp_path, monkeypatch):
 
 def test_init_wizard_team_with_skipped_model(tmp_path, monkeypatch):
     monkeypatch.delenv("BOS_CONFIG", raising=False)
-    # purpose, archetype 2 (team), provider 5 (skip), git: no
+    # purpose, archetype 2 (team), provider 2 (skip), git: no
     result = _invoke(
         ["init", str(tmp_path)],
-        input="A bot that reviews pull requests\n2\n5\nn\n",
+        input="A bot that reviews pull requests\n2\n2\nn\n",
     )
 
     assert result.exit_code == 0, result.output
@@ -326,7 +326,7 @@ def test_provider_step_interactive_existing_key(monkeypatch):
     monkeypatch.setattr(s, "_fetch_models", lambda p, key: (["anthropic/claude-sonnet-4-6"], "live"))
     monkeypatch.setattr(prompts, "autocomplete", lambda *a, **k: "anthropic/claude-sonnet-4-6")
 
-    model, env_pairs = s._provider_step(None, None, False)
+    model, env_pairs = s._provider_step(None, False)
     assert model == "anthropic/claude-sonnet-4-6"
     assert env_pairs == {}  # key already in env, never copied into .env
 
@@ -343,7 +343,7 @@ def test_provider_step_interactive_prompts_for_missing_key(monkeypatch):
     monkeypatch.setattr(s, "_fetch_models", lambda p, key: (["openai/gpt-4.1"], "live"))
     monkeypatch.setattr(prompts, "autocomplete", lambda *a, **k: "openai/gpt-4.1")
 
-    model, env_pairs = s._provider_step(None, None, False)
+    model, env_pairs = s._provider_step(None, False)
     assert model == "openai/gpt-4.1"
     assert env_pairs == {"OPENAI_API_KEY": "typed-key"}
 
@@ -354,4 +354,4 @@ def test_provider_step_interactive_skip(monkeypatch):
 
     monkeypatch.setattr(prompts, "is_interactive", lambda: True)
     monkeypatch.setattr(prompts, "select", lambda *a, **k: "__skip__")
-    assert s._provider_step(None, None, False) == (None, {})
+    assert s._provider_step(None, False) == (None, {})

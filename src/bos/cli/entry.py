@@ -10,7 +10,6 @@ logger = logging.getLogger(__name__)
 PLUGIN_ENTRY_POINT_GROUP = "boscli.commands"
 
 _LAZY_COMMANDS: dict[str, str] = {
-    "auth": "bos.cli.commands.auth:auth",
     "init": "bos.cli.commands.scaffolding:init",
     "gen": "bos.cli.commands.scaffolding:gen",
     "doctor": "bos.cli.commands.doctor:doctor",

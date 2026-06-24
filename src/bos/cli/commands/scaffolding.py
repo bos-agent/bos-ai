@@ -44,12 +44,6 @@ _API_KEY_ENV_BY_PREFIX: tuple[tuple[str, str], ...] = (
     ("openrouter/", "OPENROUTER_API_KEY"),
 )
 
-_OAUTH_PROVIDERS = {
-    "codex": ("codex", "codex/gpt-5.3-codex"),
-    "gemini-cli": ("gemini_cli", "gemini-cli/gemini-2.5-pro"),
-    "antigravity": ("antigravity", "antigravity/gemini-3-pro-preview"),
-}
-
 # API providers offered in the interactive wizard, in display order, with the
 # litellm key env var each one reads. Mirrors _API_KEY_ENV_BY_PREFIX as a flat
 # provider list. BOS-maintained; occasional drift against litellm is accepted.
@@ -88,8 +82,7 @@ _RECOMMENDED_MODELS: dict[str, tuple[str, ...]] = {
 @click.option("--no-probe", is_flag=True, default=False, help="Skip the live model credential check.")
 @click.option("--no-generate", is_flag=True, default=False, help="Skip LLM generation of team specialists.")
 @click.option("--name", "pkg_name_opt", default=None, help="Package name (package archetype; default: dir name).")
-@click.pass_context
-def init(ctx, directory, archetype, model, purpose, yes, minimal, flat, init_git, no_probe, no_generate, pkg_name_opt):
+def init(directory, archetype, model, purpose, yes, minimal, flat, init_git, no_probe, no_generate, pkg_name_opt):
     """Initialize a BOS project with a guided, runnable baseline."""
     workspace_path = Path(directory).expanduser().resolve()
     dotbos = not flat
@@ -120,7 +113,7 @@ def init(ctx, directory, archetype, model, purpose, yes, minimal, flat, init_git
             )
         pkg_name = _normalize_pkg_name(pkg_name_opt or project_name)
 
-    model, env_pairs = _provider_step(ctx, model, yes)
+    model, env_pairs = _provider_step(model, yes)
 
     env_pairs = dict(env_pairs)
     if archetype == "service":
@@ -201,36 +194,30 @@ def _prompt_archetype() -> str:
     return cast(str, prompts.select("Choose a starting topology:", choices, default=ARCHETYPES[0]))
 
 
-def _provider_step(ctx, model: str | None, yes: bool) -> tuple[str | None, dict[str, str]]:
+def _provider_step(model: str | None, yes: bool) -> tuple[str | None, dict[str, str]]:
     """Resolve the model id and any env vars to capture into .env."""
     if model:
         return model, _api_key_env_pairs(model, yes)
     if yes:
         return None, {}
     if not prompts.is_interactive():
-        return _provider_step_fallback(ctx)
-    return _provider_step_interactive(ctx)
+        return _provider_step_fallback()
+    return _provider_step_interactive()
 
 
-def _provider_step_fallback(ctx) -> tuple[str | None, dict[str, str]]:
+def _provider_step_fallback() -> tuple[str | None, dict[str, str]]:
     """The historical numbered provider menu, used for non-TTY callers (CI, pipes)."""
     click.echo("Choose a model provider:")
     click.echo("  1. API key (any litellm model id, e.g. anthropic/claude-…, gpt-…)")
-    click.echo("  2. OpenAI Codex subscription (boscli auth codex)")
-    click.echo("  3. Gemini CLI subscription (boscli auth gemini-cli)")
-    click.echo("  4. Google Antigravity (boscli auth antigravity)")
-    click.echo("  5. Skip — configure the model later")
-    choice = click.prompt("Provider", type=click.IntRange(1, 5), default=1)
-    if choice == 5:
+    click.echo("  2. Skip — configure the model later")
+    choice = click.prompt("Provider", type=click.IntRange(1, 2), default=1)
+    if choice == 2:
         return None, {}
-    if choice == 1:
-        model = click.prompt("Model id (litellm format)", default=_DEFAULT_MODEL)
-        return model, _api_key_env_pairs(model, yes=False)
-    provider = ("codex", "gemini-cli", "antigravity")[choice - 2]
-    return _oauth_provider(ctx, provider)
+    model = click.prompt("Model id (litellm format)", default=_DEFAULT_MODEL)
+    return model, _api_key_env_pairs(model, yes=False)
 
 
-def _provider_step_interactive(ctx) -> tuple[str | None, dict[str, str]]:
+def _provider_step_interactive() -> tuple[str | None, dict[str, str]]:
     detected = _detect_provider_keys()
     choices = _provider_choices(detected)
     default = next(iter(detected)) if len(detected) == 1 else None
@@ -238,8 +225,6 @@ def _provider_step_interactive(ctx) -> tuple[str | None, dict[str, str]]:
     selection = cast(str, prompts.select("Choose a model provider:", choices, default=default))
     if selection == "__skip__":
         return None, {}
-    if selection in _OAUTH_PROVIDERS:
-        return _oauth_provider(ctx, selection)
     return _api_provider(selection)
 
 
@@ -251,9 +236,6 @@ def _provider_choices(detected: dict[str, str]) -> list[prompts.Choice]:
     for provider, env in _PROVIDER_KEY_ENV:
         if provider not in detected:
             rows.append(prompts.Choice(provider, provider, f"set {env}"))
-    rows.append(prompts.Choice(None, "── OAuth subscriptions ──", selectable=False))
-    for provider in _OAUTH_PROVIDERS:
-        rows.append(prompts.Choice(provider, provider, "OAuth subscription"))
     rows.append(prompts.Choice(None, "", selectable=False))
     rows.append(prompts.Choice("__skip__", "Skip — configure the model later"))
     return rows
@@ -269,19 +251,6 @@ def _api_provider(provider: str) -> tuple[str, dict[str, str]]:
         env_pairs = {env_var: api_key}
     models, source = _fetch_models(provider, api_key)
     return _pick_model(provider, models, source), env_pairs
-
-
-def _oauth_provider(ctx, provider: str) -> tuple[str, dict[str, str]]:
-    auth_attr, default_model = _OAUTH_PROVIDERS[provider]
-    try:
-        from bos.cli.commands import auth as auth_module
-
-        ctx.invoke(getattr(auth_module, auth_attr))
-    except click.ClickException as exc:
-        click.echo(f"Authentication failed ({exc.message}) — continuing; run `boscli auth {provider}` later.", err=True)
-    except Exception as exc:  # OAuth flows talk to the network; never abort init on failure
-        click.echo(f"Authentication failed ({exc}) — continuing; run `boscli auth {provider}` later.", err=True)
-    return prompts.text("Model id", default=default_model), {}
 
 
 def _pick_model(provider: str, models: list[str], source: str) -> str:
