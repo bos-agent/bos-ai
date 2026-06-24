@@ -204,6 +204,39 @@ def acquire_singleton_lock(rd: LifecycleRunDir):
     return None
 
 
+def lock_is_free(rd: LifecycleRunDir) -> bool:
+    """Best-effort probe: True if the singleton flock is currently acquirable.
+
+    Acquires the lock non-blocking and releases it immediately, so a caller can
+    poll for a previous gateway to *actually* let go of the lock. This is the
+    correct signal for ``restart``: a dying gateway unlinks its pid file (and
+    ``stop`` removes the state file) well before the process has fully exited and
+    the OS has dropped the flock, so ``is_running`` — which keys off the pid file
+    — reports "stopped" while the lock is still held. Polling this avoids the
+    fresh gateway racing the still-exiting one and losing the lock.
+
+    On platforms without ``fcntl`` (e.g. Windows) locking is unsupported, so we
+    cannot observe contention and report free (matching ``acquire_singleton_lock``,
+    which proceeds unguarded there).
+    """
+    rd.ensure()
+    try:
+        import fcntl
+    except ImportError:
+        return True
+    try:
+        handle = rd.lock_file.open("w")
+    except OSError:
+        return True  # cannot open to probe — do not block the caller
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except OSError:
+        return False  # another live process still holds it
+    finally:
+        handle.close()  # releases the probe lock (if we took it)
+
+
 def kill_process(rd: LifecycleRunDir, sig: int = signal.SIGTERM) -> None:
     """Send *sig* to the process recorded in the lifecycle PID file."""
     pid = _read_pid(rd)

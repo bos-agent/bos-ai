@@ -7,6 +7,7 @@ from bos.runner.proc import (
     acquire_singleton_lock,
     build_docker_argv,
     is_running,
+    lock_is_free,
     lock_still_owned,
     reap_stale,
     start_background,
@@ -93,6 +94,24 @@ def test_singleton_lock_blocks_a_second_holder(tmp_path):
     again = acquire_singleton_lock(rd)
     assert again is not None
     again.close()
+
+
+def test_lock_is_free_tracks_a_live_holder(tmp_path):
+    # restart polls lock_is_free() to wait for a dying gateway to actually drop
+    # the flock — not is_running(), which flips as soon as the pid file is gone
+    # (well before the OS releases the lock). Guard that the probe reflects the
+    # real holder and never steals or releases it.
+    rd = GatewayRunDir(tmp_path / ".bos")
+
+    assert lock_is_free(rd) is True  # nobody holds it yet
+
+    holder = acquire_singleton_lock(rd)
+    assert holder is not None
+    assert lock_is_free(rd) is False  # busy while a live gateway holds it
+    assert lock_still_owned(rd, holder) is True  # probing must not disturb the holder
+
+    holder.close()
+    assert lock_is_free(rd) is True  # released → acquirable again
 
 
 def test_lock_still_owned_detects_recreated_lock_file(tmp_path):
