@@ -34,7 +34,6 @@ def doctor(do_probe: bool):
     results.extend(_check_env(ws, env_map))
     model = _configured_model(ws, env_map)
     results.append(_check_model(model))
-    results.append(_check_credentials(ws, model))
     results.append(_check_gateway(ws))
 
     if do_probe and model:
@@ -158,32 +157,6 @@ def _check_model(model: str | None) -> tuple[str, str, str]:
     if model:
         return ("ok", "model", model)
     return ("warn", "model", "no model configured (set [agent.defaults].model or BOS_MODEL)")
-
-
-_AUTH_FILE_PREFIX = {"codex": "codex_auth", "gemini-cli": "gemini_cli_auth", "antigravity": "antigravity_auth"}
-
-
-def _check_credentials(ws: Workspace, model: str | None) -> tuple[str, str, str]:
-    from bos.core import _get_bos_home
-
-    referenced: set[str] = set()
-    if model and "/" in model:
-        prefix = model.split("/", 1)[0]
-        if prefix in _AUTH_FILE_PREFIX:
-            referenced.add(prefix)
-    exts = getattr(ws.config.exts, "model_extra", None) or {}
-    for impl in exts.get("ep_provider", {}):
-        if impl in _AUTH_FILE_PREFIX:
-            referenced.add(impl)
-    if not referenced:
-        return ("skip", "credentials", "no OAuth provider configured")
-
-    auth_dir = _get_bos_home() / "auth"
-    missing = [p for p in sorted(referenced) if not list(auth_dir.glob(f"{_AUTH_FILE_PREFIX[p]}.*.json"))]
-    if missing:
-        details = ", ".join(f"{p} (run `boscli auth {p}`)" for p in missing)
-        return ("fail", "credentials", f"not authenticated: {details}")
-    return ("ok", "credentials", "auth credentials present for " + ", ".join(sorted(referenced)))
 
 
 def _check_gateway(ws: Workspace) -> tuple[str, str, str]:

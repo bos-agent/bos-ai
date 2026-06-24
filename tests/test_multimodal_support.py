@@ -18,8 +18,6 @@ from bos.core.actor import MessageType
 from bos.core.agent import content_length, content_preview
 from bos.core.defaults.consolidator import LLMConsolidator
 from bos.core.defaults.litellm_provider import _normalize_litellm_message, litellm_complete
-from bos.extensions.providers.antigravity_provider import _convert_messages as convert_antigravity_messages
-from bos.extensions.providers.codex_provider import _convert_user_message as convert_codex_user_message
 
 
 def _structured_message_content() -> list[dict[str, object]]:
@@ -314,46 +312,3 @@ async def test_default_provider_rejects_reserved_file_and_pdf_parts(monkeypatch)
     assert response.content == (
         "Error calling default provider: File/PDF inputs are reserved in phase 1 and are not yet supported."
     )
-
-
-def test_codex_conversion_accepts_path_backed_image_parts(tmp_path):
-    image_path = tmp_path / "cat.png"
-    image_bytes = _png_bytes()
-    image_path.write_bytes(image_bytes)
-
-    converted = convert_codex_user_message([
-        {"type": "text", "text": "Describe this image."},
-        {"type": "image", "source": {"kind": "path", "value": str(image_path)}},
-    ])
-
-    image_part = converted["content"][1]
-
-    assert converted["role"] == "user"
-    assert converted["content"][0] == {"type": "input_text", "text": "Describe this image."}
-    assert image_part["type"] == "input_image"
-    assert image_part["detail"] == "auto"
-    assert image_part["image_url"].startswith("data:image/png;base64,")
-    assert base64.b64decode(image_part["image_url"].split(",", 1)[1]) == image_bytes
-
-
-def test_codex_conversion_rejects_reserved_file_and_pdf_parts():
-    with pytest.raises(
-        ValueError,
-        match="File/PDF inputs are reserved in phase 1 and are not yet supported.",
-    ):
-        convert_codex_user_message([
-            {"type": "text", "text": "Summarize the attachment."},
-            {
-                "type": "file",
-                "mime_type": "application/pdf",
-                "source": {"kind": "path", "value": "/tmp/example.pdf"},
-            },
-        ])
-
-
-def test_antigravity_conversion_rejects_structured_multimodal_input():
-    with pytest.raises(
-        ValueError,
-        match="Structured multimodal inputs are not supported by the antigravity provider in phase 1.",
-    ):
-        convert_antigravity_messages([{"role": "user", "content": _structured_message_content()}])

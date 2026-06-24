@@ -59,11 +59,6 @@ import bos.extensions.mailboxes.in_memory  # noqa: F401
 # Memory stores
 import bos.extensions.memory_stores.in_memory  # noqa: F401
 
-# Providers
-import bos.extensions.providers.antigravity_provider  # noqa: F401
-import bos.extensions.providers.codex_provider  # noqa: F401
-import bos.extensions.providers.gemini_cli_provider  # noqa: F401
-
 # Tools
 import bos.extensions.tools.filesystem  # noqa: F401
 import bos.extensions.tools.knowledge  # noqa: F401

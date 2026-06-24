@@ -189,14 +189,10 @@ dependencies = [
 [package.optional-dependencies]
 all = [
     { name = "lark-oapi" },
-    { name = "oauth-cli-kit" },
     { name = "tavily-python" },
 ]
 lark = [
     { name = "lark-oapi" },
-]
-providers = [
-    { name = "oauth-cli-kit" },
 ]
 search = [
     { name = "tavily-python" },
@@ -224,8 +220,6 @@ requires-dist = [
     { name = "lark-oapi", marker = "extra == 'all'", specifier = "==1.6.8" },
     { name = "lark-oapi", marker = "extra == 'lark'", specifier = "==1.6.8" },
     { name = "litellm", specifier = "==1.84.0" },
-    { name = "oauth-cli-kit", marker = "extra == 'all'", specifier = "==0.1.3" },
-    { name = "oauth-cli-kit", marker = "extra == 'providers'", specifier = "==0.1.3" },
     { name = "prompt-toolkit", specifier = "==3.0.52" },
     { name = "pydantic", specifier = "==2.12.5" },
     { name = "python-dotenv", specifier = "==1.2.2" },
@@ -238,7 +232,7 @@ requires-dist = [
     { name = "tomli", marker = "python_full_version < '3.11'", specifier = "==2.0.1" },
     { name = "tomlkit", specifier = "==0.15.0" },
 ]
-provides-extras = ["providers", "search", "lark", "all"]
+provides-extras = ["search", "lark", "all"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -1394,19 +1388,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/9c/50/0753655aa844c99cd9e018aacf76f130f1bd81d881bb74bc0aef5d73a8ba/numpy-2.4.6-cp314-cp314t-win32.whl", hash = "sha256:260a5d70215b61ab4fadf5c7baacd64821842975eea312125ed3c39a6391b063", size = 6156982, upload-time = "2026-05-18T23:36:40.817Z" },
     { url = "https://files.pythonhosted.org/packages/b2/d4/7c67becf668f973cb490cec3e98dfd799d866f9c989a54d355672cfa0db6/numpy-2.4.6-cp314-cp314t-win_amd64.whl", hash = "sha256:81a1cca95ed5bb92aa8b10dd2cdc9a0d3853a50fad926c28b5d7e8ea54389627", size = 12638908, upload-time = "2026-05-18T23:36:43.996Z" },
     { url = "https://files.pythonhosted.org/packages/43/bb/e1c71a4295b1b1d1393d50dbb4f2a36283c6859d9d3892e84f00ec5a91d5/numpy-2.4.6-cp314-cp314t-win_arm64.whl", hash = "sha256:0c9136e14ed34a9e343a31c533d78a9813a69a3148332bce5e9821cb2f996e66", size = 10565867, upload-time = "2026-05-18T23:36:47.114Z" },
-]
-
-[[package]]
-name = "oauth-cli-kit"
-version = "0.1.3"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "httpx" },
-    { name = "platformdirs" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/b6/84/c6b1030669266378e2f286a4e3e8c020e7f2d537b711a2ad30a789e97097/oauth_cli_kit-0.1.3.tar.gz", hash = "sha256:6612b3dea1a97c4de4a7d3b828767d42f0a78eae93be56b90c55d3ab668ebfb8", size = 8551, upload-time = "2026-02-13T10:21:19.046Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/ee/55/a4abfc5f9be60ffd7fedf0e808ffd0a1d35f3ecd6f7b2fc782b7948a8329/oauth_cli_kit-0.1.3-py3-none-any.whl", hash = "sha256:09aabde83fbb823b38de3b8c220f6c256df2d771bf31dccdb2680a5fbe383836", size = 11504, upload-time = "2026-02-13T10:21:18.282Z" },
 ]
 
 [[package]]

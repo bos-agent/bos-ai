@@ -26,7 +26,7 @@ The design metric for this BEP: **time from `pip install bos-ai` to a custom too
    - Every archetype produces a config that **boots successfully with no further editing** (given valid credentials).
    - Non-interactive operation via flags (`--archetype`, `--model`, `--yes`) for scripting and CI.
 2. **Scaffolded files as in-place documentation**: each generated file carries concise comments explaining its format and discovery rules, so the project itself teaches the extension model.
-3. **Model and credential setup inside the flow**: provider selection (litellm API-key providers, or the OAuth providers behind `boscli auth`), env var capture into `.env`, and an optional live credential probe before declaring success.
+3. **Model and credential setup inside the flow**: provider selection (litellm API-key providers), env var capture into `.env`, and an optional live credential probe before declaring success.
 4. **`boscli project add` — day-2 generators** for agents, tools, and channels that reuse the same templates as `init`.
 5. **`boscli project doctor` — static health check**: config validation, referenced-path existence, env var and credential presence, with an optional live model probe.
 6. **One front door**: the top-level `boscli init` is replaced by `boscli project init`. A `--minimal` flag preserves the old copy-the-template behavior.
@@ -65,10 +65,7 @@ $ boscli project init
 │
 │ Choose a model provider:
 │ > 1. API key (any litellm model id, e.g. anthropic/claude-…, gpt-…)
-│   2. OpenAI Codex subscription (boscli auth codex)
-│   3. Gemini CLI subscription (boscli auth gemini-cli)
-│   4. Google Antigravity (boscli auth antigravity)
-│   5. Skip — configure the model later
+│   2. Skip — configure the model later
 │
 │ Model id: anthropic/claude-sonnet-4-6
 │ ANTHROPIC_API_KEY (stored in .env, leave empty to skip): ****
@@ -103,7 +100,6 @@ Wizard step semantics:
 2. **Archetype**: selects the template set (below).
 3. **Provider/model**:
    - *API key path*: prompt for a litellm model id and the matching API key env var. The env var name is inferred from a small BOS-maintained prefix → env-var map (`anthropic/` → `ANTHROPIC_API_KEY`, `gpt-`/`openai/` → `OPENAI_API_KEY`, `gemini/` → `GEMINI_API_KEY`, …), shown as the default and overridable at the prompt. The map changes rarely; occasional drift fixes against litellm are an accepted maintenance cost. The key value is written to `.env`; the model id to `[agent.defaults].model`.
-   - *OAuth paths*: invoke the corresponding `boscli auth <provider>` flow inline, then write the provider's `[exts.ep_provider.<impl>]` entry and model default.
    - *Skip*: scaffold everything, leave `model` commented with a pointer, and print a warning in next-steps.
 4. **Git**: as today's `--git` (default yes when the directory is not already inside a git repo).
 5. **Write + verify**: render templates, run `validate_config()` on the result (a scaffold that fails validation is a bug — abort and clean up), then run the credential probe unless `--no-probe`/skipped-model.
@@ -132,12 +128,11 @@ $ boscli project doctor
 ✓ paths          agent_dirs, extensions, skills dirs exist
 ✓ agents         3 agent specs load (researcher.md, poet.md, inline main)
 ✗ env            TELEGRAM_BOT_TOKEN referenced by channel 'telegram+main' but unset
-✓ credentials    codex_auth.default.json present
 ✓ gateway        port 5920 free (no gateway running for this project)
 - model probe    skipped (use --probe)
 ```
 
-Checks, in order: config parse + `validate_config()`; existence of every path referenced by `platform.agent_dirs` / `platform.extensions` (local paths only) / skills plugin bindings / `envfile`; external agent file loadability (frontmatter parse warnings surface here); every `*_env` reference (`api_key_env`, `token_env`, channel `settings.*_env`) resolvable from the environment after applying `[platform.envs]` + `envfile`; presence of `~/.bos/auth/*` credential files for configured OAuth providers; gateway port conflict against a live `gateway.state`. `--probe` adds the live model call per configured provider.
+Checks, in order: config parse + `validate_config()`; existence of every path referenced by `platform.agent_dirs` / `platform.extensions` (local paths only) / skills plugin bindings / `envfile`; external agent file loadability (frontmatter parse warnings surface here); every `*_env` reference (`api_key_env`, `token_env`, channel `settings.*_env`) resolvable from the environment after applying `[platform.envs]` + `envfile`; gateway port conflict against a live `gateway.state`. `--probe` adds the live model call per configured provider.
 
 `doctor` never writes. Fix suggestions are printed as commands or config lines, not applied.
 
