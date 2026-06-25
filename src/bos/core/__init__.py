@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from bos.core.actor import Envelope
 
+from ._chat_store_utils import filter_internal_chats, is_internal_chat
 from ._utils import (
     _aclose,
     _allowed,
@@ -160,6 +161,8 @@ __all__ = [
     "ep_provider",
     "ep_tool",
     "ep_turn_interceptor",
+    "filter_internal_chats",
+    "is_internal_chat",
     "_aclose",
     "_allowed",
     "_apply",

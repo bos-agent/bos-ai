@@ -111,6 +111,22 @@ async def test_chats_lists_most_recent_first(ref):
 
 
 @pytest.mark.asyncio
+async def test_chats_hides_internal_subagent_chats(ref):
+    from bos.core._chat_store_utils import make_subagent_chat_id
+
+    subagent_id = make_subagent_chat_id("conv-1", "explorer")
+    store = FakeChatStore(
+        [
+            FakeMeta("conv-1", last_activity=datetime(2026, 1, 1), description="user chat"),
+            FakeMeta(subagent_id, last_activity=datetime(2026, 2, 1), description="subagent work"),
+        ]
+    )
+    res = await _handler(store=store).run(ref, "/chats", target_actor="main")
+    assert res.ok
+    assert [c["chat_id"] for c in res.result] == ["conv-1"]
+
+
+@pytest.mark.asyncio
 async def test_unknown_command_is_rejected(ref):
     res = await _handler().run(ref, "/bogus x", target_actor="main")
     assert not res.ok and res.error and "Invalid command" in res.error

@@ -15,7 +15,7 @@ import click
 
 import bos.exts  # noqa: F401 — registers default ep impls (chat_store, mail_route, ...)
 from bos.cli.commands.scaffolding import _discover_project
-from bos.core import _deep_merge
+from bos.core import _deep_merge, filter_internal_chats
 from bos.plugins.memory.plugin import MemoryHarnessPlugin, PerAgentMemory
 
 
@@ -163,7 +163,9 @@ def consolidate_cmd(agent: str | None, chat_id: str | None, do_all: bool):
     async def _consolidate(_bundle, plugin, _h):
         targets: list[str] = []
         if do_all:
-            chats = await plugin._services.chat_store.list_chats()
+            # Skip internal (e.g. subagent) chats — they are not the user's
+            # conversations and must not feed memory recall.
+            chats = filter_internal_chats(await plugin._services.chat_store.list_chats())
             targets = list(chats.keys())
         elif chat_id:
             targets = [chat_id]

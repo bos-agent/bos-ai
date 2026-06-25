@@ -4,7 +4,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
-from bos.core import ChatStore
+from bos.core import ChatStore, filter_internal_chats
 
 from .chat_coordinator import ChannelConversationRef, ChatCoordinator
 
@@ -69,7 +69,7 @@ class CommandHandler:
         return CommandResult(name="resume", ok=True, chat_id=arg, result=f"resumed {arg}")
 
     async def _chats(self) -> CommandResult:
-        chats = await self._chat_store.list_chats()
+        chats = filter_internal_chats(await self._chat_store.list_chats())
         metas = sorted(
             chats.values(),
             key=lambda m: (m.last_activity is not None, m.last_activity),

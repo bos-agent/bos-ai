@@ -165,7 +165,7 @@ class SubagentAgentPlugin:
             if task_template:
                 task = _safe_format(task_template, role=role, task=task, message=task)
 
-            return await runtime.ask(role, task, parent=context)
+            return await runtime.ask(role, task, context=context)
 
     async def get_system_prompt_section(self, context: TurnContext) -> str | None:
         available = self._available_subagents()

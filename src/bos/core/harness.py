@@ -4,11 +4,10 @@ import asyncio
 import contextvars
 import logging
 import os
-import re
-import uuid
 from pathlib import Path
 from typing import Any
 
+from ._chat_store_utils import make_subagent_chat_id
 from ._utils import (
     _aclose,
     _allowed,
@@ -216,24 +215,24 @@ class _HarnessSubagentRuntime:
 
     async def ask(
         self,
-        role: str,
+        kind: str,
         message: str,
         *,
-        parent: ToolContext,
+        context: ToolContext,
         agent_cfg: dict[str, Any] | None = None,
     ) -> str:
-        child_chat_id = self._harness._make_subagent_chat_id(parent.chat_id, role)
-        agent = await self._harness.create_agent(role, agent_cfg)
+        child_chat_id = make_subagent_chat_id(context.chat_id, kind)
+        agent = await self._harness.create_agent(kind, agent_cfg)
         child_event_sink = derive_event_sink(
-            parent.event_sink,
-            parent_turn_id=parent.turn_id,
-            parent_chat_id=parent.chat_id,
-            parent_agent_name=parent.agent_name,
+            context.event_sink,
+            parent_turn_id=context.turn_id,
+            parent_chat_id=context.chat_id,
+            parent_agent_name=context.agent_name,
         )
         return await agent.ask(
             child_chat_id,
             message,
-            ctx_metadata={"subagent": role, "ref_chat_id": parent.chat_id},
+            ctx_metadata={"subagent": kind, "ref_chat_id": context.chat_id},
             event_sink=child_event_sink,
         )
 
@@ -526,9 +525,3 @@ class AgentHarness:
         if chat_id not in self._compaction_locks:
             self._compaction_locks[chat_id] = asyncio.Lock()
         return self._compaction_locks[chat_id]
-
-    @staticmethod
-    def _make_subagent_chat_id(parent_chat_id: str, role: str) -> str:
-        agent_tag = re.sub(r"[^a-z0-9]+", "-", role.lower()).strip("-") or "agent"
-        agent_tag = agent_tag[:10]
-        return f"{parent_chat_id}~{agent_tag}{uuid.uuid4().hex[:8]}"

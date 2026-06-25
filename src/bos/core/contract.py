@@ -312,13 +312,14 @@ ep_plugin = ExtensionPoint(
 class SubagentRuntime(Protocol):
     async def ask(
         self,
-        role: str,
+        kind: str,
         message: str,
         *,
-        parent: ToolContext,
+        context: ToolContext,
         agent_cfg: dict[str, Any] | None = None,
     ) -> str:
-        """Delegate to a configured subagent and return its response."""
+        """Delegate to a configured subagent (by agent ``kind``) and return its
+        response. ``context`` is the invoking tool's context (the parent turn)."""
         ...
 
 

@@ -27,7 +27,7 @@ from bos.plugins.task import TaskAgentPlugin
 
 
 class _MockSubagentRuntime:
-    async def ask(self, role, message, *, parent) -> str:
+    async def ask(self, kind, message, *, context) -> str:
         return "mock response"
 
 
