@@ -90,7 +90,6 @@ from .contract import (
     ep_turn_interceptor,
 )
 from .harness import (
-    CURRENT_HARNESS,
     AgentHarness,
     AgentRegistry,
     ChainInterceptor,
@@ -106,7 +105,6 @@ __all__ = [
     "AgentPlugin",
     "BackgroundLLM",
     "BaseChannel",
-    "CURRENT_HARNESS",
     "Channel",
     "ChainInterceptor",
     "ChatCommit",

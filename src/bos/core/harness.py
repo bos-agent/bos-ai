@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextvars
 import logging
 import os
 from pathlib import Path
@@ -78,9 +77,6 @@ class AgentRegistry:
     @classmethod
     def describe(cls) -> dict[str, str]:
         return {name: entry["description"] for name, entry in cls._registry.items()}
-
-
-CURRENT_HARNESS: contextvars.ContextVar[AgentHarness] = contextvars.ContextVar("current_harness")
 
 
 class ResolvedToolSet:
@@ -261,7 +257,7 @@ class AgentHarness:
         self._interceptors_impl = interceptors or []
 
         self._owned: list[Any] = []
-        self._token: contextvars.Token | None = None
+        self._active: bool = False
         self.mail_route: MailRoute | None = None
         self.chat_store: ChatStore | None = None
         self.consolidator: Consolidator | None = None
@@ -279,11 +275,8 @@ class AgentHarness:
         self._compaction_locks: dict[str, asyncio.Lock] = {}
 
     async def __aenter__(self):
-        if self._token is not None:
-            raise RuntimeError(
-                "AgentHarness is already active. Use CURRENT_HARNESS.get() to access "
-                "the current harness instead of re-entering."
-            )
+        if self._active:
+            raise RuntimeError("AgentHarness is already active; do not re-enter the same instance.")
 
         # The assembly ring registers its own ``_default`` adapters (consolidator,
         # litellm provider, jsonl chat store/mailbox, job runner) — the harness
@@ -324,7 +317,7 @@ class AgentHarness:
             background_llm=self.background_llm,
         )
 
-        self._token = CURRENT_HARNESS.set(self)
+        self._active = True
         return self
 
     async def __aexit__(self, *exc) -> None:
@@ -347,16 +340,14 @@ class AgentHarness:
             await _aclose(resource)
         self._owned.clear()
 
-        if self._token is not None:
-            CURRENT_HARNESS.reset(self._token)
-            self._token = None
+        self._active = False
 
     async def create_agent(
         self,
         kind: str | None = None,
         agent_cfg: dict[str, Any] | None = None,
     ) -> Agent:
-        if CURRENT_HARNESS.get(None) is None:
+        if not self._active:
             raise RuntimeError("create_agent must be called within an active AgentHarness context.")
 
         # Resolve agent defaults from AgentRegistry so plugin config is visible
