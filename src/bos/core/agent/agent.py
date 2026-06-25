@@ -11,6 +11,13 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal, Sequence
 from xml.sax.saxutils import escape
 
+from ._structured import (
+    UNUSABLE_FINISH_REASONS,
+    StructuredOutputError,
+    StructuredValidator,
+    parse_json,
+    provider_hint_schema,
+)
 from ._utils import (
     _apply_async,
     _compact,
@@ -20,6 +27,7 @@ from ._utils import (
 from .contract import (
     LLM,
     AgentEventType,
+    AgentResult,
     ChatStore,
     ContextResult,
     InterceptorStage,
@@ -208,6 +216,7 @@ class Agent:
         chat_compaction_lock: Callable[[str], AbstractAsyncContextManager] | None = None,
         history_attribution: bool = False,
         workspace: str | os.PathLike[str] | None = None,
+        structured_validator: StructuredValidator | None = None,
     ):
         if system_prompt is not None and not isinstance(system_prompt, str):
             raise TypeError("system_prompt must be a string or None")
@@ -231,6 +240,7 @@ class Agent:
         self._compaction_lock = chat_compaction_lock
         self._history_attribution = history_attribution
         self._workspace = str(workspace) if workspace else None
+        self._structured_validator = structured_validator
 
         # The agent runs a single interceptor; assembling plugin + configured
         # interceptors into one is the outer layer's job.
@@ -251,10 +261,44 @@ class Agent:
         turn_id: str | None = None,
         commit_observer: Callable[[Any], Any | Awaitable[Any]] | None = None,
     ) -> str:
+        """Run a turn and return the final response text.
+
+        Thin wrapper over :meth:`run`; the full result (token usage, iteration
+        count, structured output) is available via ``run`` directly."""
+        result = await self.run(
+            chat_id,
+            content,
+            interrupt=interrupt,
+            ctx_metadata=ctx_metadata,
+            llm_args=llm_args,
+            event_sink=event_sink,
+            turn_id=turn_id,
+            commit_observer=commit_observer,
+        )
+        return result.output
+
+    async def run(
+        self,
+        chat_id: str,
+        content: MessageContent,
+        *,
+        interrupt: Callable[[], dict[str, Any] | Awaitable[dict[str, Any]] | None] | None = None,
+        ctx_metadata: dict[str, Any] | None = None,
+        llm_args: dict[str, Any] | None = None,
+        event_sink: TurnEventSink | None = None,
+        turn_id: str | None = None,
+        commit_observer: Callable[[Any], Any | Awaitable[Any]] | None = None,
+        schema: dict[str, Any] | None = None,
+        max_schema_retries: int = 1,
+    ) -> AgentResult:
         llm_params = {
             "model": self._model,
             "reasoning_effort": self._reasoning_effort,
         } | (llm_args or {})
+        if schema is not None:
+            # Provider-native structured-output hint; local validation below is
+            # authoritative (BEP 12). Sanitized so non-OpenAI providers accept it.
+            llm_params["response_schema"] = provider_hint_schema(schema)
         budget_model = llm_params.get("model")
 
         ctx = TurnContext(
@@ -276,6 +320,11 @@ class Agent:
         abort_reason: str | None = None
 
         cache_index = 0
+        iteration = 0
+        usage_total: dict[str, int] = {}
+        structured_output: Any = None
+        structured_ok = False
+        schema_retries = 0
 
         def _message_metadata(message: dict[str, Any], metadata: dict[str, Any] | None = None) -> dict[str, Any] | None:
             if metadata is not None:
@@ -405,7 +454,6 @@ class Agent:
                 stage=TurnEventStage.prepare,
                 detail=TurnEventDetail.start,
             )
-            iteration = 0
             while True:
                 if iteration >= self._max_iterations:
                     # max iterations reached
@@ -436,6 +484,9 @@ class Agent:
                     **llm_params,
                 )
                 cache_index = -1
+                for _k, _v in (response.usage or {}).items():
+                    if isinstance(_v, int):
+                        usage_total[_k] = usage_total.get(_k, 0) + _v
                 await _run_interceptor("after_llm")
 
                 # Emit one unified LLM response event carrying both the
@@ -479,6 +530,32 @@ class Agent:
                             else None
                         ),
                     )
+                    if schema is not None and not structured_ok:
+                        if response.finish_reason in UNUSABLE_FINISH_REASONS:
+                            # Truncation / content filter / provider error — a
+                            # "reply in JSON" retry cannot repair it; surface.
+                            raise StructuredOutputError(
+                                f"no usable completion for structured output "
+                                f"(finish_reason={response.finish_reason!r})"
+                            )
+                        try:
+                            if self._structured_validator is not None:
+                                structured_output = self._structured_validator.validate(final_content, schema)
+                            else:
+                                structured_output = parse_json(final_content)
+                            structured_ok = True
+                        except StructuredOutputError as e:
+                            if schema_retries < max_schema_retries:
+                                schema_retries += 1
+                                _add_message({
+                                    "role": "user",
+                                    "content": (
+                                        f"Your previous response failed schema validation: {e}. "
+                                        "Reply ONLY with JSON matching the schema."
+                                    ),
+                                })
+                                continue
+                            raise
                     ctx.final_content = final_content
                     await _run_interceptor("final_response")
                     await _emit_event(
@@ -540,6 +617,12 @@ class Agent:
             turn_status = "aborted"
             abort_reason = "cancelled"
             raise
+        except StructuredOutputError:
+            # Structured-output failure is the caller's to handle (BEP 12):
+            # persist what we have, then propagate rather than masking it as a
+            # normal "(error: …)" assistant turn.
+            turn_status = "error"
+            raise
         except Exception as e:
             turn_status = "error"
             logger.error("Error in agent: %s", e, exc_info=True)
@@ -548,7 +631,25 @@ class Agent:
             await _emit_event(AgentEventType.turn, TurnEventPhase.fail, detail=TurnEventDetail.error, content=str(e))
         finally:
             await _persist_turn()
-        return ctx.final_response
+
+        finish_reason = ctx.current_llm_response.finish_reason if ctx.current_llm_response else None
+        if schema is not None and structured_ok:
+            return AgentResult(
+                output=structured_output,
+                structured=True,
+                iterations=iteration,
+                usage=usage_total,
+                turn_id=ctx.turn_id,
+                finish_reason=finish_reason,
+            )
+        return AgentResult(
+            output=ctx.final_response,
+            structured=False,
+            iterations=iteration,
+            usage=usage_total,
+            turn_id=ctx.turn_id,
+            finish_reason=finish_reason,
+        )
 
     def _get_tool_defs(self) -> list[dict[str, Any]]:
         return list(self._tools.to_openai_schema().values())

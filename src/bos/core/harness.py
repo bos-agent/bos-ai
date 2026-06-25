@@ -40,6 +40,20 @@ from .sinks import derive_event_sink
 
 logger = logging.getLogger(__name__)
 
+_structured_validator_singleton: Any = None
+
+
+def _default_structured_validator() -> Any:
+    """The default (jsonschema-backed) structured-output validator injected into
+    agents (BEP 12). Lazily imported so the agent ring stays stdlib-pure and the
+    third-party dep is only pulled when an agent is actually built."""
+    global _structured_validator_singleton
+    if _structured_validator_singleton is None:
+        from bos.core.defaults.structured_validator import JsonSchemaValidator
+
+        _structured_validator_singleton = JsonSchemaValidator()
+    return _structured_validator_singleton
+
 
 class AgentRegistry:
     _registry: dict[str, dict[str, Any]] = {}
@@ -393,6 +407,7 @@ class AgentHarness:
             "prompt_provider": _PluginPromptProvider(plugins),
             "chat_compaction_lock": self._get_compaction_lock,
             "workspace": str(self._workspace),
+            "structured_validator": _default_structured_validator(),
         }
 
         return _apply(Agent, kwargs)

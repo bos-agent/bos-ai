@@ -287,6 +287,23 @@ class LLMResponse:
         return self.content or self.reasoning_content or ""
 
 
+@dataclass
+class AgentResult:
+    """Result of an :meth:`Agent.run` turn — the final response plus run metadata.
+
+    ``output`` is the final text when no ``schema`` was requested; when a schema
+    was supplied and validated it is the parsed object and ``structured`` is True.
+    ``usage`` aggregates per-iteration token counts across the turn's LLM calls.
+    """
+
+    output: Any
+    structured: bool = False
+    iterations: int = 0
+    usage: dict[str, int] = field(default_factory=dict)
+    turn_id: str = ""
+    finish_reason: str | None = None
+
+
 @runtime_checkable
 class LLM(Protocol):
     """The model-completion capability the Agent depends on.

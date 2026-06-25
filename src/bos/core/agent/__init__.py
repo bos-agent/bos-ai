@@ -21,6 +21,7 @@ from ._content import (
     validate_message_content,
     validate_message_part,
 )
+from ._structured import StructuredOutputError, StructuredValidator
 from ._utils import (
     _apply_async,
     _as_parts,
@@ -34,6 +35,7 @@ from .agent import AbortTurn, Agent
 from .contract import (
     LLM,
     AgentEventType,
+    AgentResult,
     ChatCommit,
     ChatMeta,
     ChatStore,
@@ -65,7 +67,10 @@ __all__ = [
     "AbortTurn",
     "Agent",
     "AgentEventType",
+    "AgentResult",
     "ChatCommit",
+    "StructuredOutputError",
+    "StructuredValidator",
     "ChatMeta",
     "ChatStore",
     "Consolidator",
