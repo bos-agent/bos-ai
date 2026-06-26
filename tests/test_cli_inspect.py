@@ -86,3 +86,36 @@ def test_inspect_preset_flagged(tmp_path, monkeypatch):
     assert harness["is_preset"] is True
     assert harness["source"] == "preset"
     assert harness["preset_name"] == "default"
+
+
+def test_inspect_agent_reports_resolved_capabilities(tmp_path, monkeypatch):
+    monkeypatch.delenv("BOS_CONFIG", raising=False)
+    _init_project(tmp_path)
+    monkeypatch.chdir(tmp_path)
+
+    result = _invoke(["inspect", "--agent", "main", "--json"])
+
+    assert result.exit_code == 0, result.output
+    report = json.loads(result.output)
+    # Agent mode replaces the global capability/extension-point sections.
+    assert "agent" in report
+    assert "capabilities" not in report
+    agent = report["agent"]
+    assert agent["kind"] == "main"
+    assert "SkillsPlugin" in agent["plugins"]
+    # The resolved tool set includes plugin-contributed tools (e.g. LoadSkill),
+    # not just the globally registered ones.
+    assert "LoadSkill" in agent["tools"]
+    assert "ReadFile" in agent["tools"]
+    assert isinstance(agent["skills"], dict)
+
+
+def test_inspect_agent_unknown_errors(tmp_path, monkeypatch):
+    monkeypatch.delenv("BOS_CONFIG", raising=False)
+    _init_project(tmp_path)
+    monkeypatch.chdir(tmp_path)
+
+    result = _invoke(["inspect", "--agent", "does-not-exist"])
+
+    assert result.exit_code != 0
+    assert "not a registered agent kind" in result.output

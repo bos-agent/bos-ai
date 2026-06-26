@@ -3,7 +3,9 @@
 Reports what the active workspace resolves to: paths and config source, the
 selected harness implementations, gateway status, runtime topology, and the
 capabilities (agents, plugins, tools, skills) and extension points available
-after bootstrap. Read-only — it never starts the gateway or mutates config.
+after bootstrap. With ``--agent NAME`` it instead reflects a single agent's
+resolved plugins, tools, and skills by building it through the harness.
+Read-only — it never starts the gateway or mutates config.
 """
 
 from __future__ import annotations
@@ -156,7 +158,52 @@ def _extension_points_info() -> dict[str, dict[str, str]]:
     }
 
 
-def _collect(ctx, workspace_dir: str | None) -> dict[str, Any]:
+async def _agent_capabilities(ws, agent_kind: str) -> dict[str, Any]:
+    """Reflect the plugins, tools, and skills a specific agent resolves to.
+
+    The inspector is authoritative over agent internals: it builds the agent
+    through the harness exactly as the runtime would, then reads its private
+    resolved tool set and bound plugins rather than re-deriving config — so it
+    reports precisely what that agent sees, after include/exclude filtering and
+    plugin-contributed tools are merged in.
+    """
+    from bos.core import AgentRegistry, _pick_collection
+    from bos.plugins.skills.plugin import SkillsAgentPlugin
+
+    if not AgentRegistry.has_registered(agent_kind):
+        known = ", ".join(sorted(AgentRegistry.describe())) or "none"
+        raise click.ClickException(f"Agent {agent_kind!r} is not a registered agent kind. Known: {known}")
+
+    harness = ws.harness()
+    await harness.__aenter__()
+    try:
+        agent = await harness.create_agent(agent_kind)
+        bound = list(getattr(agent._prompt_provider, "_plugins", []))
+
+        skills: dict[str, str] = {}
+        for plugin in bound:
+            if not isinstance(plugin, SkillsAgentPlugin):
+                continue
+            try:
+                metas = await plugin._loader.search_skills()
+            except Exception as exc:
+                skills = {"<error>": str(exc)}
+                break
+            metas = _pick_collection(metas, plugin._allow, plugin._exclude)
+            skills = {name: (meta.description or "").strip() for name, meta in metas.items()}
+
+        return {
+            "kind": agent._kind,
+            "name": agent._name,
+            "plugins": sorted({plugin.name for plugin in bound}),
+            "tools": agent._tools.describe_usage(),
+            "skills": skills,
+        }
+    finally:
+        await harness.__aexit__(None, None, None)
+
+
+def _collect(ctx, workspace_dir: str | None, agent_kind: str | None) -> dict[str, Any]:
     from bos.cli.commands.agent import _build_workspace_for_daemon
 
     ws = _build_workspace_for_daemon(ctx, workspace_dir)
@@ -169,16 +216,24 @@ def _collect(ctx, workspace_dir: str | None) -> dict[str, Any]:
     }
 
     # Loading external agents + extensions populates the registries the
-    # capability/extension-point sections read from. Best-effort: a broken
-    # extension should not blank out the paths/gateway info already gathered.
+    # capability sections read from. Best-effort: a broken extension should not
+    # blank out the paths/gateway info already gathered.
     try:
         ws.resolve_agents()
         ws.bootstrap_platform()
+    except Exception as exc:
+        if agent_kind:
+            report["agent"] = {"kind": agent_kind, "error": str(exc)}
+        else:
+            report["capabilities"] = {"<error>": str(exc)}
+            report["extension_points"] = {}
+        return report
+
+    if agent_kind:
+        report["agent"] = asyncio.run(_agent_capabilities(ws, agent_kind))
+    else:
         report["capabilities"] = _capabilities_info(ws)
         report["extension_points"] = _extension_points_info()
-    except Exception as exc:
-        report["capabilities"] = {"<error>": str(exc)}
-        report["extension_points"] = {}
 
     return report
 
@@ -188,7 +243,6 @@ def _collect(ctx, workspace_dir: str | None) -> dict[str, Any]:
 
 def _render_text(report: dict[str, Any]) -> None:
     from rich.console import Console
-    from rich.table import Table
 
     console = Console()
     h = report["harness"]
@@ -233,19 +287,13 @@ def _render_text(report: dict[str, Any]) -> None:
     for ch in r["channels"]:
         console.print(f"  channel:       {ch['channel_id']} [{ch['type']}] → {ch['target_actor']}")
 
+    if "agent" in report:
+        _render_agent(console, report["agent"])
+        return
+
     caps = report.get("capabilities", {})
     for label in ("agents", "plugins", "tools", "skills"):
-        items = caps.get(label, {})
-        console.print(f"\n[bold]{label.capitalize()}[/] ({len(items)})")
-        if not items:
-            console.print("  —")
-            continue
-        table = Table(show_header=False, box=None, pad_edge=False, padding=(0, 2, 0, 2))
-        table.add_column(style="cyan", no_wrap=True)
-        table.add_column(overflow="fold")
-        for name, desc in sorted(items.items()):
-            table.add_row(name, _shorten(desc))
-        console.print(table)
+        _render_caps_table(console, label.capitalize(), caps.get(label, {}))
 
     eps = report.get("extension_points", {})
     if eps:
@@ -253,6 +301,34 @@ def _render_text(report: dict[str, Any]) -> None:
         for ep_name, impls in eps.items():
             names = ", ".join(sorted(impls)) or "—"
             console.print(f"  {ep_name}: {names}")
+
+
+def _render_agent(console, a: dict[str, Any]) -> None:
+    name = a.get("name")
+    suffix = f" [dim](name={name})[/]" if name and name != a.get("kind") else ""
+    console.print(f"\n[bold]Agent[/] [cyan]{a.get('kind')}[/]{suffix}")
+    if a.get("error"):
+        console.print(f"  [red]error: {a['error']}[/]")
+        return
+    plugins = a.get("plugins", [])
+    console.print(f"  plugins ({len(plugins)}): " + (", ".join(plugins) or "—"))
+    _render_caps_table(console, "Tools", a.get("tools", {}))
+    _render_caps_table(console, "Skills", a.get("skills", {}))
+
+
+def _render_caps_table(console, label: str, items: dict[str, str]) -> None:
+    from rich.table import Table
+
+    console.print(f"\n[bold]{label}[/] ({len(items)})")
+    if not items:
+        console.print("  —")
+        return
+    table = Table(show_header=False, box=None, pad_edge=False, padding=(0, 2, 0, 2))
+    table.add_column(style="cyan", no_wrap=True)
+    table.add_column(overflow="fold")
+    for name, desc in sorted(items.items()):
+        table.add_row(name, _shorten(desc))
+    console.print(table)
 
 
 def _shorten(text: str, limit: int = 100) -> str:
@@ -263,6 +339,13 @@ def _shorten(text: str, limit: int = 100) -> str:
 @click.command(name="inspect")
 @click.option("--json", "as_json", is_flag=True, default=False, help="Emit the report as JSON.")
 @click.option(
+    "-a",
+    "--agent",
+    "agent_kind",
+    default=None,
+    help="Inspect a single agent: the plugins, tools, and skills it resolves to.",
+)
+@click.option(
     "-w",
     "--workspace",
     "workspace_dir",
@@ -270,13 +353,17 @@ def _shorten(text: str, limit: int = 100) -> str:
     help="Override the workspace directory (defaults to '.' or project root).",
 )
 @click.pass_context
-def inspect(ctx, as_json: bool, workspace_dir: str | None):
+def inspect(ctx, as_json: bool, agent_kind: str | None, workspace_dir: str | None):
     """Show harness-level info: paths, gateway, capabilities, extension points.
+
+    With ``--agent NAME``, instead reports the plugins, tools, and skills that
+    agent resolves to (its filtered, plugin-merged view) by building it through
+    the harness.
 
     Read-only. Honors ``-c <preset|file>`` like the gateway commands; with no
     config it discovers the project, falling back to the ``default`` preset.
     """
-    report = _collect(ctx, workspace_dir)
+    report = _collect(ctx, workspace_dir, agent_kind)
     if as_json:
         click.echo(json_lib.dumps(report, indent=2, default=str))
     else:
