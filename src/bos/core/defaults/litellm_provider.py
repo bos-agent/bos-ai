@@ -34,7 +34,7 @@ def _normalize_litellm_message(message: dict[str, Any]) -> dict[str, Any]:
     return {**message, "content": normalized}
 
 
-@ep_provider(name="_default")
+@ep_provider(name="litellm")
 async def litellm_complete(messages: list[dict], model: str, **kwargs: Any) -> LLMResponse:
     import litellm
 

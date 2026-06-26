@@ -608,10 +608,10 @@ class Workspace:
         return AgentHarness(
             bos_dir=self.bos_dir,
             workspace=self.workspace,
-            consolidator=kwargs.get("consolidator", "_default"),
-            chat_store=kwargs.get("chat_store", "_default"),
-            mail_route=kwargs.get("mail_route", "_default"),
-            job_runner=kwargs.get("job_runner", "_default"),
+            consolidator=kwargs.get("consolidator", "LLMConsolidator"),
+            chat_store=kwargs.get("chat_store", "JsonlChatStore"),
+            mail_route=kwargs.get("mail_route", "JsonlMailRoute"),
+            job_runner=kwargs.get("job_runner", "InProcJobRunner"),
             interceptors=kwargs.get("interceptors", []),
         )
 

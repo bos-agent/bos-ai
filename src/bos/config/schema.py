@@ -89,10 +89,10 @@ class HarnessConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    consolidator: str = "_default"
-    chat_store: str = "_default"
-    mail_route: str = "_default"
-    job_runner: str = "_default"
+    consolidator: str = "LLMConsolidator"
+    chat_store: str = "JsonlChatStore"
+    mail_route: str = "JsonlMailRoute"
+    job_runner: str = "InProcJobRunner"
     interceptors: list[str] = Field(default_factory=list)
 
 

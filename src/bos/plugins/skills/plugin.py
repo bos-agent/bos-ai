@@ -46,7 +46,9 @@ def _normalize_skill_dirs(skill_dirs: Any) -> tuple[str, ...]:
 
 
 def _loader_cache_key(config: Mapping[str, Any]) -> tuple[str, tuple[str, ...]]:
-    return str(config.get("loader", "_default")), _normalize_skill_dirs(config.get("skill_dirs", ["skills"]))
+    return str(config.get("loader", "FileSystemSkillsLoader")), _normalize_skill_dirs(
+        config.get("skill_dirs", ["skills"])
+    )
 
 
 if TYPE_CHECKING:
@@ -91,7 +93,7 @@ class SkillsHarnessPlugin:
             "skill_dirs": ["__builtin__", "skills"],
             "allow": "*",
             "exclude": [],
-            "loader": "_default",
+            "loader": "FileSystemSkillsLoader",
             "preload": [],
             "test_tools": "*",
         }

@@ -34,7 +34,7 @@ _DEFAULT_META = {
 }
 
 
-@pep_memory_backend(name="_default")
+@pep_memory_backend(name="MarkdownMemoryBackend")
 class MarkdownMemoryBackend:
     def __init__(self, store_dir: str | Path | None = None, bos_dir: str | Path | None = None) -> None:
         store_dir = Path(store_dir).expanduser() if store_dir else "memory"

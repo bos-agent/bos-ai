@@ -18,7 +18,7 @@ def _seeded_workspace(tmp_path, monkeypatch):
         'workspace = "."\n'
         "\n"
         "[harness]\n"
-        'chat_store = "_default"\n'
+        'chat_store = "JsonlChatStore"\n'
         "\n"
         "[exts.ep_plugin.MemoryPlugin]\n"
         'backend = "in_memory"\n',
