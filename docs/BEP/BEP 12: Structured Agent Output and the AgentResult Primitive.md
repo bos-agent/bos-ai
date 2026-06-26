@@ -196,11 +196,11 @@ needs (test-only tool/loader wiring), as a later, separate step. Until then `llm
 3. ✅ **`Agent.run` + `ask` wrapper** — loop moved into `run`; `iterations`/`usage` aggregated; `ask` delegates and returns `.output`.
 4. ✅ **Structured path in `run`** — `schema` → provider hint + injected validator + bounded `max_schema_retries`; raises `StructuredOutputError` on exhaustion / unusable finish reason.
 
-**Tracks 5–7 — the `AgentRunner` unification (this update):**
+**Tracks 5–7 — the `AgentRunner` unification — SHIPPED:**
 
-5. **`AgentRunner` port + adapter** — add the `AgentRunner` Protocol to `contract.py`; implement the single harness adapter over `create_agent` + `Agent.run` (generalizing `_HarnessSubagentRuntime`, with optional `context`).
-6. **Swap `PluginServices`** — replace `subagents` + `background_llm` with `agent_runner`; update harness wiring to construct and inject the adapter.
-7. **Migrate callers + delete old lanes** — `AskSubagent` → `agent_runner.run(kind=…, parent=ctx.parent)`; `DefaultMemoryConsolidator` → `agent_runner.run(agent_cfg=…, schema=…)`; delete `SubagentRuntime`, `BackgroundLLM`, `DefaultBackgroundLLM`, `_HarnessSubagentRuntime`, the two `PluginServices` fields, harness wiring, and `tests/test_background_llm.py`.
+5. ✅ **`AgentRunner` port + adapter** — `AgentRunner` Protocol in `contract.py`; single harness adapter `_HarnessAgentRunner` over `create_agent` + `Agent.run` (generalizing the old `_HarnessSubagentRuntime`, with optional `parent: ParentTurn`). Chat-ids via the unified `make_internal_chat_id(tag, parent_chat_id=None)`.
+6. ✅ **Swap `PluginServices`** — `subagents` + `background_llm` replaced by a single `agent_runner: AgentRunner | None`; harness constructs and injects the adapter.
+7. ✅ **Migrate callers + delete old lanes** — `AskSubagent` → `agent_runner.run(kind=…, parent=ctx.parent)`; `DefaultMemoryConsolidator` → `agent_runner.run(agent_cfg=…, schema=…)`. Deleted `SubagentRuntime`, `BackgroundLLM`, `DefaultBackgroundLLM`, `_HarnessSubagentRuntime`, the two `PluginServices` fields, the harness wiring, and `tests/test_background_llm.py`. Remaining deferred: fold `PluginServices.llm`/`consolidator` into `agent_runner` once the skills `_SkillTestRuntime` migrates (Open Issue out of scope here), and collapse `ToolContext` onto `ParentTurn` (Open Issue #7).
 
 Tracks 5–7 depend on 1–4 (shipped) and on `create_agent`/`Agent.run` being reachable from the adapter (they are, inside an active harness). **Out of scope (later, verify first):** folding `PluginServices.llm`/`consolidator` into `agent_runner` once the skills `_SkillTestRuntime` migrates.
 

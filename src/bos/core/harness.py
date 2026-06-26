@@ -19,7 +19,6 @@ from .agent import AbortTurn, Agent, TurnContext
 from .contract import (
     AgentPlugin,
     AgentResult,
-    BackgroundLLM,
     ChatStore,
     Consolidator,
     EventBus,
@@ -31,7 +30,6 @@ from .contract import (
     ParentTurn,
     PluginServices,
     ToolAttributes,
-    ToolContext,
     TurnInterceptor,
     ep_plugin,
     ep_tool,
@@ -220,36 +218,6 @@ class _PluginPromptProvider:
         return out
 
 
-class _HarnessSubagentRuntime:
-    """Adapter that implements SubagentRuntime using AgentHarness internals."""
-
-    def __init__(self, harness: AgentHarness) -> None:
-        self._harness = harness
-
-    async def ask(
-        self,
-        kind: str,
-        message: str,
-        *,
-        context: ToolContext,
-        agent_cfg: dict[str, Any] | None = None,
-    ) -> str:
-        child_chat_id = make_internal_chat_id(kind, context.chat_id)
-        agent = await self._harness.create_agent(kind, agent_cfg)
-        child_event_sink = derive_event_sink(
-            context.event_sink,
-            parent_turn_id=context.turn_id,
-            parent_chat_id=context.chat_id,
-            parent_agent_name=context.agent_name,
-        )
-        return await agent.ask(
-            child_chat_id,
-            message,
-            ctx_metadata={"subagent": kind, "ref_chat_id": context.chat_id},
-            event_sink=child_event_sink,
-        )
-
-
 class _HarnessAgentRunner:
     """Adapter implementing :class:`AgentRunner` over AgentHarness internals (BEP 12).
 
@@ -331,7 +299,6 @@ class AgentHarness:
         self.llm: LLMClient | None = None
         self.events: EventBus | None = None
         self.jobs: JobRunner | None = None
-        self.background_llm: BackgroundLLM | None = None
 
         # Plugin state
         self._harness_plugins: dict[str, HarnessPlugin] = {}
@@ -358,9 +325,8 @@ class AgentHarness:
         self.consolidator = await self._create_consolidator()
         self.interceptor = ChainInterceptor(await self._resolve_interceptors(self._interceptors_impl))
 
-        # BEP 11 services: in-process EventBus, JobRunner, BackgroundLLM.
+        # BEP 11 services: in-process EventBus, JobRunner.
         from bos.core.contract import ep_job_runner
-        from bos.core.defaults.background_llm import DefaultBackgroundLLM
         from bos.core.defaults.eventbus import DefaultEventBus
 
         self.events = DefaultEventBus()
@@ -368,7 +334,6 @@ class AgentHarness:
         assert self.jobs is not None  # ep_job_runner has a _default, so creation never returns None
         await self.jobs.start()
         self._owned.append(self.jobs)
-        self.background_llm = DefaultBackgroundLLM(self.llm)
 
         # Build plugin services
         self._plugin_services = PluginServices(
@@ -377,10 +342,8 @@ class AgentHarness:
             llm=self.llm,
             chat_store=self.chat_store,
             consolidator=self.consolidator,
-            subagents=_HarnessSubagentRuntime(self),
             events=self.events,
             jobs=self.jobs,
-            background_llm=self.background_llm,
             agent_runner=_HarnessAgentRunner(self),
         )
 
@@ -389,7 +352,7 @@ class AgentHarness:
 
     async def __aexit__(self, *exc) -> None:
         # Drain BEP 11 JobRunner first — gives in-flight jobs a bounded window
-        # while BackgroundLLM/ChatStore are still alive (BEP 11 §4).
+        # while the ChatStore is still alive (BEP 11 §4).
         if self.jobs is not None:
             try:
                 await self.jobs.drain(timeout=5.0)

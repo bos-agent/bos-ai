@@ -35,7 +35,6 @@ async def _setup_plugin(tmp_path, *, consolidation_enabled=False, idle_after=300
         workspace=tmp_path,
         llm=_StubLLM(),
         consolidator=None,
-        subagents=None,
         chat_store=chat_store,
         events=bus,
         jobs=runner,

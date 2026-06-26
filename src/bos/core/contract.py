@@ -201,23 +201,6 @@ ep_job_runner = ExtensionPoint(
 )
 
 
-# ── BEP 11 §3: Background LLM ──────────────────────────────────────────────
-
-
-@runtime_checkable
-class BackgroundLLM(Protocol):
-    async def ask(
-        self,
-        *,
-        messages: list[dict[str, Any]],
-        model: str | None = None,
-        reasoning_effort: ReasoningEffort | None = None,
-        tools: list[dict[str, Any]] | None = None,
-        response_schema: dict[str, Any] | None = None,
-        metadata: dict[str, Any] | None = None,
-    ) -> Any: ...
-
-
 ep_mail_route = ExtensionPoint(
     name="ep_mail_route",
     description="MailRoute. Used for message routing between agents. It should implement the MailRoute protocol.",
@@ -311,20 +294,6 @@ ep_plugin = ExtensionPoint(
 )
 
 
-class SubagentRuntime(Protocol):
-    async def ask(
-        self,
-        kind: str,
-        message: str,
-        *,
-        context: ToolContext,
-        agent_cfg: dict[str, Any] | None = None,
-    ) -> str:
-        """Delegate to a configured subagent (by agent ``kind``) and return its
-        response. ``context`` is the invoking tool's context (the parent turn)."""
-        ...
-
-
 class AgentRunner(Protocol):
     """Spin up a *disposable* agent and return its result (BEP 12).
 
@@ -361,14 +330,11 @@ class PluginServices:
     workspace: Path
     llm: Any  # LLMClient
     consolidator: Consolidator
-    subagents: SubagentRuntime
     chat_store: ChatStore
     events: EventBus | None = None
     jobs: JobRunner | None = None
-    background_llm: BackgroundLLM | None = None
-    # BEP 12: the unified disposable-agent runner. Added additively alongside
-    # ``subagents``/``background_llm``; those two fold away once their callers
-    # migrate to ``agent_runner``.
+    # BEP 12: the single disposable-agent runner. Plugins guard on ``is None``
+    # (the subagent tool requires it; memory consolidation skips when absent).
     agent_runner: AgentRunner | None = None
 
 
@@ -409,7 +375,6 @@ class HarnessPlugin(Protocol):
 __all__ = [
     # ── Outer-ring contracts owned here ──
     "AgentPlugin",
-    "BackgroundLLM",
     "BaseChannel",
     "Channel",
     "Closeable",
@@ -429,7 +394,6 @@ __all__ = [
     "SessionEvent",
     "SessionEventKind",
     "SettingsT",
-    "SubagentRuntime",
     "ep_agent",
     "ep_channel",
     "ep_chat_store",

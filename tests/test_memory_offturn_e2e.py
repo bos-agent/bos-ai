@@ -49,7 +49,6 @@ async def test_mid_chat_fact_persists_into_next_session(tmp_path):
         workspace=tmp_path,
         llm=None,
         consolidator=None,
-        subagents=None,
         chat_store=chat_store,
         events=bus,
         jobs=runner,
