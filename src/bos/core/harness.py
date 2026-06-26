@@ -1,14 +1,12 @@
 from __future__ import annotations
 
 import asyncio
-import contextvars
 import logging
 import os
-import re
-import uuid
 from pathlib import Path
 from typing import Any
 
+from ._chat_store_utils import make_internal_chat_id
 from ._utils import (
     _aclose,
     _allowed,
@@ -20,7 +18,7 @@ from ._utils import (
 from .agent import AbortTurn, Agent, TurnContext
 from .contract import (
     AgentPlugin,
-    BackgroundLLM,
+    AgentResult,
     ChatStore,
     Consolidator,
     EventBus,
@@ -28,9 +26,10 @@ from .contract import (
     InterceptorStage,
     JobRunner,
     MailRoute,
+    MessageContent,
+    ParentTurn,
     PluginServices,
     ToolAttributes,
-    ToolContext,
     TurnInterceptor,
     ep_plugin,
     ep_tool,
@@ -41,6 +40,20 @@ from .registry import ToolRegistry
 from .sinks import derive_event_sink
 
 logger = logging.getLogger(__name__)
+
+_structured_validator_singleton: Any = None
+
+
+def _default_structured_validator() -> Any:
+    """The default (jsonschema-backed) structured-output validator injected into
+    agents (BEP 12). Lazily imported so the agent ring stays stdlib-pure and the
+    third-party dep is only pulled when an agent is actually built."""
+    global _structured_validator_singleton
+    if _structured_validator_singleton is None:
+        from bos.core.defaults.structured_validator import JsonSchemaValidator
+
+        _structured_validator_singleton = JsonSchemaValidator()
+    return _structured_validator_singleton
 
 
 class AgentRegistry:
@@ -79,9 +92,6 @@ class AgentRegistry:
     @classmethod
     def describe(cls) -> dict[str, str]:
         return {name: entry["description"] for name, entry in cls._registry.items()}
-
-
-CURRENT_HARNESS: contextvars.ContextVar[AgentHarness] = contextvars.ContextVar("current_harness")
 
 
 class ResolvedToolSet:
@@ -208,33 +218,52 @@ class _PluginPromptProvider:
         return out
 
 
-class _HarnessSubagentRuntime:
-    """Adapter that implements SubagentRuntime using AgentHarness internals."""
+class _HarnessAgentRunner:
+    """Adapter implementing :class:`AgentRunner` over AgentHarness internals (BEP 12).
+
+    The single way a plugin/tool spins up a disposable agent. ``parent`` is
+    optional: on-turn callers (the AskSubagent tool) pass it so the child chat
+    nests under the parent and the event sink is parented; off-turn callers
+    (the memory consolidator, run inside a job) omit it and get a standalone
+    internal chat-id with no parent sink. Either way the disposable agent has a
+    fresh chat-id, so there is no chat history and no compaction recursion.
+    """
 
     def __init__(self, harness: AgentHarness) -> None:
         self._harness = harness
 
-    async def ask(
+    async def run(
         self,
-        role: str,
-        message: str,
+        message: MessageContent,
         *,
-        parent: ToolContext,
+        kind: str | None = None,
         agent_cfg: dict[str, Any] | None = None,
-    ) -> str:
-        child_chat_id = self._harness._make_subagent_chat_id(parent.chat_id, role)
-        agent = await self._harness.create_agent(role, agent_cfg)
-        child_event_sink = derive_event_sink(
-            parent.event_sink,
-            parent_turn_id=parent.turn_id,
-            parent_chat_id=parent.chat_id,
-            parent_agent_name=parent.agent_name,
-        )
-        return await agent.ask(
+        schema: dict[str, Any] | None = None,
+        parent: ParentTurn | None = None,
+        model: str | None = None,
+    ) -> AgentResult:
+        agent = await self._harness.create_agent(kind, agent_cfg)
+        tag = kind or "agent"
+        if parent is not None:
+            child_chat_id = make_internal_chat_id(tag, parent.chat_id)
+            child_event_sink = derive_event_sink(
+                parent.event_sink,
+                parent_turn_id=parent.turn_id,
+                parent_chat_id=parent.chat_id,
+                parent_agent_name=parent.agent_name,
+            )
+            ctx_metadata: dict[str, Any] = {"subagent": tag, "ref_chat_id": parent.chat_id}
+        else:
+            child_chat_id = make_internal_chat_id(tag)
+            child_event_sink = None
+            ctx_metadata = {"subagent": tag}
+        return await agent.run(
             child_chat_id,
             message,
-            ctx_metadata={"subagent": role, "ref_chat_id": parent.chat_id},
+            schema=schema,
+            ctx_metadata=ctx_metadata,
             event_sink=child_event_sink,
+            llm_args={"model": model} if model else None,
         )
 
 
@@ -262,7 +291,7 @@ class AgentHarness:
         self._interceptors_impl = interceptors or []
 
         self._owned: list[Any] = []
-        self._token: contextvars.Token | None = None
+        self._active: bool = False
         self.mail_route: MailRoute | None = None
         self.chat_store: ChatStore | None = None
         self.consolidator: Consolidator | None = None
@@ -270,7 +299,6 @@ class AgentHarness:
         self.llm: LLMClient | None = None
         self.events: EventBus | None = None
         self.jobs: JobRunner | None = None
-        self.background_llm: BackgroundLLM | None = None
 
         # Plugin state
         self._harness_plugins: dict[str, HarnessPlugin] = {}
@@ -280,11 +308,8 @@ class AgentHarness:
         self._compaction_locks: dict[str, asyncio.Lock] = {}
 
     async def __aenter__(self):
-        if self._token is not None:
-            raise RuntimeError(
-                "AgentHarness is already active. Use CURRENT_HARNESS.get() to access "
-                "the current harness instead of re-entering."
-            )
+        if self._active:
+            raise RuntimeError("AgentHarness is already active; do not re-enter the same instance.")
 
         # The assembly ring registers its own ``_default`` adapters (consolidator,
         # litellm provider, jsonl chat store/mailbox, job runner) — the harness
@@ -300,9 +325,8 @@ class AgentHarness:
         self.consolidator = await self._create_consolidator()
         self.interceptor = ChainInterceptor(await self._resolve_interceptors(self._interceptors_impl))
 
-        # BEP 11 services: in-process EventBus, JobRunner, BackgroundLLM.
+        # BEP 11 services: in-process EventBus, JobRunner.
         from bos.core.contract import ep_job_runner
-        from bos.core.defaults.background_llm import DefaultBackgroundLLM
         from bos.core.defaults.eventbus import DefaultEventBus
 
         self.events = DefaultEventBus()
@@ -310,7 +334,6 @@ class AgentHarness:
         assert self.jobs is not None  # ep_job_runner has a _default, so creation never returns None
         await self.jobs.start()
         self._owned.append(self.jobs)
-        self.background_llm = DefaultBackgroundLLM(self.llm)
 
         # Build plugin services
         self._plugin_services = PluginServices(
@@ -319,18 +342,17 @@ class AgentHarness:
             llm=self.llm,
             chat_store=self.chat_store,
             consolidator=self.consolidator,
-            subagents=_HarnessSubagentRuntime(self),
             events=self.events,
             jobs=self.jobs,
-            background_llm=self.background_llm,
+            agent_runner=_HarnessAgentRunner(self),
         )
 
-        self._token = CURRENT_HARNESS.set(self)
+        self._active = True
         return self
 
     async def __aexit__(self, *exc) -> None:
         # Drain BEP 11 JobRunner first — gives in-flight jobs a bounded window
-        # while BackgroundLLM/ChatStore are still alive (BEP 11 §4).
+        # while the ChatStore is still alive (BEP 11 §4).
         if self.jobs is not None:
             try:
                 await self.jobs.drain(timeout=5.0)
@@ -348,16 +370,14 @@ class AgentHarness:
             await _aclose(resource)
         self._owned.clear()
 
-        if self._token is not None:
-            CURRENT_HARNESS.reset(self._token)
-            self._token = None
+        self._active = False
 
     async def create_agent(
         self,
         kind: str | None = None,
         agent_cfg: dict[str, Any] | None = None,
     ) -> Agent:
-        if CURRENT_HARNESS.get(None) is None:
+        if not self._active:
             raise RuntimeError("create_agent must be called within an active AgentHarness context.")
 
         # Resolve agent defaults from AgentRegistry so plugin config is visible
@@ -403,6 +423,7 @@ class AgentHarness:
             "prompt_provider": _PluginPromptProvider(plugins),
             "chat_compaction_lock": self._get_compaction_lock,
             "workspace": str(self._workspace),
+            "structured_validator": _default_structured_validator(),
         }
 
         return _apply(Agent, kwargs)
@@ -526,9 +547,3 @@ class AgentHarness:
         if chat_id not in self._compaction_locks:
             self._compaction_locks[chat_id] = asyncio.Lock()
         return self._compaction_locks[chat_id]
-
-    @staticmethod
-    def _make_subagent_chat_id(parent_chat_id: str, role: str) -> str:
-        agent_tag = re.sub(r"[^a-z0-9]+", "-", role.lower()).strip("-") or "agent"
-        agent_tag = agent_tag[:10]
-        return f"{parent_chat_id}~{agent_tag}{uuid.uuid4().hex[:8]}"

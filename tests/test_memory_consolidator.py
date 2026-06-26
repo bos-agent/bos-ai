@@ -1,10 +1,6 @@
-"""DefaultMemoryConsolidator — propose() over a stub BackgroundLLM."""
-
-import json
+"""DefaultMemoryConsolidator — propose() over a stub AgentRunner."""
 
 import pytest
-
-from bos.core.agent import LLMResponse
 
 
 class TestStructural:
@@ -40,16 +36,24 @@ class TestStructural:
         assert "source_turn_ids" in item_required
 
 
-class _StubBackgroundLLM:
-    def __init__(self, payload, *, raw: str | None = None):
+class _StubAgentRunner:
+    """Stands in for the disposable consolidation agent (BEP 12): records the
+    run() call and returns a pre-canned validated payload, or raises."""
+
+    def __init__(self, payload, *, error: Exception | None = None):
         self._payload = payload
-        self._raw = raw
+        self._error = error
         self.calls = []
 
-    async def ask(self, **kwargs):
-        self.calls.append(kwargs)
-        content = self._raw if self._raw is not None else json.dumps(self._payload)
-        return LLMResponse(content=content)
+    async def run(self, message, *, kind=None, agent_cfg=None, schema=None, parent=None, model=None):
+        from bos.core import AgentResult
+
+        self.calls.append(
+            {"message": message, "kind": kind, "agent_cfg": agent_cfg, "schema": schema, "parent": parent}
+        )
+        if self._error is not None:
+            raise self._error
+        return AgentResult(output=self._payload, structured=True)
 
 
 class TestDefaultConsolidator:
@@ -67,7 +71,7 @@ class TestDefaultConsolidator:
                 {"op": "NOOP", "reason": "considered, declined"},
             ]
         }
-        blm = _StubBackgroundLLM(payload)
+        blm = _StubAgentRunner(payload)
         c = DefaultMemoryConsolidator(blm, maxim_keys={"user"})
         req = MemoryConsolidationRequest(
             chat_id="c1",
@@ -86,9 +90,10 @@ class TestDefaultConsolidator:
         assert ops[1].reason == "considered, declined"
 
     @pytest.mark.asyncio
-    async def test_unparseable_response_raises_consolidation_unavailable(self):
-        """A non-JSON response is a failure, not 'nothing to consolidate'. It must
-        raise so the job leaves the watermark in place and retries the turns."""
+    async def test_structured_output_error_raises_consolidation_unavailable(self):
+        """A failed structured proposal is a failure, not 'nothing to consolidate'.
+        It must raise so the job leaves the watermark in place and retries the turns."""
+        from bos.core.agent import StructuredOutputError
         from bos.plugins.memory.consolidator import (
             ConsolidationPolicy,
             ConsolidationUnavailable,
@@ -96,7 +101,7 @@ class TestDefaultConsolidator:
             MemoryConsolidationRequest,
         )
 
-        blm = _StubBackgroundLLM({}, raw="not json at all")
+        blm = _StubAgentRunner({}, error=StructuredOutputError("no valid structured output"))
         c = DefaultMemoryConsolidator(blm, maxim_keys={"user"})
         req = MemoryConsolidationRequest(
             chat_id="c1",
@@ -120,7 +125,7 @@ class TestDefaultConsolidator:
             MemoryConsolidationRequest,
         )
 
-        blm = _StubBackgroundLLM({"operations": []})
+        blm = _StubAgentRunner({"operations": []})
         c = DefaultMemoryConsolidator(blm, maxim_keys={"user"})
         req = MemoryConsolidationRequest(
             chat_id="c1",
@@ -134,12 +139,15 @@ class TestDefaultConsolidator:
             policy=ConsolidationPolicy(),
         )
         await c.propose(req)
-        sent_schema = blm.calls[0]["response_schema"]
+        sent_schema = blm.calls[0]["schema"]
         assert sent_schema["type"] == "object"
         assert "operations" in sent_schema["properties"]
         item_schema = sent_schema["properties"]["operations"]["items"]
         assert "op" in item_schema["properties"]
         assert set(item_schema["required"]) >= {"op", "reason"}
+        # Off-turn disposable agent: system prompt via agent_cfg, no parent turn.
+        assert blm.calls[0]["agent_cfg"]["system_prompt"]
+        assert blm.calls[0]["parent"] is None
 
     @pytest.mark.asyncio
     async def test_prompt_includes_transcript_and_candidates(self):
@@ -151,7 +159,7 @@ class TestDefaultConsolidator:
         )
         from bos.plugins.memory.scoped_memory import MemoryEntry
 
-        blm = _StubBackgroundLLM({"operations": []})
+        blm = _StubAgentRunner({"operations": []})
         c = DefaultMemoryConsolidator(blm, maxim_keys={"user"})
         req = MemoryConsolidationRequest(
             chat_id="c1",
@@ -165,7 +173,7 @@ class TestDefaultConsolidator:
             policy=ConsolidationPolicy(),
         )
         await c.propose(req)
-        prompt = blm.calls[0]["messages"][-1]["content"]
+        prompt = blm.calls[0]["message"]
         assert "dark mode" in prompt
         assert "m1" in prompt
         assert "prefers light mode" in prompt

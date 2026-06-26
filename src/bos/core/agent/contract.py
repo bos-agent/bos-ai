@@ -287,6 +287,23 @@ class LLMResponse:
         return self.content or self.reasoning_content or ""
 
 
+@dataclass
+class AgentResult:
+    """Result of an :meth:`Agent.run` turn — the final response plus run metadata.
+
+    ``output`` is the final text when no ``schema`` was requested; when a schema
+    was supplied and validated it is the parsed object and ``structured`` is True.
+    ``usage`` aggregates per-iteration token counts across the turn's LLM calls.
+    """
+
+    output: Any
+    structured: bool = False
+    iterations: int = 0
+    usage: dict[str, int] = field(default_factory=dict)
+    turn_id: str = ""
+    finish_reason: str | None = None
+
+
 @runtime_checkable
 class LLM(Protocol):
     """The model-completion capability the Agent depends on.
@@ -446,11 +463,30 @@ class ToolSet(Protocol):
 
 
 @dataclass(frozen=True)
-class ToolContext:
-    agent_name: str
+class ParentTurn:
+    """The parent turn a disposable agent nests under (BEP 12).
+
+    The minimal linkage an ``AgentRunner`` needs to attach a child agent to an
+    on-turn caller — the child chat-id nests under ``chat_id`` and the child's
+    events are parented to this turn. Off-turn callers pass no parent at all.
+    This is deliberately *not* ``ToolContext``: the runner is a general
+    capability, not a tool-only one, so it does not depend on the tool layer. A
+    ``ToolContext`` (the tool-invocation type) exposes one via :attr:`ToolContext.parent`.
+    """
+
     chat_id: str
     turn_id: str
+    agent_name: str
     event_sink: TurnEventSink | None = None
+
+
+@dataclass(frozen=True)
+class ToolContext:
+    # The invocation's turn linkage. ``ParentTurn`` is the single source of truth
+    # for chat_id/turn_id/agent_name/event_sink; read them via ``ctx.parent.*``.
+    # Named ``parent`` because that is its role when handed to a child agent
+    # (``AgentRunner.run(parent=ctx.parent)``).
+    parent: ParentTurn
     # Escape hatch for plugin/runtime-specific context that is intentionally
     # not modeled as a core ToolContext field.
     extra_data: Mapping[str, Any] = field(default_factory=dict)

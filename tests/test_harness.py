@@ -26,9 +26,11 @@ from bos.plugins.subagent import SubagentAgentPlugin, SubagentHarnessPlugin
 from bos.plugins.task import TaskAgentPlugin
 
 
-class _MockSubagentRuntime:
-    async def ask(self, role, message, *, parent) -> str:
-        return "mock response"
+class _MockAgentRunner:
+    async def run(self, message, *, kind=None, agent_cfg=None, schema=None, parent=None, model=None):
+        from bos.core import AgentResult
+
+        return AgentResult(output="mock response")
 
 
 def test_react_agent_local_tools_describe_ask_subagent(caplog):
@@ -37,7 +39,7 @@ def test_react_agent_local_tools_describe_ask_subagent(caplog):
 
     try:
         AgentRegistry.register(name=role, description="Available subagent", tools=[])
-        subagent = SubagentAgentPlugin(_MockSubagentRuntime(), enabled=None, disabled=[])
+        subagent = SubagentAgentPlugin(_MockAgentRunner(), enabled=None, disabled=[])
 
         with caplog.at_level(logging.WARNING):
             agent = create_test_agent(local_tools=local_tools, plugins=[subagent])
@@ -60,13 +62,44 @@ def test_react_agent_local_tools_describe_ask_subagent(caplog):
 
 
 @pytest.mark.asyncio
+async def test_ask_subagent_invokes_runner_with_parent_and_returns_output():
+    from bos.core import ParentTurn
+    from bos.core.contract import ToolContext
+
+    role = f"ask_subagent_run_{uuid.uuid4().hex}"
+    captured: dict = {}
+
+    class _CapturingRunner:
+        async def run(self, message, *, kind=None, agent_cfg=None, schema=None, parent=None, model=None):
+            from bos.core import AgentResult
+
+            captured.update(message=message, kind=kind, parent=parent)
+            return AgentResult(output="delegated answer")
+
+    local_tools = ToolRegistry("_test_tools")
+    try:
+        AgentRegistry.register(name=role, description="sub", tools=[])
+        plugin = SubagentAgentPlugin(_CapturingRunner(), enabled=None, disabled=[])
+        plugin.register_tools(local_tools)
+        ctx = ToolContext(parent=ParentTurn(chat_id="conv-1", turn_id="turn-1", agent_name="parent"))
+        out = await local_tools.invoke("AskSubagent", {"role": role, "task": "do it", "context": ctx})
+    finally:
+        AgentRegistry._registry.pop(role, None)
+
+    assert out == "delegated answer"
+    assert captured["kind"] == role
+    assert captured["message"] == "do it"
+    assert captured["parent"] == ctx.parent  # ToolContext → ParentTurn at the call site
+
+
+@pytest.mark.asyncio
 async def test_subagent_plugin_hides_prompt_and_tool_when_no_subagents():
     snapshot = dict(AgentRegistry._registry)
     AgentRegistry._registry.clear()
     try:
         AgentRegistry.register(name="_default", description="Default agent", tools=[])
         local_tools = ToolRegistry("_test_tools")
-        subagent = SubagentAgentPlugin(_MockSubagentRuntime(), enabled=None, disabled=[])
+        subagent = SubagentAgentPlugin(_MockAgentRunner(), enabled=None, disabled=[])
 
         agent = create_test_agent(local_tools=local_tools, plugins=[subagent])
 
@@ -83,7 +116,7 @@ async def test_subagent_plugin_hides_prompt_and_tool_when_no_subagents():
 async def test_subagent_plugin_string_star_matches_list_star():
     role = f"string_star_subagent_{uuid.uuid4().hex}"
     provider = SubagentHarnessPlugin()
-    provider._runtime = _MockSubagentRuntime()
+    provider._runner = _MockAgentRunner()
 
     try:
         AgentRegistry.register(name=role, description="String star subagent", tools=[])
@@ -565,7 +598,7 @@ async def test_builtin_skill_creator_discovered_and_loadable(tmp_path):
 
 @pytest.mark.asyncio
 async def test_test_skill_tool_runs_isolated_agent_and_reports_trigger(tmp_path):
-    from bos.core import LLMClient
+    from bos.core import LLMClient, ParentTurn
     from bos.core.contract import ToolContext
     from bos.plugins.skills.fs_skill_loader import FileSystemSkillsLoader
     from bos.plugins.skills.plugin import _SkillTestRuntime
@@ -602,7 +635,7 @@ async def test_test_skill_tool_runs_isolated_agent_and_reports_trigger(tmp_path)
         plugin.register_tools(registry)
         assert registry.get("TestSkill") is not None
 
-        context = ToolContext(agent_name=parent_kind, chat_id="chat", turn_id="turn")
+        context = ToolContext(parent=ParentTurn(chat_id="chat", turn_id="turn", agent_name=parent_kind))
         missing = await registry.invoke("TestSkill", {"name": "greeter", "task": "say hi", "context": context})
         assert "not found" in missing
 
@@ -821,7 +854,7 @@ async def test_plugin_prompt_sections_render_inside_system_prompt():
             MemoryAgentPlugin(store, {"user"}),
             SkillsAgentPlugin(StaticSkillsLoader(), allow=None, exclude=[]),
             TaskAgentPlugin(),
-            SubagentAgentPlugin(_MockSubagentRuntime(), enabled=None, disabled=[]),
+            SubagentAgentPlugin(_MockAgentRunner(), enabled=None, disabled=[]),
         ]
     )
     prompt = await agent._build_system_prompt(dummy_turn_context())
@@ -871,7 +904,7 @@ async def test_prompt_sections_render_first_50_items_and_warn(caplog):
             AgentRegistry.register(name=name, description=f"Subagent description {i:03}", tools=[])
 
         skills_plugin = SkillsAgentPlugin(StaticSkillsLoader(), allow=None, exclude=[])
-        subagent_plugin = SubagentAgentPlugin(_MockSubagentRuntime(), enabled=None, disabled=[])
+        subagent_plugin = SubagentAgentPlugin(_MockAgentRunner(), enabled=None, disabled=[])
 
         agent = create_test_agent(
             local_tools=local_tools,
@@ -996,6 +1029,8 @@ async def test_react_agent_first_turn_passes_only_user_text():
 
 @pytest.mark.asyncio
 async def test_react_agent_injects_runtime_tool_context():
+    from bos.core.contract import ToolContext
+
     suffix = uuid.uuid4().hex
     provider_name = f"test_tool_context_provider_{suffix}"
     tools = ToolRegistry("_test_tools")
@@ -1009,8 +1044,8 @@ async def test_react_agent_injects_runtime_tool_context():
             "required": ["text"],
         },
     )
-    def echo_with_context(text: str, chat_id: str, turn_id: str) -> dict[str, str]:
-        return {"text": text, "chat_id": chat_id, "turn_id": turn_id}
+    def echo_with_context(text: str, context: ToolContext) -> dict[str, str]:
+        return {"text": text, "chat_id": context.parent.chat_id, "turn_id": context.parent.turn_id}
 
     @ep_provider(name=provider_name)
     async def tool_context_provider(messages, model=None, **kwargs):

@@ -10,18 +10,20 @@ from bos.plugins.memory.job import MemoryConsolidationJob
 from bos.plugins.memory.operation_service import DefaultMemoryOperationService
 
 
-class _StubBLM:
-    def __init__(self, ops_payload, *, raw=None):
+class _StubAgentRunner:
+    """Disposable consolidation agent stand-in (BEP 12): returns a pre-canned
+    validated payload, or raises to simulate a failed structured proposal."""
+
+    def __init__(self, ops_payload, *, error=None):
         self._payload = ops_payload
-        self._raw = raw
+        self._error = error
 
-    async def ask(self, **kwargs):
-        import json as _json
+    async def run(self, message, *, kind=None, agent_cfg=None, schema=None, parent=None, model=None):
+        from bos.core import AgentResult
 
-        from bos.core.agent import LLMResponse
-
-        content = self._raw if self._raw is not None else _json.dumps(self._payload)
-        return LLMResponse(content=content)
+        if self._error is not None:
+            raise self._error
+        return AgentResult(output=self._payload, structured=True)
 
 
 def _msg(role, content, *, turn_id="t1"):
@@ -40,7 +42,7 @@ class TestJobRun:
             audit_path=tmp_path / "audit.jsonl",
             maxim_keys={"user"},
         )
-        blm = _StubBLM({
+        blm = _StubAgentRunner({
             "operations": [
                 {"op": "ADD", "reason": "stable preference", "content": "prefers dark mode", "importance": 7},
             ]
@@ -73,7 +75,7 @@ class TestJobRun:
         await chat_store.commit_turn("c1", [_msg("user", "just chatter")], turn_id="t1")
         wm = WatermarkStore(tmp_path / "wm.json")
         op_svc = DefaultMemoryOperationService(backend, audit_path=tmp_path / "audit.jsonl", maxim_keys={"user"})
-        consolidator = DefaultMemoryConsolidator(_StubBLM({"operations": []}), maxim_keys={"user"})
+        consolidator = DefaultMemoryConsolidator(_StubAgentRunner({"operations": []}), maxim_keys={"user"})
         head = await chat_store.get_revision("c1")
         job = MemoryConsolidationJob(
             chat_id="c1",
@@ -94,8 +96,9 @@ class TestJobRun:
 
     @pytest.mark.asyncio
     async def test_unparseable_proposal_does_not_advance_watermark(self, tmp_path):
-        """Regression: an unparseable model response must NOT burn the window. It
+        """Regression: a failed structured proposal must NOT burn the window. It
         raises (ConsolidationUnavailable), leaving the watermark for a retry."""
+        from bos.core.agent import StructuredOutputError
         from bos.plugins.memory.consolidator import ConsolidationUnavailable
 
         chat_store = InMemChatStore()
@@ -103,7 +106,9 @@ class TestJobRun:
         await chat_store.commit_turn("c1", [_msg("user", "I prefer dark mode")], turn_id="t1")
         wm = WatermarkStore(tmp_path / "wm.json")
         op_svc = DefaultMemoryOperationService(backend, audit_path=tmp_path / "audit.jsonl", maxim_keys={"user"})
-        consolidator = DefaultMemoryConsolidator(_StubBLM({}, raw="<<not json>>"), maxim_keys={"user"})
+        consolidator = DefaultMemoryConsolidator(
+            _StubAgentRunner({}, error=StructuredOutputError("no valid structured output")), maxim_keys={"user"}
+        )
         head = await chat_store.get_revision("c1")
         job = MemoryConsolidationJob(
             chat_id="c1",
@@ -172,7 +177,7 @@ class TestJobRun:
             policy=ConsolidationPolicy(),
             chat_store=InMemChatStore(),
             backend=InMemMemoryExtension(),
-            consolidator=DefaultMemoryConsolidator(_StubBLM({"operations": []}), maxim_keys={"user"}),
+            consolidator=DefaultMemoryConsolidator(_StubAgentRunner({"operations": []}), maxim_keys={"user"}),
             operation_service=op_svc,
             watermarks=WatermarkStore(tmp_path / "wm.json"),
             maxim_keys={"user"},

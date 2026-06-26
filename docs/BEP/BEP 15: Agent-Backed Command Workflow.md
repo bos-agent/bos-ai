@@ -1,6 +1,6 @@
-# BEP 12: Agent-Backed Command Workflow
+# BEP 15: Agent-Backed Command Workflow
 
-Status: **draft** (bootstrapped 2026-06-15; scope expected to expand)
+Status: **draft** (bootstrapped 2026-06-15; scope expected to expand; renumbered 12→15 on 2026-06-25 — see BEP 12: Structured Agent Output, which it depends on)
 
 ---
 
@@ -8,11 +8,11 @@ Status: **draft** (bootstrapped 2026-06-15; scope expected to expand)
 
 Most `boscli` commands today are either pure deterministic logic (scaffolding from fixed templates) or, at most, a single bare LLM completion (`_complete` in the init wizard generates specialist prose). Neither can *understand intent*: research the actual project, ask the user a clarifying question, weigh options, and produce a tailored result. As BOS grows day-2 tooling (`gen agent`, `gen tool`, `gen channel`, config edits, refactors), more commands hit the same wall — the user knows what they want in prose, but the command can only act on flags.
 
-BEP 12 defines a **reusable pattern for agent-backed commands**: a CLI command whose core work is performed by a real **in-process `Agent.ask()` turn** — custom system prompt, builtin tools and skills, a human-in-the-loop `AskUser` tool, and an isolated audit-retained message store — while the **CLI retains deterministic ownership of any mutation** to project files and config. Commands that change startup-loaded state run their generation and mutation inside a throwaway **git worktree**, smoke-verify there, and only **merge back on success** — so a bad result can never break the user's `boscli gateway start`.
+BEP 15 defines a **reusable pattern for agent-backed commands**: a CLI command whose core work is performed by a real **in-process `Agent.ask()` turn** — custom system prompt, builtin tools and skills, a human-in-the-loop `AskUser` tool, and an isolated audit-retained message store — while the **CLI retains deterministic ownership of any mutation** to project files and config. Commands that change startup-loaded state run their generation and mutation inside a throwaway **git worktree**, smoke-verify there, and only **merge back on success** — so a bad result can never break the user's `boscli gateway start`.
 
 This is a *framework BEP*, not a single feature. It specifies the shared building blocks (the agent-backed runner, the HITL tool, the audit store, the structured-output contract, and the worktree verify-before-apply lifecycle) and the seam each command plugs into. `gen agent` is the **first worked instance**; `gen tool`, `gen channel`, and future intent-driven commands are expected to reuse the same harness.
 
-It is also the sanctioned lift of BEP 9's deferred Non-Goal #1 ("LLM-assisted topology generation… explicitly deferred"): BEP 9 built the deterministic substrate; BEP 12 builds the agent layer that parameterizes it.
+It is also the sanctioned lift of BEP 9's deferred Non-Goal #1 ("LLM-assisted topology generation… explicitly deferred"): BEP 9 built the deterministic substrate; BEP 15 builds the agent layer that parameterizes it.
 
 The design metric: **a user describes intent in one sentence and ends with a tailored, already-smoke-tested change merged into their project — with zero risk to a running gateway — and adding a new agent-backed command is mostly prompt + a verify hook, not new plumbing.**
 

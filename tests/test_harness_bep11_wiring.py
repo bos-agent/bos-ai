@@ -30,7 +30,7 @@ class TestHarnessServices:
             svc = h._plugin_services
             assert svc.events is not None
             assert svc.jobs is not None
-            assert svc.background_llm is not None
+            assert svc.agent_runner is not None
             assert h.jobs is svc.jobs
 
     @pytest.mark.asyncio

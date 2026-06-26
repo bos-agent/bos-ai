@@ -11,8 +11,8 @@ from xml.sax.saxutils import escape
 from bos.core._utils import _pick_collection, _xml_attr
 from bos.core.contract import (
     AgentPlugin,
+    AgentRunner,
     PluginServices,
-    SubagentRuntime,
     TurnInterceptor,
     ep_plugin,
 )
@@ -35,7 +35,9 @@ class SubagentHarnessPlugin:
         return {"enabled": [], "disabled": [], "task_template": None}
 
     async def setup(self, services: PluginServices) -> None:
-        self._runtime: SubagentRuntime = services.subagents
+        if services.agent_runner is None:
+            raise RuntimeError("SubagentPlugin requires services.agent_runner")
+        self._runner: AgentRunner = services.agent_runner
 
     def validate_config(self, config: Mapping[str, Any]) -> None:
         enabled = config.get("enabled")
@@ -56,7 +58,7 @@ class SubagentHarnessPlugin:
         disabled = config.get("disabled", [])
         if not isinstance(disabled, list):
             disabled = []
-        return SubagentAgentPlugin(self._runtime, enabled, disabled, task_template=config.get("task_template"))
+        return SubagentAgentPlugin(self._runner, enabled, disabled, task_template=config.get("task_template"))
 
     async def teardown(self) -> None:
         pass
@@ -106,13 +108,13 @@ def _normalize_enabled(value: Any) -> list[str] | None:
 class SubagentAgentPlugin:
     def __init__(
         self,
-        runtime: SubagentRuntime,
+        runner: AgentRunner,
         enabled: list[str] | None,
         disabled: list[str],
         *,
         task_template: str | None = None,
     ) -> None:
-        self._runtime = runtime
+        self._runner = runner
         self._enabled = enabled
         self._disabled = disabled
         self._task_template = task_template
@@ -125,7 +127,7 @@ class SubagentAgentPlugin:
         if not self._available_subagents():
             return
 
-        runtime = self._runtime
+        runner = self._runner
         task_template = self._task_template
 
         @registry(
@@ -165,7 +167,8 @@ class SubagentAgentPlugin:
             if task_template:
                 task = _safe_format(task_template, role=role, task=task, message=task)
 
-            return await runtime.ask(role, task, parent=context)
+            result = await runner.run(task, kind=role, parent=context.parent)
+            return result.output
 
     async def get_system_prompt_section(self, context: TurnContext) -> str | None:
         available = self._available_subagents()

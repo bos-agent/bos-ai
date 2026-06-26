@@ -374,7 +374,6 @@ class TestHarnessConfig:
                 workspace=tmp_path,
                 llm=None,
                 consolidator=None,
-                subagents=None,
                 chat_store=None,
             )
         )

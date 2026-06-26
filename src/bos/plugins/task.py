@@ -21,6 +21,7 @@ from bos.core.registry import ToolRegistry
 
 if TYPE_CHECKING:
     from bos.core.agent import TurnContext
+    from bos.core.contract import ToolContext
 
 
 @dataclass
@@ -312,7 +313,8 @@ class TaskAgentPlugin:
                 "required": ["tasks"],
             },
         )
-        async def task_create(tasks: list[dict[str, Any]], chat_id: str = "") -> str:
+        async def task_create(tasks: list[dict[str, Any]], context: ToolContext) -> str:
+            chat_id = context.parent.chat_id
             if not tasks:
                 return "Error: 'tasks' must contain at least one task."
             for index, item in enumerate(tasks):
@@ -377,7 +379,8 @@ class TaskAgentPlugin:
                 "required": ["updates"],
             },
         )
-        async def task_update(updates: list[dict[str, Any]], chat_id: str = "") -> str:
+        async def task_update(updates: list[dict[str, Any]], context: ToolContext) -> str:
+            chat_id = context.parent.chat_id
             if not updates:
                 return "Error: 'updates' must contain at least one update."
             tl = task_lists.get(chat_id)
@@ -410,8 +413,8 @@ class TaskAgentPlugin:
             usage=_TASK_TOOL_USAGE["TaskList"],
             parameters={"type": "object", "properties": {}, "required": []},
         )
-        async def task_list(chat_id: str = "") -> str:
-            tl = task_lists.get(chat_id)
+        async def task_list(context: ToolContext) -> str:
+            tl = task_lists.get(context.parent.chat_id)
             if tl is None or not tl.tasks:
                 return "(No tasks created yet.)"
             lines = []
@@ -432,8 +435,8 @@ class TaskAgentPlugin:
                 "required": ["taskId"],
             },
         )
-        async def task_get(taskId: str, chat_id: str = "") -> str:
-            tl = task_lists.get(chat_id)
+        async def task_get(taskId: str, context: ToolContext) -> str:
+            tl = task_lists.get(context.parent.chat_id)
             if tl is None or taskId not in tl.tasks:
                 return f"Error: Task '{taskId}' not found. Use TaskList to see available tasks."
             t = tl.tasks[taskId]

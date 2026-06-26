@@ -17,6 +17,7 @@ from bos.core.actor import Envelope, Event, EventBus, MailBox, MessageType
 from .agent import (
     LLM,
     AgentEventType,
+    AgentResult,
     ChatCommit,
     ChatMeta,
     ChatStore,
@@ -26,6 +27,7 @@ from .agent import (
     LLMResponse,
     Message,
     MessageContent,
+    ParentTurn,
     PromptProvider,
     ReasoningEffort,
     TokenEstimate,
@@ -199,23 +201,6 @@ ep_job_runner = ExtensionPoint(
 )
 
 
-# ── BEP 11 §3: Background LLM ──────────────────────────────────────────────
-
-
-@runtime_checkable
-class BackgroundLLM(Protocol):
-    async def ask(
-        self,
-        *,
-        messages: list[dict[str, Any]],
-        model: str | None = None,
-        reasoning_effort: ReasoningEffort | None = None,
-        tools: list[dict[str, Any]] | None = None,
-        response_schema: dict[str, Any] | None = None,
-        metadata: dict[str, Any] | None = None,
-    ) -> Any: ...
-
-
 ep_mail_route = ExtensionPoint(
     name="ep_mail_route",
     description="MailRoute. Used for message routing between agents. It should implement the MailRoute protocol.",
@@ -309,16 +294,33 @@ ep_plugin = ExtensionPoint(
 )
 
 
-class SubagentRuntime(Protocol):
-    async def ask(
+class AgentRunner(Protocol):
+    """Spin up a *disposable* agent and return its result (BEP 12).
+
+    The single capability a plugin/tool uses to run a one-off agent, subsuming
+    both spawning a subagent (text → ``result.output``) and a structured
+    one-shot (``schema=`` → ``result.output`` is the validated object).
+    Implemented once by a harness adapter over ``create_agent`` + ``Agent.run``.
+    """
+
+    async def run(
         self,
-        role: str,
-        message: str,
+        message: MessageContent,
         *,
-        parent: ToolContext,
+        kind: str | None = None,
         agent_cfg: dict[str, Any] | None = None,
-    ) -> str:
-        """Delegate to a configured subagent and return its response."""
+        schema: dict[str, Any] | None = None,
+        parent: ParentTurn | None = None,
+        model: str | None = None,
+    ) -> AgentResult:
+        """Run a disposable agent turn.
+
+        ``kind`` selects a registered agent; ``agent_cfg`` builds an ad-hoc one
+        (at least one should be given). ``schema`` requests validated structured
+        output. ``parent`` is the OPTIONAL parent turn: when present the child
+        chat-id nests under it and the event sink is parented (on-turn); when
+        omitted the runner uses a standalone internal chat-id with no parent
+        sink (off-turn). ``model`` overrides the agent's model."""
         ...
 
 
@@ -328,11 +330,12 @@ class PluginServices:
     workspace: Path
     llm: Any  # LLMClient
     consolidator: Consolidator
-    subagents: SubagentRuntime
     chat_store: ChatStore
     events: EventBus | None = None
     jobs: JobRunner | None = None
-    background_llm: BackgroundLLM | None = None
+    # BEP 12: the single disposable-agent runner. Plugins guard on ``is None``
+    # (the subagent tool requires it; memory consolidation skips when absent).
+    agent_runner: AgentRunner | None = None
 
 
 @runtime_checkable
@@ -372,7 +375,6 @@ class HarnessPlugin(Protocol):
 __all__ = [
     # ── Outer-ring contracts owned here ──
     "AgentPlugin",
-    "BackgroundLLM",
     "BaseChannel",
     "Channel",
     "Closeable",
@@ -392,7 +394,6 @@ __all__ = [
     "SessionEvent",
     "SessionEventKind",
     "SettingsT",
-    "SubagentRuntime",
     "ep_agent",
     "ep_channel",
     "ep_chat_store",

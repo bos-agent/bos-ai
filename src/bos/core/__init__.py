@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from bos.core.actor import Envelope
 
+from ._chat_store_utils import filter_internal_chats, is_internal_chat
 from ._utils import (
     _aclose,
     _allowed,
@@ -36,6 +37,7 @@ from .agent import (
     AbortTurn,
     Agent,
     AgentEventType,
+    AgentResult,
     ChatCommit,
     ChatMeta,
     ChatStore,
@@ -59,7 +61,7 @@ from .agent import (
 )
 from .contract import (
     AgentPlugin,
-    BackgroundLLM,
+    AgentRunner,
     BaseChannel,
     Channel,
     Closeable,
@@ -73,10 +75,10 @@ from .contract import (
     JobTrigger,
     MailBox,
     MailRoute,
+    ParentTurn,
     PluginServices,
     SessionEvent,
     SessionEventKind,
-    SubagentRuntime,
     ep_agent,
     ep_channel,
     ep_chat_store,
@@ -89,7 +91,6 @@ from .contract import (
     ep_turn_interceptor,
 )
 from .harness import (
-    CURRENT_HARNESS,
     AgentHarness,
     AgentRegistry,
     ChainInterceptor,
@@ -102,10 +103,10 @@ __all__ = [
     "AgentEventType",
     "AgentHarness",
     "AgentRegistry",
+    "AgentResult",
     "AgentPlugin",
-    "BackgroundLLM",
+    "AgentRunner",
     "BaseChannel",
-    "CURRENT_HARNESS",
     "Channel",
     "ChainInterceptor",
     "ChatCommit",
@@ -134,11 +135,11 @@ __all__ = [
     "MailBox",
     "MailRoute",
     "Message",
+    "ParentTurn",
     "PluginServices",
     "Agent",
     "SessionEvent",
     "SessionEventKind",
-    "SubagentRuntime",
     "TokenEstimate",
     "TokenEstimateSource",
     "ToolCallRequest",
@@ -160,6 +161,8 @@ __all__ = [
     "ep_provider",
     "ep_tool",
     "ep_turn_interceptor",
+    "filter_internal_chats",
+    "is_internal_chat",
     "_aclose",
     "_allowed",
     "_apply",
