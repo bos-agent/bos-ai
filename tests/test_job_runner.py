@@ -7,7 +7,7 @@ import pytest
 
 from bos.core.contract import SessionEvent
 from bos.core.defaults.eventbus import DefaultEventBus
-from bos.core.defaults.jobs import InProcJobRunner
+from bos.core.defaults.job_runner import InProcJobRunner
 
 
 @dataclass
