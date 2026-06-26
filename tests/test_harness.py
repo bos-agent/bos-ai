@@ -26,9 +26,11 @@ from bos.plugins.subagent import SubagentAgentPlugin, SubagentHarnessPlugin
 from bos.plugins.task import TaskAgentPlugin
 
 
-class _MockSubagentRuntime:
-    async def ask(self, kind, message, *, context) -> str:
-        return "mock response"
+class _MockAgentRunner:
+    async def run(self, message, *, kind=None, agent_cfg=None, schema=None, parent=None, model=None):
+        from bos.core import AgentResult
+
+        return AgentResult(output="mock response")
 
 
 def test_react_agent_local_tools_describe_ask_subagent(caplog):
@@ -37,7 +39,7 @@ def test_react_agent_local_tools_describe_ask_subagent(caplog):
 
     try:
         AgentRegistry.register(name=role, description="Available subagent", tools=[])
-        subagent = SubagentAgentPlugin(_MockSubagentRuntime(), enabled=None, disabled=[])
+        subagent = SubagentAgentPlugin(_MockAgentRunner(), enabled=None, disabled=[])
 
         with caplog.at_level(logging.WARNING):
             agent = create_test_agent(local_tools=local_tools, plugins=[subagent])
@@ -60,13 +62,43 @@ def test_react_agent_local_tools_describe_ask_subagent(caplog):
 
 
 @pytest.mark.asyncio
+async def test_ask_subagent_invokes_runner_with_parent_and_returns_output():
+    from bos.core.contract import ToolContext
+
+    role = f"ask_subagent_run_{uuid.uuid4().hex}"
+    captured: dict = {}
+
+    class _CapturingRunner:
+        async def run(self, message, *, kind=None, agent_cfg=None, schema=None, parent=None, model=None):
+            from bos.core import AgentResult
+
+            captured.update(message=message, kind=kind, parent=parent)
+            return AgentResult(output="delegated answer")
+
+    local_tools = ToolRegistry("_test_tools")
+    try:
+        AgentRegistry.register(name=role, description="sub", tools=[])
+        plugin = SubagentAgentPlugin(_CapturingRunner(), enabled=None, disabled=[])
+        plugin.register_tools(local_tools)
+        ctx = ToolContext(agent_name="parent", chat_id="conv-1", turn_id="turn-1")
+        out = await local_tools.invoke("AskSubagent", {"role": role, "task": "do it", "context": ctx})
+    finally:
+        AgentRegistry._registry.pop(role, None)
+
+    assert out == "delegated answer"
+    assert captured["kind"] == role
+    assert captured["message"] == "do it"
+    assert captured["parent"] == ctx.parent  # ToolContext → ParentTurn at the call site
+
+
+@pytest.mark.asyncio
 async def test_subagent_plugin_hides_prompt_and_tool_when_no_subagents():
     snapshot = dict(AgentRegistry._registry)
     AgentRegistry._registry.clear()
     try:
         AgentRegistry.register(name="_default", description="Default agent", tools=[])
         local_tools = ToolRegistry("_test_tools")
-        subagent = SubagentAgentPlugin(_MockSubagentRuntime(), enabled=None, disabled=[])
+        subagent = SubagentAgentPlugin(_MockAgentRunner(), enabled=None, disabled=[])
 
         agent = create_test_agent(local_tools=local_tools, plugins=[subagent])
 
@@ -83,7 +115,7 @@ async def test_subagent_plugin_hides_prompt_and_tool_when_no_subagents():
 async def test_subagent_plugin_string_star_matches_list_star():
     role = f"string_star_subagent_{uuid.uuid4().hex}"
     provider = SubagentHarnessPlugin()
-    provider._runtime = _MockSubagentRuntime()
+    provider._runner = _MockAgentRunner()
 
     try:
         AgentRegistry.register(name=role, description="String star subagent", tools=[])
@@ -821,7 +853,7 @@ async def test_plugin_prompt_sections_render_inside_system_prompt():
             MemoryAgentPlugin(store, {"user"}),
             SkillsAgentPlugin(StaticSkillsLoader(), allow=None, exclude=[]),
             TaskAgentPlugin(),
-            SubagentAgentPlugin(_MockSubagentRuntime(), enabled=None, disabled=[]),
+            SubagentAgentPlugin(_MockAgentRunner(), enabled=None, disabled=[]),
         ]
     )
     prompt = await agent._build_system_prompt(dummy_turn_context())
@@ -871,7 +903,7 @@ async def test_prompt_sections_render_first_50_items_and_warn(caplog):
             AgentRegistry.register(name=name, description=f"Subagent description {i:03}", tools=[])
 
         skills_plugin = SkillsAgentPlugin(StaticSkillsLoader(), allow=None, exclude=[])
-        subagent_plugin = SubagentAgentPlugin(_MockSubagentRuntime(), enabled=None, disabled=[])
+        subagent_plugin = SubagentAgentPlugin(_MockAgentRunner(), enabled=None, disabled=[])
 
         agent = create_test_agent(
             local_tools=local_tools,
