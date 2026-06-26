@@ -18,6 +18,7 @@ from bos.core.registry import ToolRegistry
 
 if TYPE_CHECKING:
     from bos.core.agent import TurnContext
+    from bos.core.contract import ToolContext
 
 _PLAN_STATUSES = {"draft", "needs_input", "approved", "in_progress", "verified", "abandoned"}
 _TERMINAL_PLAN_STATUSES = {"verified", "abandoned"}
@@ -229,6 +230,7 @@ class PlanAgentPlugin:
             },
         )
         async def plan_create(
+            context: ToolContext,
             objective: str,
             user_value: str = "",
             appetite: str = "",
@@ -241,8 +243,8 @@ class PlanAgentPlugin:
             verification: list[str] | None = None,
             open_questions: list[str] | None = None,
             status: str = "draft",
-            chat_id: str = "",
         ) -> dict[str, Any]:
+            chat_id = context.parent.chat_id
             if status not in _PLAN_STATUSES:
                 return {"error": f"Invalid status {status!r}. Expected one of: {', '.join(sorted(_PLAN_STATUSES))}."}
             if status == "draft" and open_questions:
@@ -296,6 +298,7 @@ class PlanAgentPlugin:
             },
         )
         async def plan_update(
+            context: ToolContext,
             objective: str | None = None,
             user_value: str | None = None,
             appetite: str | None = None,
@@ -308,9 +311,8 @@ class PlanAgentPlugin:
             verification: list[str] | None = None,
             open_questions: list[str] | None = None,
             status: str | None = None,
-            chat_id: str = "",
         ) -> dict[str, Any]:
-            plan = plans.get(chat_id)
+            plan = plans.get(context.parent.chat_id)
             if plan is None:
                 return {"error": "No plan exists for this conversation. Use PlanCreate first."}
             if status is not None:
@@ -346,8 +348,8 @@ class PlanAgentPlugin:
             usage=_PLAN_TOOL_USAGE["PlanGet"],
             parameters={"type": "object", "properties": {}, "required": []},
         )
-        async def plan_get(chat_id: str = "") -> dict[str, Any]:
-            plan = plans.get(chat_id)
+        async def plan_get(context: ToolContext) -> dict[str, Any]:
+            plan = plans.get(context.parent.chat_id)
             if plan is None:
                 return {"plan": None}
             return {"plan": plan.to_payload()}
@@ -358,8 +360,8 @@ class PlanAgentPlugin:
             usage=_PLAN_TOOL_USAGE["PlanClear"],
             parameters={"type": "object", "properties": {}, "required": []},
         )
-        async def plan_clear(chat_id: str = "") -> dict[str, Any]:
-            removed = plans.pop(chat_id, None) is not None
+        async def plan_clear(context: ToolContext) -> dict[str, Any]:
+            removed = plans.pop(context.parent.chat_id, None) is not None
             return {"result": "Plan cleared." if removed else "No plan existed."}
 
     async def get_system_prompt_section(self, context: TurnContext | None) -> str | None:

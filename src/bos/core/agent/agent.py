@@ -687,25 +687,21 @@ class Agent:
             return str(e)
 
     async def _invoke_tool(self, tool_name: str, **params: Any) -> str:
-        """Invoke a tool by name, merging runtime context into its parameters."""
-        chat_id = params.get("chat_id", "")
-        turn_id = params.get("turn_id", "")
-        event_sink = params.get("event_sink")
-        kwargs = params | {
-            "chat_id": params.pop("chat_id", ""),
-            "turn_id": params.pop("turn_id", ""),
-            "event_sink": params.pop("event_sink", None),
-            "context": ToolContext(
-                parent=ParentTurn(
-                    chat_id=chat_id,
-                    turn_id=turn_id,
-                    agent_name=self._name,
-                    event_sink=event_sink,
-                ),
+        """Invoke a tool by name, folding the runtime turn linkage into a single
+        ``ToolContext``. The ``chat_id``/``turn_id``/``event_sink`` carried in
+        ``params`` are the runtime injection from ``_call_tool``; they are lifted
+        into ``context`` and never exposed to tools as flat parameters — a tool
+        reads them via ``context.parent.*``."""
+        context = ToolContext(
+            parent=ParentTurn(
+                chat_id=params.pop("chat_id", ""),
+                turn_id=params.pop("turn_id", ""),
+                agent_name=self._name,
+                event_sink=params.pop("event_sink", None),
             ),
-        }
+        )
         if self._tools.has(tool_name):
-            return await self._tools.invoke(tool_name, kwargs)
+            return await self._tools.invoke(tool_name, params | {"context": context})
         raise Exception(f"Tool {tool_name} not found")
 
     async def _load_and_compact_history(self, chat_id: str, *, budget_model: str | None) -> list[dict[str, Any]]:

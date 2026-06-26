@@ -1029,6 +1029,8 @@ async def test_react_agent_first_turn_passes_only_user_text():
 
 @pytest.mark.asyncio
 async def test_react_agent_injects_runtime_tool_context():
+    from bos.core.contract import ToolContext
+
     suffix = uuid.uuid4().hex
     provider_name = f"test_tool_context_provider_{suffix}"
     tools = ToolRegistry("_test_tools")
@@ -1042,8 +1044,8 @@ async def test_react_agent_injects_runtime_tool_context():
             "required": ["text"],
         },
     )
-    def echo_with_context(text: str, chat_id: str, turn_id: str) -> dict[str, str]:
-        return {"text": text, "chat_id": chat_id, "turn_id": turn_id}
+    def echo_with_context(text: str, context: ToolContext) -> dict[str, str]:
+        return {"text": text, "chat_id": context.parent.chat_id, "turn_id": context.parent.turn_id}
 
     @ep_provider(name=provider_name)
     async def tool_context_provider(messages, model=None, **kwargs):

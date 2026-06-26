@@ -99,17 +99,14 @@ async def test_react_agent_emits_tool_events_and_injects_event_sink():
     suffix = uuid.uuid4().hex
     provider_name = f"test_event_sink_tool_{suffix}"
 
-    async def echo_with_context(
-        text: str,
-        chat_id: str,
-        turn_id: str,
-        event_sink=None,
-    ) -> dict[str, str | bool]:
+    from bos.core.contract import ToolContext
+
+    async def echo_with_context(text: str, context: ToolContext) -> dict[str, str | bool]:
         return {
             "text": text,
-            "chat_id": chat_id,
-            "turn_id": turn_id,
-            "has_event_sink": event_sink is not None,
+            "chat_id": context.parent.chat_id,
+            "turn_id": context.parent.turn_id,
+            "has_event_sink": context.parent.event_sink is not None,
         }
 
     @ep_provider(name=provider_name)
