@@ -3,11 +3,12 @@
 import pytest
 
 from bos.config.workspace import Workspace
+from bos.core import DEFAULT_AGENT_KIND
 
 
 def test_runtime_agent_defaults_without_runtime_for_oneshot_helpers():
     ws = Workspace(".", ".bos", {})
-    assert ws.get_main_agent_kind() == "_default"
+    assert ws.get_main_agent_kind() == DEFAULT_AGENT_KIND
 
 
 def test_gateway_runtime_resolves_final_config_shape():

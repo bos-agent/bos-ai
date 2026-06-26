@@ -29,7 +29,7 @@ port = 0
 api_key_env = "BOS_GATEWAY_API_KEY"
 
 [runtime.actors.main]
-agent = "_default"
+agent = "BOS"
 display_name = "Main"
 [runtime.actors.main.agent_cfg.plugin-bindings.SubagentPlugin]
 enabled = ["forex"]

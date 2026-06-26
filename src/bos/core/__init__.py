@@ -90,6 +90,7 @@ from .contract import (
     ep_turn_interceptor,
 )
 from .harness import (
+    DEFAULT_AGENT_KIND,
     AgentHarness,
     AgentRegistry,
     ChainInterceptor,
@@ -114,6 +115,7 @@ __all__ = [
     "Closeable",
     "Consolidator",
     "ContextResult",
+    "DEFAULT_AGENT_KIND",
     "Envelope",
     "Event",
     "EventBus",

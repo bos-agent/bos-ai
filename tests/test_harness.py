@@ -17,7 +17,15 @@ import bos.extensions.tools.knowledge  # noqa: F401
 import bos.extensions.tools.system  # noqa: F401
 from bos.config.default_agent_spec import default_agent_spec
 from bos.config.workspace import Workspace
-from bos.core import AgentHarness, AgentRegistry, LLMResponse, Message, ToolCallRequest, ep_provider
+from bos.core import (
+    DEFAULT_AGENT_KIND,
+    AgentHarness,
+    AgentRegistry,
+    LLMResponse,
+    Message,
+    ToolCallRequest,
+    ep_provider,
+)
 from bos.core.contract import ep_consolidator, ep_tool
 from bos.core.registry import ToolRegistry
 from bos.plugins.memory import MemoryAgentPlugin
@@ -97,7 +105,7 @@ async def test_subagent_plugin_hides_prompt_and_tool_when_no_subagents():
     snapshot = dict(AgentRegistry._registry)
     AgentRegistry._registry.clear()
     try:
-        AgentRegistry.register(name="_default", description="Default agent", tools=[])
+        AgentRegistry.register(name=DEFAULT_AGENT_KIND, description="Default agent", tools=[])
         local_tools = ToolRegistry("_test_tools")
         subagent = SubagentAgentPlugin(_MockAgentRunner(), enabled=None, disabled=[])
 
@@ -163,7 +171,7 @@ async def test_harness_binds_subagent_plugin_bindings_from_validated_config(tmp_
         ws.bootstrap_platform()
 
         async with ws.harness() as harness:
-            agent = await harness.create_agent("_default")
+            agent = await harness.create_agent(DEFAULT_AGENT_KIND)
             prompt = await agent._build_system_prompt(dummy_turn_context())
 
         assert agent._tools.has("AskSubagent")
@@ -1351,7 +1359,9 @@ def test_bootstrap_platform_does_not_require_consolidator_model(tmp_path, monkey
 
     bos_dir = tmp_path / ".bos"
     bos_dir.mkdir(parents=True, exist_ok=True)
-    ws = Workspace(tmp_path, bos_dir, {"runtime": {"location": "process", "actors": {"main": {"agent": "_default"}}}})
+    ws = Workspace(
+        tmp_path, bos_dir, {"runtime": {"location": "process", "actors": {"main": {"agent": DEFAULT_AGENT_KIND}}}}
+    )
     ws.bootstrap_platform()
 
 

@@ -17,7 +17,7 @@ from bos.config.schema import (
     validate_agent_config,
     validate_config,
 )
-from bos.core import AgentHarness, _deep_merge, _get_bos_home, _resolve_path
+from bos.core import DEFAULT_AGENT_KIND, AgentHarness, _deep_merge, _get_bos_home, _resolve_path
 
 if TYPE_CHECKING:
     # The gateway owns these config *shapes* (BEP 13 §3.3); the loader (this ring)
@@ -591,11 +591,11 @@ class Workspace:
                     merged["description"] = ext.description
             AgentRegistry.register(name, **merged)
 
-        if not AgentRegistry.has_registered("_default"):
+        if not AgentRegistry.has_registered(DEFAULT_AGENT_KIND):
             default_spec = _agent_config_to_core_kwargs(AgentConfig.model_validate(default_agent_spec))
             merged = _deep_merge(dict(agent_defaults), default_spec)
             merged.pop("name", None)
-            AgentRegistry.register("_default", **merged)
+            AgentRegistry.register(DEFAULT_AGENT_KIND, **merged)
 
         # Suppress litellm auto-loading
         os.environ["LITELLM_MODE"] = "extension"
@@ -618,7 +618,7 @@ class Workspace:
     def get_main_agent_kind(self) -> str:
         runtime = self.config.runtime
         if not runtime or not runtime.actors:
-            return "_default"
+            return DEFAULT_AGENT_KIND
         default_actor = runtime.default_actor
         actor = runtime.actors.get(default_actor)
         if actor is None:
