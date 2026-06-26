@@ -33,6 +33,7 @@ from .contract import (
     InterceptorStage,
     Message,
     MessageContent,
+    ParentTurn,
     PromptProvider,
     ReasoningEffort,
     ToolAttributes,
@@ -695,10 +696,12 @@ class Agent:
             "turn_id": params.pop("turn_id", ""),
             "event_sink": params.pop("event_sink", None),
             "context": ToolContext(
-                agent_name=self._name,
-                chat_id=chat_id,
-                turn_id=turn_id,
-                event_sink=event_sink,
+                parent=ParentTurn(
+                    chat_id=chat_id,
+                    turn_id=turn_id,
+                    agent_name=self._name,
+                    event_sink=event_sink,
+                ),
             ),
         }
         if self._tools.has(tool_name):

@@ -476,27 +476,17 @@ class ParentTurn:
 
     chat_id: str
     turn_id: str
-    agent_name: str | None = None
+    agent_name: str
     event_sink: TurnEventSink | None = None
 
 
 @dataclass(frozen=True)
 class ToolContext:
-    agent_name: str
-    chat_id: str
-    turn_id: str
-    event_sink: TurnEventSink | None = None
+    # The invocation's turn linkage. ``ParentTurn`` is the single source of truth
+    # for chat_id/turn_id/agent_name/event_sink; read them via ``ctx.parent.*``.
+    # Named ``parent`` because that is its role when handed to a child agent
+    # (``AgentRunner.run(parent=ctx.parent)``).
+    parent: ParentTurn
     # Escape hatch for plugin/runtime-specific context that is intentionally
     # not modeled as a core ToolContext field.
     extra_data: Mapping[str, Any] = field(default_factory=dict)
-
-    @property
-    def parent(self) -> ParentTurn:
-        """This invocation's turn as a :class:`ParentTurn` — the linkage view a
-        disposable agent (via ``AgentRunner.run(parent=…)``) nests under."""
-        return ParentTurn(
-            chat_id=self.chat_id,
-            turn_id=self.turn_id,
-            agent_name=self.agent_name,
-            event_sink=self.event_sink,
-        )

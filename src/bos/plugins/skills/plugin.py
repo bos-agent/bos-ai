@@ -277,7 +277,7 @@ class SkillsAgentPlugin:
 
             # Inherit the calling agent's model when it is resolvable from the
             # registry; otherwise fall back to the LLM client default (BOS_MODEL).
-            model = AgentRegistry.get_defaults(context.agent_name).get("model") if context else None
+            model = AgentRegistry.get_defaults(context.parent.agent_name).get("model") if context else None
 
             test_tools = runtime.test_tools
             include = None if test_tools == "*" else sorted(set(test_tools) | {"LoadSkill"})

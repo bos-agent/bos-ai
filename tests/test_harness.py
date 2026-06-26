@@ -63,6 +63,7 @@ def test_react_agent_local_tools_describe_ask_subagent(caplog):
 
 @pytest.mark.asyncio
 async def test_ask_subagent_invokes_runner_with_parent_and_returns_output():
+    from bos.core import ParentTurn
     from bos.core.contract import ToolContext
 
     role = f"ask_subagent_run_{uuid.uuid4().hex}"
@@ -80,7 +81,7 @@ async def test_ask_subagent_invokes_runner_with_parent_and_returns_output():
         AgentRegistry.register(name=role, description="sub", tools=[])
         plugin = SubagentAgentPlugin(_CapturingRunner(), enabled=None, disabled=[])
         plugin.register_tools(local_tools)
-        ctx = ToolContext(agent_name="parent", chat_id="conv-1", turn_id="turn-1")
+        ctx = ToolContext(parent=ParentTurn(chat_id="conv-1", turn_id="turn-1", agent_name="parent"))
         out = await local_tools.invoke("AskSubagent", {"role": role, "task": "do it", "context": ctx})
     finally:
         AgentRegistry._registry.pop(role, None)
@@ -597,7 +598,7 @@ async def test_builtin_skill_creator_discovered_and_loadable(tmp_path):
 
 @pytest.mark.asyncio
 async def test_test_skill_tool_runs_isolated_agent_and_reports_trigger(tmp_path):
-    from bos.core import LLMClient
+    from bos.core import LLMClient, ParentTurn
     from bos.core.contract import ToolContext
     from bos.plugins.skills.fs_skill_loader import FileSystemSkillsLoader
     from bos.plugins.skills.plugin import _SkillTestRuntime
@@ -634,7 +635,7 @@ async def test_test_skill_tool_runs_isolated_agent_and_reports_trigger(tmp_path)
         plugin.register_tools(registry)
         assert registry.get("TestSkill") is not None
 
-        context = ToolContext(agent_name=parent_kind, chat_id="chat", turn_id="turn")
+        context = ToolContext(parent=ParentTurn(chat_id="chat", turn_id="turn", agent_name=parent_kind))
         missing = await registry.invoke("TestSkill", {"name": "greeter", "task": "say hi", "context": context})
         assert "not found" in missing
 

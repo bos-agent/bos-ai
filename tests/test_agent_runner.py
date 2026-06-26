@@ -16,9 +16,12 @@ from bos.core._chat_store_utils import is_internal_chat
 from bos.core.contract import ToolContext
 
 
-def test_tool_context_exposes_parent_turn_view():
-    ctx = ToolContext(agent_name="parent", chat_id="conv-1", turn_id="turn-1")
-    assert ctx.parent == ParentTurn(chat_id="conv-1", turn_id="turn-1", agent_name="parent")
+def test_tool_context_composes_parent_turn():
+    parent = ParentTurn(chat_id="conv-1", turn_id="turn-1", agent_name="parent")
+    ctx = ToolContext(parent=parent)
+    # ParentTurn is the single source of truth; turn fields are read via .parent.
+    assert ctx.parent is parent
+    assert ctx.parent.chat_id == "conv-1"
 
 
 @pytest.mark.asyncio
