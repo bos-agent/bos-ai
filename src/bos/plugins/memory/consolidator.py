@@ -1,14 +1,14 @@
 """Memory consolidation handler (BEP 10 §4) — proposes structured operations
-for off-turn curation. Uses BEP 11 BackgroundLLM with a JSON schema; never
-writes directly (writes go through the L1 operation service)."""
+for off-turn curation. Runs a disposable agent (BEP 12 AgentRunner) with a JSON
+schema; never writes directly (writes go through the L1 operation service)."""
 
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
+from bos.core.agent import StructuredOutputError
 from bos.core.contract import Message
 
 from .operation_service import MemoryOperation
@@ -121,28 +121,33 @@ def _render_user_prompt(request: MemoryConsolidationRequest) -> str:
 
 
 class DefaultMemoryConsolidator:
-    def __init__(self, background_llm, *, maxim_keys: set[str], model: str | None = None) -> None:
-        self._llm = background_llm
+    def __init__(self, agent_runner, *, maxim_keys: set[str], model: str | None = None) -> None:
+        self._runner = agent_runner
         self._maxim_keys = set(maxim_keys)
         self._model = model
 
     async def propose(self, request: MemoryConsolidationRequest) -> list[MemoryOperation]:
-        resp = await self._llm.ask(
-            messages=[
-                {"role": "system", "content": _SYSTEM_PROMPT},
-                {"role": "user", "content": _render_user_prompt(request)},
-            ],
-            response_schema=_RESPONSE_SCHEMA,
-            model=self._model,
-        )
+        # A disposable, history-less agent: a fresh internal chat-id each run
+        # (no parent turn → off-turn), a tunable consolidation system prompt, no
+        # tools, and structured output validated against _RESPONSE_SCHEMA.
+        # NOTE (future): the memory plugin could expose a config setting to run a
+        # *registered* agent kind here (run(kind=…) instead of this ad-hoc
+        # agent_cfg), giving consolidation a fully configurable model/prompt/tools
+        # like any other agent. Tracked as BEP 12 Open Issue #4.
         try:
-            payload = json.loads(resp.content or "")
-        except json.JSONDecodeError as exc:
-            # An unparseable response is NOT "nothing to consolidate" — it is a
-            # failure. Surface it so the job leaves the watermark in place and
-            # retries these turns later, instead of advancing past them.
-            raise ConsolidationUnavailable("consolidator: failed to parse response JSON") from exc
-        ops_in = payload.get("operations", [])
+            result = await self._runner.run(
+                _render_user_prompt(request),
+                agent_cfg={"system_prompt": _SYSTEM_PROMPT, "tools": []},
+                schema=_RESPONSE_SCHEMA,
+                model=self._model,
+            )
+        except StructuredOutputError as exc:
+            # No valid structured proposal is NOT "nothing to consolidate" — it
+            # is a failure. Surface it so the job leaves the watermark in place
+            # and retries these turns later, instead of advancing past them.
+            raise ConsolidationUnavailable("consolidator: model returned no valid structured proposal") from exc
+        payload = result.output
+        ops_in = payload.get("operations", []) if isinstance(payload, dict) else []
         out: list[MemoryOperation] = []
         for raw in ops_in:
             try:

@@ -5,7 +5,6 @@ import pytest
 
 import bos.exts  # noqa: F401 — registers default extensions
 from bos.core.contract import PluginServices
-from bos.core.defaults.background_llm import DefaultBackgroundLLM
 from bos.core.defaults.eventbus import DefaultEventBus
 from bos.core.defaults.jobs import InProcJobRunner
 from bos.plugins.memory.operation_service import DefaultMemoryOperationService
@@ -24,7 +23,12 @@ async def _setup_plugin(tmp_path, *, consolidation_enabled=False, idle_after=300
 
             return LLMResponse(content='{"operations": []}')
 
-    blm = DefaultBackgroundLLM(_StubLLM())
+    class _StubAgentRunner:
+        async def run(self, message, *, kind=None, agent_cfg=None, schema=None, parent=None, model=None):
+            from bos.core import AgentResult
+
+            return AgentResult(output={"operations": []}, structured=True)
+
     chat_store = InMemChatStore()
     svc = PluginServices(
         bos_dir=tmp_path,
@@ -35,7 +39,7 @@ async def _setup_plugin(tmp_path, *, consolidation_enabled=False, idle_after=300
         chat_store=chat_store,
         events=bus,
         jobs=runner,
-        background_llm=blm,
+        agent_runner=_StubAgentRunner(),
     )
     h = MemoryHarnessPlugin()
     cfg = {**h.default_config(), "backend": "in_memory"}

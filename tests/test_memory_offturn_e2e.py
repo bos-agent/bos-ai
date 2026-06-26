@@ -2,29 +2,27 @@
 commit turns → emit session_close → consolidator proposes ADD → operation
 service applies → fact is queryable in a fresh harness."""
 
-import json
-
 import pytest
 
 import bos.exts  # noqa: F401
 
 
-class _CannedLLM:
-    """LLMClient stand-in that returns a pre-canned JSON payload for any complete()."""
+class _CannedAgentRunner:
+    """AgentRunner stand-in returning a pre-canned validated structured payload —
+    stands in for the disposable consolidation agent (BEP 12)."""
 
     def __init__(self, payload):
         self._payload = payload
 
-    async def complete(self, messages, **kwargs):
-        from bos.core.agent import LLMResponse
+    async def run(self, message, *, kind=None, agent_cfg=None, schema=None, parent=None, model=None):
+        from bos.core import AgentResult
 
-        return LLMResponse(content=json.dumps(self._payload))
+        return AgentResult(output=self._payload, structured=True)
 
 
 @pytest.mark.asyncio
 async def test_mid_chat_fact_persists_into_next_session(tmp_path):
     from bos.core.contract import Message, PluginServices, SessionEvent
-    from bos.core.defaults.background_llm import DefaultBackgroundLLM
     from bos.core.defaults.eventbus import DefaultEventBus
     from bos.core.defaults.jobs import InProcJobRunner
     from bos.extensions.chat_stores.in_memory import InMemChatStore
@@ -34,7 +32,7 @@ async def test_mid_chat_fact_persists_into_next_session(tmp_path):
     runner = InProcJobRunner(bus, max_concurrency=1, idle_after=300)
     await runner.start()
     chat_store = InMemChatStore()
-    canned = _CannedLLM({
+    canned = _CannedAgentRunner({
         "operations": [
             {
                 "op": "ADD",
@@ -45,18 +43,17 @@ async def test_mid_chat_fact_persists_into_next_session(tmp_path):
             },
         ]
     })
-    blm = DefaultBackgroundLLM(canned)
 
     services = PluginServices(
         bos_dir=tmp_path,
         workspace=tmp_path,
-        llm=canned,
+        llm=None,
         consolidator=None,
         subagents=None,
         chat_store=chat_store,
         events=bus,
         jobs=runner,
-        background_llm=blm,
+        agent_runner=canned,
     )
 
     plugin = MemoryHarnessPlugin()

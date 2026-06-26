@@ -157,7 +157,7 @@ class MemoryHarnessPlugin:
             self._policy.enabled
             and services.events is not None
             and services.jobs is not None
-            and services.background_llm is not None
+            and services.agent_runner is not None
             and services.chat_store is not None
         ):
             services.jobs.bind_trigger("session_close", self._make_consolidation_job_factory("session_close"))
@@ -193,8 +193,8 @@ class MemoryHarnessPlugin:
         )
         watermarks = WatermarkStore(agent_dir / "watermarks.json")
         consolidator = (
-            DefaultMemoryConsolidator(self._services.background_llm, maxim_keys=self._maxim_keys)
-            if self._services.background_llm is not None
+            DefaultMemoryConsolidator(self._services.agent_runner, maxim_keys=self._maxim_keys)
+            if self._services.agent_runner is not None
             else None
         )
         return PerAgentMemory(backend, op_service, watermarks, consolidator)
