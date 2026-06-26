@@ -17,6 +17,7 @@ from bos.core.actor import Envelope, Event, EventBus, MailBox, MessageType
 from .agent import (
     LLM,
     AgentEventType,
+    AgentResult,
     ChatCommit,
     ChatMeta,
     ChatStore,
@@ -26,6 +27,7 @@ from .agent import (
     LLMResponse,
     Message,
     MessageContent,
+    ParentTurn,
     PromptProvider,
     ReasoningEffort,
     TokenEstimate,
@@ -323,6 +325,36 @@ class SubagentRuntime(Protocol):
         ...
 
 
+class AgentRunner(Protocol):
+    """Spin up a *disposable* agent and return its result (BEP 12).
+
+    The single capability a plugin/tool uses to run a one-off agent, subsuming
+    both spawning a subagent (text → ``result.output``) and a structured
+    one-shot (``schema=`` → ``result.output`` is the validated object).
+    Implemented once by a harness adapter over ``create_agent`` + ``Agent.run``.
+    """
+
+    async def run(
+        self,
+        message: MessageContent,
+        *,
+        kind: str | None = None,
+        agent_cfg: dict[str, Any] | None = None,
+        schema: dict[str, Any] | None = None,
+        parent: ParentTurn | None = None,
+        model: str | None = None,
+    ) -> AgentResult:
+        """Run a disposable agent turn.
+
+        ``kind`` selects a registered agent; ``agent_cfg`` builds an ad-hoc one
+        (at least one should be given). ``schema`` requests validated structured
+        output. ``parent`` is the OPTIONAL parent turn: when present the child
+        chat-id nests under it and the event sink is parented (on-turn); when
+        omitted the runner uses a standalone internal chat-id with no parent
+        sink (off-turn). ``model`` overrides the agent's model."""
+        ...
+
+
 @dataclass(frozen=True)
 class PluginServices:
     bos_dir: Path
@@ -334,6 +366,10 @@ class PluginServices:
     events: EventBus | None = None
     jobs: JobRunner | None = None
     background_llm: BackgroundLLM | None = None
+    # BEP 12: the unified disposable-agent runner. Added additively alongside
+    # ``subagents``/``background_llm``; those two fold away once their callers
+    # migrate to ``agent_runner``.
+    agent_runner: AgentRunner | None = None
 
 
 @runtime_checkable

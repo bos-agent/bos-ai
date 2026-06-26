@@ -30,7 +30,7 @@ The design metric: **a programmatic caller gets `result.output` + `result.usage`
 2. **`Agent.run(...) -> AgentResult`** — the full-fidelity primitive. The existing `ask(...) -> str` is preserved as a thin wrapper (`(await self.run(...)).output`), so current callers do not churn.
 3. **Optional structured output** — `run(..., schema=…)` validates the **final** answer against a JSON Schema (provider hint + local validation + bounded retry) and returns the parsed object; `result.structured` discriminates.
 4. **`AgentRunner` — one disposable-agent port.** A single capability that subsumes both spawning a subagent (returns text) and a structured one-shot (returns a validated object), implemented once by a harness adapter over `create_agent` + `Agent.run`. Replaces `SubagentRuntime` and `BackgroundLLM`.
-5. **Migrate both callers to `agent_runner`** — the `AskSubagent` tool (text path, on-turn, passes `context`) and memory curation (structured path, off-turn, omits `context`) — and **delete** `SubagentRuntime`, `BackgroundLLM`, `DefaultBackgroundLLM`, and `_HarnessSubagentRuntime`. `BackgroundLLM`'s validate-hint-retry is already gone — it folded into the shared structured validator that `Agent.run` uses (tracks 1–4).
+5. **Migrate both callers to `agent_runner`** — the `AskSubagent` tool (text path, on-turn, passes a `ParentTurn`) and memory curation (structured path, off-turn, omits `parent`) — and **delete** `SubagentRuntime`, `BackgroundLLM`, `DefaultBackgroundLLM`, and `_HarnessSubagentRuntime`. `BackgroundLLM`'s validate-hint-retry is already gone — it folded into the shared structured validator that `Agent.run` uses (tracks 1–4).
 
 ## Non-Goals
 
@@ -98,6 +98,13 @@ contract ring (`src/bos/core/contract.py`) and is implemented **once** by a harn
 adapter over `create_agent` + `Agent.run`:
 
 ```python
+@dataclass(frozen=True)
+class ParentTurn:
+    chat_id: str
+    turn_id: str
+    agent_name: str | None = None
+    event_sink: TurnEventSink | None = None
+
 class AgentRunner(Protocol):
     async def run(
         self,
@@ -106,35 +113,47 @@ class AgentRunner(Protocol):
         kind: str | None = None,                  # a registered agent kind, OR…
         agent_cfg: dict[str, Any] | None = None,  # …an ad-hoc disposable agent
         schema: dict[str, Any] | None = None,     # structured output → result.output is the parsed obj
-        context: ToolContext | None = None,       # OPTIONAL parent turn (see below)
+        parent: ParentTurn | None = None,         # OPTIONAL parent turn (see below)
         model: str | None = None,
     ) -> AgentResult: ...
 ```
 
-**Why `context` is optional — and the key insight that makes the unification work.**
-`ToolContext` is a *per-invocation parameter, not a service binding*. `AskSubagent` is
-invoked *by the model as a tool*, so it already holds a `ToolContext` and passes it; the
-adapter uses it only to (a) nest the child chat-id under the parent
-(`make_subagent_chat_id(context.chat_id, kind)`) and (b) parent the event sink
-(`derive_event_sink(context.event_sink, …)`). Off-turn callers — the memory consolidator,
-which runs inside a job with no invoking tool — simply **omit `context`**: the adapter
-falls back to a standalone **internal** chat-id (the `INTERNAL_CHAT_SEPARATOR` convention
-in `src/bos/core/_chat_store_utils.py`, so the turn stays out of the user's chat
-list/recall) and a null parent sink. Same capability, on-turn and off-turn — this is why
-the consolidator does *not* need a separate non-agent lane.
+**Why `parent` is optional — and the key insight that makes the unification work.**
+The parent turn is a *per-invocation parameter, not a service binding*. `AskSubagent` is
+invoked *by the model as a tool*, so it holds a `ToolContext` and constructs a `ParentTurn`
+from it at the call site; the adapter uses that only to (a) nest the child chat-id under the
+parent (`make_subagent_chat_id(parent.chat_id, kind)`) and (b) parent the event sink
+(`derive_event_sink(parent.event_sink, …)`). Off-turn callers — the memory consolidator,
+which runs inside a job with no invoking tool — simply **omit `parent`**: the adapter falls
+back to a standalone **internal** chat-id (the `INTERNAL_CHAT_SEPARATOR` convention in
+`src/bos/core/_chat_store_utils.py`, so the turn stays out of the user's chat list/recall)
+and a null parent sink. Same capability, on-turn and off-turn — this is why the consolidator
+does *not* need a separate non-agent lane.
+
+> **Why `ParentTurn`, not `ToolContext`.** `AgentRunner` is a *general* capability, not a
+> tool-only one — its off-turn callers have no tool and no `ToolContext`. Naming `ToolContext`
+> in the port would bake a false "called from a tool" assumption into a port that isn't
+> tool-specific, and would couple the contract ring to the richer tool-layer type while the
+> runner only consumes four linkage fields. `ParentTurn` is the minimal parent-turn descriptor
+> those four fields define. It lives in the **agent ring** (`src/bos/core/agent/contract.py`,
+> beside `ToolContext`/`TurnEventSink`) and is re-exported through `core.contract`; `ToolContext`
+> remains the tool-invocation type and simply **exposes** one via a `ToolContext.parent` property
+> (`ParentTurn(chat_id, turn_id, agent_name, event_sink)`). So the on-turn call site is just
+> `parent=ctx.parent` — the conversion is a property on the source object, not manual unpacking
+> in the port or the tool.
 
 The adapter is essentially today's `_HarnessSubagentRuntime.ask` (`src/bos/core/harness.py:220`)
-generalized: derive the chat-id (nested if `context`, internal-standalone if not), call
-`create_agent(kind, agent_cfg)`, derive the child event sink only when `context` is present,
-then `await agent.run(child_chat_id, message, schema=schema, model=…, event_sink=…)` and
-return the `AgentResult` whole (callers read `.output`). The disposable agent has a fresh
+generalized: derive the chat-id (nested if `parent`, internal-standalone if not), call
+`create_agent(kind, agent_cfg)`, derive the child event sink only when `parent` is present,
+then `await agent.run(child_chat_id, message, schema=schema, event_sink=…, llm_args={"model": …})`
+and return the `AgentResult` whole (callers read `.output`). The disposable agent has a fresh
 chat-id every run, so there is no chat history and no compaction-recursion risk.
 
 ### E. Migrating the two callers
 
 - **`AskSubagent`** (`src/bos/plugins/subagent.py:168`) — on-turn, text. Today it calls
   `runtime.ask(role, task, context=context)`; it becomes
-  `(await agent_runner.run(task, kind=role, context=context)).output`. Behavior-preserving.
+  `(await agent_runner.run(task, kind=role, parent=context.parent)).output`. Behavior-preserving.
 - **`DefaultMemoryConsolidator`** (`src/bos/plugins/memory/consolidator.py:123`) — off-turn,
   structured. Today it calls `self._llm.ask(messages=…, response_schema=_RESPONSE_SCHEMA, model=…)`
   then `json.loads(resp.content)`. It becomes
@@ -181,7 +200,7 @@ needs (test-only tool/loader wiring), as a later, separate step. Until then `llm
 
 5. **`AgentRunner` port + adapter** — add the `AgentRunner` Protocol to `contract.py`; implement the single harness adapter over `create_agent` + `Agent.run` (generalizing `_HarnessSubagentRuntime`, with optional `context`).
 6. **Swap `PluginServices`** — replace `subagents` + `background_llm` with `agent_runner`; update harness wiring to construct and inject the adapter.
-7. **Migrate callers + delete old lanes** — `AskSubagent` → `agent_runner.run(kind=…, context=ctx)`; `DefaultMemoryConsolidator` → `agent_runner.run(agent_cfg=…, schema=…)`; delete `SubagentRuntime`, `BackgroundLLM`, `DefaultBackgroundLLM`, `_HarnessSubagentRuntime`, the two `PluginServices` fields, harness wiring, and `tests/test_background_llm.py`.
+7. **Migrate callers + delete old lanes** — `AskSubagent` → `agent_runner.run(kind=…, parent=ctx.parent)`; `DefaultMemoryConsolidator` → `agent_runner.run(agent_cfg=…, schema=…)`; delete `SubagentRuntime`, `BackgroundLLM`, `DefaultBackgroundLLM`, `_HarnessSubagentRuntime`, the two `PluginServices` fields, harness wiring, and `tests/test_background_llm.py`.
 
 Tracks 5–7 depend on 1–4 (shipped) and on `create_agent`/`Agent.run` being reachable from the adapter (they are, inside an active harness). **Out of scope (later, verify first):** folding `PluginServices.llm`/`consolidator` into `agent_runner` once the skills `_SkillTestRuntime` migrates.
 
@@ -197,7 +216,7 @@ Tracks 5–7 depend on 1–4 (shipped) and on `create_agent`/`Agent.run` being r
 | `AgentRunner` port | `src/bos/core/contract.py`; `src/bos/core/__init__.py` | add `AgentRunner` Protocol; export | track 5 |
 | `AgentRunner` adapter | `src/bos/core/harness.py` | single impl over `create_agent` + `Agent.run` (optional `context`); wire + inject | tracks 5–6 |
 | `PluginServices` | `src/bos/core/contract.py` (field), `harness.py` (construction) | replace `subagents`+`background_llm` with `agent_runner` | track 6 |
-| Subagent tool | `src/bos/plugins/subagent.py:168` | `AskSubagent` → `agent_runner.run(kind=…, context=ctx)`, read `.output` | track 7 |
+| Subagent tool | `src/bos/plugins/subagent.py:168` | `AskSubagent` → `agent_runner.run(kind=…, parent=ctx.parent)`, read `.output` | track 7 |
 | Memory curation | `src/bos/plugins/memory/consolidator.py`, `.../memory/plugin.py` | `DefaultMemoryConsolidator` → `agent_runner.run(agent_cfg=…, schema=…)`, read `.output` | track 7 |
 | Delete old lanes | `contract.py` (`SubagentRuntime`, `BackgroundLLM`), `defaults/background_llm.py`, `harness.py` (`_HarnessSubagentRuntime`), `tests/test_background_llm.py` | remove protocols/adapters/wiring/tests | track 7 |
 | Consumer | BEP 15 §A4 | gains the structured-output primitive it presumes | n/a |
@@ -211,7 +230,8 @@ Tracks 5–7 depend on 1–4 (shipped) and on `create_agent`/`Agent.run` being r
 3. ✅ **`BackgroundLLM` removal vs demotion** — **delete outright.** Its validate/retry already folded into the injected structured validator; no remaining caller wants a non-agent lane (the consolidator uses `AgentRunner` with `context` omitted). No thin-wrapper demotion.
 4. **Consolidation agent registration** — does the disposable consolidation agent get a real registered `kind` (configurable/promptable via config), or stay an ad-hoc `agent_cfg={"system_prompt": …}` passed to `agent_runner.run`? Track 7 ships the ad-hoc form; promoting it to a registered `kind` is a follow-up if config-tunability is wanted.
 5. ✅ **`usage` shape** — summed totals on `AgentResult.usage`; per-iteration breakdown stays in events. (Shipped.)
-6. **`AgentRunner` chat-id ownership.** The adapter derives the child chat-id (nested vs internal-standalone). Confirm the off-turn standalone id uses the `INTERNAL_CHAT_SEPARATOR` convention so it is filtered from list/recall exactly like subagent chats — and that nothing downstream depends on the consolidator's old non-chat path.
+6. **`AgentRunner` chat-id ownership.** The adapter derives the child chat-id (nested vs internal-standalone) via the single `make_internal_chat_id(tag, parent_chat_id=None)` helper (`src/bos/core/_chat_store_utils.py`), shape `{parent}{sep}{tag}{sep}{uuid}`. The off-turn standalone id (empty parent) still carries `INTERNAL_CHAT_SEPARATOR`, so it is filtered from list/recall exactly like subagent chats. Confirm nothing downstream depends on the consolidator's old non-chat path.
+7. **Collapse `ToolContext` onto `ParentTurn` (deferred cleanup).** `ToolContext` currently *duplicates* `ParentTurn`'s four fields (`chat_id`/`turn_id`/`agent_name`/`event_sink`) and exposes them via the `.parent` property. **Once every call site reads `ctx.parent`** (rather than `ctx.chat_id` etc. directly), make `ToolContext` *compose* a `ParentTurn` instead of re-declaring those fields — removing the direct attributes so there is a single source of truth. This is a broad, breaking change across all tool implementations that read `ctx.chat_id`/`ctx.turn_id`/…, so it is tracked as its own follow-up, gated on the call-site migration, not done in this BEP.
 
 ---
 

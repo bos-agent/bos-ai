@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from ._chat_store_utils import make_subagent_chat_id
+from ._chat_store_utils import make_internal_chat_id
 from ._utils import (
     _aclose,
     _allowed,
@@ -18,6 +18,7 @@ from ._utils import (
 from .agent import AbortTurn, Agent, TurnContext
 from .contract import (
     AgentPlugin,
+    AgentResult,
     BackgroundLLM,
     ChatStore,
     Consolidator,
@@ -26,6 +27,8 @@ from .contract import (
     InterceptorStage,
     JobRunner,
     MailRoute,
+    MessageContent,
+    ParentTurn,
     PluginServices,
     ToolAttributes,
     ToolContext,
@@ -231,7 +234,7 @@ class _HarnessSubagentRuntime:
         context: ToolContext,
         agent_cfg: dict[str, Any] | None = None,
     ) -> str:
-        child_chat_id = make_subagent_chat_id(context.chat_id, kind)
+        child_chat_id = make_internal_chat_id(kind, context.chat_id)
         agent = await self._harness.create_agent(kind, agent_cfg)
         child_event_sink = derive_event_sink(
             context.event_sink,
@@ -244,6 +247,55 @@ class _HarnessSubagentRuntime:
             message,
             ctx_metadata={"subagent": kind, "ref_chat_id": context.chat_id},
             event_sink=child_event_sink,
+        )
+
+
+class _HarnessAgentRunner:
+    """Adapter implementing :class:`AgentRunner` over AgentHarness internals (BEP 12).
+
+    The single way a plugin/tool spins up a disposable agent. ``parent`` is
+    optional: on-turn callers (the AskSubagent tool) pass it so the child chat
+    nests under the parent and the event sink is parented; off-turn callers
+    (the memory consolidator, run inside a job) omit it and get a standalone
+    internal chat-id with no parent sink. Either way the disposable agent has a
+    fresh chat-id, so there is no chat history and no compaction recursion.
+    """
+
+    def __init__(self, harness: AgentHarness) -> None:
+        self._harness = harness
+
+    async def run(
+        self,
+        message: MessageContent,
+        *,
+        kind: str | None = None,
+        agent_cfg: dict[str, Any] | None = None,
+        schema: dict[str, Any] | None = None,
+        parent: ParentTurn | None = None,
+        model: str | None = None,
+    ) -> AgentResult:
+        agent = await self._harness.create_agent(kind, agent_cfg)
+        tag = kind or "agent"
+        if parent is not None:
+            child_chat_id = make_internal_chat_id(tag, parent.chat_id)
+            child_event_sink = derive_event_sink(
+                parent.event_sink,
+                parent_turn_id=parent.turn_id,
+                parent_chat_id=parent.chat_id,
+                parent_agent_name=parent.agent_name,
+            )
+            ctx_metadata: dict[str, Any] = {"subagent": tag, "ref_chat_id": parent.chat_id}
+        else:
+            child_chat_id = make_internal_chat_id(tag)
+            child_event_sink = None
+            ctx_metadata = {"subagent": tag}
+        return await agent.run(
+            child_chat_id,
+            message,
+            schema=schema,
+            ctx_metadata=ctx_metadata,
+            event_sink=child_event_sink,
+            llm_args={"model": model} if model else None,
         )
 
 
@@ -329,6 +381,7 @@ class AgentHarness:
             events=self.events,
             jobs=self.jobs,
             background_llm=self.background_llm,
+            agent_runner=_HarnessAgentRunner(self),
         )
 
         self._active = True

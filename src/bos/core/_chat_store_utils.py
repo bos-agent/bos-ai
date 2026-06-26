@@ -7,18 +7,25 @@ from typing import Any
 from .contract import ChatMeta, Message, ToolNoiseFilter
 
 # Internal (non-user-facing) chats embed this separator in their chat_id —
-# today, subagent child chats (see ``make_subagent_chat_id``). The user-facing
-# read paths (chat list, memory ingestion) hide them.
+# disposable-agent chats (see ``make_internal_chat_id``). The user-facing read
+# paths (chat list, memory ingestion) hide them.
 INTERNAL_CHAT_SEPARATOR = "~"
 
 
-def make_subagent_chat_id(parent_chat_id: str, role: str) -> str:
-    """Derive a child chat_id for a subagent turn. Embeds
-    ``INTERNAL_CHAT_SEPARATOR`` so the result is recognized by
-    ``is_internal_chat`` and kept out of the user's chat list / recall."""
-    agent_tag = re.sub(r"[^a-z0-9]+", "-", role.lower()).strip("-") or "agent"
+def make_internal_chat_id(tag: str, parent_chat_id: str | None = None) -> str:
+    """Derive a chat_id for an internal (non-user-facing) disposable agent.
+
+    Covers both flavors: on-turn subagents (pass the parent's ``parent_chat_id``
+    so the child nests under it) and off-turn agents like the memory consolidator
+    (omit it). Always embeds ``INTERNAL_CHAT_SEPARATOR`` so ``is_internal_chat``
+    recognizes it and it stays out of the user's chat list / recall. Shape:
+    ``{parent}{sep}{tag}{sep}{uuid}`` (``parent`` empty when off-turn). The uuid
+    slice is 48 random bits — enough that disposable-agent chats don't collide in
+    the store."""
+    agent_tag = re.sub(r"[^a-z0-9]+", "-", tag.lower()).strip("-") or "agent"
     agent_tag = agent_tag[:10]
-    return f"{parent_chat_id}{INTERNAL_CHAT_SEPARATOR}{agent_tag}{uuid.uuid4().hex[:8]}"
+    sep = INTERNAL_CHAT_SEPARATOR
+    return f"{parent_chat_id or ''}{sep}{agent_tag}{sep}{uuid.uuid4().hex[:12]}"
 
 
 def is_internal_chat(chat_id: str) -> bool:

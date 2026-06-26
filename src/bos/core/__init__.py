@@ -61,6 +61,7 @@ from .agent import (
 )
 from .contract import (
     AgentPlugin,
+    AgentRunner,
     BackgroundLLM,
     BaseChannel,
     Channel,
@@ -75,6 +76,7 @@ from .contract import (
     JobTrigger,
     MailBox,
     MailRoute,
+    ParentTurn,
     PluginServices,
     SessionEvent,
     SessionEventKind,
@@ -105,6 +107,7 @@ __all__ = [
     "AgentRegistry",
     "AgentResult",
     "AgentPlugin",
+    "AgentRunner",
     "BackgroundLLM",
     "BaseChannel",
     "Channel",
@@ -135,6 +138,7 @@ __all__ = [
     "MailBox",
     "MailRoute",
     "Message",
+    "ParentTurn",
     "PluginServices",
     "Agent",
     "SessionEvent",

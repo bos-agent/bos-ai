@@ -463,6 +463,24 @@ class ToolSet(Protocol):
 
 
 @dataclass(frozen=True)
+class ParentTurn:
+    """The parent turn a disposable agent nests under (BEP 12).
+
+    The minimal linkage an ``AgentRunner`` needs to attach a child agent to an
+    on-turn caller — the child chat-id nests under ``chat_id`` and the child's
+    events are parented to this turn. Off-turn callers pass no parent at all.
+    This is deliberately *not* ``ToolContext``: the runner is a general
+    capability, not a tool-only one, so it does not depend on the tool layer. A
+    ``ToolContext`` (the tool-invocation type) exposes one via :attr:`ToolContext.parent`.
+    """
+
+    chat_id: str
+    turn_id: str
+    agent_name: str | None = None
+    event_sink: TurnEventSink | None = None
+
+
+@dataclass(frozen=True)
 class ToolContext:
     agent_name: str
     chat_id: str
@@ -471,3 +489,14 @@ class ToolContext:
     # Escape hatch for plugin/runtime-specific context that is intentionally
     # not modeled as a core ToolContext field.
     extra_data: Mapping[str, Any] = field(default_factory=dict)
+
+    @property
+    def parent(self) -> ParentTurn:
+        """This invocation's turn as a :class:`ParentTurn` — the linkage view a
+        disposable agent (via ``AgentRunner.run(parent=…)``) nests under."""
+        return ParentTurn(
+            chat_id=self.chat_id,
+            turn_id=self.turn_id,
+            agent_name=self.agent_name,
+            event_sink=self.event_sink,
+        )
