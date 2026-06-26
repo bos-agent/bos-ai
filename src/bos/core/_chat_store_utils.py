@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import uuid
 from typing import Any
 
@@ -22,9 +23,9 @@ def make_internal_chat_id(tag: str, parent_chat_id: str | None = None) -> str:
     slice is 48 random bits — enough that disposable-agent chats don't collide in
     the store."""
     sep = INTERNAL_CHAT_SEPARATOR
-    # Only strip the separator from the tag so it can't break the id's structure;
-    # the tag is otherwise kept as-is (agent kinds are already clean identifiers).
-    agent_tag = tag.replace(sep, "") or "agent"
+    # Sanitize the tag to a safe slug: drop the separator and any path-dangerous
+    # characters (keep [a-z0-9]; collapse every other run to '-'). Not truncated.
+    agent_tag = re.sub(r"[^a-z0-9]+", "-", tag.lower()).strip("-") or "agent"
     return f"{parent_chat_id or ''}{sep}{agent_tag}{sep}{uuid.uuid4().hex[:12]}"
 
 
