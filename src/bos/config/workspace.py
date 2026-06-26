@@ -619,10 +619,10 @@ class Workspace:
         runtime = self.config.runtime
         if not runtime or not runtime.actors:
             return DEFAULT_AGENT_KIND
-        default_actor = runtime.default_actor
-        actor = runtime.actors.get(default_actor)
+        main_actor = runtime.main_actor
+        actor = runtime.actors.get(main_actor)
         if actor is None:
-            raise ValueError(f"runtime.default_actor {default_actor!r} must exist in runtime.actors.")
+            raise ValueError(f"runtime.main_actor {main_actor!r} must exist in runtime.actors.")
         return actor.agent
 
     def resolve_gateway_config(self) -> ResolvedGatewayConfig:
@@ -664,11 +664,11 @@ class Workspace:
 
     def resolve_default_actor(self) -> str:
         runtime = self.config.runtime
-        default_actor = runtime.default_actor if runtime else "main"
+        main_actor = runtime.main_actor if runtime else "main"
         actors = self.resolve_gateway_actors()
-        if default_actor not in actors:
-            raise ValueError(f"runtime.default_actor {default_actor!r} must exist in runtime.actors.")
-        return default_actor
+        if main_actor not in actors:
+            raise ValueError(f"runtime.main_actor {main_actor!r} must exist in runtime.actors.")
+        return main_actor
 
     def resolve_gateway_channels(self) -> list[ResolvedGatewayChannelConfig]:
         from bos.gateway.config import ResolvedGatewayChannelConfig
@@ -740,7 +740,7 @@ class Workspace:
             runtime_extra = {
                 k: v
                 for k, v in extra.items()
-                if k not in {"location", "channels", "actors", "default_actor", "gateway", "actor_resolver"}
+                if k not in {"location", "channels", "actors", "main_actor", "gateway", "actor_resolver"}
             }
 
         workspace_dir = runtime_extra.get("workspace_dir") or "/workspace"

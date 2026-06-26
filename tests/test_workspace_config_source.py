@@ -46,7 +46,7 @@ tools = { enabled = ["ReadFile"] }
 
 [runtime]
 location = "process"
-default_actor = "main"
+main_actor = "main"
 
 [runtime.actors.main]
 agent = "custom-agent"

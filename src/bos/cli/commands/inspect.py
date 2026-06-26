@@ -77,7 +77,7 @@ def _runtime_info(ws) -> dict[str, Any]:
     runtime = ws.config.runtime or RuntimeConfig()
     model = getattr((ws.config.agent or AgentSection()).defaults, "model", None)
     return {
-        "default_actor": runtime.default_actor,
+        "main_actor": runtime.main_actor,
         "model": model,
         "actors": {
             name: {"agent": cfg.agent, "display_name": cfg.display_name}
@@ -224,10 +224,10 @@ def _render_text(report: dict[str, Any]) -> None:
 
     r = report["runtime"]
     console.print("\n[bold]Runtime[/]")
-    console.print(f"  default_actor: {r['default_actor']}")
+    console.print(f"  main_actor:    {r['main_actor']}")
     console.print(f"  model:         {r['model'] or '— (set agent.defaults.model or BOS_MODEL)'}")
     for name, actor in r["actors"].items():
-        marker = " *" if name == r["default_actor"] else ""
+        marker = " *" if name == r["main_actor"] else ""
         display = f" ({actor['display_name']})" if actor.get("display_name") else ""
         console.print(f"  actor:         {name}{marker} → agent={actor['agent']}{display}")
     for ch in r["channels"]:

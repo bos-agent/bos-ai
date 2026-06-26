@@ -846,7 +846,7 @@ All runtime config stays under `[runtime]`. This is the final end-state schema: 
 ```toml
 [runtime]
 location = "process"
-default_actor = "main"
+main_actor = "main"
 
 # ── Gateway / HTTP server (infrastructure) ──
 
@@ -908,11 +908,11 @@ settings = { app_id = "A01234567", token_env = "SLACK_BOT_TOKEN" }
 | Key | Type | Required | Purpose |
 |-----|------|----------|---------|
 | `location` | `str` | no | Runtime location, e.g. `process` or `docker` |
-| `default_actor` | `str` | yes | Default actor identity for channels and dynamic WS sessions |
+| `main_actor` | `str` | yes | Default actor identity for channels and dynamic WS sessions |
 
 Validation:
 
-- `default_actor` must exist in `[runtime.actors]`
+- `main_actor` must exist in `[runtime.actors]`
 - if no actors are configured, config is invalid; single-agent setups still configure `[runtime.actors.main]`
 
 ### Actor config fields
@@ -952,7 +952,7 @@ Validation:
 | `type` | `str` | yes | Channel class/type registered on `ep_channel` |
 | `channel_id` | `str` | yes | Unique BOS channel instance identity |
 | `display_name` | `str` | no | Human-readable label for UI/status listing |
-| `target_actor` | `str` | no | Default actor for messages without explicit routing; falls back to `runtime.default_actor` |
+| `target_actor` | `str` | no | Default actor for messages without explicit routing; falls back to `runtime.main_actor` |
 | `settings` | `dict` | no | Adapter-specific configuration passed to the channel |
 
 Validation:
@@ -1178,7 +1178,7 @@ Write timing:
 
 - TUI/HTTP clients use `channel_id` and gateway API-key auth.
 - `WS_TAKEOVER_CLOSE_CODE` constant lives in `bos.gateway` (`gateway/channels/ws_channel.py`, re-exported from `bos.gateway`; per BEP 13 Track A).
-- Config goes directly to the final `[runtime.gateway]`, `[runtime.actors]`, `channel_id`, `target_actor`, and `runtime.default_actor` shape.
+- Config goes directly to the final `[runtime.gateway]`, `[runtime.actors]`, `channel_id`, `target_actor`, and `runtime.main_actor` shape.
 
 ---
 

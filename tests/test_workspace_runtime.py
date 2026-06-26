@@ -15,7 +15,7 @@ def test_gateway_runtime_resolves_final_config_shape():
     config = {
         "runtime": {
             "location": "process",
-            "default_actor": "main",
+            "main_actor": "main",
             "gateway": {"host": "0.0.0.0", "port": 7000, "api_key_env": "BOS_TEST_KEY"},
             "actors": {
                 "main": {
@@ -71,16 +71,16 @@ def test_gateway_runtime_resolves_final_config_shape():
 
 
 def test_gateway_runtime_requires_actors():
-    ws = Workspace(".", ".bos", {"runtime": {"default_actor": "main"}})
+    ws = Workspace(".", ".bos", {"runtime": {"main_actor": "main"}})
 
     with pytest.raises(ValueError, match="runtime.actors"):
         ws.resolve_gateway_actors()
 
 
 def test_gateway_runtime_rejects_invalid_default_actor():
-    ws = Workspace(".", ".bos", {"runtime": {"default_actor": "missing", "actors": {"main": {"agent": "main"}}}})
+    ws = Workspace(".", ".bos", {"runtime": {"main_actor": "missing", "actors": {"main": {"agent": "main"}}}})
 
-    with pytest.raises(ValueError, match="runtime.default_actor"):
+    with pytest.raises(ValueError, match="runtime.main_actor"):
         ws.resolve_default_actor()
 
 
@@ -91,7 +91,7 @@ def test_gateway_runtime_rejects_actor_overflow_agent_overrides():
             ".bos",
             {
                 "runtime": {
-                    "default_actor": "main",
+                    "main_actor": "main",
                     "actors": {
                         "main": {
                             "agent": "main",
@@ -106,7 +106,7 @@ def test_gateway_runtime_rejects_actor_overflow_agent_overrides():
 def test_gateway_runtime_rejects_duplicate_channel_ids():
     config = {
         "runtime": {
-            "default_actor": "main",
+            "main_actor": "main",
             "actors": {"main": {"agent": "main"}},
             "channels": [
                 {"type": "TelegramChannel", "channel_id": "dup"},
@@ -123,7 +123,7 @@ def test_gateway_runtime_rejects_duplicate_channel_ids():
 def test_gateway_runtime_rejects_http_channel_config():
     config = {
         "runtime": {
-            "default_actor": "main",
+            "main_actor": "main",
             "actors": {"main": {"agent": "main"}},
             "channels": [{"type": "HttpChannel", "channel_id": "http"}],
         }
@@ -156,7 +156,7 @@ def test_gateway_runtime_rejects_legacy_channel_keys(legacy_key):
             ".bos",
             {
                 "runtime": {
-                    "default_actor": "main",
+                    "main_actor": "main",
                     "actors": {"main": {"agent": "main"}},
                     "channels": [channel],
                 }

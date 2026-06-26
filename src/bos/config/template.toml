@@ -120,7 +120,7 @@ instead of return empty message
 
 [runtime]
 location = "process"
-default_actor = "main"
+main_actor = "main"
 
 [runtime.gateway]
 host = "127.0.0.1"
