@@ -175,10 +175,24 @@ two `PluginServices` fields, and the harness wiring that constructs them — plu
 `tests/test_background_llm.py`.
 
 The skills plugin's `_SkillTestRuntime` still uses `PluginServices.llm` and `.consolidator`
-(it builds an agent by hand for skill tests). Those two fields are **out of scope for this
-update**: fold them into `agent_runner` only *after* verifying the skills runtime's exact
-needs (test-only tool/loader wiring), as a later, separate step. Until then `llm` and
-`consolidator` stay on `PluginServices`.
+(it hand-builds an `Agent` for skill tests — `src/bos/plugins/skills/plugin.py`). Verified:
+those two fields **stay** — `_SkillTestRuntime` cannot route through `AgentRunner` as it stands,
+because the `TestSkill` tool needs three things the generic runner deliberately can't express:
+(1) a per-run **recording loader** whose `loaded` set is inspected *after* the run to report
+whether the agent called `LoadSkill` — a fire-and-return `AgentResult` has no hook for a
+caller-owned, post-run-inspected object; (2) a custom **single-skill plugin + prompt provider**
+(`SkillsAgentPlugin(allow=[name])` / `_PluginPromptProvider`), whereas `create_agent` binds
+plugins from harness *config*, not from a pre-built instance; (3) an **isolated throwaway
+chat store**. Re-exposing all of that through the port would re-create the `Agent` constructor
+and defeat the port's purpose. So this is a **decided non-goal**, not a pending migration:
+`llm`/`consolidator` remain on `PluginServices` for the skill-test runtime.
+
+> **Future work (separate BEP).** The current `TestSkill` implementation is hacky — a
+> hand-assembled agent with an instrumented loader. It should be redone later atop
+> `AgentRunner` once we have a proper **A/B skill-testing environment** (e.g. an isolated
+> workspace per test via a git worktree or equivalent sandbox) plus a first-class way for the
+> runner to surface a "which skills loaded" signal. At that point `llm`/`consolidator` could
+> finally fold into `agent_runner`. Out of scope here; tracked as a follow-up.
 
 > **Layering (the clean end state).** `LLM.complete` (raw, stateless) → `Agent.run`
 > (one agentic turn, returns `AgentResult`) → `AgentRunner.run` (spawn a *disposable* agent
@@ -200,9 +214,9 @@ needs (test-only tool/loader wiring), as a later, separate step. Until then `llm
 
 5. ✅ **`AgentRunner` port + adapter** — `AgentRunner` Protocol in `contract.py`; single harness adapter `_HarnessAgentRunner` over `create_agent` + `Agent.run` (generalizing the old `_HarnessSubagentRuntime`, with optional `parent: ParentTurn`). Chat-ids via the unified `make_internal_chat_id(tag, parent_chat_id=None)`.
 6. ✅ **Swap `PluginServices`** — `subagents` + `background_llm` replaced by a single `agent_runner: AgentRunner | None`; harness constructs and injects the adapter.
-7. ✅ **Migrate callers + delete old lanes** — `AskSubagent` → `agent_runner.run(kind=…, parent=ctx.parent)`; `DefaultMemoryConsolidator` → `agent_runner.run(agent_cfg=…, schema=…)`. Deleted `SubagentRuntime`, `BackgroundLLM`, `DefaultBackgroundLLM`, `_HarnessSubagentRuntime`, the two `PluginServices` fields, the harness wiring, and `tests/test_background_llm.py`. Remaining deferred: fold `PluginServices.llm`/`consolidator` into `agent_runner` once the skills `_SkillTestRuntime` migrates (Open Issue out of scope here), and collapse `ToolContext` onto `ParentTurn` (Open Issue #7).
+7. ✅ **Migrate callers + delete old lanes** — `AskSubagent` → `agent_runner.run(kind=…, parent=ctx.parent)`; `DefaultMemoryConsolidator` → `agent_runner.run(agent_cfg=…, schema=…)`. Deleted `SubagentRuntime`, `BackgroundLLM`, `DefaultBackgroundLLM`, `_HarnessSubagentRuntime`, the two `PluginServices` fields, the harness wiring, and `tests/test_background_llm.py`. Remaining deferred: collapse `ToolContext` onto `ParentTurn` (Open Issue #7). Note: folding `PluginServices.llm`/`consolidator` into `agent_runner` was **verified and rejected** — the skills `_SkillTestRuntime` legitimately needs them (see §F); a future redo of `TestSkill` atop `AgentRunner` + an A/B test sandbox could revisit it.
 
-Tracks 5–7 depend on 1–4 (shipped) and on `create_agent`/`Agent.run` being reachable from the adapter (they are, inside an active harness). **Out of scope (later, verify first):** folding `PluginServices.llm`/`consolidator` into `agent_runner` once the skills `_SkillTestRuntime` migrates.
+Tracks 5–7 depend on 1–4 (shipped) and on `create_agent`/`Agent.run` being reachable from the adapter (they are, inside an active harness). **Verified and rejected:** folding `PluginServices.llm`/`consolidator` into `agent_runner` — the skills `_SkillTestRuntime` requires them (see §F).
 
 ---
 
@@ -247,4 +261,5 @@ Tracks 5–7 depend on 1–4 (shipped) and on `create_agent`/`Agent.run` being r
 ## Revision History
 
 - **2026-06-25** — Initial draft. Claims BEP number 12 (renumbered the former "BEP 12: Agent-Backed Command Workflow" to BEP 15, since this structured-output primitive is the lower-level dependency it builds on).
-- **2026-06-26** — Tracks 1–4 shipped (`70793d6`). Recorded the as-built amendment: structured validation landed as a **port + adapter** (forced by the stdlib-pure agent ring), not a flat shared helper (§C). Replaced original tracks 5–6 ("migrate consolidator, retire `BackgroundLLM`") with the broader **`AgentRunner` unification**: a single disposable-agent port subsuming both `SubagentRuntime` and `BackgroundLLM`, with `ToolContext` as an optional per-call param (Goals 4–5; Design §§D–F; tracks 5–7; resolved Open Issues 1–3, 5).
+- **2026-06-26** — Tracks 1–4 shipped (`70793d6`). Recorded the as-built amendment: structured validation landed as a **port + adapter** (forced by the stdlib-pure agent ring), not a flat shared helper (§C). Replaced original tracks 5–6 ("migrate consolidator, retire `BackgroundLLM`") with the broader **`AgentRunner` unification**: a single disposable-agent port subsuming both `SubagentRuntime` and `BackgroundLLM`, with the parent turn as an optional per-call param (Goals 4–5; Design §§D–F; tracks 5–7; resolved Open Issues 1–3, 5).
+- **2026-06-26** — Tracks 5–7 shipped (`acd4ee4`, `315fcf4`, `9d8300f`, `7d62192`). The port takes `parent: ParentTurn` (a minimal linkage descriptor in the agent ring, exposed via `ToolContext.parent`), *not* `ToolContext`, so it stays non-tool-specific. Chat-ids unified into `make_internal_chat_id`. `AskSubagent` and the memory consolidator migrated; `SubagentRuntime`/`BackgroundLLM`/`DefaultBackgroundLLM`/`_HarnessSubagentRuntime` and the old `PluginServices` fields deleted. **Verified and rejected** folding `llm`/`consolidator` into `agent_runner`: the skills `_SkillTestRuntime` needs them to hand-build an instrumented single-skill agent (§F); a future `TestSkill` redo atop `AgentRunner` + an A/B test sandbox (git-worktree isolation) may revisit it.
