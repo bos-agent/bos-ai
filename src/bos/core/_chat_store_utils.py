@@ -19,13 +19,16 @@ def make_internal_chat_id(tag: str, parent_chat_id: str | None = None) -> str:
     so the child nests under it) and off-turn agents like the memory consolidator
     (omit it). Always embeds ``INTERNAL_CHAT_SEPARATOR`` so ``is_internal_chat``
     recognizes it and it stays out of the user's chat list / recall. Shape:
-    ``{parent}{sep}{tag}{sep}{uuid}`` (``parent`` empty when off-turn). The uuid
-    slice is 48 random bits — enough that disposable-agent chats don't collide in
-    the store."""
+    ``{parent}{sep}{tag}{sep}{uuid}`` (``parent`` empty when off-turn). ``tag`` is
+    sanitized to a safe slug — lowercased, every non-``[a-z0-9]`` run collapsed to
+    ``-``, and the separator stripped — so it can't break the id's structure or a
+    path-based chat store (it is not length-capped). The uuid slice is 48 random
+    bits — enough that disposable-agent chats don't collide in the store."""
     sep = INTERNAL_CHAT_SEPARATOR
     # Sanitize the tag to a safe slug: drop the separator and any path-dangerous
     # characters (keep [a-z0-9]; collapse every other run to '-'). Not truncated.
     agent_tag = re.sub(r"[^a-z0-9]+", "-", tag.lower()).strip("-") or "agent"
+    agent_tag = agent_tag.replace(INTERNAL_CHAT_SEPARATOR, "")
     return f"{parent_chat_id or ''}{sep}{agent_tag}{sep}{uuid.uuid4().hex[:12]}"
 
 
