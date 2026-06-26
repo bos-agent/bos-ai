@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v1.6.0 (2026-06-26)
+
+### Features
+
+- **agent**: Unify subagent + background LLM into AgentRunner (BEP 12)
+  ([#56](https://github.com/bos-agent/bos-ai/pull/56),
+  [`552b6f7`](https://github.com/bos-agent/bos-ai/commit/552b6f736e59431d6d6c3e1ffa7b10e4abcc8536))
+
+
 ## v1.5.0 (2026-06-24)
 
 ### Bug Fixes
