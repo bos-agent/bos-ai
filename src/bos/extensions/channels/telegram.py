@@ -490,11 +490,18 @@ class TelegramChannel(BaseChannel[TelegramSettings]):
             buf["caption"] = inbound["text"]
         if buf["handle"] is not None:
             buf["handle"].cancel()
-        loop = asyncio.get_event_loop()
-        buf["handle"] = loop.call_later(
-            self._album_debounce,
-            lambda: asyncio.ensure_future(self._flush_album(mailbox, group)),
-        )
+        loop = asyncio.get_running_loop()
+
+        def _schedule_flush() -> None:
+            fut = asyncio.ensure_future(self._flush_album(mailbox, group))
+            fut.add_done_callback(
+                lambda f: (
+                    f.cancelled()
+                    or (f.exception() and logger.warning("Telegram album flush failed: %s", f.exception()))
+                )
+            )
+
+        buf["handle"] = loop.call_later(self._album_debounce, _schedule_flush)
 
     async def _flush_album(self, mailbox: Any, media_group_id: str) -> None:
         buf = self._album_buffers.pop(media_group_id, None)
