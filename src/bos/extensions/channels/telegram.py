@@ -377,6 +377,26 @@ class TelegramChannel(BaseChannel[TelegramSettings]):
                         # never as envelopes through the agent actor (BEP 13 / OPEN-D).
                         await self._handle_command(inbound["text"], ref, telegram_chat_id)
                         continue
+                    is_single_photo = (
+                        inbound["content_type"] == MessageType.MESSAGE
+                        and inbound["file_ids"]
+                        and not inbound["media_group_id"]
+                    )
+                    if is_single_photo:
+                        try:
+                            parts = await self._download_image_parts(inbound["file_ids"])
+                        except Exception as exc:
+                            logger.warning("Telegram image download failed: %s", exc)
+                            await self._api_call(
+                                "sendMessage",
+                                {
+                                    "chat_id": telegram_chat_id,
+                                    "text": "Couldn't fetch the image you sent — please try again.",
+                                },
+                            )
+                            continue
+                        await self._assemble_and_send(mailbox, inbound, parts)
+                        continue
                     chat_id = self._runtime.chat_coordinator.get_cursor(ref)
                     if chat_id is None:
                         chat_id = self._runtime.chat_coordinator.new_chat(ref)
@@ -409,27 +429,6 @@ class TelegramChannel(BaseChannel[TelegramSettings]):
                         )
                     if not preflight.ok:
                         await self._send_preflight_rejection(telegram_chat_id, preflight)
-                        continue
-
-                    is_single_photo = (
-                        inbound["content_type"] == MessageType.MESSAGE
-                        and inbound["file_ids"]
-                        and not inbound["media_group_id"]
-                    )
-                    if is_single_photo:
-                        try:
-                            parts = await self._download_image_parts(inbound["file_ids"])
-                        except Exception as exc:
-                            logger.warning("Telegram image download failed: %s", exc)
-                            await self._api_call(
-                                "sendMessage",
-                                {
-                                    "chat_id": telegram_chat_id,
-                                    "text": "Couldn't fetch the image you sent — please try again.",
-                                },
-                            )
-                            continue
-                        await self._assemble_and_send(mailbox, inbound, parts)
                         continue
 
                     self._conversation_to_telegram_chat[ref.channel_conversation_id] = telegram_chat_id

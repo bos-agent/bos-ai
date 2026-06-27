@@ -790,3 +790,48 @@ async def test_single_photo_assembles_image_content(monkeypatch, tmp_path):
 
     assert sent["content"][0] == {"type": "text", "text": "look"}
     assert sent["content"][1]["source"]["kind"] == "path"
+
+
+@pytest.mark.asyncio
+async def test_single_photo_no_caption_assembles_image_only(monkeypatch, tmp_path):
+    import bos.extensions.channels.telegram as tg_mod
+    from bos.core.actor import MessageType
+
+    sent = {}
+
+    def _fake_store(*, upload_dir, filename, content_type, data):
+        return {"type": "image", "source": {"kind": "path", "value": f"/u/{filename}"}}
+
+    monkeypatch.setattr(tg_mod, "store_uploaded_image", _fake_store)
+
+    channel = _make_channel(tmp_path)
+
+    async def _fake_api(method, payload):
+        assert method == "getFile"
+        return {"result": {"file_path": "photos/a.jpg"}}
+
+    async def _fake_dl(file_path):
+        return b"\xff\xd8imgbytes"
+
+    monkeypatch.setattr(channel, "_api_call", _fake_api)
+    monkeypatch.setattr(channel, "_download_telegram_file", _fake_dl)
+
+    class _MB:
+        async def send(self, addr, content, **kw):
+            sent["addr"] = addr
+            sent["content"] = content
+
+    inbound = {
+        "telegram_chat_id": "42",
+        "channel_conversation_id": "tg_chat:42",
+        "text": "",
+        "content_type": MessageType.MESSAGE,
+        "file_ids": ["big"],
+        "media_group_id": None,
+    }
+    parts = await channel._download_image_parts(inbound["file_ids"])
+    await channel._assemble_and_send(_MB(), inbound, parts)
+
+    assert len(sent["content"]) == 1
+    assert sent["content"][0]["type"] == "image"
+    assert sent["content"][0]["source"]["kind"] == "path"
