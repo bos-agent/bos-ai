@@ -26,7 +26,7 @@ from textual.binding import Binding
 from textual.containers import Vertical
 from textual.message import Message
 from textual.screen import ModalScreen
-from textual.widgets import Footer, Input, OptionList, RichLog, Static, TextArea
+from textual.widgets import DirectoryTree, Footer, Input, OptionList, RichLog, Static, TextArea
 from textual.widgets.option_list import Option
 from textual_autocomplete import AutoComplete, DropdownItem, TargetState
 
@@ -117,6 +117,18 @@ def _compose_send_content(text: str, attachments: list[dict[str, Any]]) -> Messa
         return text
     parts: list[dict[str, Any]] = [{"type": "text", "text": text}, *attachments]
     return cast("MessageContent", parts)
+
+
+def _resolve_typed_path(raw: str) -> tuple[str, str | None]:
+    candidate = raw.strip()
+    if not candidate:
+        return ("invalid", None)
+    path = Path(candidate).expanduser()
+    if path.is_file():
+        return ("dismiss", str(path.resolve()))
+    if path.is_dir():
+        return ("reroot", str(path.resolve()))
+    return ("invalid", None)
 
 
 def _relative_time(iso: str | None) -> str:
@@ -408,6 +420,74 @@ class ChatPickerModal(ModalScreen[str | None]):
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         self.dismiss(event.option.id)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class FilePickerModal(ModalScreen[str | None]):
+    """File browser for attaching a file. Enter on a file selects it; Esc cancels.
+
+    A path Input at the top retargets the tree (directory) or selects directly (file).
+    """
+
+    DEFAULT_CSS = """
+    FilePickerModal {
+        align: center middle;
+    }
+
+    #file-picker {
+        width: 90%;
+        max-width: 120;
+        height: auto;
+        max-height: 80%;
+        border: round $primary;
+        background: $surface;
+        padding: 1 2;
+    }
+
+    #file-picker-title {
+        color: $text-muted;
+        padding-bottom: 1;
+    }
+
+    #file-tree {
+        height: auto;
+        max-height: 20;
+        border: none;
+        background: transparent;
+    }
+    """
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel", show=False),
+    ]
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="file-picker"):
+            yield Static(
+                "Attach a file — browse + Enter to select, type a path, Esc to cancel",
+                id="file-picker-title",
+            )
+            yield Input(placeholder="Path (file selects, directory re-roots)…", id="file-path")
+            yield DirectoryTree(str(Path.cwd()), id="file-tree")
+
+    def on_mount(self) -> None:
+        self.query_one("#file-tree", DirectoryTree).focus()
+
+    def on_directory_tree_file_selected(self, event: DirectoryTree.FileSelected) -> None:
+        self.dismiss(str(event.path))
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        action, value = _resolve_typed_path(event.value)
+        if action == "dismiss":
+            self.dismiss(value)
+        elif action == "reroot" and value is not None:
+            self.query_one("#file-tree", DirectoryTree).path = value
+            self.query_one("#file-path", Input).value = ""
+        else:
+            self.query_one("#file-path", Input).value = ""
+            self.notify("No such file or directory.", severity="warning")
 
     def action_cancel(self) -> None:
         self.dismiss(None)

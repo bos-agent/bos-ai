@@ -1029,3 +1029,35 @@ async def test_flush_carries_pending_attachments(monkeypatch):
         {"type": "image", "source": {"kind": "path", "value": "/u/b.png"}},
     ]
     assert app._pending_attachments == []
+
+
+def test_resolve_typed_path_file(tmp_path):
+    from bos.cli.tui_app import _resolve_typed_path
+
+    f = tmp_path / "a.png"
+    f.write_bytes(b"x")
+    action, value = _resolve_typed_path(str(f))
+    assert action == "dismiss"
+    assert value == str(f.resolve())
+
+
+def test_resolve_typed_path_directory(tmp_path):
+    from bos.cli.tui_app import _resolve_typed_path
+
+    action, value = _resolve_typed_path(str(tmp_path))
+    assert action == "reroot"
+    assert value == str(tmp_path.resolve())
+
+
+def test_resolve_typed_path_missing(tmp_path):
+    from bos.cli.tui_app import _resolve_typed_path
+
+    action, value = _resolve_typed_path(str(tmp_path / "nope.png"))
+    assert action == "invalid"
+    assert value is None
+
+
+def test_resolve_typed_path_blank():
+    from bos.cli.tui_app import _resolve_typed_path
+
+    assert _resolve_typed_path("   ") == ("invalid", None)
