@@ -48,9 +48,14 @@ class _StubAgentRunner:
     async def run(self, message, *, kind=None, agent_cfg=None, schema=None, parent=None, model=None):
         from bos.core import AgentResult
 
-        self.calls.append(
-            {"message": message, "kind": kind, "agent_cfg": agent_cfg, "schema": schema, "parent": parent}
-        )
+        self.calls.append({
+            "message": message,
+            "kind": kind,
+            "agent_cfg": agent_cfg,
+            "schema": schema,
+            "parent": parent,
+            "model": model,
+        })
         if self._error is not None:
             raise self._error
         return AgentResult(output=self._payload, structured=True)
@@ -148,6 +153,87 @@ class TestDefaultConsolidator:
         # Off-turn disposable agent: system prompt via agent_cfg, no parent turn.
         assert blm.calls[0]["agent_cfg"]["system_prompt"]
         assert blm.calls[0]["parent"] is None
+
+    @pytest.mark.asyncio
+    async def test_explicit_model_forwarded_to_runner(self, monkeypatch):
+        """A model configured on the consolidator is passed to the disposable
+        agent run() call, overriding any env fallback."""
+        from bos.plugins.memory.consolidator import (
+            ConsolidationPolicy,
+            DefaultMemoryConsolidator,
+            MemoryConsolidationRequest,
+        )
+
+        monkeypatch.setenv("BOS_CONSOLIDATOR_MODEL", "env/model")
+        blm = _StubAgentRunner({"operations": []})
+        c = DefaultMemoryConsolidator(blm, maxim_keys={"user"}, model="explicit/model")
+        req = MemoryConsolidationRequest(
+            chat_id="c1",
+            actor_name=None,
+            base_revision=1,
+            trigger="manual",
+            transcript_window=[],
+            raw_appends=[],
+            candidate_memories=[],
+            active_maxims={},
+            policy=ConsolidationPolicy(),
+        )
+        await c.propose(req)
+        assert blm.calls[0]["model"] == "explicit/model"
+
+    @pytest.mark.asyncio
+    async def test_model_falls_back_to_env(self, monkeypatch):
+        """With no configured model, the call site falls back to
+        BOS_CONSOLIDATOR_MODEL."""
+        from bos.plugins.memory.consolidator import (
+            ConsolidationPolicy,
+            DefaultMemoryConsolidator,
+            MemoryConsolidationRequest,
+        )
+
+        monkeypatch.setenv("BOS_CONSOLIDATOR_MODEL", "env/model")
+        blm = _StubAgentRunner({"operations": []})
+        c = DefaultMemoryConsolidator(blm, maxim_keys={"user"})
+        req = MemoryConsolidationRequest(
+            chat_id="c1",
+            actor_name=None,
+            base_revision=1,
+            trigger="manual",
+            transcript_window=[],
+            raw_appends=[],
+            candidate_memories=[],
+            active_maxims={},
+            policy=ConsolidationPolicy(),
+        )
+        await c.propose(req)
+        assert blm.calls[0]["model"] == "env/model"
+
+    @pytest.mark.asyncio
+    async def test_model_none_when_unconfigured_and_no_env(self, monkeypatch):
+        """No configured model and no env → None, so the provider falls back to
+        BOS_MODEL downstream."""
+        from bos.plugins.memory.consolidator import (
+            ConsolidationPolicy,
+            DefaultMemoryConsolidator,
+            MemoryConsolidationRequest,
+        )
+
+        monkeypatch.delenv("BOS_CONSOLIDATOR_MODEL", raising=False)
+        blm = _StubAgentRunner({"operations": []})
+        c = DefaultMemoryConsolidator(blm, maxim_keys={"user"})
+        req = MemoryConsolidationRequest(
+            chat_id="c1",
+            actor_name=None,
+            base_revision=1,
+            trigger="manual",
+            transcript_window=[],
+            raw_appends=[],
+            candidate_memories=[],
+            active_maxims={},
+            policy=ConsolidationPolicy(),
+        )
+        await c.propose(req)
+        assert blm.calls[0]["model"] is None
 
     @pytest.mark.asyncio
     async def test_prompt_includes_transcript_and_candidates(self):

@@ -93,6 +93,12 @@ enabled = [
 # [agent.defaults.plugin-bindings.MemoryPlugin]
 # maxims = ["user", "self", "rules"]
 # scope = "workspace"
+# [agent.defaults.plugin-bindings.MemoryPlugin.consolidation]
+# enabled = false
+# retention_days = 30
+# model for the off-turn memory consolidation agent. precedence:
+#   consolidation.model > env:BOS_CONSOLIDATOR_MODEL > BOS_MODEL (provider default)
+# model = "gemini/gemini-2.5-flash"
 
 [agent.defaults.plugin-bindings.SubagentPlugin]
 task_template = """
