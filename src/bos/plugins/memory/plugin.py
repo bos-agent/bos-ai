@@ -128,7 +128,7 @@ class MemoryHarnessPlugin:
             "maxims": ["user", "self", "rules"],
             "backend": "_default",
             "retrieval": {"auto_recall": True, "index_in_prompt": True, "index_max": 50, "top_k": 5},
-            "consolidation": {"enabled": False, "retention_days": 30},
+            "consolidation": {"enabled": False, "retention_days": 30, "model": None},
         }
 
     async def setup(self, services: PluginServices) -> None:
@@ -152,6 +152,7 @@ class MemoryHarnessPlugin:
             enabled=bool(cons_cfg.get("enabled", False)),
             retention_days=int(cons_cfg.get("retention_days", 30)),
         )
+        self._consolidation_model = cons_cfg.get("model") or None
 
         if (
             self._policy.enabled
@@ -193,7 +194,11 @@ class MemoryHarnessPlugin:
         )
         watermarks = WatermarkStore(agent_dir / "watermarks.json")
         consolidator = (
-            DefaultMemoryConsolidator(self._services.agent_runner, maxim_keys=self._maxim_keys)
+            DefaultMemoryConsolidator(
+                self._services.agent_runner,
+                maxim_keys=self._maxim_keys,
+                model=self._consolidation_model,
+            )
             if self._services.agent_runner is not None
             else None
         )

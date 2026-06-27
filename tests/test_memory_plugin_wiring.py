@@ -67,6 +67,23 @@ async def test_setup_does_not_build_per_agent_eagerly(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_consolidation_model_config_reaches_consolidator(tmp_path):
+    h, runner = await _setup_plugin(tmp_path)
+    try:
+        h._cfg = {
+            **h._cfg,
+            "consolidation": {"enabled": False, "retention_days": 30, "model": "cfg/model"},
+        }
+        await h.setup(h._services)
+        h.bind({**h._cfg, "agent_name": "alice"})
+        bundle = h._for("alice")
+        assert bundle.consolidator is not None
+        assert bundle.consolidator._model == "cfg/model"
+    finally:
+        await runner.drain(timeout=0.5)
+
+
+@pytest.mark.asyncio
 async def test_validate_config_rejects_scope_key(tmp_path):
     h, runner = await _setup_plugin(tmp_path)
     try:

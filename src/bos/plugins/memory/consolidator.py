@@ -5,6 +5,7 @@ schema; never writes directly (writes go through the L1 operation service)."""
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
@@ -134,12 +135,15 @@ class DefaultMemoryConsolidator:
         # *registered* agent kind here (run(kind=…) instead of this ad-hoc
         # agent_cfg), giving consolidation a fully configurable model/prompt/tools
         # like any other agent. Tracked as BEP 12 Open Issue #4.
+        # Model precedence: configured model > BOS_CONSOLIDATOR_MODEL env >
+        # None (the runner then falls back to BOS_MODEL in the provider).
+        model = self._model or os.environ.get("BOS_CONSOLIDATOR_MODEL") or None
         try:
             result = await self._runner.run(
                 _render_user_prompt(request),
                 agent_cfg={"system_prompt": _SYSTEM_PROMPT, "tools": []},
                 schema=_RESPONSE_SCHEMA,
-                model=self._model,
+                model=model,
             )
         except StructuredOutputError as exc:
             # No valid structured proposal is NOT "nothing to consolidate" — it
