@@ -16,7 +16,7 @@ import json
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from rich.markdown import Markdown
 from rich.text import Text
@@ -26,12 +26,12 @@ from textual.binding import Binding
 from textual.containers import Vertical
 from textual.message import Message
 from textual.screen import ModalScreen
-from textual.widgets import Footer, Input, OptionList, RichLog, Static, TextArea
+from textual.widgets import DirectoryTree, Footer, Input, OptionList, RichLog, Static, TextArea
 from textual.widgets.option_list import Option
 from textual_autocomplete import AutoComplete, DropdownItem, TargetState
 
 from bos.core.actor import MessageType
-from bos.core.agent import TurnEvent, content_to_plain_text
+from bos.core.agent import MessageContent, TurnEvent, content_to_plain_text
 from bos.gateway import WS_TAKEOVER_CLOSE_REASON
 from bos.gateway.client import GatewayClient
 
@@ -110,6 +110,31 @@ def _message_text(content: Any) -> str:
         parts = [p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text"]
         return "\n".join(p for p in parts if p).strip()
     return ""
+
+
+def _compose_send_content(text: str, attachments: list[dict[str, Any]]) -> MessageContent:
+    if not attachments:
+        return text
+    parts: list[dict[str, Any]] = [{"type": "text", "text": text}, *attachments]
+    return cast("MessageContent", parts)
+
+
+def _render_attachment_tags(names: list[str]) -> str:
+    if not names:
+        return ""
+    return "   ".join(f"📎 {name}" for name in names)
+
+
+def _resolve_typed_path(raw: str) -> tuple[str, str | None]:
+    candidate = raw.strip()
+    if not candidate:
+        return ("invalid", None)
+    path = Path(candidate).expanduser()
+    if path.is_file():
+        return ("dismiss", str(path.resolve()))
+    if path.is_dir():
+        return ("reroot", str(path.resolve()))
+    return ("invalid", None)
 
 
 def _relative_time(iso: str | None) -> str:
@@ -406,6 +431,74 @@ class ChatPickerModal(ModalScreen[str | None]):
         self.dismiss(None)
 
 
+class FilePickerModal(ModalScreen[str | None]):
+    """File browser for attaching a file. Enter on a file selects it; Esc cancels.
+
+    A path Input at the top retargets the tree (directory) or selects directly (file).
+    """
+
+    DEFAULT_CSS = """
+    FilePickerModal {
+        align: center middle;
+    }
+
+    #file-picker {
+        width: 90%;
+        max-width: 120;
+        height: auto;
+        max-height: 80%;
+        border: round $primary;
+        background: $surface;
+        padding: 1 2;
+    }
+
+    #file-picker-title {
+        color: $text-muted;
+        padding-bottom: 1;
+    }
+
+    #file-tree {
+        height: auto;
+        max-height: 20;
+        border: none;
+        background: transparent;
+    }
+    """
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel", show=False),
+    ]
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="file-picker"):
+            yield Static(
+                "Attach a file — browse + Enter to select, type a path, Esc to cancel",
+                id="file-picker-title",
+            )
+            yield Input(placeholder="Path (file selects, directory re-roots)…", id="file-path")
+            yield DirectoryTree(str(Path.cwd()), id="file-tree")
+
+    def on_mount(self) -> None:
+        self.query_one("#file-tree", DirectoryTree).focus()
+
+    def on_directory_tree_file_selected(self, event: DirectoryTree.FileSelected) -> None:
+        self.dismiss(str(event.path))
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        action, value = _resolve_typed_path(event.value)
+        if action == "dismiss":
+            self.dismiss(value)
+        elif action == "reroot" and value is not None:
+            self.query_one("#file-tree", DirectoryTree).path = value
+            self.query_one("#file-path", Input).value = ""
+        else:
+            self.query_one("#file-path", Input).value = ""
+            self.notify("No such file or directory.", severity="warning")
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 _PLAN_LIST_SECTIONS = [
     ("constraints", "Constraints"),
     ("current_context", "Current context"),
@@ -529,6 +622,13 @@ class ChatApp(App):
         background: transparent;
     }
 
+    #attachments {
+        height: auto;
+        padding: 0 1;
+        color: $accent;
+        background: transparent;
+    }
+
     #prompt:focus {
         border: none;
     }
@@ -544,6 +644,7 @@ class ChatApp(App):
         Binding("ctrl+n", "reset_chat", "New Chat", show=True),
         Binding("ctrl+r", "resume_chat", "Resume", show=True),
         Binding("ctrl+p", "show_plan", "Plan", show=True),
+        Binding("ctrl+o", "attach_file", "Attach", show=True),
     ]
 
     _TASK_TOOL_NAMES = {"TaskCreate", "TaskUpdate", "TaskList", "TaskGet"}
@@ -560,6 +661,8 @@ class ChatApp(App):
         self._chat_id = client.chat_id
         self._busy = False
         self._buffer: list[str] = []
+        self._pending_attachments: list[dict[str, Any]] = []
+        self._attachment_names: list[str] = []
         self._conn_status: str = "connected"
         self._pending_tool_calls: list[tuple[str, str]] = []
         self._known_actors: list[str] = []
@@ -588,6 +691,9 @@ class ChatApp(App):
             show_line_numbers=False,
             compact=True,
         )
+        attachments = Static(id="attachments")
+        attachments.display = False
+        yield attachments
         yield SlashAutoComplete("#prompt", candidates=self._get_candidates)
         yield Footer()
 
@@ -696,7 +802,8 @@ class ChatApp(App):
         self._last_sent_text = text
         self._update_status()
         try:
-            await self._client.send(text, chat_id=self._chat_id)
+            await self._client.send(_compose_send_content(text, self._pending_attachments), chat_id=self._chat_id)
+            self._clear_attachments()
         except Exception as exc:
             self._busy = False
             self._pending_tool_calls.clear()
@@ -824,7 +931,8 @@ class ChatApp(App):
             self._busy = True
             self._last_sent_text = merged
             try:
-                await self._client.send(merged, chat_id=self._chat_id)
+                await self._client.send(_compose_send_content(merged, self._pending_attachments), chat_id=self._chat_id)
+                self._clear_attachments()
             except Exception as exc:
                 self._busy = False
                 self._write_system(f"[yellow]⚠ Send failed — reconnecting: {exc}[/]")
@@ -1067,6 +1175,21 @@ class ChatApp(App):
         else:
             self._write_system("[dim]No plan for this chat yet.[/]")
 
+    def action_attach_file(self) -> None:
+        self.push_screen(FilePickerModal(), callback=self._on_file_picked)
+
+    async def _on_file_picked(self, path: str | None) -> None:
+        if path is None:
+            return
+        try:
+            part = await self._client.upload_image(path)
+        except Exception as exc:
+            self._write_system(f"[yellow]⚠ Couldn't attach {Path(path).name}: {exc}[/]")
+            return
+        self._pending_attachments.append(part)
+        self._attachment_names.append(Path(path).name)
+        self._update_status()
+
     def action_reset_chat(self) -> None:
         asyncio.create_task(self._send_command("/new"))
 
@@ -1256,10 +1379,20 @@ class ChatApp(App):
         tokens = ""
         if self._context_tokens:
             tokens = f"  ·  ctx {_fmt_tokens(self._context_tokens)} · total {_fmt_tokens(self._session_tokens)} tok"
-        return f"  {conn}  ·  Chat: {self._chat_id}  ·  Channel: {self._client.client_id}  ·  {state}{tokens}"
+        header = f"  {conn}  ·  Chat: {self._chat_id}  ·  Channel: {self._client.client_id}"
+        return f"{header}  ·  {state}{tokens}"
 
     def _update_status(self) -> None:
         self.query_one("#status-bar", Static).update(self._status_text())
+        tags = self.query_one("#attachments", Static)
+        tag_text = _render_attachment_tags(self._attachment_names)
+        tags.update(tag_text)
+        tags.display = bool(tag_text)
+
+    def _clear_attachments(self) -> None:
+        self._pending_attachments = []
+        self._attachment_names = []
+        self._update_status()
 
     async def _poll_connection_status(self) -> None:
         """Periodically check the WebSocket connection and update the status bar."""

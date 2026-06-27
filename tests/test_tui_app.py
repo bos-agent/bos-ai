@@ -3,6 +3,7 @@ import asyncio
 import pytest
 
 from bos.cli.tui_app import (
+    AgentReplyEvent,
     ChatApp,
     CommandResultEvent,
     PlanModal,
@@ -10,6 +11,7 @@ from bos.cli.tui_app import (
     PromptInput,
     SystemEvent,
     TurnEventMessage,
+    _compose_send_content,
     _render_plan_text,
     run_chat_tui,
 )
@@ -963,3 +965,186 @@ def test_render_plan_text_includes_populated_sections_only():
     assert "Step one" in text
     assert "Open questions" not in text
     assert "Risks" not in text
+
+
+def test_compose_send_content_no_attachments_returns_string():
+    assert _compose_send_content("hello", []) == "hello"
+
+
+def test_compose_send_content_with_attachments_builds_list():
+    parts = [{"type": "image", "source": {"kind": "path", "value": "/u/a.png"}}]
+    assert _compose_send_content("look", parts) == [
+        {"type": "text", "text": "look"},
+        {"type": "image", "source": {"kind": "path", "value": "/u/a.png"}},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_submit_with_attachments_sends_list_and_clears(monkeypatch):
+    client = FakeClient()
+    app = ChatApp(client=client)
+    app._pending_attachments = [{"type": "image", "source": {"kind": "path", "value": "/u/a.png"}}]
+
+    _queued, _log, _focused = _fake_widgets(app, monkeypatch)
+    monkeypatch.setattr(app, "_update_status", lambda: None)
+
+    class FakeEvent:
+        value = "describe this"
+
+        class prompt_input:
+            @staticmethod
+            def clear():
+                pass
+
+    await app.on_prompt_input_submitted(FakeEvent())
+
+    assert client.calls == [
+        {
+            "content": [
+                {"type": "text", "text": "describe this"},
+                {"type": "image", "source": {"kind": "path", "value": "/u/a.png"}},
+            ],
+            "chat_id": "chat-1",
+        }
+    ]
+    assert app._pending_attachments == []
+
+
+@pytest.mark.asyncio
+async def test_flush_carries_pending_attachments(monkeypatch):
+    client = FakeClient()
+    app = ChatApp(client=client)
+    app._busy = True
+    app._buffer.append("queued text")
+    app._pending_attachments = [{"type": "image", "source": {"kind": "path", "value": "/u/b.png"}}]
+
+    _queued, _log, _focused = _fake_widgets(app, monkeypatch)
+    monkeypatch.setattr(app, "_update_status", lambda: None)
+    monkeypatch.setattr(app, "_refresh_queued", lambda: None)
+
+    await app.on_agent_reply_event(AgentReplyEvent("done", chat_id="chat-1"))
+
+    assert client.calls[-1]["content"] == [
+        {"type": "text", "text": "queued text"},
+        {"type": "image", "source": {"kind": "path", "value": "/u/b.png"}},
+    ]
+    assert app._pending_attachments == []
+
+
+def test_resolve_typed_path_file(tmp_path):
+    from bos.cli.tui_app import _resolve_typed_path
+
+    f = tmp_path / "a.png"
+    f.write_bytes(b"x")
+    action, value = _resolve_typed_path(str(f))
+    assert action == "dismiss"
+    assert value == str(f.resolve())
+
+
+def test_resolve_typed_path_directory(tmp_path):
+    from bos.cli.tui_app import _resolve_typed_path
+
+    action, value = _resolve_typed_path(str(tmp_path))
+    assert action == "reroot"
+    assert value == str(tmp_path.resolve())
+
+
+def test_resolve_typed_path_missing(tmp_path):
+    from bos.cli.tui_app import _resolve_typed_path
+
+    action, value = _resolve_typed_path(str(tmp_path / "nope.png"))
+    assert action == "invalid"
+    assert value is None
+
+
+def test_resolve_typed_path_blank():
+    from bos.cli.tui_app import _resolve_typed_path
+
+    assert _resolve_typed_path("   ") == ("invalid", None)
+
+
+class FakeUploadClient(FakeClient):
+    def __init__(self, part=None, error=None):
+        super().__init__()
+        self._part = part or {"type": "image", "source": {"kind": "path", "value": "/u/x.png"}}
+        self._error = error
+        self.uploaded: list[str] = []
+
+    async def upload_image(self, path):
+        self.uploaded.append(str(path))
+        if self._error is not None:
+            raise self._error
+        return self._part
+
+
+def test_render_attachment_tags():
+    from bos.cli.tui_app import _render_attachment_tags
+
+    assert _render_attachment_tags([]) == ""
+    assert _render_attachment_tags(["a.png"]) == "📎 a.png"
+    assert _render_attachment_tags(["a.png", "chart.png"]) == "📎 a.png   📎 chart.png"
+
+
+@pytest.mark.asyncio
+async def test_on_file_picked_success_appends_and_updates(monkeypatch):
+    client = FakeUploadClient()
+    app = ChatApp(client=client)
+    updates: list[int] = []
+    monkeypatch.setattr(app, "_update_status", lambda: updates.append(len(app._pending_attachments)))
+
+    await app._on_file_picked("/home/user/a.png")
+
+    assert client.uploaded == ["/home/user/a.png"]
+    assert app._pending_attachments == [{"type": "image", "source": {"kind": "path", "value": "/u/x.png"}}]
+    assert app._attachment_names == ["a.png"]
+    assert updates == [1]
+
+
+@pytest.mark.asyncio
+async def test_submit_clears_attachment_names(monkeypatch):
+    client = FakeUploadClient()
+    app = ChatApp(client=client)
+    app._pending_attachments = [{"type": "image", "source": {"kind": "path", "value": "/u/x.png"}}]
+    app._attachment_names = ["a.png"]
+
+    _queued, _log, _focused = _fake_widgets(app, monkeypatch)
+    monkeypatch.setattr(app, "_update_status", lambda: None)
+
+    class FakeEvent:
+        value = "go"
+
+        class prompt_input:
+            @staticmethod
+            def clear():
+                pass
+
+    await app.on_prompt_input_submitted(FakeEvent())
+
+    assert app._pending_attachments == []
+    assert app._attachment_names == []
+
+
+@pytest.mark.asyncio
+async def test_on_file_picked_failure_writes_system_and_keeps_empty(monkeypatch):
+    client = FakeUploadClient(error=RuntimeError("must be an image"))
+    app = ChatApp(client=client)
+    outputs: list[str] = []
+    monkeypatch.setattr(app, "_write_system", outputs.append)
+    monkeypatch.setattr(app, "_update_status", lambda: None)
+
+    await app._on_file_picked("/home/user/notes.txt")
+
+    assert app._pending_attachments == []
+    assert len(outputs) == 1 and "notes.txt" in outputs[0]
+
+
+@pytest.mark.asyncio
+async def test_on_file_picked_none_is_noop(monkeypatch):
+    client = FakeUploadClient()
+    app = ChatApp(client=client)
+    monkeypatch.setattr(app, "_update_status", lambda: None)
+
+    await app._on_file_picked(None)
+
+    assert client.uploaded == []
+    assert app._pending_attachments == []
