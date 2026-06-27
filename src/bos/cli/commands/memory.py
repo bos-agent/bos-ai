@@ -2,7 +2,7 @@
 
 Each invocation targets a single agent's isolated memory subtree (Ω). Use
 ``--agent NAME`` to pick the agent; defaults to the workspace's
-``runtime.default_actor`` if configured."""
+``runtime.main_actor`` if configured."""
 
 from __future__ import annotations
 
@@ -70,7 +70,7 @@ _AGENT_OPT = click.option(
     "--agent",
     "agent",
     default=None,
-    help="Agent whose memory to operate on (default: workspace's runtime.default_actor).",
+    help="Agent whose memory to operate on (default: workspace's runtime.main_actor).",
 )
 
 

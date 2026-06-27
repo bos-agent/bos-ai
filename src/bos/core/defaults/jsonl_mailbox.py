@@ -74,7 +74,7 @@ class _JsonlMailBox:
         return await self._route.receive_nowait(self._address)
 
 
-@ep_mail_route(name="_default")
+@ep_mail_route(name="JsonlMailRoute")
 class JsonlMailRoute:
     """File-based mail route using JSONL inbox files."""
 

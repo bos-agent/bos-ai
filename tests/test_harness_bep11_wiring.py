@@ -10,7 +10,7 @@ from bos.core.contract import SessionEvent
 class TestHarnessConfig:
     def test_default_job_runner_field(self):
         cfg = HarnessConfig()
-        assert cfg.job_runner == "_default"
+        assert cfg.job_runner == "InProcJobRunner"
 
     def test_explicit_job_runner_field(self):
         cfg = HarnessConfig(job_runner="custom")

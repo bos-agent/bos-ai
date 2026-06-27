@@ -21,7 +21,7 @@ Avoid transcript style and verbose language. Keep the summary less than 2048 cha
 SUMMARY_PREFIX = "Chat summary:\n"
 
 
-@ep_consolidator(name="_default")
+@ep_consolidator(name="LLMConsolidator")
 class LLMConsolidator:
     """LLM-backed harness-level consolidator."""
 

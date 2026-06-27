@@ -1,6 +1,7 @@
 """Tests for resolve_config_source with BEP6 config format."""
 
 from bos.config.workspace import Workspace, resolve_config_source
+from bos.core import DEFAULT_AGENT_KIND
 
 
 def test_workspace_config_source_uses_preset_bos_home(tmp_path, monkeypatch):
@@ -11,7 +12,7 @@ def test_workspace_config_source_uses_preset_bos_home(tmp_path, monkeypatch):
 
     assert ws.bos_dir == (tmp_path / "home" / "presets" / "default").resolve()
     assert ws.bos_dir.is_dir()
-    assert ws.get_main_agent_kind() == "_default"
+    assert ws.get_main_agent_kind() == DEFAULT_AGENT_KIND
 
 
 def test_team_preset_resolves_two_gateway_actors_and_poet_prompt(tmp_path, monkeypatch):
@@ -22,7 +23,7 @@ def test_team_preset_resolves_two_gateway_actors_and_poet_prompt(tmp_path, monke
 
     actors = ws.resolve_gateway_actors()
     assert list(actors) == ["main", "libai"]
-    assert actors["main"].agent == "_default"
+    assert actors["main"].agent == DEFAULT_AGENT_KIND
     assert actors["libai"].agent == "poet"
     assert actors["libai"].display_name == "Li Bai"
     assert ws.config.agents["poet"].system_prompt
@@ -45,7 +46,7 @@ tools = { enabled = ["ReadFile"] }
 
 [runtime]
 location = "process"
-default_actor = "main"
+main_actor = "main"
 
 [runtime.actors.main]
 agent = "custom-agent"

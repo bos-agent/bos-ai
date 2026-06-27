@@ -24,9 +24,9 @@
 # ── Harness ─────────────────────────────────────────────────────────
 # Select extension implementations for harness-level services
 [harness]
-consolidator = "_default"
-chat_store = "_default"
-mail_route = "_default"
+consolidator = "LLMConsolidator"
+chat_store = "JsonlChatStore"
+mail_route = "JsonlMailRoute"
 
 # Ordered chain of turn interceptors
 #interceptors = ["logging", "rate_limit"]
@@ -34,19 +34,19 @@ mail_route = "_default"
 # ── Extension Configurations ────────────────────────────────────────
 
 # LLM provider defaults
-# [exts.ep_provider._default]
+# [exts.ep_provider.litellm]
 
-[exts.ep_consolidator._default]
+[exts.ep_consolidator.LLMConsolidator]
 model = "gemini/gemini-2.5-flash"
 
-# [exts.ep_chat_store._default]
+# [exts.ep_chat_store.JsonlChatStore]
 # store_dir = "./messages"
 
-# [exts.ep_mail_route._default]
+# [exts.ep_mail_route.JsonlMailRoute]
 # store_dir = "./mailboxes"
 
 # Plugin-defined extension points use the pep_ prefix
-# [exts.pep_skills_loader._default]
+# [exts.pep_skills_loader.FileSystemSkillsLoader]
 # skill_dirs = ["skills"]
 
 # Tool-specific runtime configuration
@@ -126,7 +126,7 @@ instead of return empty message
 
 [runtime]
 location = "process"
-default_actor = "main"
+main_actor = "main"
 
 [runtime.gateway]
 host = "127.0.0.1"

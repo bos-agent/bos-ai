@@ -47,7 +47,7 @@ def test_build_docker_argv_publishes_gateway_port_not_http_channel(tmp_path):
         """
 [runtime]
 location = "docker"
-default_actor = "main"
+main_actor = "main"
 image = "bos:test"
 
 [runtime.gateway]

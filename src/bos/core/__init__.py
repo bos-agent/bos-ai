@@ -15,7 +15,6 @@ from ._utils import (
     _as_parts,
     _build_params,
     _compact,
-    _create_extension_instance,
     _deep_merge,
     _flock,
     _get_bos_home,
@@ -91,6 +90,7 @@ from .contract import (
     ep_turn_interceptor,
 )
 from .harness import (
+    DEFAULT_AGENT_KIND,
     AgentHarness,
     AgentRegistry,
     ChainInterceptor,
@@ -115,6 +115,7 @@ __all__ = [
     "Closeable",
     "Consolidator",
     "ContextResult",
+    "DEFAULT_AGENT_KIND",
     "Envelope",
     "Event",
     "EventBus",
@@ -170,7 +171,6 @@ __all__ = [
     "_as_parts",
     "_build_params",
     "_compact",
-    "_create_extension_instance",
     "_deep_merge",
     "_flock",
     "_litellm_response_to_llm_response",

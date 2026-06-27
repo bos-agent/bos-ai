@@ -62,7 +62,7 @@ async def test_gateway_status_uses_channel_manager_payload(monkeypatch):
         ".bos",
         {
             "runtime": {
-                "default_actor": "main",
+                "main_actor": "main",
                 "actors": {"main": {"agent": "main"}},
                 "channels": [
                     {

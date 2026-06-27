@@ -45,8 +45,8 @@ Mechanics that shape how you write the skill:
    first; don't front-load a survey.
 2. **Draft it.** Create `<bos_dir>/skills/<skill-name>/SKILL.md` (usually
    `.bos/skills/`). No other files unless clearly earned (see Bundled files).
-3. **Test it.** Run realistic prompts through the `TestSkill` tool — see
-   *Testing the skill* below.
+3. **Test it.** Wire the skill in and run realistic prompts through the real
+   agent — see *Testing the skill* below.
 4. **Iterate.** Generalize from failures instead of patching the exact case:
    if the agent misused the skill, the instructions likely lack the *why*; if
    it ignored the skill, the description likely doesn't cover that phrasing.
@@ -134,31 +134,22 @@ body's tokens on every turn.
 
 ## Testing the skill
 
-Use the **TestSkill** tool. It runs a task on a throwaway agent that has only
-the skill under test enabled — in-memory chat state, a fresh scan of the
-skill directories (a just-written skill is visible immediately), no change to
-the project config, and no interaction with the running gateway or real chat
-history.
-
-Call it with 2–3 realistic, differently phrased prompts that do **not** name
-the skill — naming it would make the triggering check meaningless:
+Test end-to-end through the real agent. Wire the skill in (next section),
+run `uv run boscli gateway restart` (a running gateway caches the skill list
+~5 minutes), then run 2–3 realistic, differently phrased prompts that do
+**not** name the skill — naming it would make the triggering check
+meaningless:
 
 ```
-TestSkill(name="quarterly-report", task="put together the Q2 client numbers")
+uv run boscli ask "put together the Q2 client numbers"
 ```
 
-The result reports two things; judge them separately:
+Judge two things separately:
 
-- **Triggered** — whether the test agent chose to load the skill from its
+- **Triggered** — whether the agent chose to load the skill from its
   description alone. If no, tune the description.
 - **The response** — whether following the body produced the right result.
   If not, tune the body.
-
-One blind spot: the test agent sees only this skill, so TestSkill cannot
-catch a description that loses to a competing skill. Finish with one
-end-to-end check through the real agent: wire the skill in (next section),
-run `uv run boscli gateway restart` (a running gateway caches the skill list
-~5 minutes), then try the same prompts with `uv run boscli ask "..."`.
 
 When wiring in a restricted project, edit minimally and in the right scope.
 The effective agent settings are the deep merge of `[agent.defaults]` and the

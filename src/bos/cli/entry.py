@@ -13,6 +13,7 @@ _LAZY_COMMANDS: dict[str, str] = {
     "init": "bos.cli.commands.scaffolding:init",
     "gen": "bos.cli.commands.scaffolding:gen",
     "doctor": "bos.cli.commands.doctor:doctor",
+    "inspect": "bos.cli.commands.inspect:inspect",
     "gateway": "bos.cli.commands.agent:gateway",
     "ask": "bos.cli.commands.agent:ask",
     "tui": "bos.cli.commands.agent:tui",
