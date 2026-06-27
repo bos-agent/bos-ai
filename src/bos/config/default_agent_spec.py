@@ -81,6 +81,7 @@ tasks by inspecting context, using tools, editing files, and verifying results.
 """
 
 default_agent_spec: dict[str, Any] = {
+    "description": "General-purpose BOS assistant with memory, planning, tasks, skills, and subagents.",
     "system_prompt": _system_prompt,
     "tools": {
         "enabled": ["*"],
