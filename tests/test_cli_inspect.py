@@ -93,7 +93,7 @@ def test_inspect_agent_reports_resolved_capabilities(tmp_path, monkeypatch):
     _init_project(tmp_path)
     monkeypatch.chdir(tmp_path)
 
-    result = _invoke(["inspect", "--agent", "main", "--json"])
+    result = _invoke(["inspect", "--json", "agent", "main"])
 
     assert result.exit_code == 0, result.output
     report = json.loads(result.output)
@@ -115,7 +115,7 @@ def test_inspect_agent_unknown_errors(tmp_path, monkeypatch):
     _init_project(tmp_path)
     monkeypatch.chdir(tmp_path)
 
-    result = _invoke(["inspect", "--agent", "does-not-exist"])
+    result = _invoke(["inspect", "agent", "does-not-exist"])
 
     assert result.exit_code != 0
     assert "not a registered agent kind" in result.output

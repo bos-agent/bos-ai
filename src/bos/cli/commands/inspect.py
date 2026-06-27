@@ -3,8 +3,9 @@
 Reports what the active workspace resolves to: paths and config source, the
 selected harness implementations, gateway status, runtime topology, and the
 capabilities (agents, plugins, tools, skills) and extension points available
-after bootstrap. With ``--agent NAME`` it instead reflects a single agent's
-resolved plugins, tools, and skills by building it through the harness.
+after bootstrap. The ``agent NAME`` subcommand instead reflects a single
+agent's resolved model, plugins, tools, and skills by building it through the
+harness.
 Read-only — it never starts the gateway or mutates config.
 """
 
@@ -82,12 +83,10 @@ def _runtime_info(ws) -> dict[str, Any]:
         "main_actor": runtime.main_actor,
         "model": model,
         "actors": {
-            name: {"agent": cfg.agent, "display_name": cfg.display_name}
-            for name, cfg in runtime.actors.items()
+            name: {"agent": cfg.agent, "display_name": cfg.display_name} for name, cfg in runtime.actors.items()
         },
         "channels": [
-            {"channel_id": ch.channel_id, "type": ch.type, "target_actor": ch.target_actor}
-            for ch in runtime.channels
+            {"channel_id": ch.channel_id, "type": ch.type, "target_actor": ch.target_actor} for ch in runtime.channels
         ],
     }
 
@@ -195,6 +194,7 @@ async def _agent_capabilities(ws, agent_kind: str) -> dict[str, Any]:
         return {
             "kind": agent._kind,
             "name": agent._name,
+            "model": agent._model,
             "plugins": sorted({plugin.name for plugin in bound}),
             "tools": agent._tools.describe_usage(),
             "skills": skills,
@@ -209,11 +209,12 @@ def _collect(ctx, workspace_dir: str | None, agent_kind: str | None) -> dict[str
     ws = _build_workspace_for_daemon(ctx, workspace_dir)
     config_arg = ctx.obj.get("CONFIG")
 
-    report: dict[str, Any] = {
-        "harness": _harness_info(ws, config_arg),
-        "gateway": _gateway_info(ws),
-        "runtime": _runtime_info(ws),
-    }
+    report: dict[str, Any] = {"harness": _harness_info(ws, config_arg)}
+    # Gateway/runtime are process-level concerns, irrelevant to a single
+    # agent's resolved capabilities.
+    if not agent_kind:
+        report["gateway"] = _gateway_info(ws)
+        report["runtime"] = _runtime_info(ws)
 
     # Loading external agents + extensions populates the registries the
     # capability sections read from. Best-effort: a broken extension should not
@@ -263,29 +264,31 @@ def _render_text(report: dict[str, Any]) -> None:
     interceptors = ", ".join(impls["interceptors"]) or "—"
     console.print(f"  interceptors: {interceptors}")
 
-    g = report["gateway"]
-    console.print("\n[bold]Gateway[/]")
-    if not g.get("running") and not g.get("pid"):
-        console.print("  [red]○ not running[/]")
-    else:
-        mark = "[green]● running[/]" if g.get("running") else "[red]○ stopped[/]"
-        console.print(f"  status:      {mark}")
-        console.print(f"  runtime:     {g.get('runtime', '—')}")
-        if g.get("pid"):
-            console.print(f"  pid:         {g['pid']}")
-        if g.get("endpoint"):
-            console.print(f"  endpoint:    {g['endpoint']}")
+    g = report.get("gateway")
+    if g is not None:
+        console.print("\n[bold]Gateway[/]")
+        if not g.get("running") and not g.get("pid"):
+            console.print("  [red]○ not running[/]")
+        else:
+            mark = "[green]● running[/]" if g.get("running") else "[red]○ stopped[/]"
+            console.print(f"  status:      {mark}")
+            console.print(f"  runtime:     {g.get('runtime', '—')}")
+            if g.get("pid"):
+                console.print(f"  pid:         {g['pid']}")
+            if g.get("endpoint"):
+                console.print(f"  endpoint:    {g['endpoint']}")
 
-    r = report["runtime"]
-    console.print("\n[bold]Runtime[/]")
-    console.print(f"  main_actor:    {r['main_actor']}")
-    console.print(f"  model:         {r['model'] or '— (set agent.defaults.model or BOS_MODEL)'}")
-    for name, actor in r["actors"].items():
-        marker = " *" if name == r["main_actor"] else ""
-        display = f" ({actor['display_name']})" if actor.get("display_name") else ""
-        console.print(f"  actor:         {name}{marker} → agent={actor['agent']}{display}")
-    for ch in r["channels"]:
-        console.print(f"  channel:       {ch['channel_id']} [{ch['type']}] → {ch['target_actor']}")
+    r = report.get("runtime")
+    if r is not None:
+        console.print("\n[bold]Runtime[/]")
+        console.print(f"  main_actor:    {r['main_actor']}")
+        console.print(f"  model:         {r['model'] or '— (set agent.defaults.model or BOS_MODEL)'}")
+        for name, actor in r["actors"].items():
+            marker = " *" if name == r["main_actor"] else ""
+            display = f" ({actor['display_name']})" if actor.get("display_name") else ""
+            console.print(f"  actor:         {name}{marker} → agent={actor['agent']}{display}")
+        for ch in r["channels"]:
+            console.print(f"  channel:       {ch['channel_id']} [{ch['type']}] → {ch['target_actor']}")
 
     if "agent" in report:
         _render_agent(console, report["agent"])
@@ -310,8 +313,10 @@ def _render_agent(console, a: dict[str, Any]) -> None:
     if a.get("error"):
         console.print(f"  [red]error: {a['error']}[/]")
         return
+    console.print(f"  model:        {a.get('model') or '— (set agent.defaults.model or BOS_MODEL)'}")
     plugins = a.get("plugins", [])
-    console.print(f"  plugins ({len(plugins)}): " + (", ".join(plugins) or "—"))
+    console.print(f"\n[bold]Plugins[/] ({len(plugins)})")
+    console.print("  " + (", ".join(plugins) or "—"))
     _render_caps_table(console, "Tools", a.get("tools", {}))
     _render_caps_table(console, "Skills", a.get("skills", {}))
 
@@ -336,15 +341,15 @@ def _shorten(text: str, limit: int = 100) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
-@click.command(name="inspect")
+def _emit(report: dict[str, Any], as_json: bool) -> None:
+    if as_json:
+        click.echo(json_lib.dumps(report, indent=2, default=str))
+    else:
+        _render_text(report)
+
+
+@click.group(name="inspect", invoke_without_command=True)
 @click.option("--json", "as_json", is_flag=True, default=False, help="Emit the report as JSON.")
-@click.option(
-    "-a",
-    "--agent",
-    "agent_kind",
-    default=None,
-    help="Inspect a single agent: the plugins, tools, and skills it resolves to.",
-)
 @click.option(
     "-w",
     "--workspace",
@@ -353,18 +358,30 @@ def _shorten(text: str, limit: int = 100) -> str:
     help="Override the workspace directory (defaults to '.' or project root).",
 )
 @click.pass_context
-def inspect(ctx, as_json: bool, agent_kind: str | None, workspace_dir: str | None):
+def inspect(ctx, as_json: bool, workspace_dir: str | None):
     """Show harness-level info: paths, gateway, capabilities, extension points.
 
-    With ``--agent NAME``, instead reports the plugins, tools, and skills that
-    agent resolves to (its filtered, plugin-merged view) by building it through
-    the harness.
+    Use the ``agent`` subcommand to instead report the plugins, tools, and
+    skills a single agent resolves to (its filtered, plugin-merged view).
 
     Read-only. Honors ``-c <preset|file>`` like the gateway commands; with no
     config it discovers the project, falling back to the ``default`` preset.
     """
-    report = _collect(ctx, workspace_dir, agent_kind)
-    if as_json:
-        click.echo(json_lib.dumps(report, indent=2, default=str))
-    else:
-        _render_text(report)
+    ctx.obj["INSPECT_JSON"] = as_json
+    ctx.obj["INSPECT_WORKSPACE"] = workspace_dir
+    if ctx.invoked_subcommand is None:
+        _emit(_collect(ctx, workspace_dir, None), as_json)
+
+
+@inspect.command(name="agent")
+@click.argument("agent_kind", metavar="NAME")
+@click.pass_context
+def inspect_agent(ctx, agent_kind: str):
+    """Inspect a single agent: the plugins, tools, and skills it resolves to.
+
+    Builds the agent through the harness and reports its filtered,
+    plugin-merged view. Read-only.
+    """
+    as_json = ctx.obj.get("INSPECT_JSON", False)
+    workspace_dir = ctx.obj.get("INSPECT_WORKSPACE")
+    _emit(_collect(ctx, workspace_dir, agent_kind), as_json)
