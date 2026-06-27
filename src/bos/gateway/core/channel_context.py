@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from pathlib import Path
 
 from bos.core import MailRoute
 
@@ -17,3 +18,4 @@ class ChannelRuntimeContext:
     mail_route: MailRoute
     command_handler: CommandHandler | None = None
     state_changed: Callable[[], Awaitable[None]] | None = None
+    upload_dir: Path = field(default_factory=lambda: Path(".bos/uploads/http"))
