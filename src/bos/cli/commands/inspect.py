@@ -164,14 +164,15 @@ def _extension_points_info() -> dict[str, dict[str, str]]:
     }
 
 
-async def _agent_capabilities(ws, agent_kind: str) -> dict[str, Any]:
+async def _agent_capabilities(ws, agent_kind: str, agent_cfg: dict[str, Any] | None = None) -> dict[str, Any]:
     """Reflect the plugins, tools, and skills a specific agent resolves to.
 
     The inspector is authoritative over agent internals: it builds the agent
     through the harness exactly as the runtime would, then reads its private
     resolved tool set and bound plugins rather than re-deriving config — so it
     reports precisely what that agent sees, after include/exclude filtering and
-    plugin-contributed tools are merged in.
+    plugin-contributed tools are merged in. ``agent_cfg`` applies per-actor
+    overrides so an actor's effective view matches what the gateway would run.
     """
     from bos.core import AgentRegistry, _pick_collection
     from bos.plugins.skills.plugin import SkillsAgentPlugin
@@ -183,7 +184,7 @@ async def _agent_capabilities(ws, agent_kind: str) -> dict[str, Any]:
     harness = ws.harness()
     await harness.__aenter__()
     try:
-        agent = await harness.create_agent(agent_kind)
+        agent = await harness.create_agent(agent_kind, agent_cfg=agent_cfg)
         bound = list(getattr(agent._prompt_provider, "_plugins", []))
 
         skills: dict[str, str] = {}
@@ -210,16 +211,44 @@ async def _agent_capabilities(ws, agent_kind: str) -> dict[str, Any]:
         await harness.__aexit__(None, None, None)
 
 
-def _collect(ctx, workspace_dir: str | None, agent_kind: str | None) -> dict[str, Any]:
+def _collect(ctx, workspace_dir: str | None, agent_kind: str | None, actor_name: str | None = None) -> dict[str, Any]:
     from bos.cli.commands.agent import _build_workspace_for_daemon
 
     ws = _build_workspace_for_daemon(ctx, workspace_dir)
     config_arg = ctx.obj.get("CONFIG")
 
     report: dict[str, Any] = {"harness": _harness_info(ws, config_arg)}
+
+    # An actor names a configured runtime actor; resolve it to the agent it runs
+    # (with its per-actor agent_cfg overrides) so the rest of the flow mirrors
+    # the agent inspection and reflects what the gateway would actually run.
+    actor_meta: dict[str, Any] | None = None
+    actor_overrides: dict[str, Any] | None = None
+    if actor_name:
+        from bos.config.schema import _agent_config_to_core_kwargs
+
+        runtime = ws.config.runtime or RuntimeConfig()
+        actor_cfg = runtime.actors.get(actor_name)
+        if actor_cfg is None:
+            known = ", ".join(sorted(runtime.actors)) or "none"
+            raise click.ClickException(f"Actor {actor_name!r} is not a configured actor. Known: {known}")
+        agent_kind = actor_cfg.agent
+        # Mirror ActorManager._start_record: per-actor overrides plus the
+        # actor's name and multi-actor history attribution.
+        actor_overrides = _agent_config_to_core_kwargs(actor_cfg.agent_cfg)
+        actor_overrides["agent_name"] = actor_name
+        actor_overrides["history_attribution"] = len(runtime.actors) > 1
+        actor_meta = {
+            "actor": actor_name,
+            "agent": agent_kind,
+            "display_name": actor_cfg.display_name,
+            "is_main": actor_name == runtime.main_actor,
+        }
+
+    scoped = bool(agent_kind or actor_name)
     # Gateway/models/actors are process-level concerns, irrelevant to a single
-    # agent's resolved capabilities.
-    if not agent_kind:
+    # agent's or actor's resolved capabilities.
+    if not scoped:
         report["gateway"] = _gateway_info(ws)
         report["default_models"] = _default_models_info(ws)
         report["actors"] = _actors_info(ws)
@@ -231,15 +260,21 @@ def _collect(ctx, workspace_dir: str | None, agent_kind: str | None) -> dict[str
         ws.resolve_agents()
         ws.bootstrap_platform()
     except Exception as exc:
-        if agent_kind:
+        if scoped:
             report["agent"] = {"kind": agent_kind, "error": str(exc)}
+            if actor_meta is not None:
+                report["agent"]["actor"] = actor_meta
         else:
             report["capabilities"] = {"<error>": str(exc)}
             report["extension_points"] = {}
         return report
 
-    if agent_kind:
-        report["agent"] = asyncio.run(_agent_capabilities(ws, agent_kind))
+    if scoped:
+        assert agent_kind is not None
+        agent_report = asyncio.run(_agent_capabilities(ws, agent_kind, actor_overrides))
+        if actor_meta is not None:
+            agent_report["actor"] = actor_meta
+        report["agent"] = agent_report
     else:
         report["capabilities"] = _capabilities_info(ws)
         report["extension_points"] = _extension_points_info()
@@ -328,6 +363,12 @@ def _render_text(report: dict[str, Any]) -> None:
 
 
 def _render_agent(console, a: dict[str, Any]) -> None:
+    actor = a.get("actor")
+    if actor is not None:
+        star = " [bright_yellow]★[/]" if actor.get("is_main") else ""
+        display = f"; {actor['display_name']}" if actor.get("display_name") else ""
+        console.print(f"\n[bold]Actor[/] [cyan]{actor['actor']}[/]{star}{display}")
+
     name = a.get("name")
     suffix = f" [dim](name={name})[/]" if name and name != a.get("kind") else ""
     console.print(f"\n[bold]Agent[/] [cyan]{a.get('kind')}[/]{suffix}")
@@ -383,7 +424,8 @@ def inspect(ctx, as_json: bool, workspace_dir: str | None):
     """Show harness-level info: paths, gateway, capabilities, extension points.
 
     Use the ``agent`` subcommand to instead report the plugins, tools, and
-    skills a single agent resolves to (its filtered, plugin-merged view).
+    skills a single agent resolves to (its filtered, plugin-merged view), or
+    ``actor`` to do the same for the agent a configured actor runs.
 
     Read-only. Honors ``-c <preset|file>`` like the gateway commands; with no
     config it discovers the project, falling back to the ``default`` preset.
@@ -406,3 +448,15 @@ def inspect_agent(ctx, agent_kind: str):
     as_json = ctx.obj.get("INSPECT_JSON", False)
     workspace_dir = ctx.obj.get("INSPECT_WORKSPACE")
     _emit(_collect(ctx, workspace_dir, agent_kind), as_json)
+
+
+@inspect.command(name="actor")
+@click.argument("actor_name", metavar="NAME")
+@click.pass_context
+def inspect_actor(ctx, actor_name: str):
+    """Inspect a configured actor: the agent it runs and that agent's
+    resolved plugins, tools, and skills. Read-only.
+    """
+    as_json = ctx.obj.get("INSPECT_JSON", False)
+    workspace_dir = ctx.obj.get("INSPECT_WORKSPACE")
+    _emit(_collect(ctx, workspace_dir, None, actor_name=actor_name), as_json)

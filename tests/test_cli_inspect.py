@@ -119,3 +119,61 @@ def test_inspect_agent_unknown_errors(tmp_path, monkeypatch):
 
     assert result.exit_code != 0
     assert "not a registered agent kind" in result.output
+
+
+def test_inspect_actor_reports_agent_and_capabilities(tmp_path, monkeypatch):
+    monkeypatch.delenv("BOS_CONFIG", raising=False)
+    _init_project(tmp_path)
+    monkeypatch.chdir(tmp_path)
+
+    result = _invoke(["inspect", "--json", "actor", "main"])
+
+    assert result.exit_code == 0, result.output
+    report = json.loads(result.output)
+    # Actor mode reuses the agent report, scoped to the actor's agent.
+    assert "agent" in report
+    assert "capabilities" not in report
+    agent = report["agent"]
+    assert agent["kind"] == "main"
+    assert agent["actor"] == {"actor": "main", "agent": "main", "display_name": "Main", "is_main": True}
+    assert "ReadFile" in agent["tools"]
+
+
+def test_inspect_actor_applies_per_actor_agent_cfg_override(tmp_path, monkeypatch):
+    monkeypatch.delenv("BOS_CONFIG", raising=False)
+    _init_project(tmp_path)
+    monkeypatch.chdir(tmp_path)
+
+    # A worker actor that narrows the agent's tools to WebSearch only.
+    config = tmp_path / ".bos" / "config.toml"
+    config.write_text(
+        config.read_text()
+        + (
+            "\n[runtime.actors.worker]\n"
+            'agent = "main"\n'
+            'display_name = "Tony"\n'
+            "\n[runtime.actors.worker.agent_cfg.tools]\n"
+            'enabled = ["WebSearch"]\n'
+        ),
+        encoding="utf-8",
+    )
+
+    result = _invoke(["inspect", "--json", "actor", "worker"])
+
+    assert result.exit_code == 0, result.output
+    agent = json.loads(result.output)["agent"]
+    assert agent["actor"]["is_main"] is False
+    # The per-actor override wins: only WebSearch survives, not the agent's
+    # full default tool set.
+    assert list(agent["tools"]) == ["WebSearch"]
+
+
+def test_inspect_actor_unknown_errors(tmp_path, monkeypatch):
+    monkeypatch.delenv("BOS_CONFIG", raising=False)
+    _init_project(tmp_path)
+    monkeypatch.chdir(tmp_path)
+
+    result = _invoke(["inspect", "actor", "does-not-exist"])
+
+    assert result.exit_code != 0
+    assert "not a configured actor" in result.output
