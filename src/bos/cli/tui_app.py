@@ -16,7 +16,7 @@ import json
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from rich.markdown import Markdown
 from rich.text import Text
@@ -31,7 +31,7 @@ from textual.widgets.option_list import Option
 from textual_autocomplete import AutoComplete, DropdownItem, TargetState
 
 from bos.core.actor import MessageType
-from bos.core.agent import TurnEvent, content_to_plain_text
+from bos.core.agent import MessageContent, TurnEvent, content_to_plain_text
 from bos.gateway import WS_TAKEOVER_CLOSE_REASON
 from bos.gateway.client import GatewayClient
 
@@ -110,6 +110,13 @@ def _message_text(content: Any) -> str:
         parts = [p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text"]
         return "\n".join(p for p in parts if p).strip()
     return ""
+
+
+def _compose_send_content(text: str, attachments: list[dict[str, Any]]) -> MessageContent:
+    if not attachments:
+        return text
+    parts: list[dict[str, Any]] = [{"type": "text", "text": text}, *attachments]
+    return cast("MessageContent", parts)
 
 
 def _relative_time(iso: str | None) -> str:
@@ -560,6 +567,7 @@ class ChatApp(App):
         self._chat_id = client.chat_id
         self._busy = False
         self._buffer: list[str] = []
+        self._pending_attachments: list[dict[str, Any]] = []
         self._conn_status: str = "connected"
         self._pending_tool_calls: list[tuple[str, str]] = []
         self._known_actors: list[str] = []
@@ -696,7 +704,8 @@ class ChatApp(App):
         self._last_sent_text = text
         self._update_status()
         try:
-            await self._client.send(text, chat_id=self._chat_id)
+            await self._client.send(_compose_send_content(text, self._pending_attachments), chat_id=self._chat_id)
+            self._pending_attachments = []
         except Exception as exc:
             self._busy = False
             self._pending_tool_calls.clear()
@@ -824,7 +833,8 @@ class ChatApp(App):
             self._busy = True
             self._last_sent_text = merged
             try:
-                await self._client.send(merged, chat_id=self._chat_id)
+                await self._client.send(_compose_send_content(merged, self._pending_attachments), chat_id=self._chat_id)
+                self._pending_attachments = []
             except Exception as exc:
                 self._busy = False
                 self._write_system(f"[yellow]⚠ Send failed — reconnecting: {exc}[/]")

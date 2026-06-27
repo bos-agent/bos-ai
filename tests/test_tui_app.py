@@ -3,6 +3,7 @@ import asyncio
 import pytest
 
 from bos.cli.tui_app import (
+    AgentReplyEvent,
     ChatApp,
     CommandResultEvent,
     PlanModal,
@@ -10,6 +11,7 @@ from bos.cli.tui_app import (
     PromptInput,
     SystemEvent,
     TurnEventMessage,
+    _compose_send_content,
     _render_plan_text,
     run_chat_tui,
 )
@@ -963,3 +965,67 @@ def test_render_plan_text_includes_populated_sections_only():
     assert "Step one" in text
     assert "Open questions" not in text
     assert "Risks" not in text
+
+
+def test_compose_send_content_no_attachments_returns_string():
+    assert _compose_send_content("hello", []) == "hello"
+
+
+def test_compose_send_content_with_attachments_builds_list():
+    parts = [{"type": "image", "source": {"kind": "path", "value": "/u/a.png"}}]
+    assert _compose_send_content("look", parts) == [
+        {"type": "text", "text": "look"},
+        {"type": "image", "source": {"kind": "path", "value": "/u/a.png"}},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_submit_with_attachments_sends_list_and_clears(monkeypatch):
+    client = FakeClient()
+    app = ChatApp(client=client)
+    app._pending_attachments = [{"type": "image", "source": {"kind": "path", "value": "/u/a.png"}}]
+
+    _queued, _log, _focused = _fake_widgets(app, monkeypatch)
+    monkeypatch.setattr(app, "_update_status", lambda: None)
+
+    class FakeEvent:
+        value = "describe this"
+
+        class prompt_input:
+            @staticmethod
+            def clear():
+                pass
+
+    await app.on_prompt_input_submitted(FakeEvent())
+
+    assert client.calls == [
+        {
+            "content": [
+                {"type": "text", "text": "describe this"},
+                {"type": "image", "source": {"kind": "path", "value": "/u/a.png"}},
+            ],
+            "chat_id": "chat-1",
+        }
+    ]
+    assert app._pending_attachments == []
+
+
+@pytest.mark.asyncio
+async def test_flush_carries_pending_attachments(monkeypatch):
+    client = FakeClient()
+    app = ChatApp(client=client)
+    app._busy = True
+    app._buffer.append("queued text")
+    app._pending_attachments = [{"type": "image", "source": {"kind": "path", "value": "/u/b.png"}}]
+
+    _queued, _log, _focused = _fake_widgets(app, monkeypatch)
+    monkeypatch.setattr(app, "_update_status", lambda: None)
+    monkeypatch.setattr(app, "_refresh_queued", lambda: None)
+
+    await app.on_agent_reply_event(AgentReplyEvent("done", chat_id="chat-1"))
+
+    assert client.calls[-1]["content"] == [
+        {"type": "text", "text": "queued text"},
+        {"type": "image", "source": {"kind": "path", "value": "/u/b.png"}},
+    ]
+    assert app._pending_attachments == []
