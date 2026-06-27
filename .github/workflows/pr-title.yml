@@ -26,8 +26,4 @@ jobs:
           #   fix: resolved crash on startup
           #   docs: updated readme
           requireScope: false
-          subjectPattern: ^(BEP \d+.+|(?![A-Z]).+)$
-          subjectPatternError: |
-            The subject (description) of the PR title must start with a lowercase letter,
-            or with "BEP N" for BEP-related changes (e.g. "BEP 4 - micro-kernel and plugin architecture").
 
