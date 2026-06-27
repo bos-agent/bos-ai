@@ -119,11 +119,10 @@ def _compose_send_content(text: str, attachments: list[dict[str, Any]]) -> Messa
     return cast("MessageContent", parts)
 
 
-def _attachment_indicator(count: int) -> str:
-    if count <= 0:
+def _render_attachment_tags(names: list[str]) -> str:
+    if not names:
         return ""
-    noun = "attachment" if count == 1 else "attachments"
-    return f"📎 {count} {noun}"
+    return "   ".join(f"📎 {name}" for name in names)
 
 
 def _resolve_typed_path(raw: str) -> tuple[str, str | None]:
@@ -623,6 +622,13 @@ class ChatApp(App):
         background: transparent;
     }
 
+    #attachments {
+        height: auto;
+        padding: 0 1;
+        color: $accent;
+        background: transparent;
+    }
+
     #prompt:focus {
         border: none;
     }
@@ -656,6 +662,7 @@ class ChatApp(App):
         self._busy = False
         self._buffer: list[str] = []
         self._pending_attachments: list[dict[str, Any]] = []
+        self._attachment_names: list[str] = []
         self._conn_status: str = "connected"
         self._pending_tool_calls: list[tuple[str, str]] = []
         self._known_actors: list[str] = []
@@ -684,6 +691,9 @@ class ChatApp(App):
             show_line_numbers=False,
             compact=True,
         )
+        attachments = Static(id="attachments")
+        attachments.display = False
+        yield attachments
         yield SlashAutoComplete("#prompt", candidates=self._get_candidates)
         yield Footer()
 
@@ -793,7 +803,7 @@ class ChatApp(App):
         self._update_status()
         try:
             await self._client.send(_compose_send_content(text, self._pending_attachments), chat_id=self._chat_id)
-            self._pending_attachments = []
+            self._clear_attachments()
         except Exception as exc:
             self._busy = False
             self._pending_tool_calls.clear()
@@ -922,7 +932,7 @@ class ChatApp(App):
             self._last_sent_text = merged
             try:
                 await self._client.send(_compose_send_content(merged, self._pending_attachments), chat_id=self._chat_id)
-                self._pending_attachments = []
+                self._clear_attachments()
             except Exception as exc:
                 self._busy = False
                 self._write_system(f"[yellow]⚠ Send failed — reconnecting: {exc}[/]")
@@ -1177,6 +1187,7 @@ class ChatApp(App):
             self._write_system(f"[yellow]⚠ Couldn't attach {Path(path).name}: {exc}[/]")
             return
         self._pending_attachments.append(part)
+        self._attachment_names.append(Path(path).name)
         self._update_status()
 
     def action_reset_chat(self) -> None:
@@ -1368,14 +1379,20 @@ class ChatApp(App):
         tokens = ""
         if self._context_tokens:
             tokens = f"  ·  ctx {_fmt_tokens(self._context_tokens)} · total {_fmt_tokens(self._session_tokens)} tok"
-        attachments = ""
-        if indicator := _attachment_indicator(len(self._pending_attachments)):
-            attachments = f"  ·  {indicator}"
         header = f"  {conn}  ·  Chat: {self._chat_id}  ·  Channel: {self._client.client_id}"
-        return f"{header}  ·  {state}{tokens}{attachments}"
+        return f"{header}  ·  {state}{tokens}"
 
     def _update_status(self) -> None:
         self.query_one("#status-bar", Static).update(self._status_text())
+        tags = self.query_one("#attachments", Static)
+        tag_text = _render_attachment_tags(self._attachment_names)
+        tags.update(tag_text)
+        tags.display = bool(tag_text)
+
+    def _clear_attachments(self) -> None:
+        self._pending_attachments = []
+        self._attachment_names = []
+        self._update_status()
 
     async def _poll_connection_status(self) -> None:
         """Periodically check the WebSocket connection and update the status bar."""

@@ -1077,12 +1077,12 @@ class FakeUploadClient(FakeClient):
         return self._part
 
 
-def test_attachment_indicator_text():
-    from bos.cli.tui_app import _attachment_indicator
+def test_render_attachment_tags():
+    from bos.cli.tui_app import _render_attachment_tags
 
-    assert _attachment_indicator(0) == ""
-    assert _attachment_indicator(1) == "📎 1 attachment"
-    assert _attachment_indicator(3) == "📎 3 attachments"
+    assert _render_attachment_tags([]) == ""
+    assert _render_attachment_tags(["a.png"]) == "📎 a.png"
+    assert _render_attachment_tags(["a.png", "chart.png"]) == "📎 a.png   📎 chart.png"
 
 
 @pytest.mark.asyncio
@@ -1096,7 +1096,32 @@ async def test_on_file_picked_success_appends_and_updates(monkeypatch):
 
     assert client.uploaded == ["/home/user/a.png"]
     assert app._pending_attachments == [{"type": "image", "source": {"kind": "path", "value": "/u/x.png"}}]
+    assert app._attachment_names == ["a.png"]
     assert updates == [1]
+
+
+@pytest.mark.asyncio
+async def test_submit_clears_attachment_names(monkeypatch):
+    client = FakeUploadClient()
+    app = ChatApp(client=client)
+    app._pending_attachments = [{"type": "image", "source": {"kind": "path", "value": "/u/x.png"}}]
+    app._attachment_names = ["a.png"]
+
+    _queued, _log, _focused = _fake_widgets(app, monkeypatch)
+    monkeypatch.setattr(app, "_update_status", lambda: None)
+
+    class FakeEvent:
+        value = "go"
+
+        class prompt_input:
+            @staticmethod
+            def clear():
+                pass
+
+    await app.on_prompt_input_submitted(FakeEvent())
+
+    assert app._pending_attachments == []
+    assert app._attachment_names == []
 
 
 @pytest.mark.asyncio
