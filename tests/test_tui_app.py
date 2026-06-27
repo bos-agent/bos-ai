@@ -1061,3 +1061,65 @@ def test_resolve_typed_path_blank():
     from bos.cli.tui_app import _resolve_typed_path
 
     assert _resolve_typed_path("   ") == ("invalid", None)
+
+
+class FakeUploadClient(FakeClient):
+    def __init__(self, part=None, error=None):
+        super().__init__()
+        self._part = part or {"type": "image", "source": {"kind": "path", "value": "/u/x.png"}}
+        self._error = error
+        self.uploaded: list[str] = []
+
+    async def upload_image(self, path):
+        self.uploaded.append(str(path))
+        if self._error is not None:
+            raise self._error
+        return self._part
+
+
+def test_attachment_indicator_text():
+    from bos.cli.tui_app import _attachment_indicator
+
+    assert _attachment_indicator(0) == ""
+    assert _attachment_indicator(1) == "📎 1 attachment"
+    assert _attachment_indicator(3) == "📎 3 attachments"
+
+
+@pytest.mark.asyncio
+async def test_on_file_picked_success_appends_and_updates(monkeypatch):
+    client = FakeUploadClient()
+    app = ChatApp(client=client)
+    updates: list[int] = []
+    monkeypatch.setattr(app, "_update_status", lambda: updates.append(len(app._pending_attachments)))
+
+    await app._on_file_picked("/home/user/a.png")
+
+    assert client.uploaded == ["/home/user/a.png"]
+    assert app._pending_attachments == [{"type": "image", "source": {"kind": "path", "value": "/u/x.png"}}]
+    assert updates == [1]
+
+
+@pytest.mark.asyncio
+async def test_on_file_picked_failure_writes_system_and_keeps_empty(monkeypatch):
+    client = FakeUploadClient(error=RuntimeError("must be an image"))
+    app = ChatApp(client=client)
+    outputs: list[str] = []
+    monkeypatch.setattr(app, "_write_system", outputs.append)
+    monkeypatch.setattr(app, "_update_status", lambda: None)
+
+    await app._on_file_picked("/home/user/notes.txt")
+
+    assert app._pending_attachments == []
+    assert len(outputs) == 1 and "notes.txt" in outputs[0]
+
+
+@pytest.mark.asyncio
+async def test_on_file_picked_none_is_noop(monkeypatch):
+    client = FakeUploadClient()
+    app = ChatApp(client=client)
+    monkeypatch.setattr(app, "_update_status", lambda: None)
+
+    await app._on_file_picked(None)
+
+    assert client.uploaded == []
+    assert app._pending_attachments == []

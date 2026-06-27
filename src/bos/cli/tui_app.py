@@ -119,6 +119,13 @@ def _compose_send_content(text: str, attachments: list[dict[str, Any]]) -> Messa
     return cast("MessageContent", parts)
 
 
+def _attachment_indicator(count: int) -> str:
+    if count <= 0:
+        return ""
+    noun = "attachment" if count == 1 else "attachments"
+    return f"📎 {count} {noun}"
+
+
 def _resolve_typed_path(raw: str) -> tuple[str, str | None]:
     candidate = raw.strip()
     if not candidate:
@@ -631,6 +638,7 @@ class ChatApp(App):
         Binding("ctrl+n", "reset_chat", "New Chat", show=True),
         Binding("ctrl+r", "resume_chat", "Resume", show=True),
         Binding("ctrl+p", "show_plan", "Plan", show=True),
+        Binding("ctrl+o", "attach_file", "Attach", show=True),
     ]
 
     _TASK_TOOL_NAMES = {"TaskCreate", "TaskUpdate", "TaskList", "TaskGet"}
@@ -1157,6 +1165,20 @@ class ChatApp(App):
         else:
             self._write_system("[dim]No plan for this chat yet.[/]")
 
+    def action_attach_file(self) -> None:
+        self.push_screen(FilePickerModal(), callback=self._on_file_picked)
+
+    async def _on_file_picked(self, path: str | None) -> None:
+        if path is None:
+            return
+        try:
+            part = await self._client.upload_image(path)
+        except Exception as exc:
+            self._write_system(f"[yellow]⚠ Couldn't attach {Path(path).name}: {exc}[/]")
+            return
+        self._pending_attachments.append(part)
+        self._update_status()
+
     def action_reset_chat(self) -> None:
         asyncio.create_task(self._send_command("/new"))
 
@@ -1346,7 +1368,11 @@ class ChatApp(App):
         tokens = ""
         if self._context_tokens:
             tokens = f"  ·  ctx {_fmt_tokens(self._context_tokens)} · total {_fmt_tokens(self._session_tokens)} tok"
-        return f"  {conn}  ·  Chat: {self._chat_id}  ·  Channel: {self._client.client_id}  ·  {state}{tokens}"
+        attachments = ""
+        if indicator := _attachment_indicator(len(self._pending_attachments)):
+            attachments = f"  ·  {indicator}"
+        header = f"  {conn}  ·  Chat: {self._chat_id}  ·  Channel: {self._client.client_id}"
+        return f"{header}  ·  {state}{tokens}{attachments}"
 
     def _update_status(self) -> None:
         self.query_one("#status-bar", Static).update(self._status_text())
