@@ -122,6 +122,8 @@ def test_extract_inbound_message_text_is_message():
         "channel_conversation_id": "lark_chat:oc_1",
         "text": "hello there",
         "content_type": "message",
+        "image_keys": [],
+        "message_id": "om_x",
     }
 
 
@@ -141,11 +143,14 @@ def test_extract_inbound_message_strips_group_mention():
     assert result["text"] == "what is the weather"
 
 
-def test_extract_inbound_message_ignores_non_text():
+def test_extract_inbound_message_image_returns_image_keys():
     event = _text_event("oc_1", "")
     event["message_type"] = "image"
     event["content"] = json.dumps({"image_key": "img_x"})
-    assert _extract_inbound_message(event) is None
+    result = _extract_inbound_message(event)
+    assert result is not None
+    assert result["image_keys"] == ["img_x"]
+    assert result["text"] == ""
 
 
 def test_extract_inbound_message_ignores_empty_text():
@@ -270,7 +275,7 @@ async def test_handle_inbound_nudges_on_unsupported_format():
     delivered = _capture_deliver(channel)
     mailbox = FakeSendMailbox()
     event = _text_event("oc_42", "")
-    event["message_type"] = "image"
+    event["message_type"] = "audio"
 
     await channel._handle_inbound(mailbox, event)
 
@@ -623,3 +628,86 @@ async def test_resume_command_switches_cursor_via_control_plane():
     assert mailbox.sent == []
     assert coordinator.get_cursor(ref) == "chat-target"
     assert retired == [("main", "chat-old")]
+
+
+def test_extract_inbound_image_message():
+    event = {
+        "chat_id": "oc_1",
+        "message_id": "om_1",
+        "message_type": "image",
+        "content": json.dumps({"image_key": "img_abc"}),
+    }
+    inbound = _extract_inbound_message(event)
+    assert inbound["image_keys"] == ["img_abc"]
+    assert inbound["message_id"] == "om_1"
+    assert inbound["text"] == ""
+
+
+def test_extract_inbound_post_with_two_images():
+    post = {
+        "title": "",
+        "content": [
+            [{"tag": "text", "text": "compare "}, {"tag": "img", "image_key": "k1"}],
+            [{"tag": "img", "image_key": "k2"}],
+        ],
+    }
+    event = {"chat_id": "oc_1", "message_id": "om_2", "message_type": "post", "content": json.dumps(post)}
+    inbound = _extract_inbound_message(event)
+    assert inbound["image_keys"] == ["k1", "k2"]
+    assert inbound["text"].strip() == "compare"
+
+
+def test_extract_inbound_empty_post_returns_none():
+    event = {
+        "chat_id": "oc_1",
+        "message_id": "om_3",
+        "message_type": "post",
+        "content": json.dumps({"content": [[{"tag": "at", "user_id": "x"}]]}),
+    }
+    assert _extract_inbound_message(event) is None
+
+
+def test_extract_inbound_text_has_empty_image_keys():
+    event = {"chat_id": "oc_1", "message_id": "om_4", "message_type": "text", "content": json.dumps({"text": "hello"})}
+    inbound = _extract_inbound_message(event)
+    assert inbound["image_keys"] == []
+    assert inbound["text"] == "hello"
+
+
+def _make_channel(tmp_path):
+    store = InMemChatStore()
+    runtime = ChannelRuntimeContext(
+        actor_resolver=ActorResolver(
+            {"main": ActorDescriptor(name="main", address="agent@main")},
+            default_actor="main",
+        ),
+        chat_coordinator=ChatCoordinator(store),
+        mail_route=FakeMailRoute(),
+        upload_dir=tmp_path,
+    )
+    return LarkChannel(
+        channel_id="lark:daily",
+        target_actor="main",
+        settings=LarkSettings(app_id="cli_app", app_secret="secret"),
+        runtime=runtime,
+    )
+
+
+@pytest.mark.asyncio
+async def test_lark_image_assembles_content(monkeypatch, tmp_path):
+    import bos.extensions.channels.lark as lark_mod
+
+    def _fake_store(*, upload_dir, filename, content_type, data):
+        return {"type": "image", "source": {"kind": "path", "value": filename}}
+
+    monkeypatch.setattr(lark_mod, "store_uploaded_image", _fake_store)
+
+    channel = _make_channel(tmp_path)  # existing helper; runtime.upload_dir=tmp_path
+
+    async def _fake_dl(message_id, image_key):
+        return b"\x89PNGdata"
+
+    monkeypatch.setattr(channel, "_download_lark_image", _fake_dl)
+
+    parts = await channel._download_image_parts("om_1", ["k1", "k2"])
+    assert [p["source"]["value"] for p in parts] == ["k1.png", "k2.png"]
