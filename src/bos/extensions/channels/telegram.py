@@ -58,6 +58,7 @@ class TelegramSettings:
     api_base: str = "https://api.telegram.org"
     allowed_chat_ids: Iterable[int | str] | None = None
     default_chat_id: int | str | None = None
+    album_debounce_seconds: float = 1.5
 
 
 def _conversation_id_for_telegram_chat(telegram_chat_id: int | str) -> str:
@@ -261,6 +262,9 @@ class TelegramChannel(BaseChannel[TelegramSettings]):
         self._default_chat_id = str(settings.default_chat_id or "").strip()
         self._bot_id = str(settings.bot_id or "").strip()
 
+        self._album_buffers: dict[str, dict[str, Any]] = {}
+        self._album_debounce = settings.album_debounce_seconds
+
         self._session: ClientSession | None = None
         self._chat_to_telegram_chat: dict[str, str] = {}
         self._conversation_to_telegram_chat: dict[str, str] = {}
@@ -289,6 +293,10 @@ class TelegramChannel(BaseChannel[TelegramSettings]):
                 logger.info("TelegramChannel stopped")
                 raise
             finally:
+                for buf in self._album_buffers.values():
+                    if buf.get("handle") is not None:
+                        buf["handle"].cancel()
+                self._album_buffers.clear()
                 self._session = None
 
     async def aclose(self) -> None:
@@ -376,6 +384,9 @@ class TelegramChannel(BaseChannel[TelegramSettings]):
                         # Control plane: handle slash-commands off the gateway,
                         # never as envelopes through the agent actor (BEP 13 / OPEN-D).
                         await self._handle_command(inbound["text"], ref, telegram_chat_id)
+                        continue
+                    if inbound["content_type"] == MessageType.MESSAGE and inbound["media_group_id"]:
+                        self._buffer_album_update(mailbox, inbound)
                         continue
                     is_single_photo = (
                         inbound["content_type"] == MessageType.MESSAGE
@@ -467,6 +478,44 @@ class TelegramChannel(BaseChannel[TelegramSettings]):
             except Exception as exc:
                 logger.warning("Telegram polling error: %s", exc)
                 await asyncio.sleep(2)
+
+    def _buffer_album_update(self, mailbox: Any, inbound: dict[str, Any]) -> None:
+        group = inbound["media_group_id"]
+        buf = self._album_buffers.get(group)
+        if buf is None:
+            buf = {"file_ids": [], "caption": "", "base": inbound, "handle": None}
+            self._album_buffers[group] = buf
+        buf["file_ids"].extend(inbound["file_ids"])
+        if inbound["text"] and not buf["caption"]:
+            buf["caption"] = inbound["text"]
+        if buf["handle"] is not None:
+            buf["handle"].cancel()
+        loop = asyncio.get_event_loop()
+        buf["handle"] = loop.call_later(
+            self._album_debounce,
+            lambda: asyncio.ensure_future(self._flush_album(mailbox, group)),
+        )
+
+    async def _flush_album(self, mailbox: Any, media_group_id: str) -> None:
+        buf = self._album_buffers.pop(media_group_id, None)
+        if not buf:
+            return
+        inbound = dict(buf["base"])
+        inbound["text"] = buf["caption"]
+        inbound["file_ids"] = buf["file_ids"]
+        try:
+            parts = await self._download_image_parts(buf["file_ids"])
+        except Exception as exc:
+            logger.warning("Telegram album download failed: %s", exc)
+            await self._api_call(
+                "sendMessage",
+                {
+                    "chat_id": inbound["telegram_chat_id"],
+                    "text": "Couldn't fetch the images you sent — please try again.",
+                },
+            )
+            return
+        await self._assemble_and_send(mailbox, inbound, parts)
 
     async def _download_telegram_file(self, file_path: str) -> bytes:
         if self._session is None:

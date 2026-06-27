@@ -749,6 +749,59 @@ def test_extract_inbound_text_has_empty_file_ids():
 
 
 @pytest.mark.asyncio
+async def test_album_buffers_into_single_turn(monkeypatch, tmp_path):
+    import bos.extensions.channels.telegram as tg_mod
+    from bos.core.actor import MessageType
+
+    monkeypatch.setattr(
+        tg_mod,
+        "store_uploaded_image",
+        lambda *, upload_dir, filename, content_type, data: {
+            "type": "image",
+            "source": {"kind": "path", "value": filename},
+        },
+    )
+
+    channel = _make_channel(tmp_path)
+    channel._album_debounce = 0.05
+    captured = {}
+
+    async def _fake_parts(file_ids):
+        return [{"type": "image", "source": {"kind": "path", "value": f}} for f in file_ids]
+
+    monkeypatch.setattr(channel, "_download_image_parts", _fake_parts)
+
+    class _MB:
+        async def send(self, addr, content, **kw):
+            captured["content"] = content
+
+    mb = _MB()
+
+    async def _fake_assemble(mailbox, inbound, parts):
+        captured["count"] = len(parts)
+        captured["text"] = inbound["text"]
+
+    monkeypatch.setattr(channel, "_assemble_and_send", _fake_assemble)
+
+    def mk(file_id, caption=""):
+        return {
+            "telegram_chat_id": "42",
+            "channel_conversation_id": "tg_chat:42",
+            "text": caption,
+            "content_type": MessageType.MESSAGE,
+            "file_ids": [file_id],
+            "media_group_id": "mg9",
+        }
+
+    channel._buffer_album_update(mb, mk("a", "two shots"))
+    channel._buffer_album_update(mb, mk("b"))
+    await asyncio.sleep(0.15)  # let the debounce fire
+
+    assert captured["count"] == 2
+    assert captured["text"] == "two shots"
+
+
+@pytest.mark.asyncio
 async def test_single_photo_assembles_image_content(monkeypatch, tmp_path):
     import bos.extensions.channels.telegram as tg_mod
     from bos.core.actor import MessageType
