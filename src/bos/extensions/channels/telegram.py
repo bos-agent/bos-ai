@@ -545,7 +545,7 @@ class TelegramChannel(BaseChannel[TelegramSettings]):
                 store_uploaded_image(
                     upload_dir=self._runtime.upload_dir,
                     filename=Path(file_path).name,
-                    content_type=None,
+                    content_type="image/jpeg",
                     data=data,
                 )
             )

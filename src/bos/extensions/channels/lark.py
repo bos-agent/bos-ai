@@ -467,6 +467,19 @@ class LarkChannel(BaseChannel[LarkSettings]):
             # envelopes through the agent actor (BEP 13 / OPEN-D).
             await self._handle_command(inbound["text"], ref, lark_chat_id)
             return
+
+        # Download images before reserving the send slot — a download failure
+        # should not leave a dangling preflight reservation.
+        if inbound["content_type"] == MessageType.MESSAGE and inbound["image_keys"]:
+            try:
+                image_parts = await self._download_image_parts(inbound["message_id"], inbound["image_keys"])
+            except Exception as exc:
+                logger.warning("Lark image download failed: %s", exc)
+                await self._deliver_text(lark_chat_id, "Couldn't fetch the image you sent — please try again.")
+                return
+        else:
+            image_parts = []
+
         chat_id = self._runtime.chat_coordinator.get_cursor(ref)
         if chat_id is None:
             chat_id = self._runtime.chat_coordinator.new_chat(ref)
@@ -505,16 +518,6 @@ class LarkChannel(BaseChannel[LarkSettings]):
                 "channel_conversation_id": ref.channel_conversation_id,
             },
         }
-        # Download images (if any) before routing/sending.
-        if inbound["content_type"] == MessageType.MESSAGE and inbound["image_keys"]:
-            try:
-                image_parts = await self._download_image_parts(inbound["message_id"], inbound["image_keys"])
-            except Exception as exc:
-                logger.warning("Lark image download failed: %s", exc)
-                await self._notify_unsupported(inbound["lark_chat_id"])
-                return
-        else:
-            image_parts = []
 
         inbound_text = inbound["text"]
         target_address = f"agent@{self.target_actor}"
