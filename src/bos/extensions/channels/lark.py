@@ -32,6 +32,7 @@ from typing import Any
 from bos.core import BaseChannel, MailBox, ep_channel
 from bos.core.actor import Envelope, MessageType
 from bos.gateway import ChannelConversationRef, ChannelRuntimeContext
+from bos.gateway.http import store_uploaded_image
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +118,24 @@ def _split_message(text: str, limit: int = LARK_MESSAGE_LIMIT) -> list[str]:
     return [part for part in parts if part] or [text[:limit]]
 
 
+def _post_image_keys_and_text(content_obj: dict) -> tuple[list[str], str]:
+    keys: list[str] = []
+    texts: list[str] = []
+    blocks = content_obj.get("content")
+    if isinstance(blocks, list):
+        for line in blocks:
+            if not isinstance(line, list):
+                continue
+            for el in line:
+                if not isinstance(el, dict):
+                    continue
+                if el.get("tag") == "img" and isinstance(el.get("image_key"), str):
+                    keys.append(el["image_key"])
+                elif el.get("tag") == "text" and isinstance(el.get("text"), str):
+                    texts.append(el["text"])
+    return keys, " ".join(t for t in texts if t).strip()
+
+
 def _extract_inbound_message(event: dict[str, Any]) -> dict[str, Any] | None:
     """Build the inbound payload from a flattened ``im.message.receive_v1`` event.
 
@@ -127,28 +146,42 @@ def _extract_inbound_message(event: dict[str, Any]) -> dict[str, Any] | None:
     lark_chat_id = event.get("chat_id")
     if not lark_chat_id:
         return None
-    if event.get("message_type") != "text":
-        return None
 
     raw = event.get("content")
     if not isinstance(raw, str):
         return None
     try:
-        text = json.loads(raw).get("text", "")
+        content_obj = json.loads(raw)
     except (ValueError, AttributeError):
         return None
-    if not isinstance(text, str):
+
+    message_type = event.get("message_type")
+    image_keys: list[str] = []
+    text = ""
+    if message_type == "text":
+        text = content_obj.get("text", "") if isinstance(content_obj, dict) else ""
+        text = text if isinstance(text, str) else ""
+    elif message_type == "image":
+        key = content_obj.get("image_key") if isinstance(content_obj, dict) else None
+        if isinstance(key, str):
+            image_keys = [key]
+    elif message_type == "post":
+        image_keys, text = _post_image_keys_and_text(content_obj) if isinstance(content_obj, dict) else ([], "")
+    else:
         return None
 
-    text = _strip_mentions(text, event.get("mentions"))
-    if not text:
+    text = _strip_mentions(text, event.get("mentions")) if text else ""
+    if not text.strip() and not image_keys:
         return None
 
+    is_command = text.startswith("/") and not image_keys
     return {
         "lark_chat_id": str(lark_chat_id),
         "channel_conversation_id": _conversation_id_for_lark_chat(lark_chat_id),
         "text": text,
-        "content_type": MessageType.COMMAND if text.startswith("/") else MessageType.MESSAGE,
+        "content_type": MessageType.COMMAND if is_command else MessageType.MESSAGE,
+        "image_keys": image_keys,
+        "message_id": event.get("message_id"),
     }
 
 
@@ -160,7 +193,7 @@ def _unsupported_message_chat_id(event: dict[str, Any]) -> str | None:
     """
     lark_chat_id = event.get("chat_id")
     message_type = event.get("message_type")
-    if not lark_chat_id or not message_type or message_type == "text":
+    if not lark_chat_id or not message_type or message_type in ("text", "image", "post"):
         return None
     return str(lark_chat_id)
 
@@ -434,6 +467,19 @@ class LarkChannel(BaseChannel[LarkSettings]):
             # envelopes through the agent actor (BEP 13 / OPEN-D).
             await self._handle_command(inbound["text"], ref, lark_chat_id)
             return
+
+        # Download images before reserving the send slot — a download failure
+        # should not leave a dangling preflight reservation.
+        if inbound["content_type"] == MessageType.MESSAGE and inbound["image_keys"]:
+            try:
+                image_parts = await self._download_image_parts(inbound["message_id"], inbound["image_keys"])
+            except Exception as exc:
+                logger.warning("Lark image download failed: %s", exc)
+                await self._deliver_text(lark_chat_id, "Couldn't fetch the image you sent — please try again.")
+                return
+        else:
+            image_parts = []
+
         chat_id = self._runtime.chat_coordinator.get_cursor(ref)
         if chat_id is None:
             chat_id = self._runtime.chat_coordinator.new_chat(ref)
@@ -472,12 +518,13 @@ class LarkChannel(BaseChannel[LarkSettings]):
                 "channel_conversation_id": ref.channel_conversation_id,
             },
         }
-        content = inbound["text"]
+
+        inbound_text = inbound["text"]
         target_address = f"agent@{self.target_actor}"
         if inbound["content_type"] == MessageType.MESSAGE:
             try:
                 route = self._runtime.actor_resolver.resolve(
-                    content,
+                    inbound_text,
                     default_actor=self.target_actor,
                     metadata=metadata,
                 )
@@ -485,12 +532,14 @@ class LarkChannel(BaseChannel[LarkSettings]):
                 await self._deliver_text(lark_chat_id, str(exc))
                 return
             target_address = route.target_address
-            content = route.content
+            inbound_text = route.content
             metadata = route.metadata
+        text_part: list[dict[str, Any]] = [{"type": "text", "text": inbound_text}] if inbound_text else []
+        content: list[dict[str, Any]] | str = text_part + image_parts if image_parts else inbound_text
         await mailbox.send(
             target_address,
             content,
-            content_type=inbound["content_type"],
+            content_type=MessageType.MESSAGE,
             chat_id=chat_id,
             metadata=metadata,
         )
@@ -529,6 +578,29 @@ class LarkChannel(BaseChannel[LarkSettings]):
             "I can only read text messages right now — I can't process images, files, audio, "
             "or other attachments yet. Please send your message as text.",
         )
+
+    async def _download_lark_image(self, message_id: str, image_key: str) -> bytes:
+        from lark_oapi.api.im.v1 import GetMessageResourceRequest
+
+        request = GetMessageResourceRequest.builder().message_id(message_id).file_key(image_key).type("image").build()
+        response = await asyncio.to_thread(self._client.im.v1.message_resource.get, request)
+        if not response.success() or response.file is None:
+            raise ValueError(f"Lark resource download failed for {image_key}: {getattr(response, 'msg', '')}")
+        return response.file.read()
+
+    async def _download_image_parts(self, message_id: str, image_keys: list[str]) -> list[dict[str, Any]]:
+        parts: list[dict[str, Any]] = []
+        for image_key in image_keys:
+            data = await self._download_lark_image(message_id, image_key)
+            parts.append(
+                store_uploaded_image(
+                    upload_dir=self._runtime.upload_dir,
+                    filename=f"{image_key}.png",
+                    content_type="image/png",
+                    data=data,
+                )
+            )
+        return parts
 
     async def _send_preflight_rejection(self, lark_chat_id: str, preflight) -> None:
         if preflight.stale:

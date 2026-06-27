@@ -159,3 +159,10 @@ async def test_channel_manager_binds_mailboxes_and_notifies_state_change():
 
     assert runtime.mail_route.bound == ["channel@demo"]
     assert notifications == 2
+
+
+def test_channel_runtime_context_has_upload_dir_default():
+    from pathlib import Path
+
+    ctx = _runtime()
+    assert isinstance(ctx.upload_dir, Path)

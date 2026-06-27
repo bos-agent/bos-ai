@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from aiohttp import web
@@ -69,6 +70,9 @@ class Gateway:
                 mail_route=harness.mail_route,
                 command_handler=self.command_handler,
                 state_changed=self._write_state,
+                upload_dir=(Path(self.bos_dir) / self.config.upload_dir)
+                if not Path(self.config.upload_dir).is_absolute()
+                else Path(self.config.upload_dir),
             )
         )
         # Channel instantiation is async (ep_channel.invoke); deferred to run().

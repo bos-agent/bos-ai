@@ -8,6 +8,7 @@ import logging
 import os
 from collections.abc import Iterable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from aiohttp import ClientSession, ClientTimeout, FormData
@@ -16,6 +17,7 @@ from bos.core import BaseChannel, MailBox, ep_channel
 from bos.core.actor import Envelope, MessageType
 from bos.core.agent import TurnEvent
 from bos.gateway import ChannelConversationRef, ChannelRuntimeContext
+from bos.gateway.http import store_uploaded_image
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +58,7 @@ class TelegramSettings:
     api_base: str = "https://api.telegram.org"
     allowed_chat_ids: Iterable[int | str] | None = None
     default_chat_id: int | str | None = None
+    album_debounce_seconds: float = 1.5
 
 
 def _conversation_id_for_telegram_chat(telegram_chat_id: int | str) -> str:
@@ -94,6 +97,16 @@ def _split_message(text: str, limit: int = TELEGRAM_MESSAGE_LIMIT) -> list[str]:
     return [part for part in parts if part] or [text[:limit]]
 
 
+def _largest_photo_file_id(photo: Any) -> str | None:
+    if not isinstance(photo, list) or not photo:
+        return None
+    # Telegram returns sizes ascending; pick the last with a file_id.
+    for size in reversed(photo):
+        if isinstance(size, dict) and isinstance(size.get("file_id"), str):
+            return size["file_id"]
+    return None
+
+
 def _extract_inbound_message(update: dict[str, Any], *, bot_username: str | None = None) -> dict[str, Any] | None:
     message = update.get("message") or update.get("edited_message")
     if not isinstance(message, dict):
@@ -104,16 +117,22 @@ def _extract_inbound_message(update: dict[str, Any], *, bot_username: str | None
     if telegram_chat_id is None:
         return None
 
-    text = message.get("text") or message.get("caption")
-    if not isinstance(text, str) or not text.strip():
-        return None
+    caption = message.get("text") or message.get("caption")
+    caption = caption if isinstance(caption, str) else ""
+    file_id = _largest_photo_file_id(message.get("photo"))
 
-    normalized = _normalize_command(text, bot_username)
+    if not caption.strip() and file_id is None:
+        return None  # nothing we can use
+
+    normalized = _normalize_command(caption, bot_username) if caption.strip() else ""
+    is_command = normalized.startswith("/") and file_id is None
     return {
         "telegram_chat_id": str(telegram_chat_id),
         "channel_conversation_id": _conversation_id_for_telegram_chat(telegram_chat_id),
         "text": normalized,
-        "content_type": MessageType.COMMAND if normalized.startswith("/") else MessageType.MESSAGE,
+        "content_type": MessageType.COMMAND if is_command else MessageType.MESSAGE,
+        "file_ids": [file_id] if file_id else [],
+        "media_group_id": message.get("media_group_id"),
     }
 
 
@@ -123,7 +142,6 @@ def _extract_inbound_message(update: dict[str, Any], *, bot_username: str | None
 _UNSUPPORTED_CONTENT_KEYS = (
     "voice",
     "audio",
-    "photo",
     "video",
     "video_note",
     "document",
@@ -244,6 +262,9 @@ class TelegramChannel(BaseChannel[TelegramSettings]):
         self._default_chat_id = str(settings.default_chat_id or "").strip()
         self._bot_id = str(settings.bot_id or "").strip()
 
+        self._album_buffers: dict[str, dict[str, Any]] = {}
+        self._album_debounce = settings.album_debounce_seconds
+
         self._session: ClientSession | None = None
         self._chat_to_telegram_chat: dict[str, str] = {}
         self._conversation_to_telegram_chat: dict[str, str] = {}
@@ -272,6 +293,10 @@ class TelegramChannel(BaseChannel[TelegramSettings]):
                 logger.info("TelegramChannel stopped")
                 raise
             finally:
+                for buf in self._album_buffers.values():
+                    if buf.get("handle") is not None:
+                        buf["handle"].cancel()
+                self._album_buffers.clear()
                 self._session = None
 
     async def aclose(self) -> None:
@@ -360,6 +385,29 @@ class TelegramChannel(BaseChannel[TelegramSettings]):
                         # never as envelopes through the agent actor (BEP 13 / OPEN-D).
                         await self._handle_command(inbound["text"], ref, telegram_chat_id)
                         continue
+                    if inbound["content_type"] == MessageType.MESSAGE and inbound["media_group_id"]:
+                        self._buffer_album_update(mailbox, inbound)
+                        continue
+                    is_single_photo = (
+                        inbound["content_type"] == MessageType.MESSAGE
+                        and inbound["file_ids"]
+                        and not inbound["media_group_id"]
+                    )
+                    if is_single_photo:
+                        try:
+                            parts = await self._download_image_parts(inbound["file_ids"])
+                        except Exception as exc:
+                            logger.warning("Telegram image download failed: %s", exc)
+                            await self._api_call(
+                                "sendMessage",
+                                {
+                                    "chat_id": telegram_chat_id,
+                                    "text": "Couldn't fetch the image you sent — please try again.",
+                                },
+                            )
+                            continue
+                        await self._assemble_and_send(mailbox, inbound, parts)
+                        continue
                     chat_id = self._runtime.chat_coordinator.get_cursor(ref)
                     if chat_id is None:
                         chat_id = self._runtime.chat_coordinator.new_chat(ref)
@@ -430,6 +478,125 @@ class TelegramChannel(BaseChannel[TelegramSettings]):
             except Exception as exc:
                 logger.warning("Telegram polling error: %s", exc)
                 await asyncio.sleep(2)
+
+    def _buffer_album_update(self, mailbox: Any, inbound: dict[str, Any]) -> None:
+        group = inbound["media_group_id"]
+        buf = self._album_buffers.get(group)
+        if buf is None:
+            buf = {"file_ids": [], "caption": "", "base": inbound, "handle": None}
+            self._album_buffers[group] = buf
+        buf["file_ids"].extend(inbound["file_ids"])
+        if inbound["text"] and not buf["caption"]:
+            buf["caption"] = inbound["text"]
+        if buf["handle"] is not None:
+            buf["handle"].cancel()
+        loop = asyncio.get_running_loop()
+
+        def _schedule_flush() -> None:
+            fut = asyncio.ensure_future(self._flush_album(mailbox, group))
+            fut.add_done_callback(
+                lambda f: (
+                    f.cancelled()
+                    or (f.exception() and logger.warning("Telegram album flush failed: %s", f.exception()))
+                )
+            )
+
+        buf["handle"] = loop.call_later(self._album_debounce, _schedule_flush)
+
+    async def _flush_album(self, mailbox: Any, media_group_id: str) -> None:
+        buf = self._album_buffers.pop(media_group_id, None)
+        if not buf:
+            return
+        inbound = dict(buf["base"])
+        inbound["text"] = buf["caption"]
+        inbound["file_ids"] = buf["file_ids"]
+        try:
+            parts = await self._download_image_parts(buf["file_ids"])
+        except Exception as exc:
+            logger.warning("Telegram album download failed: %s", exc)
+            await self._api_call(
+                "sendMessage",
+                {
+                    "chat_id": inbound["telegram_chat_id"],
+                    "text": "Couldn't fetch the images you sent — please try again.",
+                },
+            )
+            return
+        await self._assemble_and_send(mailbox, inbound, parts)
+
+    async def _download_telegram_file(self, file_path: str) -> bytes:
+        if self._session is None:
+            raise RuntimeError("Telegram session is not initialized.")
+        url = f"{self._api_base}/file/bot{self._token}/{file_path}"
+        timeout = ClientTimeout(total=60)
+        async with self._session.get(url, timeout=timeout) as resp:
+            resp.raise_for_status()
+            return await resp.read()
+
+    async def _download_image_parts(self, file_ids: list[str]) -> list[dict[str, Any]]:
+        parts: list[dict[str, Any]] = []
+        for file_id in file_ids:
+            info = await self._api_call("getFile", {"file_id": file_id})
+            file_path = (info.get("result") or {}).get("file_path")
+            if not file_path:
+                raise ValueError(f"Telegram getFile returned no file_path for {file_id}")
+            data = await self._download_telegram_file(file_path)
+            parts.append(
+                store_uploaded_image(
+                    upload_dir=self._runtime.upload_dir,
+                    filename=Path(file_path).name,
+                    content_type="image/jpeg",
+                    data=data,
+                )
+            )
+        return parts
+
+    async def _assemble_and_send(
+        self, mailbox: Any, inbound: dict[str, Any], image_parts: list[dict[str, Any]]
+    ) -> None:
+        ref = ChannelConversationRef(self.channel_id, inbound["channel_conversation_id"])
+        telegram_chat_id = inbound["telegram_chat_id"]
+        chat_id = self._runtime.chat_coordinator.get_cursor(ref)
+        if chat_id is None:
+            chat_id = self._runtime.chat_coordinator.new_chat(ref)
+        observed_revision = self._runtime.chat_coordinator.observed_revision(chat_id=chat_id, ref=ref) or 0
+        self._runtime.chat_coordinator.set_cursor(ref, chat_id, observed_revision=observed_revision)
+        preflight = await self._runtime.chat_coordinator.prepare_send(
+            chat_id=chat_id,
+            ref=ref,
+            base_revision=observed_revision,
+            content_type=inbound["content_type"],
+        )
+        if preflight.stale:
+            observed_revision = await self._catch_up(telegram_chat_id, chat_id, ref, preflight)
+            preflight = await self._runtime.chat_coordinator.prepare_send(
+                chat_id=chat_id,
+                ref=ref,
+                base_revision=observed_revision,
+                content_type=inbound["content_type"],
+            )
+        if not preflight.ok:
+            await self._send_preflight_rejection(telegram_chat_id, preflight)
+            return
+        self._conversation_to_telegram_chat[ref.channel_conversation_id] = telegram_chat_id
+        self._chat_to_telegram_chat[chat_id] = telegram_chat_id
+        metadata = {
+            "base_revision": observed_revision,
+            "channel": {"channel_id": self.channel_id, "channel_conversation_id": ref.channel_conversation_id},
+        }
+        text = inbound["text"]
+        target_address = f"agent@{self.target_actor}"
+        if text:
+            try:
+                route = self._runtime.actor_resolver.resolve(text, default_actor=self.target_actor, metadata=metadata)
+            except Exception as exc:
+                await self._api_call("sendMessage", {"chat_id": telegram_chat_id, "text": str(exc)})
+                return
+            target_address, text, metadata = route.target_address, route.content, route.metadata
+        content: list[dict[str, Any]] = ([{"type": "text", "text": text}] if text else []) + image_parts
+        await mailbox.send(
+            target_address, content, content_type=MessageType.MESSAGE, chat_id=chat_id, metadata=metadata
+        )
 
     async def _catch_up(self, telegram_chat_id: str, chat_id: str, ref: ChannelConversationRef, preflight) -> int:
         """Deliver replies the channel missed and resync its cursor to the current revision.
