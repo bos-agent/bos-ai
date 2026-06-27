@@ -1,12 +1,10 @@
-"""Project scaffolding commands — ``boscli init`` and the ``boscli gen`` generators (BEP 9)."""
+"""Project scaffolding command — ``boscli init`` (BEP 9)."""
 
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import re
-import secrets
 import subprocess
 from pathlib import Path
 from typing import cast
@@ -14,20 +12,10 @@ from typing import cast
 import click
 
 from bos.cli import prompts
-from bos.cli.scaffold import (
-    ARCHETYPES,
-    frontmatter_text,
-    render_template,
-    scaffold_workspace,
-    toml_multiline_text,
-)
+from bos.cli.scaffold import ARCHETYPES, scaffold_workspace, toml_multiline_text
 from bos.config import ConfigNotFoundError, Workspace, WorkspaceResolutionError, initialize_workspace
-from bos.config.schema import PlatformConfig, RuntimeConfig
 
 _DEFAULT_PURPOSE = "A general-purpose personal agent."
-_DEFAULT_AGENT_TOOLS = '["ReadFile", "GrepSearch", "GlobSearch"]'
-_AGENT_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
-_SPECIALIST_NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,29}$")
 
 # litellm model-prefix → API key env var. Maintained by BOS; occasional drift
 # fixes against litellm are an accepted cost (BEP 9). Always overridable at the prompt.
@@ -80,9 +68,8 @@ _RECOMMENDED_MODELS: dict[str, tuple[str, ...]] = {
 @click.option("--flat", is_flag=True, default=False, help="Write a root bos.toml instead of the default .bos/ layout.")
 @click.option("--git/--no-git", "init_git", default=None, help="Run git init and create a .gitignore.")
 @click.option("--no-probe", is_flag=True, default=False, help="Skip the live model credential check.")
-@click.option("--no-generate", is_flag=True, default=False, help="Skip LLM generation of team specialists.")
 @click.option("--name", "pkg_name_opt", default=None, help="Package name (package archetype; default: dir name).")
-def init(directory, archetype, model, purpose, yes, minimal, flat, init_git, no_probe, no_generate, pkg_name_opt):
+def init(directory, archetype, model, purpose, yes, minimal, flat, init_git, no_probe, pkg_name_opt):
     """Initialize a BOS project with a guided, runnable baseline."""
     workspace_path = Path(directory).expanduser().resolve()
     dotbos = not flat
@@ -102,7 +89,7 @@ def init(directory, archetype, model, purpose, yes, minimal, flat, init_git, no_
     if purpose is None:
         purpose = _DEFAULT_PURPOSE if yes else prompts.text("What is this agent project for?", default=_DEFAULT_PURPOSE)
     if archetype is None:
-        archetype = "assistant" if yes else _prompt_archetype()
+        archetype = "workspace" if yes else _prompt_archetype()
 
     pkg_name = None
     if archetype == "package":
@@ -115,18 +102,10 @@ def init(directory, archetype, model, purpose, yes, minimal, flat, init_git, no_
 
     model, env_pairs = _provider_step(model, yes)
 
-    env_pairs = dict(env_pairs)
-    if archetype == "service":
-        env_pairs.setdefault("BOS_GATEWAY_API_KEY", secrets.token_urlsafe(24))
-    if archetype == "telegram-bot":
-        env_pairs.setdefault("TELEGRAM_BOT_TOKEN", "")
-
-    specialists = _fallback_specialists(purpose)
-    context = _build_context(project_name, purpose, archetype, model, dotbos, specialists)
+    context = _build_context(project_name, purpose, archetype, model, dotbos)
     if pkg_name:
         context["pkg_name"] = pkg_name
         context["dist_name"] = pkg_name.replace("_", "-")
-    agent_files = _specialist_files(specialists, purpose) if archetype == "team" else {}
 
     try:
         result = scaffold_workspace(
@@ -135,7 +114,6 @@ def init(directory, archetype, model, purpose, yes, minimal, flat, init_git, no_
             context,
             dotbos=dotbos,
             env_content=_env_content(env_pairs),
-            agent_files=agent_files,
         )
     except WorkspaceResolutionError as exc:
         raise click.ClickException(str(exc))
@@ -144,7 +122,6 @@ def init(directory, archetype, model, purpose, yes, minimal, flat, init_git, no_
     click.echo(f"Initialized {archetype} project at {workspace_path}")
     click.echo(f"Wrote {written}")
 
-    probe_ok = False
     if model and not no_probe:
         probe_ok, detail = _probe_model(workspace_path, model)
         if probe_ok:
@@ -154,15 +131,6 @@ def init(directory, archetype, model, purpose, yes, minimal, flat, init_git, no_
             click.echo("  The project was still created; fix credentials and run `boscli doctor --probe`.", err=True)
     else:
         click.echo("Config validates ✓ · credential probe skipped")
-
-    if archetype == "team" and model and probe_ok and not no_generate:
-        generated = _generate_specialists(model, purpose)
-        if generated:
-            _apply_generated_specialists(result, context, generated, purpose)
-            names = ", ".join(s["name"] for s in generated)
-            click.echo(f"Generated team specialists: {names}")
-        else:
-            click.echo("Specialist generation failed — keeping the built-in researcher/writer templates.", err=True)
 
     if init_git is None:
         default_git = not _inside_git_repo(workspace_path)
@@ -184,10 +152,7 @@ def init(directory, archetype, model, purpose, yes, minimal, flat, init_git, no_
 
 def _prompt_archetype() -> str:
     descriptions = {
-        "assistant": "single agent with memory and skills",
-        "team": "a coordinator agent that delegates to specialists",
-        "service": "headless HTTP gateway, API-first",
-        "telegram-bot": "an agent wired to a Telegram channel",
+        "workspace": "single agent with memory and skills (add a team or Telegram later)",
         "package": "an installable Python extension package (tools, channels, providers)",
     }
     choices = [prompts.Choice(name, name, descriptions[name]) for name in ARCHETYPES]
@@ -298,23 +263,12 @@ def _build_context(
     archetype: str,
     model: str | None,
     dotbos: bool,
-    specialists: list[dict[str, str]],
 ) -> dict[str, str]:
     if model:
         model_line = f'model = "{model}"'
     else:
         model_line = '# model = ""  # set a litellm model id, or export BOS_MODEL'
     first_prompt = "use the WordCount tool to count the words in this sentence"
-    notes = {
-        "service": (
-            "\n## Service notes\n\nThe gateway requires the API key from `.env` "
-            "(`BOS_GATEWAY_API_KEY`) on HTTP and WebSocket requests.\n"
-        ),
-        "telegram-bot": (
-            "\n## Telegram notes\n\nCreate a bot with @BotFather, put its token in `.env` as "
-            "`TELEGRAM_BOT_TOKEN`, then restart the gateway.\n"
-        ),
-    }
     return {
         "project_name": project_name,
         "purpose": purpose.strip(),
@@ -324,10 +278,6 @@ def _build_context(
         "model_line": model_line,
         "config_path": ".bos/config.toml" if dotbos else "bos.toml",
         "first_prompt": first_prompt,
-        "archetype_notes": notes.get(archetype, ""),
-        "specialist_a": specialists[0]["name"],
-        "specialist_b": specialists[1]["name"],
-        "specialist_a_display": specialists[0]["name"].replace("-", " ").title(),
     }
 
 
@@ -369,7 +319,7 @@ def _git_init(workspace: Path) -> None:
         click.echo(f"git init failed: {exc}", err=True)
 
 
-# ── model probe and specialist generation ──────────────────────
+# ── model probe ─────────────────────────────────────────────────
 
 
 def _bootstrapped_workspace(workspace_path: Path) -> Workspace:
@@ -457,118 +407,8 @@ def _probe_model(workspace_path: Path, model: str) -> tuple[bool, str]:
         return False, str(exc) or type(exc).__name__
 
 
-def _generate_specialists(model: str, purpose: str) -> list[dict[str, str]] | None:
-    prompt = render_template("team/specialists_prompt.txt", {"purpose": " ".join(purpose.split())})
-    for _ in range(2):
-        try:
-            specs = _parse_specialists(_complete(model, prompt))
-        except Exception:
-            specs = None
-        if specs:
-            return specs
-    return None
-
-
-def _parse_specialists(text: str) -> list[dict[str, str]] | None:
-    start, end = text.find("["), text.rfind("]")
-    if start == -1 or end <= start:
-        return None
-    try:
-        data = json.loads(text[start : end + 1])
-    except json.JSONDecodeError:
-        return None
-    if not (isinstance(data, list) and len(data) == 2):
-        return None
-    specs: list[dict[str, str]] = []
-    for item in data:
-        if not isinstance(item, dict):
-            return None
-        name = item.get("name")
-        description = item.get("description")
-        system_prompt = item.get("system_prompt")
-        if not (isinstance(name, str) and isinstance(description, str) and isinstance(system_prompt, str)):
-            return None
-        if not _SPECIALIST_NAME_RE.fullmatch(name) or name == "main":
-            return None
-        if not description.strip() or not system_prompt.strip():
-            return None
-        specs.append({"name": name, "description": description, "system_prompt": system_prompt})
-    if specs[0]["name"] == specs[1]["name"]:
-        return None
-    return specs
-
-
-def _fallback_specialists(purpose: str) -> list[dict[str, str]]:
-    purpose = " ".join(purpose.split())
-    return [
-        {
-            "name": "researcher",
-            "description": f"Gathers and verifies the information needed for: {purpose}",
-            "system_prompt": (
-                "You are the research specialist of this project.\n\n"
-                f"Project purpose: {purpose}\n\n"
-                "Investigate the questions the coordinator delegates to you: gather facts, verify them "
-                "against their sources, and report findings with clear confidence levels. Stay within the "
-                "delegated question and return a concise, structured result."
-            ),
-        },
-        {
-            "name": "writer",
-            "description": f"Drafts and polishes written output for: {purpose}",
-            "system_prompt": (
-                "You are the writing specialist of this project.\n\n"
-                f"Project purpose: {purpose}\n\n"
-                "Turn the coordinator's notes and findings into clear, well-structured prose for the "
-                "intended audience. Preserve factual content exactly; improve structure, flow, and tone. "
-                "Return only the finished text."
-            ),
-        },
-    ]
-
-
-def _render_agent_md(description: str, system_prompt: str, tools_list: str = _DEFAULT_AGENT_TOOLS) -> str:
-    return render_template(
-        "_shared/agent.md.tmpl",
-        {
-            "description": frontmatter_text(description),
-            "tools_list": tools_list,
-            "system_prompt": system_prompt.strip(),
-        },
-    )
-
-
-def _specialist_files(specialists: list[dict[str, str]], purpose: str) -> dict[str, str]:
-    return {f"{s['name']}.md": _render_agent_md(s["description"], s["system_prompt"]) for s in specialists}
-
-
-def _apply_generated_specialists(
-    result, context: dict[str, str], generated: list[dict[str, str]], purpose: str
-) -> None:
-    """Replace the fallback specialist files and re-render the pristine config."""
-    agents_dir = result.bos_dir / "agents"
-    for old in _fallback_specialists(purpose):
-        (agents_dir / f"{old['name']}.md").unlink(missing_ok=True)
-    for spec in generated:
-        (agents_dir / f"{spec['name']}.md").write_text(
-            _render_agent_md(spec["description"], spec["system_prompt"]), encoding="utf-8"
-        )
-    context = context | {
-        "specialist_a": generated[0]["name"],
-        "specialist_b": generated[1]["name"],
-        "specialist_a_display": generated[0]["name"].replace("-", " ").title(),
-    }
-    result.config_file.write_text(render_template("team/bos.toml.tmpl", context), encoding="utf-8")
-
-
-# ── boscli gen ──────────────────────────────────────────────────
-
-
-@click.group(name="gen")
-def gen():
-    """Generate an agent, tool, or channel in the current project."""
-
-
 def _discover_project() -> Workspace:
+    """Resolve the BOS project rooted at the cwd (shared by `doctor` and `memory`)."""
     from bos.cli.commands.agent import _echo_config_source
 
     try:
@@ -579,140 +419,3 @@ def _discover_project() -> Workspace:
         raise click.ClickException("Project config file could not be resolved.")
     _echo_config_source(ws)
     return ws
-
-
-@gen.command(name="agent")
-@click.argument("name")
-@click.option("--description", default=None, help="One-line description shown for delegation.")
-@click.option("--actor", "as_actor", is_flag=True, default=False, help="Also expose the agent as a named actor.")
-def gen_agent(name: str, description: str | None, as_actor: bool):
-    """Create agents/NAME.md from the standard agent skeleton."""
-    if not _AGENT_NAME_RE.fullmatch(name):
-        raise click.ClickException(f"Invalid agent name {name!r} (letters, digits, '-', '_'; starts with a letter).")
-    ws = _discover_project()
-    agents_dir = ws.bos_dir / "agents"
-    target = agents_dir / f"{name}.md"
-    if target.exists():
-        raise click.ClickException(f"{target} already exists.")
-
-    description = description or f"Specialist agent {name}"
-    system_prompt = (
-        f"You are {name}, a specialist agent of this project.\n\n"
-        "TODO: describe this agent's expertise, working style, and output expectations."
-    )
-    agents_dir.mkdir(parents=True, exist_ok=True)
-    target.write_text(_render_agent_md(description, system_prompt), encoding="utf-8")
-    click.echo(f"Created {target}")
-
-    platform = ws.config.platform or PlatformConfig()
-    if "./agents" not in platform.agent_dirs and "agents" not in platform.agent_dirs:
-        click.echo("Note: ./agents is not in [platform].agent_dirs — add this line for the file to load:", err=True)
-        click.echo('  agent_dirs = ["./agents"]', err=True)
-
-    if as_actor:
-        assert ws.config_file is not None  # _discover_project guarantees a resolved config file
-        display = name.replace("-", " ").replace("_", " ").title()
-        _append_actor(ws.config_file, name, display)
-
-
-def _append_actor(config_file: Path, name: str, display_name: str) -> None:
-    import tomlkit
-
-    try:
-        doc = tomlkit.parse(config_file.read_text(encoding="utf-8"))
-        runtime = doc.setdefault("runtime", tomlkit.table())
-        actors = runtime.setdefault("actors", tomlkit.table())
-        if name in actors:
-            raise click.ClickException(f"Actor {name!r} already exists in {config_file.name}.")
-        actor = tomlkit.table()
-        actor["agent"] = name
-        actor["display_name"] = display_name
-        actors[name] = actor
-        config_file.write_text(tomlkit.dumps(doc), encoding="utf-8")
-        click.echo(f"Added [runtime.actors.{name}] to {config_file.name}")
-    except click.ClickException:
-        raise
-    except Exception as exc:
-        click.echo(f"Could not edit {config_file.name} ({exc}). Add this snippet manually:", err=True)
-        click.echo(f'\n[runtime.actors.{name}]\nagent = "{name}"\ndisplay_name = "{display_name}"', err=True)
-
-
-@gen.command(name="tool")
-@click.argument("name")
-def gen_tool(name: str):
-    """Create extensions/<name>.py with one @ep_tool stub."""
-    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", name):
-        raise click.ClickException(f"Invalid tool name {name!r} (letters, digits, '_'; must start with a letter).")
-    ws = _discover_project()
-    func_name = re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
-    target = ws.bos_dir / "extensions" / f"{func_name}.py"
-    if target.exists():
-        raise click.ClickException(f"{target} already exists.")
-
-    target.parent.mkdir(parents=True, exist_ok=True)
-    content = render_template("_shared/tool.py.tmpl", {"tool_name": name, "func_name": func_name})
-    target.write_text(content, encoding="utf-8")
-    click.echo(f"Created {target}")
-
-    extensions = (ws.config.platform or PlatformConfig()).extensions
-    if not any(entry in ("./extensions", "extensions") for entry in extensions):
-        click.echo("Note: ./extensions is not in [platform].extensions — add this line for the file to load:", err=True)
-        click.echo('  extensions = ["bos.exts", "./extensions"]', err=True)
-
-
-@gen.command(name="channel")
-@click.argument("kind", type=click.Choice(["telegram"]))
-def gen_channel(kind: str):
-    """Wire a channel into [runtime.channels] (currently: telegram)."""
-    import tomlkit
-
-    ws = _discover_project()
-    assert ws.config_file is not None  # _discover_project guarantees a resolved config file
-    config_file = ws.config_file
-    runtime_cfg = ws.config.runtime or RuntimeConfig()
-    channel_id = f"{kind}+main"
-    if any(ch.channel_id == channel_id for ch in runtime_cfg.channels):
-        raise click.ClickException(f"Channel {channel_id!r} is already configured.")
-
-    snippet = (
-        '\n[[runtime.channels]]\ntype = "TelegramChannel"\nchannel_id = "telegram+main"\n'
-        'display_name = "Telegram"\ntarget_actor = "main"\nsettings = { token_env = "TELEGRAM_BOT_TOKEN" }'
-    )
-    try:
-        doc = tomlkit.parse(config_file.read_text(encoding="utf-8"))
-        runtime = doc.setdefault("runtime", tomlkit.table())
-        entry = tomlkit.table()
-        entry["type"] = "TelegramChannel"
-        entry["channel_id"] = channel_id
-        entry["display_name"] = "Telegram"
-        entry["target_actor"] = str(runtime_cfg.main_actor)
-        settings = tomlkit.inline_table()
-        settings["token_env"] = "TELEGRAM_BOT_TOKEN"
-        entry["settings"] = settings
-        channels = runtime.get("channels")
-        if channels is None:
-            channels = tomlkit.aot()
-            channels.append(entry)
-            runtime["channels"] = channels
-        else:
-            channels.append(entry)
-        config_file.write_text(tomlkit.dumps(doc), encoding="utf-8")
-        click.echo(f"Added [[runtime.channels]] {channel_id} to {config_file.name}")
-    except Exception as exc:
-        click.echo(f"Could not edit {config_file.name} ({exc}). Add this snippet manually:", err=True)
-        click.echo(snippet, err=True)
-        return
-
-    _ensure_env_placeholder(ws, "TELEGRAM_BOT_TOKEN")
-    click.echo("Put the bot token from @BotFather into .env as TELEGRAM_BOT_TOKEN, then restart the gateway.")
-
-
-def _ensure_env_placeholder(ws: Workspace, env_name: str) -> None:
-    envfile = (ws.config.platform or PlatformConfig()).envfile or ".env"
-    env_path = ws.bos_dir / envfile
-    existing = env_path.read_text(encoding="utf-8") if env_path.exists() else ""
-    if any(line.split("=", 1)[0].strip() == env_name for line in existing.splitlines()):
-        return
-    content = existing + ("" if not existing or existing.endswith("\n") else "\n") + f"{env_name}=\n"
-    env_path.write_text(content, encoding="utf-8")
-    click.echo(f"Added {env_name}= placeholder to {env_path.name}")

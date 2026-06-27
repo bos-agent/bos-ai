@@ -27,10 +27,15 @@ First prompt to try:
 
 ## Grow the project
 
+- Add a specialist agent: drop a `.md`/`.toml` file in `agents/`, then bind the
+  `SubagentPlugin` under `[agents.main.plugin-bindings.SubagentPlugin]`.
+- Add a custom tool: write an `@ep_tool` function under `extensions/`.
+- Reach the agent over Telegram: uncomment the `[[runtime.channels]]` block in
+  the config and set `TELEGRAM_BOT_TOKEN` in `.env`.
+
+See the commented-out sections in `${config_path}` for ready-to-uncomment
+snippets.
+
 ```bash
-boscli gen agent <name>       # add a specialist agent
-boscli gen tool <Name>        # add a custom tool stub
-boscli gen channel telegram   # wire a Telegram bot
 boscli doctor                 # check config, paths, env, credentials
 ```
-${archetype_notes}

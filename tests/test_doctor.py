@@ -56,7 +56,14 @@ def test_doctor_checks_fixed_port(tmp_path, monkeypatch):
 def test_doctor_fails_on_unset_channel_env(tmp_path, monkeypatch):
     monkeypatch.delenv("BOS_CONFIG", raising=False)
     monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
-    _init_project(tmp_path, "--archetype", "telegram-bot")
+    _init_project(tmp_path)
+    config_file = tmp_path / ".bos" / "config.toml"
+    config_file.write_text(
+        config_file.read_text(encoding="utf-8")
+        + '\n[[runtime.channels]]\ntype = "TelegramChannel"\nchannel_id = "telegram+main"\n'
+        'display_name = "Telegram"\ntarget_actor = "main"\nsettings = { token_env = "TELEGRAM_BOT_TOKEN" }\n',
+        encoding="utf-8",
+    )
     monkeypatch.chdir(tmp_path)
 
     result = _invoke(["doctor"])

@@ -17,7 +17,7 @@ from bos.config.workspace import find_discovered_config
 
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
 
-ARCHETYPES: tuple[str, ...] = ("assistant", "team", "service", "telegram-bot", "package")
+ARCHETYPES: tuple[str, ...] = ("workspace", "package")
 
 
 def render_template(relpath: str, context: dict[str, str] | None = None) -> str:
@@ -72,7 +72,7 @@ def scaffold_workspace(
     existing = find_discovered_config(workspace)
     if existing is not None:
         raise WorkspaceResolutionError(
-            f"Workspace already initialized: found {existing}. Use `boscli gen` to extend it."
+            f"Workspace already initialized: found {existing}. Edit it directly to extend it."
         )
 
     config_text = render_template(f"{archetype}/bos.toml.tmpl", context)
