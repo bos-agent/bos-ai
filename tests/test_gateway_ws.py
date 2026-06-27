@@ -52,7 +52,7 @@ def _workspace(tmp_path) -> Workspace:
         {
             "runtime": {
                 "gateway": {"port": 0, "api_key_env": "BOS_TEST_GATEWAY_KEY"},
-                "default_actor": "main",
+                "main_actor": "main",
                 "actors": {"main": {"agent": "main"}},
             }
         },

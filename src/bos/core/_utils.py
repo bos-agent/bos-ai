@@ -53,15 +53,6 @@ def _get_bos_home() -> Path:
     return Path.home() / ".bos"
 
 
-async def _create_extension_instance(ext_point: Any, ext_protocol: type, config: Any) -> Any:
-    if isinstance(config, ext_protocol):
-        return config
-    if config is None and not ext_point.has("_default"):
-        return None
-    cfg = (config or {}).copy()
-    return await ext_point.invoke(cfg.pop("name", "_default"), cfg)
-
-
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
     for k, v in override.items():
         if k in base and isinstance(base[k], dict) and isinstance(v, dict):

@@ -22,8 +22,8 @@ class LLMClient:
         if model := kwargs.get("model") or os.getenv("BOS_MODEL"):
             provider_name, model_name = model.split("/", 1)
             if not ep_provider.has(provider_name):
-                provider_name, model_name = "_default", model
+                provider_name, model_name = "litellm", model
         else:
-            provider_name, model_name = "_default", None
+            provider_name, model_name = "litellm", None
         params = kwargs | {"messages": messages, "model": model_name}
         return await ep_provider.invoke(provider_name, params)

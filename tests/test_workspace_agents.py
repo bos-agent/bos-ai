@@ -6,7 +6,7 @@ from textwrap import dedent
 import pytest
 
 from bos.config.workspace import Workspace
-from bos.core import AgentRegistry
+from bos.core import DEFAULT_AGENT_KIND, AgentRegistry
 
 
 def test_inline_agent_loaded_and_registered(tmp_path):
@@ -54,24 +54,24 @@ def test_agent_defaults_merged_into_agents(tmp_path):
 
 
 def test_default_agent_registered_from_python_spec(tmp_path):
-    """_default agent is registered from Python default_agent_spec when no TOML override."""
+    """The BOS fallback agent is registered from Python default_agent_spec when no TOML override."""
     ws = Workspace(
         tmp_path,
         tmp_path / ".bos",
-        {"runtime": {"location": "process", "actors": {"main": {"agent": "_default"}}}},
+        {"runtime": {"location": "process", "actors": {"main": {"agent": DEFAULT_AGENT_KIND}}}},
     )
     ws.bootstrap_platform()
-    assert AgentRegistry.has_registered("_default")
-    defaults = AgentRegistry.get_defaults("_default")
-    assert defaults["kind"] == "_default"
+    assert AgentRegistry.has_registered(DEFAULT_AGENT_KIND)
+    defaults = AgentRegistry.get_defaults(DEFAULT_AGENT_KIND)
+    assert defaults["kind"] == DEFAULT_AGENT_KIND
     assert defaults["tools"] is None  # "*" → None (all)
 
 
 def test_default_agent_can_be_overridden_in_toml(tmp_path):
-    """[agents._default] in TOML replaces the Python spec."""
+    """[agents.BOS] in TOML replaces the Python spec."""
     config = {
         "agents": {
-            "_default": {
+            DEFAULT_AGENT_KIND: {
                 "system_prompt": "Custom default",
                 "tools": {"enabled": ["ReadFile"]},
             }
@@ -79,8 +79,8 @@ def test_default_agent_can_be_overridden_in_toml(tmp_path):
     }
     ws = Workspace(tmp_path, tmp_path / ".bos", config)
     ws.bootstrap_platform()
-    assert AgentRegistry.has_registered("_default")
-    defaults = AgentRegistry.get_defaults("_default")
+    assert AgentRegistry.has_registered(DEFAULT_AGENT_KIND)
+    defaults = AgentRegistry.get_defaults(DEFAULT_AGENT_KIND)
     assert defaults["system_prompt"] == "Custom default"
     assert defaults["tools"] == ["ReadFile"]
 
@@ -241,7 +241,7 @@ def test_bootstrap_registers_both_inline_and_external_agents(tmp_path):
 
     assert AgentRegistry.has_registered("main")
     assert AgentRegistry.has_registered("helper")
-    assert AgentRegistry.has_registered("_default")
+    assert AgentRegistry.has_registered(DEFAULT_AGENT_KIND)
 
 
 def test_non_string_system_prompt_rejected_by_pydantic(tmp_path):

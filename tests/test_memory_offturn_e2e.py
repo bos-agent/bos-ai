@@ -24,7 +24,7 @@ class _CannedAgentRunner:
 async def test_mid_chat_fact_persists_into_next_session(tmp_path):
     from bos.core.contract import Message, PluginServices, SessionEvent
     from bos.core.defaults.eventbus import DefaultEventBus
-    from bos.core.defaults.jobs import InProcJobRunner
+    from bos.core.defaults.job_runner import InProcJobRunner
     from bos.extensions.chat_stores.in_memory import InMemChatStore
     from bos.plugins.memory.plugin import MemoryHarnessPlugin
 

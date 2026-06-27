@@ -89,10 +89,10 @@ class HarnessConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    consolidator: str = "_default"
-    chat_store: str = "_default"
-    mail_route: str = "_default"
-    job_runner: str = "_default"
+    consolidator: str = "LLMConsolidator"
+    chat_store: str = "JsonlChatStore"
+    mail_route: str = "JsonlMailRoute"
+    job_runner: str = "InProcJobRunner"
     interceptors: list[str] = Field(default_factory=list)
 
 
@@ -164,7 +164,7 @@ class RuntimeConfig(BaseModel):
     location: str = "process"
     channels: list[ChannelConfig] = Field(default_factory=list)
     actors: dict[str, ActorConfig] = Field(default_factory=dict)
-    default_actor: str = "main"
+    main_actor: str = "main"
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
     actor_resolver: ActorResolverConfig = Field(default_factory=ActorResolverConfig)
 
@@ -204,8 +204,11 @@ def validate_config(raw: dict[str, Any]) -> RootConfig:
     if "main" in raw:
         raise ValueError("[main] is no longer supported; use [runtime] with [runtime.actors].")
     runtime = raw.get("runtime")
-    if isinstance(runtime, dict) and "agent" in runtime:
-        raise ValueError("runtime.agent is no longer supported; use runtime.actors and runtime.default_actor.")
+    if isinstance(runtime, dict):
+        if "agent" in runtime:
+            raise ValueError("runtime.agent is no longer supported; use runtime.actors and runtime.main_actor.")
+        if "default_actor" in runtime:
+            raise ValueError("runtime.default_actor was renamed to runtime.main_actor.")
     return RootConfig.model_validate(raw)
 
 

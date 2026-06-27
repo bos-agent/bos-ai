@@ -1,14 +1,14 @@
-# BOS default preset — uses Python default_agent_spec for the _default agent.
+# BOS default preset — uses Python default_agent_spec for the BOS agent.
 # Agent persistent storage is at ~/.bos/agents/default.
 
 [harness]
-consolidator = "_default"
-chat_store = "_default"
-mail_route = "_default"
+consolidator = "LLMConsolidator"
+chat_store = "JsonlChatStore"
+mail_route = "JsonlMailRoute"
 
 [runtime]
 location = "process"
-default_actor = "main"
+main_actor = "main"
 
 [runtime.gateway]
 host = "127.0.0.1"
@@ -16,5 +16,5 @@ port = 0
 api_key_env = "BOS_GATEWAY_API_KEY"
 
 [runtime.actors.main]
-agent = "_default"
+agent = "BOS"
 display_name = "Main"

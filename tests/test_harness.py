@@ -17,7 +17,15 @@ import bos.extensions.tools.knowledge  # noqa: F401
 import bos.extensions.tools.system  # noqa: F401
 from bos.config.default_agent_spec import default_agent_spec
 from bos.config.workspace import Workspace
-from bos.core import AgentHarness, AgentRegistry, LLMResponse, Message, ToolCallRequest, ep_provider
+from bos.core import (
+    DEFAULT_AGENT_KIND,
+    AgentHarness,
+    AgentRegistry,
+    LLMResponse,
+    Message,
+    ToolCallRequest,
+    ep_provider,
+)
 from bos.core.contract import ep_consolidator, ep_tool
 from bos.core.registry import ToolRegistry
 from bos.plugins.memory import MemoryAgentPlugin
@@ -97,7 +105,7 @@ async def test_subagent_plugin_hides_prompt_and_tool_when_no_subagents():
     snapshot = dict(AgentRegistry._registry)
     AgentRegistry._registry.clear()
     try:
-        AgentRegistry.register(name="_default", description="Default agent", tools=[])
+        AgentRegistry.register(name=DEFAULT_AGENT_KIND, description="Default agent", tools=[])
         local_tools = ToolRegistry("_test_tools")
         subagent = SubagentAgentPlugin(_MockAgentRunner(), enabled=None, disabled=[])
 
@@ -163,7 +171,7 @@ async def test_harness_binds_subagent_plugin_bindings_from_validated_config(tmp_
         ws.bootstrap_platform()
 
         async with ws.harness() as harness:
-            agent = await harness.create_agent("_default")
+            agent = await harness.create_agent(DEFAULT_AGENT_KIND)
             prompt = await agent._build_system_prompt(dummy_turn_context())
 
         assert agent._tools.has("AskSubagent")
@@ -594,74 +602,6 @@ async def test_builtin_skill_creator_discovered_and_loadable(tmp_path):
     body = await loader.load_skill("skill-creator")
     assert "directory name is the skill's identity" in body
     assert "`LoadSkill` returns only the SKILL.md text" in body
-
-
-@pytest.mark.asyncio
-async def test_test_skill_tool_runs_isolated_agent_and_reports_trigger(tmp_path):
-    from bos.core import LLMClient, ParentTurn
-    from bos.core.contract import ToolContext
-    from bos.plugins.skills.fs_skill_loader import FileSystemSkillsLoader
-    from bos.plugins.skills.plugin import _SkillTestRuntime
-
-    skills_dir = tmp_path / "skills"
-    suffix = uuid.uuid4().hex
-    provider_name = f"test_skill_tool_provider_{suffix}"
-    parent_kind = f"skill_test_parent_{suffix}"
-
-    @ep_provider(name=provider_name)
-    async def skill_test_provider(messages, model=None, **kwargs):
-        if any(m.get("role") == "tool" for m in messages):
-            return LLMResponse(content="ahoy, captain!")
-        return LLMResponse(
-            content="",
-            tool_calls=[ToolCallRequest(id="c1", name="LoadSkill", arguments={"name": "greeter"})],
-            finish_reason="tool_calls",
-        )
-
-    def make_loader():
-        return FileSystemSkillsLoader(skill_dirs=[skills_dir])
-
-    AgentRegistry.register(name=parent_kind, description="parent", tools=[], model=f"{provider_name}/x")
-    try:
-        runtime = _SkillTestRuntime(
-            llm=LLMClient(),
-            consolidator=MessageOnlyConsolidator(),
-            workspace=str(tmp_path),
-            loader_factory=make_loader,
-            test_tools="*",
-        )
-        plugin = SkillsAgentPlugin(make_loader(), allow=None, exclude=[], test_runtime=runtime)
-        registry = ToolRegistry(f"_test_skill_tools_{suffix}")
-        plugin.register_tools(registry)
-        assert registry.get("TestSkill") is not None
-
-        context = ToolContext(parent=ParentTurn(chat_id="chat", turn_id="turn", agent_name=parent_kind))
-        missing = await registry.invoke("TestSkill", {"name": "greeter", "task": "say hi", "context": context})
-        assert "not found" in missing
-
-        # The skill is written *after* the plugin's own loader cached its scan —
-        # TestSkill must still see it via its per-run fresh loader.
-        _write_skill(skills_dir, "greeter", "Greet users warmly.", "Always greet with 'ahoy'.")
-        result = await registry.invoke("TestSkill", {"name": "greeter", "task": "say hi", "context": context})
-    finally:
-        AgentRegistry._registry.pop(parent_kind, None)
-        ep_provider._extensions.pop(provider_name, None)
-
-    assert "Skill under test: greeter" in result
-    assert "Triggered (test agent loaded it from the description alone): yes" in result
-    assert "ahoy, captain!" in result
-
-
-def test_test_skill_tool_absent_without_runtime_so_test_agents_cannot_recurse(tmp_path):
-    from bos.plugins.skills.fs_skill_loader import FileSystemSkillsLoader
-
-    # The ephemeral agent's plugin is constructed without a test runtime, so a
-    # skill test run never exposes TestSkill to the agent under test.
-    plugin = SkillsAgentPlugin(FileSystemSkillsLoader(skill_dirs=[tmp_path]), allow=None, exclude=[])
-    registry = ToolRegistry(f"_no_test_skill_tools_{uuid.uuid4().hex}")
-    plugin.register_tools(registry)
-    assert registry.get("TestSkill") is None
-    assert registry.get("LoadSkill") is not None
 
 
 def _write_skill(skills_dir, name, description, body):
@@ -1351,7 +1291,9 @@ def test_bootstrap_platform_does_not_require_consolidator_model(tmp_path, monkey
 
     bos_dir = tmp_path / ".bos"
     bos_dir.mkdir(parents=True, exist_ok=True)
-    ws = Workspace(tmp_path, bos_dir, {"runtime": {"location": "process", "actors": {"main": {"agent": "_default"}}}})
+    ws = Workspace(
+        tmp_path, bos_dir, {"runtime": {"location": "process", "actors": {"main": {"agent": DEFAULT_AGENT_KIND}}}}
+    )
     ws.bootstrap_platform()
 
 

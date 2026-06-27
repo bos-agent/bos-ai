@@ -97,7 +97,7 @@ class CloseTrackingConsolidator(RecordingConsolidator):
         self.closed = True
 
 
-@ep_consolidator(name="_default")
+@ep_consolidator(name="LLMConsolidator")
 def _default_test_consolidator(model=None, llm=None, **kwargs):
     """Default test consolidator factory — returns a MessageOnlyConsolidator."""
     return MessageOnlyConsolidator()

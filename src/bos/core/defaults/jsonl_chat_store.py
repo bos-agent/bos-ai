@@ -33,7 +33,7 @@ from ..contract import (
 )
 
 
-@ep_chat_store(name="_default")
+@ep_chat_store(name="JsonlChatStore")
 class JsonlChatStore:
     """Persistent chat store backed by JSONL files."""
 

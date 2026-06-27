@@ -195,10 +195,10 @@ class SubagentAgentPlugin:
         return "\n\n".join(sections)
 
     def _available_subagents(self) -> dict[str, str]:
-        from bos.core import AgentRegistry
+        from bos.core import DEFAULT_AGENT_KIND, AgentRegistry
 
         available = dict(AgentRegistry.describe())
-        available.pop("_default", None)
+        available.pop(DEFAULT_AGENT_KIND, None)
         return _pick_collection(available, self._enabled, self._disabled)
 
     def get_interceptors(self) -> Sequence[TurnInterceptor]:

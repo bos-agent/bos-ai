@@ -685,7 +685,7 @@ def gen_channel(kind: str):
         entry["type"] = "TelegramChannel"
         entry["channel_id"] = channel_id
         entry["display_name"] = "Telegram"
-        entry["target_actor"] = str(runtime_cfg.default_actor)
+        entry["target_actor"] = str(runtime_cfg.main_actor)
         settings = tomlkit.inline_table()
         settings["token_env"] = "TELEGRAM_BOT_TOKEN"
         entry["settings"] = settings

@@ -276,7 +276,7 @@ async def test_actor_manager_enables_history_attribution_only_for_multi_agent_ru
         ".bos",
         {
             "runtime": {
-                "default_actor": "main",
+                "main_actor": "main",
                 "actors": {
                     "main": {"agent": "main"},
                     "libai": {"agent": "poet"},
@@ -299,7 +299,7 @@ async def test_actor_manager_enables_history_attribution_only_for_multi_agent_ru
     single_ws = Workspace(
         ".",
         ".bos",
-        {"runtime": {"default_actor": "main", "actors": {"main": {"agent": "main"}}}},
+        {"runtime": {"main_actor": "main", "actors": {"main": {"agent": "main"}}}},
     )
     single_harness = _FakeHarness()
     single_manager = ActorManager(
@@ -321,7 +321,7 @@ async def test_actor_manager_passes_explicit_actor_agent_cfg_to_harness():
         ".bos",
         {
             "runtime": {
-                "default_actor": "main",
+                "main_actor": "main",
                 "actors": {
                     "main": {
                         "agent": "main",
@@ -384,7 +384,7 @@ async def test_actor_manager_clears_active_turns_on_actor_task_failure(monkeypat
         ".bos",
         {
             "runtime": {
-                "default_actor": "main",
+                "main_actor": "main",
                 "actors": {"main": {"agent": "main", "restart_on_error": False, "max_restarts": 0}},
             }
         },

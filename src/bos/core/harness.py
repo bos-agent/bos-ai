@@ -11,7 +11,6 @@ from ._utils import (
     _aclose,
     _allowed,
     _apply,
-    _create_extension_instance,
     _deep_merge,
     _pick_collection,
 )
@@ -31,15 +30,24 @@ from .contract import (
     PluginServices,
     ToolAttributes,
     TurnInterceptor,
+    ep_chat_store,
+    ep_consolidator,
+    ep_job_runner,
+    ep_mail_route,
     ep_plugin,
     ep_tool,
     ep_turn_interceptor,
 )
 from .llm import LLMClient
-from .registry import ToolRegistry
+from .registry import ExtensionPoint, ToolRegistry
 from .sinks import derive_event_sink
 
 logger = logging.getLogger(__name__)
+
+# The kind under which the built-in fallback agent (from default_agent_spec) is
+# registered, and the kind create_agent / get_main_agent_kind resolve to when no
+# agent is otherwise specified. Configs reference it by this literal name.
+DEFAULT_AGENT_KIND = "BOS"
 
 _structured_validator_singleton: Any = None
 
@@ -275,10 +283,10 @@ class AgentHarness:
         *,
         bos_dir: str | Path = ".bos",
         workspace: str | Path = ".",
-        consolidator: str = "_default",
-        chat_store: str = "_default",
-        mail_route: str = "_default",
-        job_runner: str = "_default",
+        consolidator: str = "LLMConsolidator",
+        chat_store: str = "JsonlChatStore",
+        mail_route: str = "JsonlMailRoute",
+        job_runner: str = "InProcJobRunner",
         interceptors: list[str | dict[str, Any]] | None = None,
     ) -> None:
         self._bos_root = Path(bos_dir).expanduser().resolve()
@@ -311,27 +319,26 @@ class AgentHarness:
         if self._active:
             raise RuntimeError("AgentHarness is already active; do not re-enter the same instance.")
 
-        # The assembly ring registers its own ``_default`` adapters (consolidator,
-        # litellm provider, jsonl chat store/mailbox, job runner) — the harness
-        # depends on them being resolvable by name below, so it does not rely on an
-        # outer ring (``bos.exts``) having imported them. Idempotent; deferred to
+        # The assembly ring registers its own built-in adapters (LLMConsolidator,
+        # litellm provider, JsonlChatStore/JsonlMailRoute, InProcJobRunner) — the
+        # harness depends on them being resolvable by name below, so it does not rely
+        # on an outer ring (``bos.exts``) having imported them. Idempotent; deferred to
         # open-time to avoid import-order coupling during ``bos.core`` package init.
         import bos.core.defaults  # noqa: F401
 
-        self.mail_route = await self._create_and_own("ep_mail_route", MailRoute, None, impl=self._mail_route_impl)
-        self.chat_store = await self._create_and_own("ep_chat_store", ChatStore, None, impl=self._chat_store_impl)
-        assert self.chat_store is not None  # ep_chat_store has a _default, so creation never returns None
+        self.mail_route = await self._create_and_own(ep_mail_route, self._mail_route_impl)
+        self.chat_store = await self._create_and_own(ep_chat_store, self._chat_store_impl)
+        assert self.chat_store is not None  # ep_chat_store has a built-in, so creation never returns None
         self.llm = LLMClient()
         self.consolidator = await self._create_consolidator()
         self.interceptor = ChainInterceptor(await self._resolve_interceptors(self._interceptors_impl))
 
         # BEP 11 services: in-process EventBus, JobRunner.
-        from bos.core.contract import ep_job_runner
         from bos.core.defaults.eventbus import DefaultEventBus
 
         self.events = DefaultEventBus()
         self.jobs = await ep_job_runner.invoke(self._job_runner_impl, {"bus": self.events})
-        assert self.jobs is not None  # ep_job_runner has a _default, so creation never returns None
+        assert self.jobs is not None  # ep_job_runner has a built-in, so creation never returns None
         await self.jobs.start()
         self._owned.append(self.jobs)
 
@@ -499,27 +506,20 @@ class AgentHarness:
             await instance.setup(self._plugin_services)
         return instance
 
-    async def _create_and_own(self, ep_name: str, protocol: type, cfg: Any, *, impl: str | None = None) -> Any:
-        from . import __dict__ as core_exports
-
-        ep = core_exports[ep_name]
+    async def _create_and_own(self, ep: ExtensionPoint, impl: str) -> Any:
+        """Instantiate the *impl* implementation of extension point *ep* and track
+        it for teardown. *impl* is always an explicit, registered name (the harness
+        defaults to the built-in adapter's name), so the invoke resolves a real
+        instance rather than relying on an implicit fallback."""
         context = {"bos_dir": str(self._bos_root), "workspace_dir": str(self._workspace)}
-        if impl is not None and cfg is None:
-            instance = await ep.invoke(impl, context)
-        elif impl is not None:
-            instance = await ep.invoke(impl, cfg | context)
-        else:
-            config = (cfg or {}) | context
-            instance = await _create_extension_instance(ep, protocol, config)
+        instance = await ep.invoke(impl, context)
         if instance is not None:
             self._owned.append(instance)
         return instance
 
     async def _create_consolidator(self) -> Consolidator:
         cfg = {"model": os.getenv("BOS_CONSOLIDATOR_MODEL"), "llm": self.llm}
-        from . import __dict__ as core_exports
-
-        instance = await core_exports["ep_consolidator"].invoke(self._consolidator_impl, cfg)
+        instance = await ep_consolidator.invoke(self._consolidator_impl, cfg)
         if instance is None:
             raise RuntimeError(f"Consolidator extension {self._consolidator_impl!r} could not be created")
         self._owned.append(instance)
@@ -533,12 +533,14 @@ class AgentHarness:
         """
         resolved: list[TurnInterceptor] = []
         for entry in configs:
-            cfg = {"name": entry} if isinstance(entry, str) else entry
-            name = cfg.get("name")
+            cfg = {"name": entry} if isinstance(entry, str) else dict(entry)
+            name = cfg.pop("name", None)
             if not name or not ep_turn_interceptor.has(name):
                 continue
             try:
-                resolved.append(await _create_extension_instance(ep_turn_interceptor, TurnInterceptor, cfg))
+                interceptor = await ep_turn_interceptor.invoke(name, cfg)
+                if interceptor is not None:
+                    resolved.append(interceptor)
             except Exception as e:
                 logger.error("Failed to create interceptor %s: %s", name, e)
         return resolved

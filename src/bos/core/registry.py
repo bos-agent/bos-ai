@@ -65,11 +65,7 @@ class ExtensionPoint:
 
     def register(self, ext: Extension) -> None:
         if ext.name in self._extensions:
-            logger.warning(
-                f"Set default provider for extension point: {self.description}"
-                if ext.name == "_default"
-                else f"Extension `{ext.name}` got overwritten for extension point: {self.description}"
-            )
+            logger.warning(f"Extension `{ext.name}` got overwritten for extension point: {self.description}")
         self._extensions[ext.name] = ext
 
     async def invoke(self, name: str, kwargs: dict[str, Any] | None = None) -> Any:

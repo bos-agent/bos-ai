@@ -126,7 +126,7 @@ class MemoryHarnessPlugin:
     def default_config(self) -> Mapping[str, Any]:
         return {
             "maxims": ["user", "self", "rules"],
-            "backend": "_default",
+            "backend": "MarkdownMemoryBackend",
             "retrieval": {"auto_recall": True, "index_in_prompt": True, "index_max": 50, "top_k": 5},
             "consolidation": {"enabled": False, "retention_days": 30},
         }
@@ -138,7 +138,7 @@ class MemoryHarnessPlugin:
         cfg = getattr(self, "_cfg", None) or dict(self.default_config())
         self._cfg = cfg
 
-        self._backend_name = cfg.get("backend", "_default")
+        self._backend_name = cfg.get("backend", "MarkdownMemoryBackend")
         self._backend_ext = pep_memory_backend.get(self._backend_name)
         if self._backend_ext is None:
             raise ValueError(f"MemoryPlugin: unknown backend {self._backend_name!r}")

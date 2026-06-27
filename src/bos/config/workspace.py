@@ -17,7 +17,7 @@ from bos.config.schema import (
     validate_agent_config,
     validate_config,
 )
-from bos.core import AgentHarness, _deep_merge, _get_bos_home, _resolve_path
+from bos.core import DEFAULT_AGENT_KIND, AgentHarness, _deep_merge, _get_bos_home, _resolve_path
 
 if TYPE_CHECKING:
     # The gateway owns these config *shapes* (BEP 13 §3.3); the loader (this ring)
@@ -591,11 +591,11 @@ class Workspace:
                     merged["description"] = ext.description
             AgentRegistry.register(name, **merged)
 
-        if not AgentRegistry.has_registered("_default"):
+        if not AgentRegistry.has_registered(DEFAULT_AGENT_KIND):
             default_spec = _agent_config_to_core_kwargs(AgentConfig.model_validate(default_agent_spec))
             merged = _deep_merge(dict(agent_defaults), default_spec)
             merged.pop("name", None)
-            AgentRegistry.register("_default", **merged)
+            AgentRegistry.register(DEFAULT_AGENT_KIND, **merged)
 
         # Suppress litellm auto-loading
         os.environ["LITELLM_MODE"] = "extension"
@@ -608,21 +608,21 @@ class Workspace:
         return AgentHarness(
             bos_dir=self.bos_dir,
             workspace=self.workspace,
-            consolidator=kwargs.get("consolidator", "_default"),
-            chat_store=kwargs.get("chat_store", "_default"),
-            mail_route=kwargs.get("mail_route", "_default"),
-            job_runner=kwargs.get("job_runner", "_default"),
+            consolidator=kwargs.get("consolidator", "LLMConsolidator"),
+            chat_store=kwargs.get("chat_store", "JsonlChatStore"),
+            mail_route=kwargs.get("mail_route", "JsonlMailRoute"),
+            job_runner=kwargs.get("job_runner", "InProcJobRunner"),
             interceptors=kwargs.get("interceptors", []),
         )
 
     def get_main_agent_kind(self) -> str:
         runtime = self.config.runtime
         if not runtime or not runtime.actors:
-            return "_default"
-        default_actor = runtime.default_actor
-        actor = runtime.actors.get(default_actor)
+            return DEFAULT_AGENT_KIND
+        main_actor = runtime.main_actor
+        actor = runtime.actors.get(main_actor)
         if actor is None:
-            raise ValueError(f"runtime.default_actor {default_actor!r} must exist in runtime.actors.")
+            raise ValueError(f"runtime.main_actor {main_actor!r} must exist in runtime.actors.")
         return actor.agent
 
     def resolve_gateway_config(self) -> ResolvedGatewayConfig:
@@ -664,11 +664,11 @@ class Workspace:
 
     def resolve_default_actor(self) -> str:
         runtime = self.config.runtime
-        default_actor = runtime.default_actor if runtime else "main"
+        main_actor = runtime.main_actor if runtime else "main"
         actors = self.resolve_gateway_actors()
-        if default_actor not in actors:
-            raise ValueError(f"runtime.default_actor {default_actor!r} must exist in runtime.actors.")
-        return default_actor
+        if main_actor not in actors:
+            raise ValueError(f"runtime.main_actor {main_actor!r} must exist in runtime.actors.")
+        return main_actor
 
     def resolve_gateway_channels(self) -> list[ResolvedGatewayChannelConfig]:
         from bos.gateway.config import ResolvedGatewayChannelConfig
@@ -740,7 +740,7 @@ class Workspace:
             runtime_extra = {
                 k: v
                 for k, v in extra.items()
-                if k not in {"location", "channels", "actors", "default_actor", "gateway", "actor_resolver"}
+                if k not in {"location", "channels", "actors", "main_actor", "gateway", "actor_resolver"}
             }
 
         workspace_dir = runtime_extra.get("workspace_dir") or "/workspace"

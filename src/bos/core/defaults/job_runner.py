@@ -37,7 +37,7 @@ def _parse_duration(value: str | int | float) -> float:
     return n * {"s": 1, "m": 60, "h": 3600}[unit]
 
 
-@ep_job_runner(name="_default")
+@ep_job_runner(name="InProcJobRunner")
 class InProcJobRunner:
     def __init__(
         self,

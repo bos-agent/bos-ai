@@ -82,7 +82,7 @@ def _parse_frontmatter_fields(frontmatter: str) -> dict[str, str]:
     return fields
 
 
-@pep_skills_loader(name="_default")
+@pep_skills_loader(name="FileSystemSkillsLoader")
 class FileSystemSkillsLoader:
     def __init__(self, skill_dirs: Iterable[Path | str] | None = None, bos_dir: str | Path | None = None) -> None:
         if skill_dirs is None:
