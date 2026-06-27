@@ -1,10 +1,10 @@
-"""``boscli init`` and ``boscli gen`` CLI tests (BEP 9)."""
+"""``boscli init`` CLI tests (BEP 9)."""
 
 import tomllib
 
 from click.testing import CliRunner
 
-from bos.cli.commands.scaffolding import _infer_key_env, _parse_specialists
+from bos.cli.commands.scaffolding import _infer_key_env
 from bos.cli.entry import cli
 
 
@@ -25,7 +25,7 @@ def test_init_yes_scaffolds_runnable_baseline(tmp_path, monkeypatch):
     monkeypatch.delenv("BOS_CONFIG", raising=False)
     result = _init_project(tmp_path)
 
-    assert "Initialized assistant project" in result.output
+    assert "Initialized workspace project" in result.output
     assert "Config validates ✓" in result.output
     assert (tmp_path / ".bos" / "config.toml").is_file()
     assert not (tmp_path / "bos.toml").exists()
@@ -71,22 +71,6 @@ def test_init_flat_rejected_for_package_archetype(tmp_path, monkeypatch):
 
     assert result.exit_code != 0
     assert "--flat is not supported with the package archetype" in result.output
-
-
-def test_init_wizard_team_with_skipped_model(tmp_path, monkeypatch):
-    monkeypatch.delenv("BOS_CONFIG", raising=False)
-    # purpose, archetype 2 (team), provider 2 (skip), git: no
-    result = _invoke(
-        ["init", str(tmp_path)],
-        input="A bot that reviews pull requests\n2\n2\nn\n",
-    )
-
-    assert result.exit_code == 0, result.output
-    assert (tmp_path / ".bos" / "agents" / "researcher.md").is_file()
-    assert (tmp_path / ".bos" / "agents" / "writer.md").is_file()
-    config = tomllib.loads((tmp_path / ".bos" / "config.toml").read_text(encoding="utf-8"))
-    binding = config["agents"]["main"]["plugin-bindings"]["SubagentPlugin"]
-    assert binding["enabled"] == ["researcher", "writer"]
 
 
 def test_init_package_archetype(tmp_path, monkeypatch):
@@ -136,84 +120,6 @@ def test_init_with_model_writes_env_placeholder(tmp_path, monkeypatch):
     assert "ANTHROPIC_API_KEY=" in (tmp_path / ".bos" / ".env").read_text(encoding="utf-8")
 
 
-# ── gen ─────────────────────────────────────────────────────────
-
-
-def test_gen_agent_creates_markdown_spec(tmp_path, monkeypatch):
-    monkeypatch.delenv("BOS_CONFIG", raising=False)
-    _init_project(tmp_path)
-    monkeypatch.chdir(tmp_path)
-
-    result = _invoke(["gen", "agent", "analyst"])
-
-    assert result.exit_code == 0, result.output
-    content = (tmp_path / ".bos" / "agents" / "analyst.md").read_text(encoding="utf-8")
-    assert content.startswith("---\ndescription:")
-    assert "You are analyst" in content
-
-    duplicate = _invoke(["gen", "agent", "analyst"])
-    assert duplicate.exit_code != 0
-    assert "already exists" in duplicate.output
-
-
-def test_gen_agent_actor_appends_runtime_entry(tmp_path, monkeypatch):
-    monkeypatch.delenv("BOS_CONFIG", raising=False)
-    _init_project(tmp_path)
-    monkeypatch.chdir(tmp_path)
-
-    result = _invoke(["gen", "agent", "analyst", "--actor"])
-
-    assert result.exit_code == 0, result.output
-    config_file = tmp_path / ".bos" / "config.toml"
-    config = tomllib.loads(config_file.read_text(encoding="utf-8"))
-    assert config["runtime"]["actors"]["analyst"]["agent"] == "analyst"
-    # the original entries and comments survive the tomlkit round-trip
-    assert config["runtime"]["actors"]["main"]["agent"] == "main"
-    assert "# purpose:" in config_file.read_text(encoding="utf-8")
-
-
-def test_gen_tool_creates_stub(tmp_path, monkeypatch):
-    monkeypatch.delenv("BOS_CONFIG", raising=False)
-    _init_project(tmp_path)
-    monkeypatch.chdir(tmp_path)
-
-    result = _invoke(["gen", "tool", "FetchQuote"])
-
-    assert result.exit_code == 0, result.output
-    content = (tmp_path / ".bos" / "extensions" / "fetch_quote.py").read_text(encoding="utf-8")
-    assert 'name="FetchQuote"' in content
-    assert "async def fetch_quote" in content
-
-
-def test_gen_channel_telegram_appends_config_and_env(tmp_path, monkeypatch):
-    monkeypatch.delenv("BOS_CONFIG", raising=False)
-    _init_project(tmp_path)
-    monkeypatch.chdir(tmp_path)
-
-    result = _invoke(["gen", "channel", "telegram"])
-
-    assert result.exit_code == 0, result.output
-    config = tomllib.loads((tmp_path / ".bos" / "config.toml").read_text(encoding="utf-8"))
-    channels = config["runtime"]["channels"]
-    assert channels[0]["type"] == "TelegramChannel"
-    assert channels[0]["settings"]["token_env"] == "TELEGRAM_BOT_TOKEN"
-    assert "TELEGRAM_BOT_TOKEN=" in (tmp_path / ".bos" / ".env").read_text(encoding="utf-8")
-
-    duplicate = _invoke(["gen", "channel", "telegram"])
-    assert duplicate.exit_code != 0
-    assert "already configured" in duplicate.output
-
-
-def test_gen_outside_project_fails(tmp_path, monkeypatch):
-    monkeypatch.delenv("BOS_CONFIG", raising=False)
-    monkeypatch.chdir(tmp_path)
-
-    result = _invoke(["gen", "agent", "analyst"])
-
-    assert result.exit_code != 0
-    assert "No BOS project found" in result.output
-
-
 # ── helpers and parsing ─────────────────────────────────────────
 
 
@@ -222,23 +128,6 @@ def test_infer_key_env_known_prefixes():
     assert _infer_key_env("gpt-5.2") == "OPENAI_API_KEY"
     assert _infer_key_env("gemini/gemini-2.5-pro") == "GEMINI_API_KEY"
     assert _infer_key_env("something/unknown") == "OPENAI_API_KEY"
-
-
-def _spec(name: str) -> str:
-    return f'{{"name": "{name}", "description": "d", "system_prompt": "p"}}'
-
-
-def test_parse_specialists_accepts_valid_json_with_noise():
-    text = f"Here you go:\n```json\n[{_spec('market-analyst')},\n {_spec('report-writer')}]\n```"
-    specs = _parse_specialists(text)
-    assert [s["name"] for s in specs] == ["market-analyst", "report-writer"]
-
-
-def test_parse_specialists_rejects_bad_output():
-    assert _parse_specialists("no json here") is None
-    assert _parse_specialists(f"[{_spec('only-one')}]") is None
-    assert _parse_specialists(f"[{_spec('Main!')}, {_spec('x')}]") is None
-    assert _parse_specialists(f"[{_spec('x')}, {_spec('x')}]") is None
 
 
 def test_config_source_banner_formats(tmp_path, monkeypatch):
