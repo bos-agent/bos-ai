@@ -1,8 +1,8 @@
 """``boscli inspect`` — read-only dump of harness-level information.
 
 Reports what the active workspace resolves to: paths and config source, the
-selected harness implementations, gateway status, runtime topology, and the
-capabilities (agents, plugins, tools, skills) and extension points available
+selected harness implementations, gateway status, default models, actors, and
+the capabilities (agents, plugins, tools, skills) and extension points available
 after bootstrap. The ``agent NAME`` subcommand instead reflects a single
 agent's resolved model, plugins, tools, and skills by building it through the
 harness.
@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import json as json_lib
+import os
 from typing import Any
 
 import click
@@ -76,18 +77,24 @@ def _gateway_info(ws) -> dict[str, Any]:
     }
 
 
-def _runtime_info(ws) -> dict[str, Any]:
+def _default_models_info(ws) -> dict[str, str | None]:
+    agent_model = getattr((ws.config.agent or AgentSection()).defaults, "model", None) or os.environ.get("BOS_MODEL")
+
+    exts = ws.config.exts.model_dump() if getattr(ws.config, "exts", None) is not None else {}
+    cons_cfg = exts.get("ep_consolidator", {}).get("LLMConsolidator", {}) or {}
+    consolidator_model = (
+        cons_cfg.get("model") or os.environ.get("BOS_CONSOLIDATOR_MODEL") or os.environ.get("BOS_MODEL")
+    )
+    return {"agent": agent_model, "consolidator": consolidator_model}
+
+
+def _actors_info(ws) -> dict[str, Any]:
     runtime = ws.config.runtime or RuntimeConfig()
-    model = getattr((ws.config.agent or AgentSection()).defaults, "model", None)
     return {
         "main_actor": runtime.main_actor,
-        "model": model,
         "actors": {
             name: {"agent": cfg.agent, "display_name": cfg.display_name} for name, cfg in runtime.actors.items()
         },
-        "channels": [
-            {"channel_id": ch.channel_id, "type": ch.type, "target_actor": ch.target_actor} for ch in runtime.channels
-        ],
     }
 
 
@@ -210,11 +217,12 @@ def _collect(ctx, workspace_dir: str | None, agent_kind: str | None) -> dict[str
     config_arg = ctx.obj.get("CONFIG")
 
     report: dict[str, Any] = {"harness": _harness_info(ws, config_arg)}
-    # Gateway/runtime are process-level concerns, irrelevant to a single
+    # Gateway/models/actors are process-level concerns, irrelevant to a single
     # agent's resolved capabilities.
     if not agent_kind:
         report["gateway"] = _gateway_info(ws)
-        report["runtime"] = _runtime_info(ws)
+        report["default_models"] = _default_models_info(ws)
+        report["actors"] = _actors_info(ws)
 
     # Loading external agents + extensions populates the registries the
     # capability sections read from. Best-effort: a broken extension should not
@@ -278,17 +286,30 @@ def _render_text(report: dict[str, Any]) -> None:
             if g.get("endpoint"):
                 console.print(f"  endpoint:    {g['endpoint']}")
 
-    r = report.get("runtime")
-    if r is not None:
-        console.print("\n[bold]Runtime[/]")
-        console.print(f"  main_actor:    {r['main_actor']}")
-        console.print(f"  model:         {r['model'] or '— (set agent.defaults.model or BOS_MODEL)'}")
-        for name, actor in r["actors"].items():
-            marker = " *" if name == r["main_actor"] else ""
-            display = f" ({actor['display_name']})" if actor.get("display_name") else ""
-            console.print(f"  actor:         {name}{marker} → agent={actor['agent']}{display}")
-        for ch in r["channels"]:
-            console.print(f"  channel:       {ch['channel_id']} [{ch['type']}] → {ch['target_actor']}")
+    dm = report.get("default_models")
+    if dm is not None:
+        console.print("\n[bold]Default Models[/]")
+        console.print(f"  agent:        {dm['agent'] or '— (set agent.defaults.model or BOS_MODEL)'}")
+        console.print(
+            f"  consolidator: {dm['consolidator'] or '— (set exts.ep_consolidator.LLMConsolidator.model or BOS_MODEL)'}"
+        )
+
+    ac = report.get("actors")
+    if ac is not None:
+        from rich.table import Table
+
+        actors = ac["actors"]
+        console.print(f"\n[bold]Actors[/] ({len(actors)})")
+        table = Table(show_header=False, box=None, pad_edge=False, padding=(0, 2, 0, 2))
+        table.add_column(style="cyan", no_wrap=True)
+        table.add_column(overflow="fold")
+        for name, actor in actors.items():
+            label = f"{name} [bright_yellow]★[/]" if name == ac["main_actor"] else name
+            details = f"agent={actor['agent']}"
+            if actor.get("display_name"):
+                details += f"; {actor['display_name']}"
+            table.add_row(label, details)
+        console.print(table)
 
     if "agent" in report:
         _render_agent(console, report["agent"])

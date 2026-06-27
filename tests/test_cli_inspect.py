@@ -59,7 +59,7 @@ def test_inspect_json_shape(tmp_path, monkeypatch):
 
     assert result.exit_code == 0, result.output
     report = json.loads(result.output)
-    assert set(report) >= {"harness", "gateway", "runtime", "capabilities", "extension_points"}
+    assert set(report) >= {"harness", "gateway", "default_models", "actors", "capabilities", "extension_points"}
 
     harness = report["harness"]
     assert harness["source"] == "project"
