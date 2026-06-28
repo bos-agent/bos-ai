@@ -2,6 +2,47 @@
 
 <!-- version list -->
 
+## v1.7.0 (2026-06-28)
+
+### Documentation
+
+- **site**: MKDocs doc site published on release
+  ([#61](https://github.com/bos-agent/bos-ai/pull/61),
+  [`1951761`](https://github.com/bos-agent/bos-ai/commit/1951761b7d7bd94ceadedcedc89e8982f292cb53))
+
+### Features
+
+- **channels**: Accept all attachment MIME types across input routes
+  ([#64](https://github.com/bos-agent/bos-ai/pull/64),
+  [`86997ef`](https://github.com/bos-agent/bos-ai/commit/86997ef88aa694fdf2a7e326c723172cd1cd8776))
+
+- **channels**: Accept inbound images on Telegram and Lark
+  ([#60](https://github.com/bos-agent/bos-ai/pull/60),
+  [`e332976`](https://github.com/bos-agent/bos-ai/commit/e332976f46e9a6f5c5696ada24bed4ef624b847b))
+
+- **cli**: Add `boscli inspect`; config + extension naming cleanups
+  ([#57](https://github.com/bos-agent/bos-ai/pull/57),
+  [`d855516`](https://github.com/bos-agent/bos-ai/commit/d855516119b96df2d751a006ef4613647b7eddd7))
+
+- **memory**: Make memory consolidation model configurable
+  ([#58](https://github.com/bos-agent/bos-ai/pull/58),
+  [`57821be`](https://github.com/bos-agent/bos-ai/commit/57821beb6e892d274f0f8499b7cfd2b434f6ef25))
+
+- **tui**: Attach image files from an in-terminal file browser
+  ([#62](https://github.com/bos-agent/bos-ai/pull/62),
+  [`b0283aa`](https://github.com/bos-agent/bos-ai/commit/b0283aa9ac31f82885c63233fe122e44bcac6f3e))
+
+### Refactoring
+
+- **cli**: Consolidate scaffolding to workspace + package archetypes
+  ([#59](https://github.com/bos-agent/bos-ai/pull/59),
+  [`9baca1e`](https://github.com/bos-agent/bos-ai/commit/9baca1ee380c343fd445a4c4374f3630c8497fff))
+
+- **config**: Only discover .bos/config.toml; unify search ignore filtering
+  ([#63](https://github.com/bos-agent/bos-ai/pull/63),
+  [`6ec6493`](https://github.com/bos-agent/bos-ai/commit/6ec6493b929f718426441fdad8ffbba713b1690d))
+
+
 ## v1.6.0 (2026-06-26)
 
 ### Features
