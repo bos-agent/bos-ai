@@ -334,7 +334,7 @@ class _TaskProgressDisplay:
     help="Read task content from stdin (appended after MESSAGE if both given).",
 )
 @click.option("--model", "model", default=None, help="Model id to use for this run (overrides BOS_MODEL).")
-@click.option("--agent", "agent_name", default=None, help="Actor to run (overrides runtime.main_actor).")
+@click.option("--agent", "agent_name", default=None, help="Agent to run (defaults to the main actor's agent).")
 @click.option(
     "-w",
     "--workspace",
@@ -374,20 +374,25 @@ def ask(
     ws.resolve_agents()
     ws.bootstrap_platform()
 
-    runtime = ws.config.runtime
-    actors = runtime.actors if runtime else {}
-    actor_name = agent_name or ws.resolve_default_actor()
-    if actor_name not in actors:
-        known = ", ".join(sorted(actors)) or "none"
-        raise click.ClickException(f"Unknown actor {actor_name!r}. Available actors: {known}")
-    actor_cfg = actors[actor_name]
+    from bos.core import AgentRegistry
+
+    # --agent names an agent kind directly; otherwise the main actor locates it.
+    if agent_name:
+        if not AgentRegistry.has_registered(agent_name):
+            known = ", ".join(sorted(AgentRegistry.describe())) or "none"
+            raise click.ClickException(f"Unknown agent {agent_name!r}. Available agents: {known}")
+        agent_kind = agent_name
+        agent_cfg: dict[str, Any] | None = None
+    else:
+        runtime = ws.config.runtime
+        actors = runtime.actors if runtime else {}
+        actor_cfg = actors[ws.resolve_default_actor()]
+        agent_kind = actor_cfg.agent
+        agent_cfg = actor_cfg.agent_cfg.model_dump()
 
     async def _run() -> str:
         async with ws.harness() as harness:
-            agent = await harness.create_agent(
-                kind=actor_cfg.agent,
-                agent_cfg=actor_cfg.agent_cfg.model_dump(),
-            )
+            agent = await harness.create_agent(kind=agent_kind, agent_cfg=agent_cfg)
             result = await agent.run(
                 uuid.uuid4().hex,
                 message,

@@ -10,6 +10,8 @@ from bos.core.contract import AgentResult
 
 class _StubAgent:
     last_llm_args = None
+    last_kind = None
+    last_agent_cfg = None
 
     async def run(self, chat_id, content, *, event_sink=None, llm_args=None, **kw):
         type(self).last_llm_args = llm_args
@@ -35,8 +37,13 @@ def _project(tmp_path, monkeypatch):
 
 def _patch_harness(monkeypatch):
     """Patch AgentHarness to use _StubAgent without a real LLM call."""
+    _StubAgent.last_llm_args = None
+    _StubAgent.last_kind = None
+    _StubAgent.last_agent_cfg = None
 
     async def _fake_create_agent(self, kind=None, agent_cfg=None):
+        _StubAgent.last_kind = kind
+        _StubAgent.last_agent_cfg = agent_cfg
         return _StubAgent()
 
     monkeypatch.setattr("bos.core.harness.AgentHarness.create_agent", _fake_create_agent)
@@ -59,6 +66,26 @@ def test_ask_runs_in_process_and_prints_reply(tmp_path, monkeypatch):
     result = CliRunner().invoke(ask, ["hello"], obj={})
     assert result.exit_code == 0, result.output
     assert "echo: hello" in result.output
+    # Default path: the main actor ("main") locates its agent kind ("react"),
+    # passing the actor's agent_cfg.
+    assert _StubAgent.last_kind == "react"
+    assert isinstance(_StubAgent.last_agent_cfg, dict)
+
+
+def test_ask_agent_flag_selects_agent_kind(tmp_path, monkeypatch):
+    _project(tmp_path, monkeypatch)
+    _patch_harness(monkeypatch)
+    monkeypatch.setattr("bos.config.workspace.Workspace.resolve_agents", lambda self: None)
+    monkeypatch.setattr("bos.config.workspace.Workspace.bootstrap_platform", lambda self: None)
+    # --agent names an agent kind directly (validated against the registry),
+    # bypassing actor lookup and its agent_cfg.
+    monkeypatch.setattr("bos.core.AgentRegistry.has_registered", staticmethod(lambda kind: True))
+
+    result = CliRunner().invoke(ask, ["--agent", "researcher", "hi"], obj={})
+    assert result.exit_code == 0, result.output
+    assert "echo: hi" in result.output
+    assert _StubAgent.last_kind == "researcher"
+    assert _StubAgent.last_agent_cfg is None
 
 
 def test_ask_model_flag_overrides(tmp_path, monkeypatch):
