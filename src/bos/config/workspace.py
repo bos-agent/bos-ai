@@ -392,15 +392,6 @@ def _invoke_agent_factories() -> dict[str, dict[str, Any]]:
     return specs
 
 
-@dataclass(frozen=True)
-class AgentRuntimeConfig:
-    kind: str = "process"
-    image: str | None = None
-    container_name: str | None = None
-    workspace_dir: str = "/workspace"
-    bos_dir: str | None = None
-
-
 class Workspace:
     def __init__(
         self,
@@ -710,37 +701,6 @@ class Workspace:
             mention_prefix=mention_prefix,
             workdir=str(self.workspace),
             bos_dir=self.bos_dir,
-            runtime_kind=self.get_runtime_config().kind,
-        )
-
-    def get_runtime_config(self, *, force_kind: str | None = None) -> AgentRuntimeConfig:
-        runtime = self.config.runtime
-        # Docker settings pass through via runtime.extra="allow"
-        runtime_extra: dict[str, Any] = {}
-        if runtime:
-            extra = runtime.model_dump()
-            runtime_extra = {
-                k: v
-                for k, v in extra.items()
-                if k not in {"location", "channels", "actors", "main_actor", "gateway", "actor_resolver"}
-            }
-
-        workspace_dir = runtime_extra.get("workspace_dir") or "/workspace"
-        bos_dir = runtime_extra.get("bos_dir")
-        if not bos_dir:
-            try:
-                bos_rel = self.bos_dir.relative_to(self.workspace)
-                bos_dir = str((Path(workspace_dir) / bos_rel).as_posix())
-            except ValueError:
-                bos_dir = "/bos"
-
-        location = runtime.location if runtime else "process"
-        return AgentRuntimeConfig(
-            kind=force_kind or location,
-            image=runtime_extra.get("image"),
-            container_name=runtime_extra.get("container_name"),
-            workspace_dir=str(Path(workspace_dir).as_posix()),
-            bos_dir=str(Path(bos_dir).as_posix()),
         )
 
     def resolve_platform_envfile(self) -> Path | None:

@@ -70,4 +70,3 @@ class GatewayRuntimeConfig:
     mention_prefix: str
     workdir: str
     bos_dir: Path
-    runtime_kind: str

@@ -211,7 +211,7 @@ def _ensure_gateway_endpoint(ctx, rd: GatewayRunDir, workspace_dir: str | None) 
     if not is_running(rd):
         click.echo("No gateway running — starting one in the background (it stays running).", err=True)
         try:
-            ctx.invoke(start, foreground=False, docker=False, workspace_dir=workspace_dir)
+            ctx.invoke(start, foreground=False, workspace_dir=workspace_dir)
         except SystemExit:
             # Lost a start race to another process — fine as long as a gateway is up now.
             if not is_running(rd):
@@ -442,7 +442,6 @@ def gateway():
 
 @gateway.command()
 @click.option("--foreground", "-f", is_flag=True, default=False, help="Run in the foreground (don't daemonize).")
-@click.option("--docker", is_flag=True, default=False, help="Run the agent inside a Docker container.")
 @click.option(
     "-w",
     "--workspace",
@@ -451,7 +450,7 @@ def gateway():
     help="Override the workspace directory (defaults to '.' or project root).",
 )
 @click.pass_context
-def start(ctx, foreground: bool, docker: bool, workspace_dir: str | None):
+def start(ctx, foreground: bool, workspace_dir: str | None):
     """Start the BOS gateway."""
     ws, rd = _get_ws_and_rd(ctx, workspace_dir)
 
@@ -464,54 +463,33 @@ def start(ctx, foreground: bool, docker: bool, workspace_dir: str | None):
         is_running,
         read_state,
         reap_stale,
-        run_docker_foreground,
         start_background,
-        start_docker,
     )
     from bos.runner.runner import start as start_gateway
 
     if is_running(rd):
         state = read_state(rd)
-        identifier = state.get("container_id") if state.get("runtime") == "docker" else state.get("pid")
-        click.echo(f"Gateway is already running ({state.get('runtime', 'process')} {identifier}).", err=True)
+        click.echo(f"Gateway is already running (process {state.get('pid')}).", err=True)
         raise SystemExit(1)
 
-    # No live gateway: clear any leftover pid/state from a process that was
-    # killed or crashed without cleaning up, so it neither blocks the start nor
-    # leaves a stale endpoint behind for `boscli ask`.
+    # No live gateway: clear any leftover pid/state from a crashed process.
     if reap_stale(rd):
         click.echo("Cleared stale gateway pid/state from a previous run.", err=True)
 
-    runtime = ws.get_runtime_config(force_kind="docker" if docker else None)
-
-    if runtime.kind not in {"process", "docker"}:
-        raise click.UsageError(f"Unsupported runtime kind: {runtime.kind!r}")
-
     runner_config_arg = _runner_config_arg(ctx, ws)
 
-    if runtime.kind == "docker":
-        if foreground:
-            click.echo("Starting gateway in Docker foreground…")
-            raise SystemExit(run_docker_foreground(ws, runtime, config_arg=runner_config_arg))
-
-        container_id = start_docker(ws, rd, runtime, config_arg=runner_config_arg)
-        click.echo(f"Gateway starting in Docker ({container_id[:12]})…")
-        pid = None
-    elif foreground:
+    if foreground:
         click.echo("Starting gateway in foreground…")
         asyncio.run(start_gateway(ws))
         return
-    else:
-        argv = [sys.executable, "-m", "bos.runner", "--config", runner_config_arg]
-        pid = start_background(argv, rd, cwd=ws.workspace)
-        click.echo(f"Gateway starting (PID {pid})…")
-        container_id = None
+
+    argv = [sys.executable, "-m", "bos.runner", "--config", runner_config_arg]
+    pid = start_background(argv, rd, cwd=ws.workspace)
+    click.echo(f"Gateway starting (PID {pid})…")
 
     state = read_state(rd)
     pid = state.get("pid") or pid
-    container_id = state.get("container_id") or container_id
 
-    # Poll gateway.state until the HTTP gateway reports its bound endpoint (up to 10s).
     deadline = time.monotonic() + 10
     while time.monotonic() < deadline:
         time.sleep(0.3)
@@ -520,29 +498,16 @@ def start(ctx, foreground: bool, docker: bool, workspace_dir: str | None):
         port = gateway_state.get("port")
         if port:
             host = gateway_state.get("host", "127.0.0.1")
-            if state.get("runtime") == "docker" and host == "0.0.0.0":
-                host = "127.0.0.1"
-            ident = container_id[:12] if container_id else pid
-            click.echo(f"Gateway started ({state.get('runtime', runtime.kind)} {ident}) · http://{host}:{port}")
+            click.echo(f"Gateway started (process {pid}) · http://{host}:{port}")
             return
-        # No endpoint yet: if the spawned process has already exited (lost the singleton
-        # lock, crashed at startup, …), surface it now instead of waiting out the timeout.
-        # A child that exits becomes a zombie under this CLI process (we never reap it),
-        # and os.kill(pid, 0) reports zombies as alive — so also require the pid to still
-        # be a live gateway (a zombie has an empty /proc cmdline), matching is_running.
-        if (
-            pid
-            and runtime.kind == "process"
-            and not (_pid_alive(int(pid)) and _pid_is_gateway(int(pid)))
-        ):
+        if pid and not (_pid_alive(int(pid)) and _pid_is_gateway(int(pid))):
             click.echo(
                 f"Gateway process {pid} exited during startup — check {rd.log_file} for the cause.",
                 err=True,
             )
             raise SystemExit(1)
 
-    ident = container_id[:12] if container_id else pid
-    click.echo(f"Gateway started ({runtime.kind} {ident}) — endpoint not yet available (check boscli gateway status)")
+    click.echo(f"Gateway started (process {pid}) — endpoint not yet available (check boscli gateway status)")
 
 
 # ── boscli gateway stop ─────────────────────────────────────────
@@ -560,9 +525,7 @@ def stop(ctx):
         raise SystemExit(1)
 
     state = read_state(rd)
-    runtime = state.get("runtime", "process")
-    ident = state.get("container_id", "?")[:12] if runtime == "docker" else state.get("pid", "?")
-    click.echo(f"Stopping gateway ({runtime} {ident})…")
+    click.echo(f"Stopping gateway (process {state.get('pid', '?')})…")
 
     stop_gateway(rd, signal.SIGTERM)
 
@@ -605,7 +568,6 @@ def status(ctx):
     status_str = click.style("● running", fg="green") if running else click.style("○ stopped", fg="red")
     runtime = state.get("runtime", "process")
     pid = state.get("pid", "—")
-    container_id = state.get("container_id", "—")
     started = state.get("started_at", "—")
     last_active = state.get("last_active", "—")
 
@@ -626,16 +588,12 @@ def status(ctx):
     click.echo(f"Status:      {status_str}")
     click.echo(f"Runtime:     {runtime}")
     click.echo(f"PID:         {pid}")
-    if runtime == "docker":
-        click.echo(f"Container:   {container_id}")
     click.echo(f"Started:     {started}")
     click.echo(f"Last active: {last_active}")
     click.echo(f"Uptime:      {uptime_str}")
 
     gateway_state = state.get("gateway", {})
     host = gateway_state.get("host")
-    if runtime == "docker" and host == "0.0.0.0":
-        host = "127.0.0.1"
     port = gateway_state.get("port")
     if host and port:
         click.echo(f"Gateway:     http://{host}:{port}")
@@ -660,25 +618,16 @@ def restart(ctx):
     """Restart the gateway (stop then start)."""
     # Re-invoke stop (ignore failure if not running)
     _, rd = _get_ws_and_rd(ctx)
-    from bos.runner.proc import is_running, lock_is_free, read_state
+    from bos.runner.proc import is_running, lock_is_free
 
     if is_running(rd):
-        state = read_state(rd)
-        is_docker = state.get("runtime") == "docker"
         ctx.invoke(stop)
-        # Wait for the old gateway to fully release the singleton lock before
-        # starting again, so the fresh gateway doesn't race a still-exiting one
-        # and lose the lock. `stop` reports done once the pid file is gone, but
-        # a dying process unlinks its pid file *before* it has fully exited and
-        # the OS has dropped the flock — so waiting on is_running (which keys off
-        # the now-absent pid file) is a no-op. For a local process we poll the
-        # lock itself; for Docker, container teardown is observable via
-        # is_running (and `docker stop` already blocks until the container dies).
-        released = (lambda: not is_running(rd)) if is_docker else (lambda: lock_is_free(rd))
+        # A dying process unlinks its pid file before the OS drops the flock;
+        # poll the lock itself so the fresh gateway doesn't race a still-exiting one.
         deadline = time.monotonic() + 5
-        while time.monotonic() < deadline and not released():
+        while time.monotonic() < deadline and not lock_is_free(rd):
             time.sleep(0.1)
-        ctx.invoke(start, docker=is_docker)
+        ctx.invoke(start)
         return
 
     ctx.invoke(start)

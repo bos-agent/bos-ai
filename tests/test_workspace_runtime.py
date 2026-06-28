@@ -164,15 +164,11 @@ def test_gateway_runtime_rejects_legacy_channel_keys(legacy_key):
         )
 
 
-def test_runtime_config_location():
-    config = {"runtime": {"location": "docker", "actors": {"main": {"agent": "main"}}}}
-    ws = Workspace(".", ".bos", config)
-    rt = ws.get_runtime_config()
-    assert rt.kind == "docker"
+def test_runtime_config_ignores_legacy_location_and_docker_keys():
+    from bos.config import validate_config
 
+    raw = {"runtime": {"location": "docker", "image": "x:latest", "container_name": "c", "main_actor": "main"}}
+    validate_config(raw)  # must not raise
+    from bos.config.schema import RuntimeConfig
 
-def test_runtime_config_default_location():
-    config = {"runtime": {"actors": {"main": {"agent": "main"}}}}
-    ws = Workspace(".", ".bos", config)
-    rt = ws.get_runtime_config()
-    assert rt.kind == "process"
+    assert "location" not in RuntimeConfig.model_fields

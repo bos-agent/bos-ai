@@ -62,8 +62,6 @@ def _gateway_info(ws) -> dict[str, Any]:
 
     gateway_state = state.get("gateway", {})
     host = gateway_state.get("host")
-    if state.get("runtime") == "docker" and host == "0.0.0.0":
-        host = "127.0.0.1"
     port = gateway_state.get("port")
     return {
         "running": running,
