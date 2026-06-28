@@ -20,8 +20,8 @@ class LLMClient:
 
     async def complete(self, messages: list[dict], **kwargs: Any) -> LLMResponse:
         if model := kwargs.get("model") or os.getenv("BOS_MODEL"):
-            provider_name, model_name = model.split("/", 1)
-            if not ep_provider.has(provider_name):
+            provider_name, sep, model_name = model.partition("/")
+            if not sep or not ep_provider.has(provider_name):
                 provider_name, model_name = "litellm", model
         else:
             provider_name, model_name = "litellm", None
