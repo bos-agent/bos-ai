@@ -16,13 +16,8 @@ import os
 import signal
 import subprocess
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from bos.gateway.state import GatewayRunDir
-
-if TYPE_CHECKING:
-    from bos.config.workspace import AgentRuntimeConfig, Workspace
-
 
 LifecycleRunDir = GatewayRunDir
 
@@ -61,33 +56,6 @@ def _read_pid(rd: LifecycleRunDir) -> int | None:
         return None
 
 
-def _signal_name(sig: int) -> str:
-    try:
-        return signal.Signals(sig).name
-    except ValueError:
-        return str(sig)
-
-
-def _docker_run(*args: str) -> subprocess.CompletedProcess[str]:
-    try:
-        return subprocess.run(
-            ["docker", *args],
-            check=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-    except FileNotFoundError as exc:
-        raise RuntimeError("Docker CLI not found. Install Docker or run without --docker.") from exc
-
-
-def _docker_container_is_running(container_id: str) -> bool:
-    proc = _docker_run("inspect", "-f", "{{.State.Running}}", container_id)
-    if proc.returncode != 0:
-        return False
-    return proc.stdout.strip().lower() == "true"
-
-
 def _pid_alive(pid: int) -> bool:
     try:
         os.kill(pid, 0)
@@ -119,12 +87,7 @@ def _pid_is_gateway(pid: int) -> bool:
 
 
 def is_running(rd: LifecycleRunDir) -> bool:
-    """Return True if the recorded process or container is alive *and ours*."""
-    state = read_state(rd)
-    if state.get("runtime") == "docker":
-        container_id = state.get("container_id")
-        return bool(container_id) and _docker_container_is_running(str(container_id))
-
+    """Return True if the recorded gateway process is alive *and ours*."""
     pid = _read_pid(rd)
     if pid is None:
         return False
@@ -249,27 +212,7 @@ def kill_process(rd: LifecycleRunDir, sig: int = signal.SIGTERM) -> None:
 
 
 def stop_gateway(rd: LifecycleRunDir, sig: int = signal.SIGTERM) -> None:
-    """Stop the recorded runtime, whether it is a local process or a Docker container."""
-    state = read_state(rd)
-    if state.get("runtime") == "docker":
-        container_id = state.get("container_id")
-        if not container_id:
-            raise RuntimeError("No Docker container recorded — is the gateway running?")
-        cmd = (
-            ["kill", "--signal", _signal_name(sig), str(container_id)]
-            if sig == signal.SIGKILL
-            else [
-                "stop",
-                "--signal",
-                _signal_name(sig),
-                str(container_id),
-            ]
-        )
-        proc = _docker_run(*cmd)
-        if proc.returncode != 0 and "No such container" not in proc.stderr:
-            raise RuntimeError(proc.stderr.strip() or "Failed to stop Docker container.")
-        return
-
+    """Stop the recorded gateway process."""
     kill_process(rd, sig)
 
 
@@ -304,119 +247,3 @@ def start_background(
         cwd=cwd,
     )
     return proc.pid
-
-
-def _path_in_tree(path: Path, root: Path) -> bool:
-    try:
-        path.resolve().relative_to(root.resolve())
-        return True
-    except ValueError:
-        return False
-
-
-def _default_container_bos_dir(workspace: Workspace, runtime: AgentRuntimeConfig) -> str:
-    if runtime.bos_dir:
-        return runtime.bos_dir
-    try:
-        rel = workspace.bos_dir.relative_to(workspace.workspace)
-        return str((Path(runtime.workspace_dir) / rel).as_posix())
-    except ValueError:
-        return "/bos"
-
-
-def _should_mount_bos_dir(workspace: Workspace, runtime: AgentRuntimeConfig, container_bos_dir: str) -> bool:
-    try:
-        rel = workspace.bos_dir.relative_to(workspace.workspace)
-        expected = str((Path(runtime.workspace_dir) / rel).as_posix())
-    except ValueError:
-        expected = None
-    return expected != container_bos_dir
-
-
-def _docker_env_file(workspace: Workspace) -> Path | None:
-    env_file = workspace.resolve_platform_envfile()
-    if env_file is None:
-        return None
-    return env_file if not _path_in_tree(env_file, workspace.workspace) else None
-
-
-def build_docker_argv(
-    workspace: Workspace,
-    runtime: AgentRuntimeConfig,
-    *,
-    detach: bool,
-    config_arg: str | None = None,
-) -> list[str]:
-    """Build the Docker command used to run the BOS gateway in a container."""
-    if not runtime.image:
-        raise RuntimeError("Docker runtime requires `runtime.image` in .bos/config.toml.")
-
-    container_bos_dir = _default_container_bos_dir(workspace, runtime)
-    runner_config_arg = _docker_runner_config_arg(workspace, container_bos_dir, config_arg)
-    argv = ["docker", "run", "--rm"]
-    if detach:
-        argv.append("--detach")
-    if runtime.container_name:
-        argv.extend(["--name", runtime.container_name])
-
-    argv.extend([
-        "--workdir",
-        runtime.workspace_dir,
-        "--volume",
-        f"{workspace.workspace}:{runtime.workspace_dir}",
-        "--env",
-        "BOS_RUNTIME=docker",
-        "--env",
-        f"BOS_CONFIG={runner_config_arg}",
-    ])
-
-    if _should_mount_bos_dir(workspace, runtime, container_bos_dir):
-        argv.extend(["--volume", f"{workspace.bos_dir}:{container_bos_dir}"])
-
-    if env_file := _docker_env_file(workspace):
-        argv.extend(["--env-file", str(env_file)])
-
-    gateway_port = workspace.resolve_gateway_config().port
-    if gateway_port > 0:
-        argv.extend(["--publish", f"{gateway_port}:{gateway_port}"])
-
-    argv.extend([runtime.image, "--config", runner_config_arg])
-    return argv
-
-
-def _docker_runner_config_arg(workspace: Workspace, container_bos_dir: str, config_arg: str | None) -> str:
-    if config_arg and not Path(config_arg).expanduser().is_file():
-        return config_arg
-    assert workspace.config_file is not None  # docker config path requires a resolved config file
-    return f"{container_bos_dir}/{workspace.config_file.name}"
-
-
-def start_docker(
-    workspace: Workspace,
-    rd: LifecycleRunDir,
-    runtime: AgentRuntimeConfig,
-    *,
-    config_arg: str | None = None,
-) -> str:
-    """Launch the BOS gateway in a detached Docker container and record container metadata."""
-    rd.ensure()
-    proc = subprocess.run(
-        build_docker_argv(workspace, runtime, detach=True, config_arg=config_arg),
-        check=False,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-    if proc.returncode != 0:
-        raise RuntimeError(proc.stderr.strip() or "Failed to start Docker container.")
-
-    container_id = proc.stdout.strip()
-    rd.pid_file.unlink(missing_ok=True)
-    write_state(rd, runtime="docker", container_id=container_id, container_name=runtime.container_name)
-    return container_id
-
-
-def run_docker_foreground(workspace: Workspace, runtime: AgentRuntimeConfig, *, config_arg: str | None = None) -> int:
-    """Run the BOS gateway in a foreground Docker container."""
-    proc = subprocess.run(build_docker_argv(workspace, runtime, detach=False, config_arg=config_arg), check=False)
-    return proc.returncode
