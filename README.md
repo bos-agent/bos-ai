@@ -1,12 +1,12 @@
 ```
- ███████████     ███████     █████████ 
+ ███████████     ███████     █████████
 ░░███░░░░░███  ███░░░░░███  ███░░░░░███
- ░███    ░███ ███     ░░███░███    ░░░ 
- ░██████████ ░███      ░███░░█████████ 
+ ░███    ░███ ███     ░░███░███    ░░░
+ ░██████████ ░███      ░███░░█████████
  ░███░░░░░███░███      ░███ ░░░░░░░░███
  ░███    ░███░░███     ███  ███    ░███
- ███████████  ░░░███████░  ░░█████████ 
-░░░░░░░░░░░     ░░░░░░░     ░░░░░░░░░  
+ ███████████  ░░░███████░  ░░█████████
+░░░░░░░░░░░     ░░░░░░░     ░░░░░░░░░
 ```
 
 > From zero to agent in a single command.
@@ -26,14 +26,21 @@
 
 ```bash
 pip install bos-ai
-boscli ask "how are you"
+OPENAI_API_KEY=<api-key> boscli ask "how are you" --model openai/gpt-4o
 ```
 
-Or if you have uv installed:
+Using a different provider? See LiteLLM's [provider docs](https://docs.litellm.ai/docs/providers) for the right `BOS_MODEL` prefix and required environment variables. For example, using deepseek model
+
+```
+DEEPSEEK_API_KEY=<api-key> boscli ask "how are you" --model odeepseek/deepseek-v4-pro
+```
+
+Alternatively, it could use `uvx` to start:
 
 ```bash
-uvx boscli ask "how are you"
+OPENAI_API_KEY=<api-key> uvx boscli ask "how are you" --model openai/gpt-4o
 ```
+Install [uv](https://docs.astral.sh/uv/) to get the `uvx`.
 
 ## Project Setup
 
@@ -44,18 +51,9 @@ boscli gateway start # start the agent runtime
 boscli tui           # connect the terminal UI
 ```
 
-Grow the project as you go:
-
-```bash
-boscli gen agent <name>      # add a specialist agent
-boscli gen tool <Name>       # add a custom tool stub
-boscli gen channel telegram  # wire a Telegram bot
-boscli doctor                # check config, paths, env, credentials
-```
-
 ## Docs
 
-See [`docs/`](docs/) for architecture, extension points, and configuration reference.
+See the [documentation site](https://bos-agent.github.io/bos-ai/) for architecture, extension points, and configuration reference.
 
 ## License
 

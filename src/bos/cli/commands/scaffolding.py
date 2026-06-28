@@ -144,8 +144,9 @@ def init(directory, archetype, model, purpose, yes, minimal, init_git, no_probe,
 
 def _prompt_archetype() -> str:
     descriptions = {
-        "workspace": "single agent with memory and skills (add a team or Telegram later)",
-        "package": "an installable Python extension package (tools, channels, providers)",
+        "workspace": "use BOS to manage your own project or job — agents, memory, and skills (no coding required)",
+        "package": "manage your own project, and share its extensions (tools, channels, providers) "
+        "as a reusable installable package",
     }
     choices = [prompts.Choice(name, name, descriptions[name]) for name in ARCHETYPES]
     return cast(str, prompts.select("Choose a starting topology:", choices, default=ARCHETYPES[0]))

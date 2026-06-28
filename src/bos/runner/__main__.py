@@ -14,32 +14,11 @@ import logging
 import os
 import signal
 import sys
-from typing import TextIO
 
 logger = logging.getLogger(__name__)
 
 # How often the running gateway re-checks that it still owns the singleton lock.
 _LOCK_WATCH_INTERVAL = 5.0
-
-
-class _TeeStream:
-    """Mirror writes to the original stream and a persistent log file."""
-
-    def __init__(self, primary: TextIO, mirror: TextIO) -> None:
-        self._primary = primary
-        self._mirror = mirror
-
-    def write(self, data: str) -> int:
-        written = self._primary.write(data)
-        self._mirror.write(data)
-        return written
-
-    def flush(self) -> None:
-        self._primary.flush()
-        self._mirror.flush()
-
-    def __getattr__(self, name: str):
-        return getattr(self._primary, name)
 
 
 def main() -> None:
@@ -63,13 +42,6 @@ def main() -> None:
 
     rd = GatewayRunDir(ws.bos_dir)
     rd.ensure()
-    runtime_kind = os.environ.get("BOS_RUNTIME", "process")
-    mirrored_log: TextIO | None = None
-
-    if runtime_kind == "docker":
-        mirrored_log = rd.log_file.open("a", encoding="utf-8")
-        sys.stdout = _TeeStream(sys.stdout, mirrored_log)
-        sys.stderr = _TeeStream(sys.stderr, mirrored_log)
 
     # Configure logging to include timestamps. BOS_LOG_LEVEL overrides the default
     # so operators can raise verbosity (e.g. DEBUG) without code changes.
@@ -143,8 +115,6 @@ def main() -> None:
             loop.run_until_complete(main_task)
     finally:
         loop.close()
-        if mirrored_log is not None:
-            mirrored_log.close()
 
 
 if __name__ == "__main__":

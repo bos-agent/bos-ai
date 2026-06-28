@@ -20,7 +20,6 @@ forex market analysis.
 """
 
 [runtime]
-location = "process"
 main_actor = "main"
 
 [runtime.gateway]

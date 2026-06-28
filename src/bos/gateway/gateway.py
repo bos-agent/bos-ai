@@ -88,7 +88,7 @@ class Gateway:
         actors = self.actor_manager.status_payload()
         channels = self.channel_manager.status_payload()
         return {
-            "runtime": self.runtime.runtime_kind,
+            "runtime": "process",
             "pid": os.getpid(),
             "started_at": self.started_at,
             "updated_at": datetime.now(timezone.utc).isoformat(),

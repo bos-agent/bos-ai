@@ -18,8 +18,6 @@ boscli --help
 | `boscli init` | Guided project setup. |
 | `boscli gateway start` | Start the agent runtime. |
 | `boscli tui` | Connect the terminal UI. |
-| `boscli gen agent <name>` | Add a specialist agent. |
-| `boscli gen tool <Name>` | Add a custom tool stub. |
-| `boscli gen channel <kind>` | Wire a messaging channel. |
 | `boscli doctor` | Check config, paths, env, credentials. |
 | `boscli inspect` | Inspect runtime/config state. |
+| `boscli memory` | Memory backend admin commands. |

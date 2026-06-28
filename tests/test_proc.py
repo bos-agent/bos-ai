@@ -1,84 +1,25 @@
 import os
-import signal
 
-from bos.config.workspace import AgentRuntimeConfig, Workspace, resolve_config_source
 from bos.gateway.state import GatewayRunDir, read_gateway_state, write_gateway_state
 from bos.runner.proc import (
     acquire_singleton_lock,
-    build_docker_argv,
     is_running,
     lock_is_free,
     lock_still_owned,
     reap_stale,
     start_background,
-    stop_gateway,
     write_state,
 )
 
 
-def test_is_running_checks_docker_container_state(tmp_path, monkeypatch):
-    rd = GatewayRunDir(tmp_path / ".bos")
-    write_state(rd, runtime="docker", container_id="abc123")
-    monkeypatch.setattr("bos.runner.proc._docker_container_is_running", lambda container_id: container_id == "abc123")
+def test_is_running_ignores_legacy_docker_state(tmp_path):
+    from bos.gateway.state import GatewayRunDir
+    from bos.runner.proc import is_running, write_state
 
-    assert is_running(rd) is True
-
-
-def test_stop_gateway_uses_docker_stop(tmp_path, monkeypatch):
-    rd = GatewayRunDir(tmp_path / ".bos")
-    write_state(rd, runtime="docker", container_id="abc123")
-    calls: list[tuple[str, ...]] = []
-
-    class Result:
-        returncode = 0
-        stderr = ""
-
-    monkeypatch.setattr("bos.runner.proc._docker_run", lambda *args: calls.append(args) or Result())
-
-    stop_gateway(rd, signal.SIGTERM)
-
-    assert calls == [("stop", "--signal", "SIGTERM", "abc123")]
-
-
-def test_build_docker_argv_publishes_gateway_port_not_http_channel(tmp_path):
-    bos_dir = tmp_path / ".bos"
-    bos_dir.mkdir()
-    (bos_dir / "config.toml").write_text(
-        """
-[runtime]
-location = "docker"
-main_actor = "main"
-image = "bos:test"
-
-[runtime.gateway]
-port = 7001
-
-[runtime.actors.main]
-agent = "main"
-""".strip()
-        + "\n",
-        encoding="utf-8",
-    )
-    ws = Workspace.from_discovery(tmp_path)
-    runtime = AgentRuntimeConfig(kind="docker", image="bos:test")
-
-    argv = build_docker_argv(ws, runtime, detach=True)
-
-    assert "--publish" in argv
-    assert "7001:7001" in argv
-    assert "HttpChannel" not in " ".join(argv)
-
-
-def test_build_docker_argv_preserves_preset_config_arg(tmp_path, monkeypatch):
-    monkeypatch.setenv("BOS_HOME", str(tmp_path / "home"))
-    config_path, bos_dir, config = resolve_config_source("default")
-    ws = Workspace(tmp_path / "project", bos_dir, config, config_file=config_path)
-    runtime = AgentRuntimeConfig(kind="docker", image="bos:test")
-
-    argv = build_docker_argv(ws, runtime, detach=True, config_arg="default")
-
-    assert "BOS_CONFIG=default" in argv
-    assert argv[-2:] == ["--config", "default"]
+    rd = GatewayRunDir(tmp_path)
+    write_state(rd, runtime="docker", container_id="deadbeef")  # legacy leftover
+    # No pid file → process-only is_running must report not-running, not crash.
+    assert is_running(rd) is False
 
 
 def test_singleton_lock_blocks_a_second_holder(tmp_path):

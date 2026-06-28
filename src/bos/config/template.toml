@@ -125,7 +125,6 @@ instead of return empty message
 # ── Runtime ─────────────────────────────────────────────────────────
 
 [runtime]
-location = "process"
 main_actor = "main"
 
 [runtime.gateway]

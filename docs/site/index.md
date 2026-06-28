@@ -10,13 +10,21 @@ needs expand.
 
 ```bash
 pip install bos-ai
-boscli ask "how are you"
+OPENAI_API_KEY=<api-key> boscli ask "how are you" --model openai/gpt-4o
 ```
 
-Or with [uv](https://docs.astral.sh/uv/):
+Using a different provider? See LiteLLM's [provider docs](https://docs.litellm.ai/docs/providers)
+for the right `BOS_MODEL` prefix and required environment variables. For example, with a
+DeepSeek model:
 
 ```bash
-uvx boscli ask "how are you"
+DEEPSEEK_API_KEY=<api-key> boscli ask "how are you" --model deepseek/deepseek-v4-pro
+```
+
+Alternatively, use [uv](https://docs.astral.sh/uv/)'s `uvx` to start without installing:
+
+```bash
+OPENAI_API_KEY=<api-key> uvx boscli ask "how are you" --model openai/gpt-4o
 ```
 
 ## Where to go next
