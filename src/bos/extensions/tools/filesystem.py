@@ -10,7 +10,7 @@ from bos.core import ep_tool
 # Directories skipped by GlobSearch/GrepSearch by default. Includes the
 # workspace's `.bos/` control directory. Both tools resolve their effective
 # ignore set via _resolve_ignore_dirs, configurable per tool through
-# [exts.ep_tool.<Tool>] replace_ignore / extend_ignore.
+# [exts.ep_tool.<Tool>] replace_ignore / extend_ignore / remove_ignore.
 _IGNORE_DIRS = {".git", ".pycache", "__pycache__", "node_modules", "venv", ".venv", ".uv", "dist", "build", ".bos"}
 _READ_FILES: set[Path] = set()
 
@@ -18,17 +18,24 @@ _READ_FILES: set[Path] = set()
 def _resolve_ignore_dirs(
     replace_ignore: Sequence[str] | None,
     extend_ignore: Sequence[str] | None,
+    remove_ignore: Sequence[str] | None,
 ) -> set[str]:
     """Resolve the effective ignore set for a search tool.
 
     ``replace_ignore`` replaces the default ``_IGNORE_DIRS`` outright;
-    ``extend_ignore`` unions onto it. ``replace_ignore`` wins if both are given.
+    ``extend_ignore`` unions onto it (``replace_ignore`` wins if both are given).
+    ``remove_ignore`` then subtracts from the resulting set — e.g.
+    ``remove_ignore=[".bos"]`` to search the control directory.
     """
     if replace_ignore is not None:
-        return set(replace_ignore)
-    if extend_ignore is not None:
-        return _IGNORE_DIRS | set(extend_ignore)
-    return set(_IGNORE_DIRS)
+        base = set(replace_ignore)
+    elif extend_ignore is not None:
+        base = _IGNORE_DIRS | set(extend_ignore)
+    else:
+        base = set(_IGNORE_DIRS)
+    if remove_ignore is not None:
+        base -= set(remove_ignore)
+    return base
 
 
 # GrepSearch output limits — prevent context-window poisoning from
@@ -255,11 +262,13 @@ async def tool_glob_search(
     cwd: str = ".",
     replace_ignore: Sequence[str] | None = None,
     extend_ignore: Sequence[str] | None = None,
+    remove_ignore: Sequence[str] | None = None,
 ) -> str:
-    # replace_ignore / extend_ignore are config-only knobs (see _resolve_ignore_dirs),
-    # set via [exts.ep_tool.GlobSearch]. Ignore entries match directory names in the
-    # path; unlike GrepSearch, GlobSearch does not interpret them as file globs.
-    ignore_dirs = _resolve_ignore_dirs(replace_ignore, extend_ignore)
+    # replace_ignore / extend_ignore / remove_ignore are config-only knobs (see
+    # _resolve_ignore_dirs), set via [exts.ep_tool.GlobSearch]. Ignore entries match
+    # directory names in the path; unlike GrepSearch, GlobSearch does not interpret
+    # them as file globs.
+    ignore_dirs = _resolve_ignore_dirs(replace_ignore, extend_ignore, remove_ignore)
     return await asyncio.to_thread(_sync_tool_glob_search, pattern, cwd, ignore_dirs)
 
 
@@ -303,11 +312,13 @@ async def tool_grep_search(
     cwd: str = ".",
     replace_ignore: Sequence[str] | None = None,
     extend_ignore: Sequence[str] | None = None,
+    remove_ignore: Sequence[str] | None = None,
 ) -> str:
-    # replace_ignore / extend_ignore are config-only knobs (see _resolve_ignore_dirs),
-    # set via [exts.ep_tool.GrepSearch]. Entries may be directory names (".venv") or
-    # file globs ("*.min.js") — _is_file_glob routes each to the right rg/grep flag.
-    exclude_patterns: list[str] = sorted(_resolve_ignore_dirs(replace_ignore, extend_ignore))
+    # replace_ignore / extend_ignore / remove_ignore are config-only knobs (see
+    # _resolve_ignore_dirs), set via [exts.ep_tool.GrepSearch]. Entries may be directory
+    # names (".venv") or file globs ("*.min.js") — _is_file_glob routes each to the
+    # right rg/grep flag.
+    exclude_patterns: list[str] = sorted(_resolve_ignore_dirs(replace_ignore, extend_ignore, remove_ignore))
 
     # Attempt to use 'rg' first, then 'grep'.
     cmd = None

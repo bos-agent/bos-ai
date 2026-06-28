@@ -157,6 +157,17 @@ async def test_glob_search_extend_ignore_adds_to_defaults(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_glob_search_remove_ignore_searches_dotbos(tmp_path):
+    _seed_dotbos_and_visible(tmp_path)
+
+    # remove_ignore subtracts ".bos" from the default set, exposing it.
+    result = await filesystem.tool_glob_search("**/*.txt", str(tmp_path), remove_ignore=[".bos"])
+
+    assert "visible.txt" in result
+    assert "secret.txt" in result
+
+
+@pytest.mark.asyncio
 async def test_grep_search_ignores_dotbos_by_default(tmp_path):
     _seed_dotbos_and_visible(tmp_path)
 
@@ -172,6 +183,17 @@ async def test_grep_search_replace_ignore_searches_dotbos(tmp_path):
 
     # replace_ignore drops the default set (including ".bos"), exposing it.
     result = await filesystem.tool_grep_search("needle", str(tmp_path), replace_ignore=[".git"])
+
+    assert "visible.txt" in result
+    assert "secret.txt" in result
+
+
+@pytest.mark.asyncio
+async def test_grep_search_remove_ignore_searches_dotbos(tmp_path):
+    _seed_dotbos_and_visible(tmp_path)
+
+    # remove_ignore subtracts ".bos" from the default set, exposing it.
+    result = await filesystem.tool_grep_search("needle", str(tmp_path), remove_ignore=[".bos"])
 
     assert "visible.txt" in result
     assert "secret.txt" in result
