@@ -7,7 +7,6 @@ chat_store = "JsonlChatStore"
 mail_route = "JsonlMailRoute"
 
 [runtime]
-location = "process"
 main_actor = "main"
 
 [runtime.gateway]
