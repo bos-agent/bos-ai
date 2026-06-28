@@ -13,7 +13,8 @@ from bos.cli.commands.memory import memory as memory_cmd
 
 def _seeded_workspace(tmp_path, monkeypatch):
     """Build a minimal workspace with the in_memory memory backend selected."""
-    (tmp_path / "bos.toml").write_text(
+    (tmp_path / ".bos").mkdir()
+    (tmp_path / ".bos" / "config.toml").write_text(
         "[bos]\n"
         'workspace = "."\n'
         "\n"

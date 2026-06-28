@@ -55,7 +55,6 @@ def scaffold_workspace(
     archetype: str,
     context: dict[str, str],
     *,
-    dotbos: bool = True,
     env_content: str = "",
     agent_files: dict[str, str] | None = None,
 ) -> ScaffoldResult:
@@ -78,12 +77,8 @@ def scaffold_workspace(
     config_text = render_template(f"{archetype}/bos.toml.tmpl", context)
     validate_config(tomllib.loads(config_text))
 
-    if dotbos:
-        bos_dir = workspace / ".bos"
-        config_file = bos_dir / "config.toml"
-    else:
-        bos_dir = workspace
-        config_file = workspace / "bos.toml"
+    bos_dir = workspace / ".bos"
+    config_file = bos_dir / "config.toml"
 
     result = ScaffoldResult(workspace=workspace, bos_dir=bos_dir, config_file=config_file)
 
