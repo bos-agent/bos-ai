@@ -25,7 +25,14 @@ def _normalize_litellm_message(message: dict[str, Any]) -> dict[str, Any]:
             normalized.append({"type": "image_url", "image_url": {"url": image_source_to_model_url(source)}})
             continue
         if part_type == "file":
-            raise ValueError("File/PDF inputs are reserved in phase 1 and are not yet supported.")
+            # Non-image attachments are not sent to the model natively. We hand the
+            # agent the absolute upload path and MIME type as text so it can resolve
+            # the file with its filesystem tools (ReadFile/Grep/Glob).
+            source = part.get("source") or {}
+            path = source.get("value", "")
+            mime_type = part.get("mime_type") or "application/octet-stream"
+            normalized.append({"type": "text", "text": f"[attachment: {path} ({mime_type})]"})
+            continue
         if part_type == "image_url":
             normalized.append(part)
             continue

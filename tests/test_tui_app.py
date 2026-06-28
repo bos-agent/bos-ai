@@ -1070,7 +1070,7 @@ class FakeUploadClient(FakeClient):
         self._error = error
         self.uploaded: list[str] = []
 
-    async def upload_image(self, path):
+    async def upload_attachment(self, path):
         self.uploaded.append(str(path))
         if self._error is not None:
             raise self._error

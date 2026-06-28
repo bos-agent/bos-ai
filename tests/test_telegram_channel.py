@@ -15,6 +15,7 @@ from bos.extensions.channels.telegram import (
     _conversation_id_for_telegram_chat,
     _env_int,
     _extract_inbound_message,
+    _inbound_attachment_descriptors,
     _normalize_command,
     _render_turn_event,
     _split_message,
@@ -115,6 +116,7 @@ def test_extract_inbound_message_builds_conversation_id_and_command_type():
         "text": "/history recent",
         "content_type": "command",
         "file_ids": [],
+        "attachment": None,
         "media_group_id": None,
     }
 
@@ -135,12 +137,15 @@ def test_split_message_respects_limit():
 
 
 def test_unsupported_message_chat_id_flags_media():
-    voice = {"message": {"chat": {"id": 42}, "voice": {"file_id": "abc"}}}
-    assert _unsupported_message_chat_id(voice) == "42"
+    # Stickers carry no downloadable file we'd reference — still unsupported.
+    sticker = {"message": {"chat": {"id": 42}, "sticker": {"file_id": "abc"}}}
+    assert _unsupported_message_chat_id(sticker) == "42"
 
-    # Photos are now supported — a blank-caption photo is handled as an image, not unsupported.
+    # Photos and documents are now supported — handled as attachments, not unsupported.
     photo = {"message": {"chat": {"id": 7}, "photo": [{"file_id": "x"}], "caption": "   "}}
     assert _unsupported_message_chat_id(photo) is None
+    voice = {"message": {"chat": {"id": 7}, "voice": {"file_id": "v"}}}
+    assert _unsupported_message_chat_id(voice) is None
 
 
 def test_unsupported_message_chat_id_ignores_text_and_service_updates():
@@ -176,7 +181,7 @@ async def test_poll_updates_nudges_on_unsupported_format():
             if get_updates_calls == 1:
                 return {
                     "ok": True,
-                    "result": [{"update_id": 1, "message": {"chat": {"id": 42}, "voice": {"file_id": "v"}}}],
+                    "result": [{"update_id": 1, "message": {"chat": {"id": 42}, "sticker": {"file_id": "v"}}}],
                 }
             raise asyncio.CancelledError()
         if method == "sendMessage":
@@ -745,7 +750,34 @@ def test_extract_inbound_text_has_empty_file_ids():
     update = {"message": {"chat": {"id": 42}, "text": "hi"}}
     inbound = _extract_inbound_message(update)
     assert inbound["file_ids"] == []
+    assert inbound["attachment"] is None
     assert inbound["text"] == "hi"
+
+
+def test_extract_inbound_document_attachment():
+    from bos.extensions.channels.telegram import _extract_inbound_message
+
+    update = {
+        "message": {
+            "chat": {"id": 42},
+            "caption": "the report",
+            "document": {"file_id": "doc1", "file_name": "report.pdf", "mime_type": "application/pdf"},
+        }
+    }
+    inbound = _extract_inbound_message(update)
+    assert inbound["file_ids"] == []
+    assert inbound["attachment"] == {"file_id": "doc1", "filename": "report.pdf", "mime_type": "application/pdf"}
+    assert inbound["text"] == "the report"
+    assert str(inbound["content_type"]) == "message"
+
+
+def test_extract_inbound_voice_attachment_without_caption():
+    from bos.extensions.channels.telegram import _extract_inbound_message
+
+    update = {"message": {"chat": {"id": 42}, "voice": {"file_id": "v1", "mime_type": "audio/ogg"}}}
+    inbound = _extract_inbound_message(update)
+    assert inbound["attachment"] == {"file_id": "v1", "filename": None, "mime_type": "audio/ogg"}
+    assert inbound["text"] == ""
 
 
 @pytest.mark.asyncio
@@ -755,7 +787,7 @@ async def test_album_buffers_into_single_turn(monkeypatch, tmp_path):
 
     monkeypatch.setattr(
         tg_mod,
-        "store_uploaded_image",
+        "store_uploaded_attachment",
         lambda *, upload_dir, filename, content_type, data: {
             "type": "image",
             "source": {"kind": "path", "value": filename},
@@ -766,10 +798,10 @@ async def test_album_buffers_into_single_turn(monkeypatch, tmp_path):
     channel._album_debounce = 0.05
     captured = {}
 
-    async def _fake_parts(file_ids):
-        return [{"type": "image", "source": {"kind": "path", "value": f}} for f in file_ids]
+    async def _fake_parts(descriptors):
+        return [{"type": "image", "source": {"kind": "path", "value": d["file_id"]}} for d in descriptors]
 
-    monkeypatch.setattr(channel, "_download_image_parts", _fake_parts)
+    monkeypatch.setattr(channel, "_download_attachment_parts", _fake_parts)
 
     class _MB:
         async def send(self, addr, content, **kw):
@@ -811,7 +843,7 @@ async def test_single_photo_assembles_image_content(monkeypatch, tmp_path):
     def _fake_store(*, upload_dir, filename, content_type, data):
         return {"type": "image", "source": {"kind": "path", "value": f"/u/{filename}"}}
 
-    monkeypatch.setattr(tg_mod, "store_uploaded_image", _fake_store)
+    monkeypatch.setattr(tg_mod, "store_uploaded_attachment", _fake_store)
 
     channel = _make_channel(tmp_path)
 
@@ -838,7 +870,7 @@ async def test_single_photo_assembles_image_content(monkeypatch, tmp_path):
         "file_ids": ["big"],
         "media_group_id": None,
     }
-    parts = await channel._download_image_parts(inbound["file_ids"])
+    parts = await channel._download_attachment_parts(_inbound_attachment_descriptors(inbound))
     await channel._assemble_and_send(_MB(), inbound, parts)
 
     assert sent["content"][0] == {"type": "text", "text": "look"}
@@ -855,7 +887,7 @@ async def test_single_photo_no_caption_assembles_image_only(monkeypatch, tmp_pat
     def _fake_store(*, upload_dir, filename, content_type, data):
         return {"type": "image", "source": {"kind": "path", "value": f"/u/{filename}"}}
 
-    monkeypatch.setattr(tg_mod, "store_uploaded_image", _fake_store)
+    monkeypatch.setattr(tg_mod, "store_uploaded_attachment", _fake_store)
 
     channel = _make_channel(tmp_path)
 
@@ -882,7 +914,7 @@ async def test_single_photo_no_caption_assembles_image_only(monkeypatch, tmp_pat
         "file_ids": ["big"],
         "media_group_id": None,
     }
-    parts = await channel._download_image_parts(inbound["file_ids"])
+    parts = await channel._download_attachment_parts(_inbound_attachment_descriptors(inbound))
     await channel._assemble_and_send(_MB(), inbound, parts)
 
     assert len(sent["content"]) == 1

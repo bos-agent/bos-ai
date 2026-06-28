@@ -123,6 +123,7 @@ def test_extract_inbound_message_text_is_message():
         "text": "hello there",
         "content_type": "message",
         "image_keys": [],
+        "file_keys": [],
         "message_id": "om_x",
     }
 
@@ -163,8 +164,13 @@ def test_strip_mentions_removes_all_keys():
 
 def test_unsupported_message_chat_id_flags_non_text():
     event = _text_event("oc_9", "")
-    event["message_type"] = "audio"
+    event["message_type"] = "sticker"
     assert _unsupported_message_chat_id(event) == "oc_9"
+
+    # file/audio/media are now downloaded as attachments, not flagged unsupported.
+    handled = _text_event("oc_9", "")
+    handled["message_type"] = "audio"
+    assert _unsupported_message_chat_id(handled) is None
 
 
 def test_unsupported_message_chat_id_ignores_text():
@@ -275,7 +281,7 @@ async def test_handle_inbound_nudges_on_unsupported_format():
     delivered = _capture_deliver(channel)
     mailbox = FakeSendMailbox()
     event = _text_event("oc_42", "")
-    event["message_type"] = "audio"
+    event["message_type"] = "sticker"
 
     await channel._handle_inbound(mailbox, event)
 
@@ -700,14 +706,39 @@ async def test_lark_image_assembles_content(monkeypatch, tmp_path):
     def _fake_store(*, upload_dir, filename, content_type, data):
         return {"type": "image", "source": {"kind": "path", "value": filename}}
 
-    monkeypatch.setattr(lark_mod, "store_uploaded_image", _fake_store)
+    monkeypatch.setattr(lark_mod, "store_uploaded_attachment", _fake_store)
 
     channel = _make_channel(tmp_path)  # existing helper; runtime.upload_dir=tmp_path
 
-    async def _fake_dl(message_id, image_key):
+    async def _fake_dl(message_id, file_key, resource_type):
         return b"\x89PNGdata"
 
-    monkeypatch.setattr(channel, "_download_lark_image", _fake_dl)
+    monkeypatch.setattr(channel, "_download_lark_resource", _fake_dl)
 
     parts = await channel._download_image_parts("om_1", ["k1", "k2"])
     assert [p["source"]["value"] for p in parts] == ["k1.png", "k2.png"]
+
+
+@pytest.mark.asyncio
+async def test_lark_file_assembles_file_part(monkeypatch, tmp_path):
+    import bos.extensions.channels.lark as lark_mod
+
+    def _fake_store(*, upload_dir, filename, content_type, data):
+        return {"type": "file", "mime_type": "application/pdf", "source": {"kind": "path", "value": filename}}
+
+    monkeypatch.setattr(lark_mod, "store_uploaded_attachment", _fake_store)
+
+    channel = _make_channel(tmp_path)
+
+    captured = {}
+
+    async def _fake_dl(message_id, file_key, resource_type):
+        captured["resource_type"] = resource_type
+        return b"%PDFdata"
+
+    monkeypatch.setattr(channel, "_download_lark_resource", _fake_dl)
+
+    parts = await channel._download_file_parts("om_1", [{"file_key": "fk1", "file_name": "report.pdf"}])
+    assert captured["resource_type"] == "file"
+    assert parts[0]["type"] == "file"
+    assert parts[0]["source"]["value"] == "report.pdf"

@@ -55,7 +55,8 @@ def create_gateway_app(
         app[APP_WS_HANDLER] = ws_handler
     app.router.add_get("/api/status", _status_handler)
     app.router.add_get("/api/actors", _actors_handler)
-    app.router.add_post("/api/upload-image", _upload_image_handler)
+    app.router.add_post("/api/upload-image", _upload_attachment_handler)
+    app.router.add_post("/api/upload", _upload_attachment_handler)
     app.router.add_get("/ws", _ws_handler)
     return app
 
@@ -71,7 +72,7 @@ async def _actors_handler(request: web.Request) -> web.Response:
     return web.json_response({"ok": True, "actors": status.get("actors", {})})
 
 
-async def _upload_image_handler(request: web.Request) -> web.Response:
+async def _upload_attachment_handler(request: web.Request) -> web.Response:
     config: ResolvedGatewayConfig = request.app[APP_GATEWAY_CONFIG]
     reader = await request.multipart()
     file_field = await reader.next()
@@ -79,9 +80,9 @@ async def _upload_image_handler(request: web.Request) -> web.Response:
         return web.json_response({"ok": False, "error": "Expected multipart field 'file'."}, status=400)
     try:
         data = await file_field.read()
-        part = store_uploaded_image(
+        part = store_uploaded_attachment(
             upload_dir=Path(config.upload_dir),
-            filename=file_field.filename or "image",
+            filename=file_field.filename or "attachment",
             content_type=file_field.headers.get("Content-Type"),
             data=data,
         )
@@ -97,15 +98,24 @@ async def _ws_handler(request: web.Request) -> web.StreamResponse:
     return web.json_response({"ok": False, "error": "ws_not_implemented"}, status=501)
 
 
-def store_uploaded_image(*, upload_dir: Path, filename: str, content_type: str | None, data: bytes) -> dict[str, Any]:
+def store_uploaded_attachment(
+    *, upload_dir: Path, filename: str, content_type: str | None, data: bytes
+) -> dict[str, Any]:
+    """Persist any inbound attachment to the upload dir under a unique name.
+
+    Images become a native ``image`` part (handled by the vision path); every
+    other MIME type becomes a ``file`` part carrying the absolute path and mime
+    type, which the agent resolves with its filesystem tools. No MIME type is
+    rejected — the input route never blocks an attachment from reaching the LLM.
+    """
     if not data:
-        raise ValueError("Uploaded image is empty.")
-    safe_name = Path(filename or "image").name
-    mime_type = (content_type or "").strip() or mimetypes.guess_type(safe_name)[0] or ""
-    if not mime_type.startswith("image/"):
-        raise ValueError("Uploaded file must be an image.")
-    suffix = mimetypes.guess_extension(mime_type, strict=False) or ".img"
+        raise ValueError("Uploaded attachment is empty.")
+    safe_name = Path(filename or "attachment").name
+    mime_type = (content_type or "").strip() or mimetypes.guess_type(safe_name)[0] or "application/octet-stream"
+    suffix = mimetypes.guess_extension(mime_type, strict=False) or Path(safe_name).suffix or ".bin"
     upload_dir.mkdir(parents=True, exist_ok=True)
     stored_path = (upload_dir / f"{uuid.uuid4().hex}{suffix}").resolve()
     stored_path.write_bytes(data)
-    return {"type": "image", "source": {"kind": "path", "value": str(stored_path)}}
+    if mime_type.startswith("image/"):
+        return {"type": "image", "source": {"kind": "path", "value": str(stored_path)}}
+    return {"type": "file", "mime_type": mime_type, "source": {"kind": "path", "value": str(stored_path)}}

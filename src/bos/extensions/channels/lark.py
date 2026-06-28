@@ -32,7 +32,7 @@ from typing import Any
 from bos.core import BaseChannel, MailBox, ep_channel
 from bos.core.actor import Envelope, MessageType
 from bos.gateway import ChannelConversationRef, ChannelRuntimeContext
-from bos.gateway.http import store_uploaded_image
+from bos.gateway.http import store_uploaded_attachment
 
 logger = logging.getLogger(__name__)
 
@@ -157,6 +157,7 @@ def _extract_inbound_message(event: dict[str, Any]) -> dict[str, Any] | None:
 
     message_type = event.get("message_type")
     image_keys: list[str] = []
+    file_keys: list[dict[str, str]] = []
     text = ""
     if message_type == "text":
         text = content_obj.get("text", "") if isinstance(content_obj, dict) else ""
@@ -167,20 +168,29 @@ def _extract_inbound_message(event: dict[str, Any]) -> dict[str, Any] | None:
             image_keys = [key]
     elif message_type == "post":
         image_keys, text = _post_image_keys_and_text(content_obj) if isinstance(content_obj, dict) else ([], "")
+    elif message_type in ("file", "audio", "media"):
+        # file/audio/media all carry a `file_key`; the resource is downloaded with
+        # the "file" type and handed to the agent as a path reference.
+        key = content_obj.get("file_key") if isinstance(content_obj, dict) else None
+        if isinstance(key, str):
+            name = content_obj.get("file_name") if isinstance(content_obj, dict) else None
+            file_keys = [{"file_key": key, "file_name": name if isinstance(name, str) else ""}]
     else:
         return None
 
     text = _strip_mentions(text, event.get("mentions")) if text else ""
-    if not text.strip() and not image_keys:
+    has_media = bool(image_keys or file_keys)
+    if not text.strip() and not has_media:
         return None
 
-    is_command = text.startswith("/") and not image_keys
+    is_command = text.startswith("/") and not has_media
     return {
         "lark_chat_id": str(lark_chat_id),
         "channel_conversation_id": _conversation_id_for_lark_chat(lark_chat_id),
         "text": text,
         "content_type": MessageType.COMMAND if is_command else MessageType.MESSAGE,
         "image_keys": image_keys,
+        "file_keys": file_keys,
         "message_id": event.get("message_id"),
     }
 
@@ -193,7 +203,7 @@ def _unsupported_message_chat_id(event: dict[str, Any]) -> str | None:
     """
     lark_chat_id = event.get("chat_id")
     message_type = event.get("message_type")
-    if not lark_chat_id or not message_type or message_type in ("text", "image", "post"):
+    if not lark_chat_id or not message_type or message_type in ("text", "image", "post", "file", "audio", "media"):
         return None
     return str(lark_chat_id)
 
@@ -468,17 +478,17 @@ class LarkChannel(BaseChannel[LarkSettings]):
             await self._handle_command(inbound["text"], ref, lark_chat_id)
             return
 
-        # Download images before reserving the send slot — a download failure
+        # Download attachments before reserving the send slot — a download failure
         # should not leave a dangling preflight reservation.
-        if inbound["content_type"] == MessageType.MESSAGE and inbound["image_keys"]:
+        media_parts: list[dict[str, Any]] = []
+        if inbound["content_type"] == MessageType.MESSAGE and (inbound["image_keys"] or inbound["file_keys"]):
             try:
-                image_parts = await self._download_image_parts(inbound["message_id"], inbound["image_keys"])
+                media_parts = await self._download_image_parts(inbound["message_id"], inbound["image_keys"])
+                media_parts += await self._download_file_parts(inbound["message_id"], inbound["file_keys"])
             except Exception as exc:
-                logger.warning("Lark image download failed: %s", exc)
-                await self._deliver_text(lark_chat_id, "Couldn't fetch the image you sent — please try again.")
+                logger.warning("Lark attachment download failed: %s", exc)
+                await self._deliver_text(lark_chat_id, "Couldn't fetch the file you sent — please try again.")
                 return
-        else:
-            image_parts = []
 
         chat_id = self._runtime.chat_coordinator.get_cursor(ref)
         if chat_id is None:
@@ -535,7 +545,7 @@ class LarkChannel(BaseChannel[LarkSettings]):
             inbound_text = route.content
             metadata = route.metadata
         text_part: list[dict[str, Any]] = [{"type": "text", "text": inbound_text}] if inbound_text else []
-        content: list[dict[str, Any]] | str = text_part + image_parts if image_parts else inbound_text
+        content: list[dict[str, Any]] | str = text_part + media_parts if media_parts else inbound_text
         await mailbox.send(
             target_address,
             content,
@@ -575,28 +585,45 @@ class LarkChannel(BaseChannel[LarkSettings]):
     async def _notify_unsupported(self, lark_chat_id: str) -> None:
         await self._deliver_text(
             lark_chat_id,
-            "I can only read text messages right now — I can't process images, files, audio, "
-            "or other attachments yet. Please send your message as text.",
+            "I can't process stickers or system messages — but I can handle text, images, "
+            "and file attachments. Please send one of those.",
         )
 
-    async def _download_lark_image(self, message_id: str, image_key: str) -> bytes:
+    async def _download_lark_resource(self, message_id: str, file_key: str, resource_type: str) -> bytes:
         from lark_oapi.api.im.v1 import GetMessageResourceRequest
 
-        request = GetMessageResourceRequest.builder().message_id(message_id).file_key(image_key).type("image").build()
+        request = (
+            GetMessageResourceRequest.builder().message_id(message_id).file_key(file_key).type(resource_type).build()
+        )
         response = await asyncio.to_thread(self._client.im.v1.message_resource.get, request)
         if not response.success() or response.file is None:
-            raise ValueError(f"Lark resource download failed for {image_key}: {getattr(response, 'msg', '')}")
+            raise ValueError(f"Lark resource download failed for {file_key}: {getattr(response, 'msg', '')}")
         return response.file.read()
 
     async def _download_image_parts(self, message_id: str, image_keys: list[str]) -> list[dict[str, Any]]:
         parts: list[dict[str, Any]] = []
         for image_key in image_keys:
-            data = await self._download_lark_image(message_id, image_key)
+            data = await self._download_lark_resource(message_id, image_key, "image")
             parts.append(
-                store_uploaded_image(
+                store_uploaded_attachment(
                     upload_dir=self._runtime.upload_dir,
                     filename=f"{image_key}.png",
                     content_type="image/png",
+                    data=data,
+                )
+            )
+        return parts
+
+    async def _download_file_parts(self, message_id: str, file_keys: list[dict[str, str]]) -> list[dict[str, Any]]:
+        parts: list[dict[str, Any]] = []
+        for entry in file_keys:
+            file_key = entry["file_key"]
+            data = await self._download_lark_resource(message_id, file_key, "file")
+            parts.append(
+                store_uploaded_attachment(
+                    upload_dir=self._runtime.upload_dir,
+                    filename=entry.get("file_name") or file_key,
+                    content_type=None,
                     data=data,
                 )
             )
