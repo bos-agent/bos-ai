@@ -10,6 +10,15 @@
 pip install bos-ai
 ```
 
+## First run
+
+```bash
+OPENAI_API_KEY=<api-key> boscli ask "how are you" --model openai/gpt-4o
+```
+
+Using a different provider? See LiteLLM's [provider docs](https://docs.litellm.ai/docs/providers)
+for the right `BOS_MODEL` prefix and required environment variables.
+
 ## Create a project
 
 ```bash
@@ -21,9 +30,6 @@ boscli tui           # connect the terminal UI
 
 ## Grow the project
 
-```bash
-boscli gen agent <name>      # add a specialist agent
-boscli gen tool <Name>       # add a custom tool stub
-boscli gen channel telegram  # wire a Telegram bot
-boscli doctor                # check config, paths, env, credentials
-```
+Edit the generated `.bos/config.toml` to extend the project — it ships with
+commented-out blocks for sub-agent delegation (`SubagentPlugin`) and a Telegram
+channel; uncomment and configure the one you need.

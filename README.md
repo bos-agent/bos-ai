@@ -26,19 +26,19 @@
 
 ```bash
 pip install bos-ai
-export OPENAI_API_KEY=<replace with real api key>
-export BOS_MODEL=openai/gpt-4o
-boscli ask "how are you"
+OPENAI_API_KEY=<api-key> boscli ask "how are you" --model openai/gpt-4o
 ```
 
-Using a different provider? See LiteLLM's [provider docs](https://docs.litellm.ai/docs/providers) for the right `BOS_MODEL` prefix and required environment variables.
+Using a different provider? See LiteLLM's [provider docs](https://docs.litellm.ai/docs/providers) for the right `BOS_MODEL` prefix and required environment variables. For example, using deepseek model
 
-Or use `uvx` to start:
+```
+DEEPSEEK_API_KEY=<api-key> boscli ask "how are you" --model odeepseek/deepseek-v4-pro
+```
+
+Alternatively, it could use `uvx` to start:
 
 ```bash
-export OPENAI_API_KEY=<replace with real api key>
-export BOS_MODEL=openai/gpt-4o
-uvx boscli ask "how are you"
+OPENAI_API_KEY=<api-key> uvx boscli ask "how are you" --model openai/gpt-4o
 ```
 Install [uv](https://docs.astral.sh/uv/) to get the `uvx`.
 

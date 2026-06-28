@@ -74,7 +74,7 @@ def scaffold_workspace(
             f"Workspace already initialized: found {existing}. Edit it directly to extend it."
         )
 
-    config_text = render_template(f"{archetype}/bos.toml.tmpl", context)
+    config_text = render_template(f"{archetype}/config.toml.tmpl", context)
     validate_config(tomllib.loads(config_text))
 
     bos_dir = workspace / ".bos"
