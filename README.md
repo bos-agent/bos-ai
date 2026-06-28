@@ -1,12 +1,12 @@
 ```
- ███████████     ███████     █████████ 
+ ███████████     ███████     █████████
 ░░███░░░░░███  ███░░░░░███  ███░░░░░███
- ░███    ░███ ███     ░░███░███    ░░░ 
- ░██████████ ░███      ░███░░█████████ 
+ ░███    ░███ ███     ░░███░███    ░░░
+ ░██████████ ░███      ░███░░█████████
  ░███░░░░░███░███      ░███ ░░░░░░░░███
  ░███    ░███░░███     ███  ███    ░███
- ███████████  ░░░███████░  ░░█████████ 
-░░░░░░░░░░░     ░░░░░░░     ░░░░░░░░░  
+ ███████████  ░░░███████░  ░░█████████
+░░░░░░░░░░░     ░░░░░░░     ░░░░░░░░░
 ```
 
 > From zero to agent in a single command.
@@ -26,14 +26,21 @@
 
 ```bash
 pip install bos-ai
+export OPENAI_API_KEY=<replace with real api key>
+export BOS_MODEL=openai/gpt-4o
 boscli ask "how are you"
 ```
 
-Or if you have uv installed:
+Using a different provider? See LiteLLM's [provider docs](https://docs.litellm.ai/docs/providers) for the right `BOS_MODEL` prefix and required environment variables.
+
+Or use `uvx` to start:
 
 ```bash
+export OPENAI_API_KEY=<replace with real api key>
+export BOS_MODEL=openai/gpt-4o
 uvx boscli ask "how are you"
 ```
+Install [uv](https://docs.astral.sh/uv/) to get the `uvx`.
 
 ## Project Setup
 
@@ -44,18 +51,9 @@ boscli gateway start # start the agent runtime
 boscli tui           # connect the terminal UI
 ```
 
-Grow the project as you go:
-
-```bash
-boscli gen agent <name>      # add a specialist agent
-boscli gen tool <Name>       # add a custom tool stub
-boscli gen channel telegram  # wire a Telegram bot
-boscli doctor                # check config, paths, env, credentials
-```
-
 ## Docs
 
-See [`docs/`](docs/) for architecture, extension points, and configuration reference.
+See the [documentation site](https://bos-agent.github.io/bos-ai/) for architecture, extension points, and configuration reference.
 
 ## License
 
