@@ -65,18 +65,16 @@ _RECOMMENDED_MODELS: dict[str, tuple[str, ...]] = {
 @click.option("--purpose", default=None, help="What the agent project is for.")
 @click.option("--yes", is_flag=True, default=False, help="Accept defaults for unanswered questions; never prompt.")
 @click.option("--minimal", is_flag=True, default=False, help="Only copy the reference config template, no wizard.")
-@click.option("--flat", is_flag=True, default=False, help="Write a root bos.toml instead of the default .bos/ layout.")
 @click.option("--git/--no-git", "init_git", default=None, help="Run git init and create a .gitignore.")
 @click.option("--no-probe", is_flag=True, default=False, help="Skip the live model credential check.")
 @click.option("--name", "pkg_name_opt", default=None, help="Package name (package archetype; default: dir name).")
-def init(directory, archetype, model, purpose, yes, minimal, flat, init_git, no_probe, pkg_name_opt):
+def init(directory, archetype, model, purpose, yes, minimal, init_git, no_probe, pkg_name_opt):
     """Initialize a BOS project with a guided, runnable baseline."""
     workspace_path = Path(directory).expanduser().resolve()
-    dotbos = not flat
 
     if minimal:
         try:
-            bos_dir = initialize_workspace(workspace_path, dotbos=dotbos)
+            bos_dir = initialize_workspace(workspace_path)
         except WorkspaceResolutionError as exc:
             raise click.ClickException(str(exc))
         click.echo(f"Initialized BOS workspace at {bos_dir}")
@@ -93,16 +91,11 @@ def init(directory, archetype, model, purpose, yes, minimal, flat, init_git, no_
 
     pkg_name = None
     if archetype == "package":
-        if flat:
-            raise click.ClickException(
-                "--flat is not supported with the package archetype: the project root belongs to "
-                "the Python package, so the config always lives in .bos/."
-            )
         pkg_name = _normalize_pkg_name(pkg_name_opt or project_name)
 
     model, env_pairs = _provider_step(model, yes)
 
-    context = _build_context(project_name, purpose, archetype, model, dotbos)
+    context = _build_context(project_name, purpose, archetype, model)
     if pkg_name:
         context["pkg_name"] = pkg_name
         context["dist_name"] = pkg_name.replace("_", "-")
@@ -112,7 +105,6 @@ def init(directory, archetype, model, purpose, yes, minimal, flat, init_git, no_
             workspace_path,
             archetype,
             context,
-            dotbos=dotbos,
             env_content=_env_content(env_pairs),
         )
     except WorkspaceResolutionError as exc:
@@ -262,7 +254,6 @@ def _build_context(
     purpose: str,
     archetype: str,
     model: str | None,
-    dotbos: bool,
 ) -> dict[str, str]:
     if model:
         model_line = f'model = "{model}"'
@@ -276,7 +267,7 @@ def _build_context(
         "purpose_toml": toml_multiline_text(purpose),
         "archetype": archetype,
         "model_line": model_line,
-        "config_path": ".bos/config.toml" if dotbos else "bos.toml",
+        "config_path": ".bos/config.toml",
         "first_prompt": first_prompt,
     }
 

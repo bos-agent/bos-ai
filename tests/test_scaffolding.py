@@ -39,7 +39,8 @@ def test_init_yes_scaffolds_runnable_baseline(tmp_path, monkeypatch):
 
 def test_init_rejects_initialized_workspace(tmp_path, monkeypatch):
     monkeypatch.delenv("BOS_CONFIG", raising=False)
-    (tmp_path / "bos.toml").write_text("", encoding="utf-8")
+    (tmp_path / ".bos").mkdir()
+    (tmp_path / ".bos" / "config.toml").write_text("", encoding="utf-8")
 
     result = _invoke(["init", str(tmp_path), "--yes", "--no-git"])
 
@@ -55,22 +56,6 @@ def test_init_minimal_copies_reference_template(tmp_path, monkeypatch):
     assert f"Initialized BOS workspace at {tmp_path / '.bos'}" in result.output
     assert (tmp_path / ".bos" / "config.toml").is_file()
     assert not (tmp_path / ".bos" / "extensions").exists()
-
-
-def test_init_flat_layout(tmp_path, monkeypatch):
-    monkeypatch.delenv("BOS_CONFIG", raising=False)
-    _init_project(tmp_path, "--flat")
-
-    assert (tmp_path / "bos.toml").is_file()
-    assert not (tmp_path / ".bos").exists()
-
-
-def test_init_flat_rejected_for_package_archetype(tmp_path, monkeypatch):
-    monkeypatch.delenv("BOS_CONFIG", raising=False)
-    result = _invoke(["init", str(tmp_path), "--yes", "--no-git", "--archetype", "package", "--flat"])
-
-    assert result.exit_code != 0
-    assert "--flat is not supported with the package archetype" in result.output
 
 
 def test_init_package_archetype(tmp_path, monkeypatch):
@@ -136,13 +121,14 @@ def test_config_source_banner_formats(tmp_path, monkeypatch):
     import bos.cli.commands.agent as agent_module
 
     monkeypatch.setattr("sys.stderr.isatty", lambda: True)
-    ws = SimpleNamespace(config_file=tmp_path / "bos.toml", bos_dir=tmp_path, workspace=tmp_path)
+    bos_dir = tmp_path / ".bos"
+    ws = SimpleNamespace(config_file=bos_dir / "config.toml", bos_dir=bos_dir, workspace=tmp_path)
 
     captured = []
     monkeypatch.setattr("click.echo", lambda msg, err=False: captured.append((msg, err)))
 
     agent_module._echo_config_source(ws)
-    assert captured[-1] == (f"Using project: {tmp_path} (bos.toml)", True)
+    assert captured[-1] == (f"Using project: {tmp_path} (config.toml)", True)
 
     agent_module._echo_config_source(ws, config_arg="/some/custom.toml")
     assert captured[-1][0].startswith("Using config file:")

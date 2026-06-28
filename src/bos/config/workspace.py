@@ -66,22 +66,10 @@ _EXTERNAL_AGENT_SUFFIXES = {".toml", ".md"}
 
 def find_discovered_config(workspace: Path) -> Path | None:
     for parent in [workspace] + list(workspace.parents):
-        has_dotbos = (parent / ".bos").exists()
-        has_bostoml = (parent / "bos.toml").is_file()
-
-        if has_dotbos and has_bostoml:
-            raise WorkspaceResolutionError(
-                f"Ambiguous BOS config: found both .bos/ and bos.toml in {parent}. Remove one to resolve the ambiguity."
-            )
-
-        if has_dotbos:
-            dotbos_config = parent / ".bos" / "config.toml"
-            if dotbos_config.is_file():
-                return dotbos_config
-            # .bos/ exists but config.toml is missing — keep walking up
-
-        if has_bostoml:
-            return parent / "bos.toml"
+        dotbos_config = parent / ".bos" / "config.toml"
+        if dotbos_config.is_file():
+            return dotbos_config
+        # .bos/ may exist without config.toml — keep walking up
 
     return None
 
@@ -160,7 +148,7 @@ def resolve_config_source(config_arg: str) -> tuple[Path, Path, RootConfig]:
     raise WorkspaceResolutionError(f"Unknown config source {config_arg!r}. {presets_msg}")
 
 
-def initialize_workspace(workspace: str | Path = ".", *, dotbos: bool = True) -> Path:
+def initialize_workspace(workspace: str | Path = ".") -> Path:
     workspace = _resolve_path(workspace)
 
     existing_config = find_discovered_config(workspace)
@@ -169,13 +157,9 @@ def initialize_workspace(workspace: str | Path = ".", *, dotbos: bool = True) ->
             f"Workspace already initialized: found {existing_config}. Remove it before re-initializing."
         )
 
-    if dotbos:
-        bos_dir = workspace / ".bos"
-        cfg_file = bos_dir / "config.toml"
-        bos_dir.mkdir(parents=True, exist_ok=True)
-    else:
-        bos_dir = workspace
-        cfg_file = workspace / "bos.toml"
+    bos_dir = workspace / ".bos"
+    cfg_file = bos_dir / "config.toml"
+    bos_dir.mkdir(parents=True, exist_ok=True)
 
     shutil.copy2(_config_template_path(), cfg_file)
     return bos_dir
@@ -453,9 +437,7 @@ class Workspace:
         config = _load_config(config_path)
 
         # Derive workspace root from config location
-        if config_path.name == "bos.toml":
-            workspace = config_path.parent
-        elif config_path.name == "config.toml" and config_path.parent.name == ".bos":
+        if config_path.name == "config.toml" and config_path.parent.name == ".bos":
             workspace = config_path.parent.parent
         else:
             workspace = resolved_cwd

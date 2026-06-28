@@ -2,7 +2,7 @@
 
 Usage (internal, via proc.start_background)::
 
-    python -m bos.runner --config /path/to/bos.toml
+    python -m bos.runner --config /path/to/.bos/config.toml
 """
 
 from __future__ import annotations
