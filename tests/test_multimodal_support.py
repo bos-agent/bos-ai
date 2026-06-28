@@ -279,36 +279,22 @@ def test_default_provider_normalization_accepts_path_backed_image_parts(tmp_path
     assert base64.b64decode(image_part["image_url"]["url"].split(",", 1)[1]) == image_bytes
 
 
-@pytest.mark.asyncio
-async def test_default_provider_rejects_reserved_file_and_pdf_parts(monkeypatch):
-    called = False
-
-    async def fake_acompletion(*, model, messages, **kwargs):
-        nonlocal called
-        called = True
-        return _FakeLiteLLMResponse()
-
-    monkeypatch.setitem(sys.modules, "litellm", types.SimpleNamespace(acompletion=fake_acompletion))
-
-    response = await litellm_complete(
-        model="openai/gpt-4.1-mini",
-        messages=[
+def test_default_provider_renders_file_parts_as_path_reference():
+    normalized = _normalize_litellm_message({
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "Summarize the attachment."},
             {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "Summarize the attachment."},
-                    {
-                        "type": "file",
-                        "mime_type": "application/pdf",
-                        "source": {"kind": "path", "value": "/tmp/example.pdf"},
-                    },
-                ],
-            }
+                "type": "file",
+                "mime_type": "application/pdf",
+                "source": {"kind": "path", "value": "/tmp/uploads/abc123.pdf"},
+            },
         ],
-    )
+    })
 
-    assert called is False
-    assert response.finish_reason == "error"
-    assert response.content == (
-        "Error calling default provider: File/PDF inputs are reserved in phase 1 and are not yet supported."
-    )
+    # The file part is handed to the model as a path+mime text reference so the
+    # agent can resolve it with its filesystem tools — never sent as bytes.
+    assert normalized["content"] == [
+        {"type": "text", "text": "Summarize the attachment."},
+        {"type": "text", "text": "[attachment: /tmp/uploads/abc123.pdf (application/pdf)]"},
+    ]

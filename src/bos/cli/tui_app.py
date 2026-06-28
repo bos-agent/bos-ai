@@ -1182,7 +1182,7 @@ class ChatApp(App):
         if path is None:
             return
         try:
-            part = await self._client.upload_image(path)
+            part = await self._client.upload_attachment(path)
         except Exception as exc:
             self._write_system(f"[yellow]⚠ Couldn't attach {Path(path).name}: {exc}[/]")
             return

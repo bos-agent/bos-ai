@@ -320,9 +320,9 @@ class GatewayClient:
         except asyncio.QueueEmpty:
             return None
 
-    async def upload_image(self, path: str | Path) -> dict[str, Any]:
+    async def upload_attachment(self, path: str | Path) -> dict[str, Any]:
         if self._session is None or self._session.closed:
-            raise RuntimeError("Not connected — connect the gateway client before uploading images.")
+            raise RuntimeError("Not connected — connect the gateway client before uploading attachments.")
 
         upload_path = Path(path).expanduser().resolve()
         if not upload_path.is_file():
@@ -333,7 +333,7 @@ class GatewayClient:
         form = aiohttp.FormData()
         with upload_path.open("rb") as handle:
             form.add_field("file", handle, filename=upload_path.name)
-            async with self._session.post(f"{self._http_base_url}/api/upload-image", data=form) as response:
+            async with self._session.post(f"{self._http_base_url}/api/upload", data=form) as response:
                 payload = await response.json()
 
         if response.status >= 400 or not payload.get("ok"):

@@ -17,7 +17,7 @@ from bos.core import BaseChannel, MailBox, ep_channel
 from bos.core.actor import Envelope, MessageType
 from bos.core.agent import TurnEvent
 from bos.gateway import ChannelConversationRef, ChannelRuntimeContext
-from bos.gateway.http import store_uploaded_image
+from bos.gateway.http import store_uploaded_attachment
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +107,34 @@ def _largest_photo_file_id(photo: Any) -> str | None:
     return None
 
 
+# Non-photo media fields, in priority order. Each carries a single ``file_id``
+# and, for most types, a ``mime_type`` (and sometimes ``file_name``). These are
+# stored verbatim and handed to the agent as a path reference — never rejected.
+_ATTACHMENT_KEYS = ("document", "audio", "voice", "video", "video_note", "animation")
+
+
+def _extract_attachment(message: dict[str, Any]) -> dict[str, Any] | None:
+    """Return a descriptor for a single non-photo attachment, if present."""
+    for key in _ATTACHMENT_KEYS:
+        media = message.get(key)
+        if isinstance(media, dict) and isinstance(media.get("file_id"), str):
+            return {
+                "file_id": media["file_id"],
+                "filename": media.get("file_name"),
+                "mime_type": media.get("mime_type"),
+            }
+    return None
+
+
+def _inbound_attachment_descriptors(inbound: dict[str, Any]) -> list[dict[str, Any]]:
+    """Download descriptors for a single inbound message (photos or one file)."""
+    if inbound.get("file_ids"):
+        # Photos carry no MIME type from Telegram; they are always JPEG.
+        return [{"file_id": fid, "filename": None, "mime_type": "image/jpeg"} for fid in inbound["file_ids"]]
+    attachment = inbound.get("attachment")
+    return [attachment] if attachment else []
+
+
 def _extract_inbound_message(update: dict[str, Any], *, bot_username: str | None = None) -> dict[str, Any] | None:
     message = update.get("message") or update.get("edited_message")
     if not isinstance(message, dict):
@@ -120,33 +148,33 @@ def _extract_inbound_message(update: dict[str, Any], *, bot_username: str | None
     caption = message.get("text") or message.get("caption")
     caption = caption if isinstance(caption, str) else ""
     file_id = _largest_photo_file_id(message.get("photo"))
+    attachment = _extract_attachment(message) if file_id is None else None
 
-    if not caption.strip() and file_id is None:
+    if not caption.strip() and file_id is None and attachment is None:
         return None  # nothing we can use
 
+    has_media = file_id is not None or attachment is not None
     normalized = _normalize_command(caption, bot_username) if caption.strip() else ""
-    is_command = normalized.startswith("/") and file_id is None
+    is_command = normalized.startswith("/") and not has_media
     return {
         "telegram_chat_id": str(telegram_chat_id),
         "channel_conversation_id": _conversation_id_for_telegram_chat(telegram_chat_id),
         "text": normalized,
         "content_type": MessageType.COMMAND if is_command else MessageType.MESSAGE,
         "file_ids": [file_id] if file_id else [],
+        "attachment": attachment,
         "media_group_id": message.get("media_group_id"),
     }
 
 
-# Message fields that carry user content this channel can't read (no text/caption).
-# Used to tell genuine media apart from service updates (e.g. new_chat_members),
-# so we only nudge the sender when they actually sent something we can't process.
+# Message fields that carry user content this channel can't turn into an
+# attachment (no downloadable file we'd reference). Used to tell genuine media
+# apart from service updates (e.g. new_chat_members), so we only nudge the
+# sender when they actually sent something we can't process. Downloadable media
+# (document, audio, voice, video, video_note, animation, photo) is handled and
+# is intentionally absent here.
 _UNSUPPORTED_CONTENT_KEYS = (
-    "voice",
-    "audio",
-    "video",
-    "video_note",
-    "document",
     "sticker",
-    "animation",
     "contact",
     "location",
     "poll",
@@ -388,21 +416,20 @@ class TelegramChannel(BaseChannel[TelegramSettings]):
                     if inbound["content_type"] == MessageType.MESSAGE and inbound["media_group_id"]:
                         self._buffer_album_update(mailbox, inbound)
                         continue
-                    is_single_photo = (
-                        inbound["content_type"] == MessageType.MESSAGE
-                        and inbound["file_ids"]
-                        and not inbound["media_group_id"]
+                    descriptors = _inbound_attachment_descriptors(inbound)
+                    is_single_media = (
+                        inbound["content_type"] == MessageType.MESSAGE and descriptors and not inbound["media_group_id"]
                     )
-                    if is_single_photo:
+                    if is_single_media:
                         try:
-                            parts = await self._download_image_parts(inbound["file_ids"])
+                            parts = await self._download_attachment_parts(descriptors)
                         except Exception as exc:
-                            logger.warning("Telegram image download failed: %s", exc)
+                            logger.warning("Telegram attachment download failed: %s", exc)
                             await self._api_call(
                                 "sendMessage",
                                 {
                                     "chat_id": telegram_chat_id,
-                                    "text": "Couldn't fetch the image you sent — please try again.",
+                                    "text": "Couldn't fetch the file you sent — please try again.",
                                 },
                             )
                             continue
@@ -511,7 +538,7 @@ class TelegramChannel(BaseChannel[TelegramSettings]):
         inbound["text"] = buf["caption"]
         inbound["file_ids"] = buf["file_ids"]
         try:
-            parts = await self._download_image_parts(buf["file_ids"])
+            parts = await self._download_attachment_parts(_inbound_attachment_descriptors(inbound))
         except Exception as exc:
             logger.warning("Telegram album download failed: %s", exc)
             await self._api_call(
@@ -533,19 +560,20 @@ class TelegramChannel(BaseChannel[TelegramSettings]):
             resp.raise_for_status()
             return await resp.read()
 
-    async def _download_image_parts(self, file_ids: list[str]) -> list[dict[str, Any]]:
+    async def _download_attachment_parts(self, descriptors: list[dict[str, Any]]) -> list[dict[str, Any]]:
         parts: list[dict[str, Any]] = []
-        for file_id in file_ids:
+        for desc in descriptors:
+            file_id = desc["file_id"]
             info = await self._api_call("getFile", {"file_id": file_id})
             file_path = (info.get("result") or {}).get("file_path")
             if not file_path:
                 raise ValueError(f"Telegram getFile returned no file_path for {file_id}")
             data = await self._download_telegram_file(file_path)
             parts.append(
-                store_uploaded_image(
+                store_uploaded_attachment(
                     upload_dir=self._runtime.upload_dir,
-                    filename=Path(file_path).name,
-                    content_type="image/jpeg",
+                    filename=desc.get("filename") or Path(file_path).name,
+                    content_type=desc.get("mime_type"),
                     data=data,
                 )
             )
@@ -618,8 +646,8 @@ class TelegramChannel(BaseChannel[TelegramSettings]):
                 {
                     "chat_id": telegram_chat_id,
                     "text": (
-                        "I can only read text messages right now — I can't process voice, photos, "
-                        "or other attachments yet. Please send your message as text."
+                        "I can't process stickers, polls, contacts, or locations — but I can "
+                        "handle text, photos, and file attachments. Please send one of those."
                     ),
                 },
             )

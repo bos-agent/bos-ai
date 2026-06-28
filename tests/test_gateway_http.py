@@ -155,6 +155,31 @@ async def test_gateway_upload_image_returns_path_part(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_gateway_upload_non_image_returns_file_part(tmp_path):
+    runner, base_url = await _start_app(_app(tmp_path))
+    try:
+        form = FormData()
+        form.add_field("file", b"%PDF-1.4 fake", filename="report.pdf", content_type="application/pdf")
+        async with aiohttp.ClientSession() as session:
+            response = await session.post(
+                f"{base_url}/api/upload",
+                data=form,
+                headers={"Authorization": "Bearer secret"},
+            )
+            payload = await response.json()
+
+        assert response.status == 201
+        assert payload["ok"] is True
+        part = payload["part"]
+        assert part["type"] == "file"
+        assert part["mime_type"] == "application/pdf"
+        assert part["source"]["kind"] == "path"
+        assert part["source"]["value"].endswith(".pdf")
+    finally:
+        await runner.cleanup()
+
+
+@pytest.mark.asyncio
 async def test_ws_endpoint_is_authenticated_even_before_ws_channel_slice(tmp_path):
     runner, base_url = await _start_app(_app(tmp_path))
     try:
