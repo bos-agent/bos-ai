@@ -21,7 +21,6 @@ from rich.text import Text
 
 from bos.config import ConfigNotFoundError, Workspace, WorkspaceResolutionError, resolve_config_source
 from bos.config.workspace import _resolve_path, presets_dir
-from bos.core.actor import MessageType
 from bos.core.agent import TurnEvent
 from bos.gateway.state import GatewayRunDir
 
@@ -322,23 +321,6 @@ class _TaskProgressDisplay:
         return []
 
 
-async def _run_oneshot_exchange(client, message: str, progress: _TaskProgressDisplay | None) -> str:
-    """Send *message* over the gateway client and consume envelopes until the final reply."""
-    await client.send(message)
-    while True:
-        env = await client.receive()
-        if env.content_type == MessageType.TURN_EVENT:
-            try:
-                data = json.loads(env.content) if isinstance(env.content, str) else {}
-            except json.JSONDecodeError:
-                data = {}
-            if data and progress is not None:
-                await progress.emit(TurnEvent.from_payload(data))
-        elif env.content_type == MessageType.MESSAGE:
-            return str(env.content or "")
-        # SYSTEM / ECHO / COMMAND_RESULT envelopes are not part of the oneshot exchange.
-
-
 # ── boscli ask ──────────────────────────────────────────────────
 
 
@@ -351,6 +333,8 @@ async def _run_oneshot_exchange(client, message: str, progress: _TaskProgressDis
     default=False,
     help="Read task content from stdin (appended after MESSAGE if both given).",
 )
+@click.option("--model", "model", default=None, help="Model id to use for this run (overrides BOS_MODEL).")
+@click.option("--agent", "agent_name", default=None, help="Actor to run (overrides runtime.main_actor).")
 @click.option(
     "-w",
     "--workspace",
@@ -363,17 +347,20 @@ def ask(
     ctx,
     message: str | None,
     use_stdin: bool,
+    model: str | None,
+    agent_name: str | None,
     workspace_dir: str | None,
 ):
-    """Run a oneshot agent task against the gateway.
+    """Run a oneshot agent task in-process and print the agent's final reply.
 
-    Connects to the running gateway (starting one in the background if
-    needed — it is left running) and prints the agent's final reply.
+    Runs the agent in this process (not via the gateway), so BOS_MODEL / --model
+    are honored on every invocation and no gateway is left running.
 
     \b
     Examples:
         boscli ask "refactor the auth module"
         boscli -c coding ask "explain this"
+        boscli ask --agent researcher "summarize the spec"
         cat spec.md | boscli ask --stdin
     """
     if use_stdin and not sys.stdin.isatty():
@@ -383,35 +370,31 @@ def ask(
     if not message:
         raise click.UsageError("Provide a task message or use --stdin.")
 
-    ws, rd = _get_ws_and_rd(ctx, workspace_dir)
-    gateway_config = ws.resolve_gateway_config()
-    api_key = os.environ.get(gateway_config.api_key_env, "").strip() or None
+    ws, _ = _get_ws_and_rd(ctx, workspace_dir)
+    ws.resolve_agents()
+    ws.bootstrap_platform()
 
-    host, port = _ensure_gateway_endpoint(ctx, rd, workspace_dir)
-
-    from bos.gateway.client import GatewayClient
-
-    # Stamp the invocation directory (or -w override) on each message so the
-    # agent knows where the user is working, not just the gateway workspace.
-    client_workdir = str(_resolve_path(workspace_dir)) if workspace_dir else os.getcwd()
+    runtime = ws.config.runtime
+    actors = runtime.actors if runtime else {}
+    actor_name = agent_name or ws.resolve_default_actor()
+    if actor_name not in actors:
+        known = ", ".join(sorted(actors)) or "none"
+        raise click.ClickException(f"Unknown actor {actor_name!r}. Available actors: {known}")
+    actor_cfg = actors[actor_name]
 
     async def _run() -> str:
-        # A unique channel id per invocation gives the task a fresh chat.
-        client = GatewayClient(
-            host=host,
-            port=port,
-            address="ask",
-            channel_id=f"ask:{_safe_username()}-{uuid.uuid4().hex[:8]}",
-            chat_id=None,
-            endpoint_resolver=lambda: _read_gateway_endpoint(rd),
-            api_key=api_key,
-            workdir=client_workdir,
-        )
-        await client.connect()
-        try:
-            return await _run_oneshot_exchange(client, message, _TaskProgressDisplay())
-        finally:
-            await client.aclose()
+        async with ws.harness() as harness:
+            agent = await harness.create_agent(
+                kind=actor_cfg.agent,
+                agent_cfg=actor_cfg.agent_cfg.model_dump(),
+            )
+            result = await agent.run(
+                uuid.uuid4().hex,
+                message,
+                event_sink=_TaskProgressDisplay(),
+                llm_args={"model": model} if model else None,
+            )
+            return str(result.output or "")
 
     result = asyncio.run(_run())
 
