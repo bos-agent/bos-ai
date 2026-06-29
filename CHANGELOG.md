@@ -2,6 +2,21 @@
 
 <!-- version list -->
 
+## v1.8.0 (2026-06-29)
+
+### Documentation
+
+- Flesh out docsite and add full AI-agent reference
+  ([#66](https://github.com/bos-agent/bos-ai/pull/66),
+  [`cc92d73`](https://github.com/bos-agent/bos-ai/commit/cc92d7342b82da48cbd087aabb981c372bb3f3f1))
+
+### Features
+
+- **cli**: Run boscli ask in-process; remove Docker runtime feature
+  ([#65](https://github.com/bos-agent/bos-ai/pull/65),
+  [`b0c53aa`](https://github.com/bos-agent/bos-ai/commit/b0c53aa0e05b903dddb4934bc82861fb516e5dbd))
+
+
 ## v1.7.0 (2026-06-28)
 
 ### Documentation
