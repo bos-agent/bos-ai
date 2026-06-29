@@ -1,7 +1,7 @@
 [project]
 name = "bos-ai"
 version = "1.7.0"
-description = "Lightweight single-file agent framework"
+description = "Lightweight, extensible framework for building and running multi-agent systems"
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.13"

@@ -1,5 +1,5 @@
 """
-Lightweight single-file agent framework.
+Lightweight, extensible framework for building and running multi-agent systems.
 """
 
 from __future__ import annotations
