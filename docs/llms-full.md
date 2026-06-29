@@ -495,8 +495,9 @@ return await ep_provider.invoke(provider_name, kwargs | {"messages": messages, "
 So: register `@ep_provider(name="codex")` and any agent whose `model = "codex/..."` routes
 to it. If the prefix is not a registered provider (e.g. `openai/gpt-4o`), it falls back to
 the built-in `litellm` provider with the full model string. Provider defaults come from
-`[exts.ep_provider.<name>]`. Built-in providers ship for `codex`, `gemini_cli`,
-`antigravity`; `litellm` is the default fallback (registered by `bos.core.defaults`).
+`[exts.ep_provider.<name>]`. The only built-in provider is `litellm`, which is also the
+default fallback (registered by `bos.core.defaults`); it reaches every provider LiteLLM
+supports, so a custom `@ep_provider` is only needed for non-LiteLLM backends.
 
 ### 6.3 Chat stores — `@ep_chat_store`
 

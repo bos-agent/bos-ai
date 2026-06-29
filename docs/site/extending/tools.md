@@ -129,7 +129,7 @@ async def ask_expert(question: str, context: ToolContext | None = None) -> str:
     ...
 ```
 
-The `context` parameter is **not** exposed in the tool schema — BOS strips it before passing the schema to the model.
+The `context` parameter is injected by the harness, not supplied by the model — so leave it out of `parameters`. The schema the model sees is exactly the `parameters` dict you declare (BOS does not strip anything), and validation only requires that every property in `parameters` map to a function argument, so an extra `context` argument is allowed precisely because it is absent from the schema.
 
 ---
 

@@ -41,7 +41,7 @@ model = "mycloud/fast-v2"
 timeout = 30
 ```
 
-**Built-in providers:** `codex`, `gemini_cli`, `antigravity`.  `litellm` is the default fallback (registered by `bos.core.defaults`).
+**Built-in provider:** `litellm` is the only built-in provider and the default fallback (registered by `bos.core.defaults`). Because it reaches every backend LiteLLM supports, you only need a custom `@ep_provider` for a non-LiteLLM backend.
 
 ---
 
