@@ -1,5 +1,5 @@
 site_name: BOS
-site_description: Lightweight single-file agent framework — from zero to agent in a single command.
+site_description: Lightweight, extensible framework for building and running multi-agent systems — from zero to agent in one command.
 site_url: https://bos-agent.github.io/bos-ai/
 repo_url: https://github.com/bos-agent/bos-ai
 repo_name: bos-agent/bos-ai
@@ -51,6 +51,27 @@ plugins:
 nav:
   - Home: index.md
   - Getting Started: getting-started.md
+  - Tutorials:
+      - Overview: tutorials/index.md
+      - 1. Your first agent: tutorials/first-agent.md
+      - 2. Create a project: tutorials/create-a-project.md
+      - 3. Add a custom tool: tutorials/custom-tool.md
+      - 4. Delegate to sub-agents: tutorials/subagents.md
+      - 5. Connect a channel: tutorials/channels.md
+      - 6. Package & share extensions: tutorials/package-extension.md
+  - Concepts:
+      - Overview: concepts/index.md
+      - Runtime & gateway: concepts/runtime.md
+      - Agents & actors: concepts/agents-and-actors.md
+      - Memory & skills: concepts/memory-and-skills.md
+  - Configuration: configuration/index.md
+  - Extending BOS:
+      - Overview: extending/index.md
+      - Tools: extending/tools.md
+      - Plugins: extending/plugins.md
+      - Channels: extending/channels.md
+      - Stores & providers: extending/stores-and-providers.md
+      - Packaging & entry points: extending/entry-points.md
   - CLI: cli/index.md
   - Architecture:
       - Overview: architecture/index.md

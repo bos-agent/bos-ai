@@ -2,9 +2,9 @@
 
 > From zero to agent in a single command.
 
-**BOS** is a lightweight, single-file agent framework. Install it, and you have a
-working agent in one command — then grow it into a multi-agent project as your
-needs expand.
+**BOS** is a lightweight, extensible framework for building and running multi-agent
+systems. Install it, and you have a working agent in one command — then grow it into
+a multi-agent project as your needs expand.
 
 ## Quick Start
 
@@ -13,23 +13,48 @@ pip install bos-ai
 OPENAI_API_KEY=<api-key> boscli ask "how are you" --model openai/gpt-4o
 ```
 
+Prefer to set the credentials and model once instead of repeating them on every
+call? Export them into your environment — `boscli ask` reads `BOS_MODEL` when
+`--model` is omitted:
+
+```bash
+export OPENAI_API_KEY=<api-key>
+export BOS_MODEL=openai/gpt-4o
+boscli ask "how are you"
+```
+
 Using a different provider? See LiteLLM's [provider docs](https://docs.litellm.ai/docs/providers)
 for the right `BOS_MODEL` prefix and required environment variables. For example, with a
 DeepSeek model:
 
 ```bash
-DEEPSEEK_API_KEY=<api-key> boscli ask "how are you" --model deepseek/deepseek-v4-pro
+export DEEPSEEK_API_KEY=<api-key>
+export BOS_MODEL=deepseek/deepseek-v4-pro
+boscli ask "how are you"
 ```
 
 Alternatively, use [uv](https://docs.astral.sh/uv/)'s `uvx` to start without installing:
 
 ```bash
-OPENAI_API_KEY=<api-key> uvx boscli ask "how are you" --model openai/gpt-4o
+export OPENAI_API_KEY=<api-key>
+export BOS_MODEL=openai/gpt-4o
+uvx boscli ask "how are you"
 ```
 
 ## Where to go next
 
 - **[Getting Started](getting-started.md)** — set up a project and run the agent runtime.
+- **[Tutorials](tutorials/index.md)** — a hands-on path from your first agent to a packaged,
+  shareable extension.
+- **[Concepts](concepts/index.md)** — how the runtime, agents, actors, memory, and skills fit
+  together.
+- **[Configuration](configuration/index.md)** — the complete `config.toml` reference.
+- **[Extending BOS](extending/index.md)** — write tools, plugins, channels, and providers.
 - **[CLI](cli/index.md)** — the `boscli` commands you'll use day to day.
 - **[Architecture](architecture/index.md)** — the design and principles behind BOS,
   plus an index of the enhancement proposals (BEPs) that record deeper design decisions.
+
+!!! info "Building on BOS with an AI agent?"
+    The repository ships a single dense reference at `docs/llms-full.md` that covers every
+    mechanism — configuration, extension points, plugins, channels, skills, the CLI, and the
+    runtime — in one file, intended for ingestion by an AI coding agent.
