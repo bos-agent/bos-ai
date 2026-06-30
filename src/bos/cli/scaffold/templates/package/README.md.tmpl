@@ -6,11 +6,17 @@ A [BOS](https://github.com/bos-agent/bos-ai) extension package (archetype: `${ar
 an installable Python package whose tools register with the BOS runtime through the
 `bos.exts` entry point — usable in this project and in any project that installs it.
 
+> **Using an AI coding agent in this project?** Point it at
+> [`llm-full.md`](llm-full.md) — a single, dense, self-contained reference to how
+> BOS works (config, extension points, plugins, channels, skills, the CLI, the
+> runtime, packaging). Read it before editing the config or adding tools/agents.
+
 ## Layout
 
 | Path | Purpose |
 |---|---|
 | `.bos/config.toml` | Project configuration: agents, plugins, runtime. |
+| `llm-full.md` | Full BOS reference for AI agents (and humans). |
 | `.bos/agents/` | Agent definitions (`.md` frontmatter + system prompt, or `.toml`). |
 | `.bos/.env` | Secrets (API keys, tokens). Gitignored — never commit it. |
 | `src/${pkg_name}/tools.py` | Your extensions. The `bos.exts` entry point in `pyproject.toml` points here. |

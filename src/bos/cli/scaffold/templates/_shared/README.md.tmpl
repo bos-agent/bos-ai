@@ -4,11 +4,17 @@ ${purpose}
 
 A [BOS](https://github.com/bos-agent/bos-ai) agent project (archetype: `${archetype}`).
 
+> **Using an AI coding agent in this project?** Point it at
+> [`llm-full.md`](llm-full.md) — a single, dense, self-contained reference to how
+> BOS works (config, extension points, plugins, channels, skills, the CLI, the
+> runtime, packaging). Read it before editing the config or adding tools/agents.
+
 ## Layout
 
 | Path | Purpose |
 |---|---|
 | `${config_path}` | Project configuration: agents, plugins, runtime, channels. |
+| `llm-full.md` | Full BOS reference for AI agents (and humans). |
 | `agents/` | Agent definitions (`.md` frontmatter + system prompt, or `.toml`). Auto-discovered. |
 | `extensions/` | Project-local extensions (`@ep_tool`, `@ep_channel`, …). Auto-discovered. |
 | `skills/` | Reusable instruction packs the agent can load on demand. |

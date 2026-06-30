@@ -17,6 +17,10 @@ from bos.config.workspace import find_discovered_config
 
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
 
+# The full BOS reference ships at the package root (``bos/llm-full.md``) so it is
+# easy to find and not buried under the scaffold templates.
+_LLM_FULL_DOC = Path(__file__).parents[2] / "llm-full.md"
+
 ARCHETYPES: tuple[str, ...] = ("workspace", "package")
 
 
@@ -94,6 +98,9 @@ def scaffold_workspace(
     try:
         write(config_file, config_text)
         write(workspace / "README.md", render_template(readme_template, context))
+        # Ship the full BOS reference so an AI agent working in this project can
+        # learn how to use BOS without leaving the workspace. Copied verbatim.
+        write(workspace / "llm-full.md", _LLM_FULL_DOC.read_text(encoding="utf-8"))
         write(bos_dir / ".env", env_content)
         # Always keep the .bos/ dir clean in git: ignore runtime/state files but
         # track the durable config, agents, and skills — regardless of whether

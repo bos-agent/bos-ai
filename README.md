@@ -55,7 +55,7 @@ boscli tui           # connect the terminal UI
 
 See the [documentation site](https://bos-agent.github.io/bos-ai/) for tutorials, architecture, extension points, and the configuration reference.
 
-Building on BOS with an AI agent? [`docs/llms-full.md`](docs/llms-full.md) is a single dense, code-grounded reference covering every mechanism — configuration, extension points, plugins, channels, skills, the CLI, and the runtime — in one file.
+Building on BOS with an AI agent? [`llm-full.md`](src/bos/llm-full.md) is a single dense, code-grounded reference covering every mechanism — configuration, extension points, plugins, channels, skills, the CLI, and the runtime — in one file. `boscli init` drops a copy into every scaffolded project.
 
 ## License
 
