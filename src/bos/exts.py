@@ -46,6 +46,9 @@ the bos builtins and before workspace skill dirs — so workspace skills win
 on name clashes.
 """
 
+# Built-in agents
+import bos.extensions.agents.bos  # noqa: F401
+
 # Channels
 import bos.extensions.channels.lark  # noqa: F401
 import bos.extensions.channels.telegram  # noqa: F401

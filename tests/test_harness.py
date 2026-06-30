@@ -15,10 +15,8 @@ from conftest import (
 import bos.extensions.tools.filesystem  # noqa: F401  — registers ep_tool entries
 import bos.extensions.tools.knowledge  # noqa: F401
 import bos.extensions.tools.system  # noqa: F401
-from bos.config.bos_agent import default_agent_spec
 from bos.config.workspace import Workspace
 from bos.core import (
-    DEFAULT_AGENT_KIND,
     AgentHarness,
     AgentRegistry,
     LLMResponse,
@@ -28,6 +26,7 @@ from bos.core import (
 )
 from bos.core.contract import ep_consolidator, ep_tool
 from bos.core.registry import ToolRegistry
+from bos.extensions.agents.bos import default_agent_spec
 from bos.plugins.memory import MemoryAgentPlugin
 from bos.plugins.skills import SkillMeta, SkillsAgentPlugin, SkillsHarnessPlugin
 from bos.plugins.subagent import SubagentAgentPlugin, SubagentHarnessPlugin
@@ -105,7 +104,7 @@ async def test_subagent_plugin_hides_prompt_and_tool_when_no_subagents():
     snapshot = dict(AgentRegistry._registry)
     AgentRegistry._registry.clear()
     try:
-        AgentRegistry.register(name=DEFAULT_AGENT_KIND, description="Default agent", tools=[])
+        # No agents registered → the allow-list ("*") resolves to an empty pool.
         local_tools = ToolRegistry("_test_tools")
         subagent = SubagentAgentPlugin(_MockAgentRunner(), enabled=None, disabled=[])
 
@@ -171,7 +170,7 @@ async def test_harness_binds_subagent_plugin_bindings_from_validated_config(tmp_
         ws.bootstrap_platform()
 
         async with ws.harness() as harness:
-            agent = await harness.create_agent(DEFAULT_AGENT_KIND)
+            agent = await harness.create_agent("BOS")
             prompt = await agent._build_system_prompt(dummy_turn_context())
 
         assert agent._tools.has("AskSubagent")
@@ -837,9 +836,9 @@ async def test_prompt_sections_render_first_50_items_and_warn(caplog):
             }
 
     subagent_names = [f"prompt_cap_agent_{uuid.uuid4().hex}_{i:03}" for i in range(51)]
+    snapshot = dict(AgentRegistry._registry)
+    AgentRegistry._registry.clear()  # isolate: only these 51 agents count as subagents
     try:
-        # Clean up leaked registrations from other tests
-        AgentRegistry._registry.pop("test-agent", None)
         for i, name in enumerate(subagent_names):
             AgentRegistry.register(name=name, description=f"Subagent description {i:03}", tools=[])
 
@@ -868,8 +867,8 @@ async def test_prompt_sections_render_first_50_items_and_warn(caplog):
         assert "first 50 tools" in caplog.text
         assert "first 50 subagents" in caplog.text
     finally:
-        for name in subagent_names:
-            AgentRegistry._registry.pop(name, None)
+        AgentRegistry._registry.clear()
+        AgentRegistry._registry.update(snapshot)
 
 
 @pytest.mark.asyncio
@@ -1292,7 +1291,7 @@ def test_bootstrap_platform_does_not_require_consolidator_model(tmp_path, monkey
     bos_dir = tmp_path / ".bos"
     bos_dir.mkdir(parents=True, exist_ok=True)
     ws = Workspace(
-        tmp_path, bos_dir, {"runtime": {"location": "process", "actors": {"main": {"agent": DEFAULT_AGENT_KIND}}}}
+        tmp_path, bos_dir, {"runtime": {"location": "process", "actors": {"main": {"agent": "BOS"}}}}
     )
     ws.bootstrap_platform()
 

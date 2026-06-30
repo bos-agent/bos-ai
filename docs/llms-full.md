@@ -395,11 +395,12 @@ _parent = "leader"                               # inherits model/tools/plugins/
 system_prompt = "You coordinate a team, warmly."  # overrides just this
 ```
 
-The built-in `BOS` agent (the `DEFAULT_AGENT_KIND`) is registered as an `@ep_agent` factory
-(a general assistant with memory/plan/task/skills/subagent plugins), so it resolves through
-the normal chain above — `[agents.BOS]` composes over it rather than replacing it. It is
-always available because its module is imported during bootstrap, independent of
-`[platform.extensions]`. (`bos.config.workspace`, `bos.config.bos_agent`.)
+The built-in `BOS` agent is a normal builtin `@ep_agent` extension
+(`bos.extensions.agents.bos`, a general assistant with memory/plan/task/skills/subagent
+plugins), registered when `bos.exts` is loaded (the default `[platform.extensions]`). It
+resolves through the normal chain above — `[agents.BOS]` composes over it, or inherit from it
+via `_parent = "BOS"`. There is no implicit default-agent fallback beyond the conventional
+`"BOS"` name presets reference; drop `bos.exts` and you must define your own agent.
 
 ---
 
@@ -737,7 +738,8 @@ Registered when `bos.exts` is loaded; the default agent enables
 | `SubagentPlugin` | `AskSubagent` tool to delegate to named agents | `enabled` (list/`"*"`), `disabled`, `task_template` |
 
 `SubagentPlugin.enabled` is the allow-list of agent kinds the agent may delegate to; `"*"`
-means all registered agents (except the default fallback). It requires
+means all registered agents (no implicit exclusions — including the agent itself if it is
+registered, so use explicit allow/deny lists to shape topology). It requires
 `services.agent_runner` (raises in `setup` if absent).
 
 ---
@@ -826,9 +828,10 @@ through the project venv (`uv run boscli ...`) so the package is importable.
    built-ins and discovers the `bos.exts` entry-point group.
 3. **`[exts]` defaults**: for each `[exts.<ep>.<impl>]`, `ExtensionPoint.lookup(ep)` then
    `update_defaults(impl, cfg)` (deep-merged into the extension's defaults).
-4. **Agents**: invoke every `@ep_agent` factory once; merge
-   `[agent.defaults] → factory → [agents.<name>]` and register each into `AgentRegistry`;
-   register the `BOS` fallback if absent.
+4. **Agents**: resolve `[agents.*]` `_parent` inheritance, invoke every `@ep_agent` factory
+   once, merge `[agent.defaults] → _parent chain → factory → [agents.<name>]`, and register
+   each into `AgentRegistry`. The built-in `BOS` agent is among the factories (loaded via
+   `bos.exts`); there is no separate fallback step.
 
 Then the harness opens (`AgentHarness.__aenter__`): `bos.core.defaults` self-registers
 built-in adapters, the `[harness]`-named services are instantiated, the `EventBus` +

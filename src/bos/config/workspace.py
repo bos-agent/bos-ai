@@ -17,7 +17,12 @@ from bos.config.schema import (
     validate_agent_config,
     validate_config,
 )
-from bos.core import DEFAULT_AGENT_KIND, AgentHarness, _deep_merge, _get_bos_home, _resolve_path
+from bos.core import AgentHarness, _deep_merge, _get_bos_home, _resolve_path
+
+# Conventional name of the built-in agent (registered by the bos.extensions.agents.bos
+# ep_agent factory). Used only as the no-actors fallback in get_main_agent_kind; real
+# configs name their actors' agents explicitly.
+_FALLBACK_AGENT_KIND = "BOS"
 
 if TYPE_CHECKING:
     # The gateway owns these config *shapes* (BEP 13 §3.3); the loader (this ring)
@@ -544,11 +549,6 @@ class Workspace:
         3. Merge EP defaults from [exts] into registered EP implementations
         4. Register agents into AgentRegistry
         """
-        # Importing this module registers the built-in BOS agent into ep_agent,
-        # the same way bos.core.defaults registers the other built-ins — so it is
-        # always available regardless of [platform.extensions], and resolves
-        # through the normal factory path below rather than a bespoke fallback.
-        import bos.config.bos_agent  # noqa: F401
         from bos.core import (
             AgentRegistry,
             _load_ext_modules,
@@ -658,7 +658,7 @@ class Workspace:
     def get_main_agent_kind(self) -> str:
         runtime = self.config.runtime
         if not runtime or not runtime.actors:
-            return DEFAULT_AGENT_KIND
+            return _FALLBACK_AGENT_KIND
         main_actor = runtime.main_actor
         actor = runtime.actors.get(main_actor)
         if actor is None:

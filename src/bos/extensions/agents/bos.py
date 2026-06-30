@@ -1,6 +1,21 @@
+"""The built-in BOS agent — a general-purpose assistant registered as an ``ep_agent`` factory.
+
+Importing this module (via ``bos.exts``) registers the ``BOS`` agent kind. It is a
+normal builtin extension: available when ``bos.exts`` is on the ``[platform.extensions]``
+list (the default), not unconditionally. Configs reference it by the literal name
+``"BOS"`` (e.g. ``[runtime.actors.main] agent = "BOS"``), and may override its spec via
+``[agents.BOS]`` or inherit from it via ``_parent = "BOS"``.
+"""
+
+from __future__ import annotations
+
 from typing import Any
 
-from bos.core import DEFAULT_AGENT_KIND, ep_agent
+from bos.core import ep_agent
+
+#: The kind under which the built-in agent is registered. Presets/templates reference
+#: this literal; there is no implicit "default agent" fallback beyond what configs name.
+BOS_AGENT_NAME = "BOS"
 
 _system_prompt = """
 <role>
@@ -99,15 +114,11 @@ default_agent_spec: dict[str, Any] = {
 }
 
 
-@ep_agent(name=DEFAULT_AGENT_KIND, description=_BOS_DESCRIPTION)
+@ep_agent(name=BOS_AGENT_NAME, description=_BOS_DESCRIPTION)
 def bos_agent() -> dict[str, Any]:
-    """The built-in BOS agent spec factory.
+    """Return the built-in BOS agent spec.
 
-    Registered like any other ``ep_agent`` (the same way ``bos.core.defaults``
-    registers the built-in consolidator/chat-store/job-runner) so the default
-    agent flows through the normal resolution chain
-    (``[agent.defaults] -> factory -> [agents.BOS]``) instead of a bespoke
-    fallback. Availability is guaranteed by importing this module during
-    bootstrap, not by ``[platform.extensions]``.
+    Resolves through the normal agent chain like any ``ep_agent``:
+    ``[agent.defaults] -> _parent chain -> factory -> [agents.BOS]``.
     """
     return default_agent_spec

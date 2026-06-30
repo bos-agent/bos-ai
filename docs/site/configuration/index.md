@@ -295,10 +295,11 @@ For each agent name, the final spec is a deep merge in this order:
 [agent.defaults]  →  ( _parent chain )  →  @ep_agent factory result (if any)  →  [agents.<name>] / external file
 ```
 
-The built-in `BOS` agent is itself an `@ep_agent` factory (a general assistant with memory,
-planning, tasks, skills, and sub-agent delegation), so it resolves through this same chain —
-`[agents.BOS]` composes over it rather than replacing it. It is always registered, independent
-of which extensions are loaded.
+The built-in `BOS` agent is a normal builtin `@ep_agent` extension (a general assistant with
+memory, planning, tasks, skills, and sub-agent delegation), registered when `bos.exts` is on
+your `[platform.extensions]` (the default). It resolves through this same chain — `[agents.BOS]`
+composes over it, or inherit from it with `_parent = "BOS"`. There is no hidden default-agent
+fallback: drop `bos.exts` and you must define your own agent.
 
 ---
 

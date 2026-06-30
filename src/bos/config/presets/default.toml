@@ -1,4 +1,5 @@
-# BOS default preset — uses the built-in bos_agent ep_agent factory for the BOS agent.
+# BOS default preset — the "main" actor runs the built-in "BOS" agent (a builtin
+# ep_agent extension in bos.extensions.agents.bos, loaded via bos.exts).
 # Agent persistent storage is at ~/.bos/agents/default.
 
 [harness]
