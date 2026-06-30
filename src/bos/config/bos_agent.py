@@ -1,5 +1,7 @@
 from typing import Any
 
+from bos.core import DEFAULT_AGENT_KIND, ep_agent
+
 _system_prompt = """
 <role>
 You are BOS, an autonomous software-engineering agent. Help the user complete authorized
@@ -80,8 +82,10 @@ tasks by inspecting context, using tools, editing files, and verifying results.
 </tool_discipline>
 """
 
+_BOS_DESCRIPTION = "General-purpose BOS assistant with memory, planning, tasks, skills, and subagents."
+
 default_agent_spec: dict[str, Any] = {
-    "description": "General-purpose BOS assistant with memory, planning, tasks, skills, and subagents.",
+    "description": _BOS_DESCRIPTION,
     "system_prompt": _system_prompt,
     "tools": {
         "enabled": ["*"],
@@ -93,3 +97,17 @@ default_agent_spec: dict[str, Any] = {
         "disabled": [],
     },
 }
+
+
+@ep_agent(name=DEFAULT_AGENT_KIND, description=_BOS_DESCRIPTION)
+def bos_agent() -> dict[str, Any]:
+    """The built-in BOS agent spec factory.
+
+    Registered like any other ``ep_agent`` (the same way ``bos.core.defaults``
+    registers the built-in consolidator/chat-store/job-runner) so the default
+    agent flows through the normal resolution chain
+    (``[agent.defaults] -> factory -> [agents.BOS]``) instead of a bespoke
+    fallback. Availability is guaranteed by importing this module during
+    bootstrap, not by ``[platform.extensions]``.
+    """
+    return default_agent_spec

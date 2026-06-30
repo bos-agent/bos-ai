@@ -15,7 +15,7 @@ from conftest import (
 import bos.extensions.tools.filesystem  # noqa: F401  — registers ep_tool entries
 import bos.extensions.tools.knowledge  # noqa: F401
 import bos.extensions.tools.system  # noqa: F401
-from bos.config.default_agent_spec import default_agent_spec
+from bos.config.bos_agent import default_agent_spec
 from bos.config.workspace import Workspace
 from bos.core import (
     DEFAULT_AGENT_KIND,

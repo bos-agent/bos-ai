@@ -1,4 +1,4 @@
-# BOS default preset — uses Python default_agent_spec for the BOS agent.
+# BOS default preset — uses the built-in bos_agent ep_agent factory for the BOS agent.
 # Agent persistent storage is at ~/.bos/agents/default.
 
 [harness]

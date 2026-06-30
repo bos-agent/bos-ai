@@ -364,24 +364,52 @@ def _is_comment_or_empty(value: str) -> bool:
     return not value or value.startswith("#")
 
 
+def _run_coro_blocking(coro: Any) -> Any:
+    """Drive *coro* to completion from synchronous code, with or without a loop.
+
+    ``bootstrap_platform`` is a synchronous entrypoint, but it is sometimes
+    called from inside a running event loop (async tests, embedding). A bare
+    ``asyncio.run`` raises there, so when a loop is already running we run the
+    coroutine on a dedicated worker thread that owns its own loop.
+    """
+    import asyncio
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+
+    import concurrent.futures
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(lambda: asyncio.run(coro)).result()
+
+
 def _invoke_agent_factories() -> dict[str, dict[str, Any]]:
     """Invoke each ``ep_agent`` spec factory once and validate its output.
 
     Factories receive their merged ``[exts.ep_agent.<name>]`` defaults as
     keyword arguments and must return a dict validatable by ``AgentConfig``
     (the same shape as a ``[agents.<name>]`` TOML table). ``invoke`` is async
-    (sync and async factories alike) and bootstrap runs outside any event
-    loop, so each call is driven via ``asyncio.run``.
+    (sync and async factories alike); the calls are driven synchronously via
+    :func:`_run_coro_blocking`, which copes with bootstrap being called from
+    inside an already-running event loop.
     """
-    import asyncio
-
     from pydantic import ValidationError
 
     from bos.core import ep_agent
 
+    names = list(ep_agent.describe())
+    if not names:
+        return {}
+
+    async def _gather() -> dict[str, Any]:
+        return {name: await ep_agent.invoke(name) for name in names}
+
+    raw = _run_coro_blocking(_gather())
+
     specs: dict[str, dict[str, Any]] = {}
-    for name in ep_agent.describe():
-        result = asyncio.run(ep_agent.invoke(name))
+    for name, result in raw.items():
         if not isinstance(result, dict):
             raise ValueError(f"ep_agent factory `{name}` must return an agent spec dict, got {type(result).__name__}")
         try:
@@ -480,7 +508,11 @@ class Workspace:
         3. Merge EP defaults from [exts] into registered EP implementations
         4. Register agents into AgentRegistry
         """
-        from bos.config.default_agent_spec import default_agent_spec
+        # Importing this module registers the built-in BOS agent into ep_agent,
+        # the same way bos.core.defaults registers the other built-ins — so it is
+        # always available regardless of [platform.extensions], and resolves
+        # through the normal factory path below rather than a bespoke fallback.
+        import bos.config.bos_agent  # noqa: F401
         from bos.core import (
             AgentRegistry,
             _load_ext_modules,
@@ -563,12 +595,6 @@ class Workspace:
                 if ext is not None and ext.description:
                     merged["description"] = ext.description
             AgentRegistry.register(name, **merged)
-
-        if not AgentRegistry.has_registered(DEFAULT_AGENT_KIND):
-            default_spec = _agent_config_to_core_kwargs(AgentConfig.model_validate(default_agent_spec))
-            merged = _deep_merge(dict(agent_defaults), default_spec)
-            merged.pop("name", None)
-            AgentRegistry.register(DEFAULT_AGENT_KIND, **merged)
 
         # Suppress litellm auto-loading
         os.environ["LITELLM_MODE"] = "extension"

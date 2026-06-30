@@ -375,9 +375,11 @@ For each agent name, the final spec is a deep merge in this order (`bos.config.w
 [agent.defaults]  →  @ep_agent factory result (if any)  →  [agents.<name>] / external file
 ```
 
-If no agent named `BOS` (the `DEFAULT_AGENT_KIND`) is registered, BOS registers a built-in
-fallback from `default_agent_spec` (a general assistant with memory/plan/task/skills/
-subagent plugins). (`bos.config.workspace`, `bos.config.default_agent_spec`.)
+The built-in `BOS` agent (the `DEFAULT_AGENT_KIND`) is registered as an `@ep_agent` factory
+(a general assistant with memory/plan/task/skills/subagent plugins), so it resolves through
+the normal chain above — `[agents.BOS]` composes over it rather than replacing it. It is
+always available because its module is imported during bootstrap, independent of
+`[platform.extensions]`. (`bos.config.workspace`, `bos.config.bos_agent`.)
 
 ---
 

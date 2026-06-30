@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 from conftest import create_test_agent, dummy_turn_context
 
-from bos.config.default_agent_spec import default_agent_spec
+from bos.config.bos_agent import default_agent_spec
 from bos.core import LLMResponse, ep_provider
 from bos.plugins.plan import (
     PlanAgentPlugin,

@@ -54,7 +54,7 @@ def test_agent_defaults_merged_into_agents(tmp_path):
 
 
 def test_default_agent_registered_from_python_spec(tmp_path):
-    """The BOS fallback agent is registered from Python default_agent_spec when no TOML override."""
+    """The BOS agent is registered from the built-in ep_agent factory when no TOML override."""
     ws = Workspace(
         tmp_path,
         tmp_path / ".bos",
@@ -68,7 +68,12 @@ def test_default_agent_registered_from_python_spec(tmp_path):
 
 
 def test_default_agent_can_be_overridden_in_toml(tmp_path):
-    """[agents.BOS] in TOML replaces the Python spec."""
+    """[agents.BOS] in TOML composes over the built-in factory spec.
+
+    Fields set in TOML win; fields it omits (e.g. plugins) are inherited from
+    the factory rather than dropped — the [agent.defaults] -> factory ->
+    [agents.BOS] resolution chain, same as any other agent.
+    """
     config = {
         "agents": {
             DEFAULT_AGENT_KIND: {
@@ -83,6 +88,8 @@ def test_default_agent_can_be_overridden_in_toml(tmp_path):
     defaults = AgentRegistry.get_defaults(DEFAULT_AGENT_KIND)
     assert defaults["system_prompt"] == "Custom default"
     assert defaults["tools"] == ["ReadFile"]
+    # Omitted in TOML → inherited from the built-in factory spec.
+    assert "MemoryPlugin" in defaults["plugins"]["enabled"]
 
 
 def test_resolve_agents_loads_external_toml(tmp_path):
