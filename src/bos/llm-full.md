@@ -5,20 +5,20 @@
 > packaging. Written for an AI coding agent (or a human) that needs the complete
 > picture in one file.
 
-!!! info "About this document"
-    This is written for an agent working inside a **BOS workspace** — a project that
-    has installed the `bos-ai` package — **not** inside the BOS source repository. So:
-
-    - **Configure and build** against the installed package: import from `bos` (e.g.
-      `from bos.core import ep_tool`) and edit your workspace's `.bos/config.toml`.
-    - **To inspect BOS internals**, this doc cites BOS modules by their **importable
-      dotted name** (e.g. `bos.config.workspace`). You can read the source two ways:
-        - Locally: it ships with the installed package. Find it with
-          `python -c "import bos, os; print(os.path.dirname(bos.__file__))"`.
-        - On GitHub: `https://github.com/bos-agent/bos-ai/blob/main/src/<dotted/path>.py`
-          (e.g. `bos.config.workspace` → `.../src/bos/config/workspace.py`).
-    - **Do not** assume any `src/bos/...` path exists in your workspace; those are
-      locations in the BOS repository, linked above.
+> **About this document.** This is written for an agent working inside a **BOS
+> workspace** — a project that has installed the `bos-ai` package — **not** inside
+> the BOS source repository. So:
+>
+> - **Configure and build** against the installed package: import from `bos` (e.g.
+>   `from bos.core import ep_tool`) and edit your workspace's `.bos/config.toml`.
+> - **To inspect BOS internals**, this doc cites BOS modules by their **importable
+>   dotted name** (e.g. `bos.config.workspace`). You can read the source two ways:
+>     - Locally: it ships with the installed package. Find it with
+>       `python -c "import bos, os; print(os.path.dirname(bos.__file__))"`.
+>     - On GitHub: `https://github.com/bos-agent/bos-ai/blob/main/src/<dotted/path>.py`
+>       (e.g. `bos.config.workspace` → `.../src/bos/config/workspace.py`).
+> - **Do not** assume any `src/bos/...` path exists in your workspace; those are
+>   locations in the BOS repository, linked above.
 
 BOS (`bos-ai` on PyPI) is a **lightweight, extensible framework for building and running
 multi-agent systems**.

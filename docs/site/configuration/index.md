@@ -371,5 +371,6 @@ See the [Connect a channel](../tutorials/channels.md) tutorial and
   and stores, and configure them through `[exts.<ep>.<impl>]`.
 - **[Concepts](../concepts/index.md)** — how the runtime, agents, actors, memory, and skills
   fit together.
-- **Full reference** — `docs/llms-full.md` in the repository is a single dense reference
-  covering every mechanism, intended for ingestion by an AI agent.
+- **Full reference** — [`llm-full.md`](https://github.com/bos-agent/bos-ai/blob/main/src/bos/llm-full.md)
+  is a single dense reference covering every mechanism, intended for ingestion by an AI agent.
+  `boscli init` drops a copy into every project.

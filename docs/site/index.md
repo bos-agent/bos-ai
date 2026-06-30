@@ -55,6 +55,7 @@ uvx boscli ask "how are you"
   plus an index of the enhancement proposals (BEPs) that record deeper design decisions.
 
 !!! info "Building on BOS with an AI agent?"
-    The repository ships a single dense reference at `docs/llms-full.md` that covers every
-    mechanism — configuration, extension points, plugins, channels, skills, the CLI, and the
-    runtime — in one file, intended for ingestion by an AI coding agent.
+    Every project scaffolded by `boscli init` includes an `llm-full.md` — a single dense
+    reference that covers every mechanism (configuration, extension points, plugins, channels,
+    skills, the CLI, and the runtime) in one file, intended for ingestion by an AI coding agent.
+    Source: [`src/bos/llm-full.md`](https://github.com/bos-agent/bos-ai/blob/main/src/bos/llm-full.md).

@@ -66,7 +66,7 @@ it emits the fully-commented reference config.
 ## Verify your setup
 
 ```bash
-boscli doctor        # checks config, paths, environment, and credentials
+boscli inspect       # show the resolved harness, config, agents, and actors
 ```
 
 ## Grow the project

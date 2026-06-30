@@ -46,8 +46,8 @@ decisions, see the [BEP Index](beps.md).
 - **[Concepts](../concepts/index.md)** — the mental models in depth.
 - **[Configuration](../configuration/index.md)** — how each part is configured.
 - **[Extending BOS](../extending/index.md)** — the extension-point model and how to build on it.
-- **`docs/llms-full.md`** (in the repo) — a single dense, code-grounded reference of every
-  mechanism, intended for ingestion by an AI agent.
+- **[`llm-full.md`](https://github.com/bos-agent/bos-ai/blob/main/src/bos/llm-full.md)** — a single dense, code-grounded reference of every
+  mechanism, intended for ingestion by an AI agent. `boscli init` drops a copy into every project.
 
 !!! info "Deeper detail"
     The [BEP Index](beps.md) links to the enhancement proposals that record the full design

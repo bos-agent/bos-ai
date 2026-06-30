@@ -25,6 +25,7 @@ def test_archetype_scaffold_loads_and_resolves_agents(tmp_path, archetype):
 
     assert result.config_file == tmp_path / ".bos" / "config.toml"
     assert (tmp_path / "README.md").is_file()
+    assert (tmp_path / "llm-full.md").is_file()
     assert (tmp_path / ".bos" / ".env").is_file()
     assert (tmp_path / ".gitignore").is_file()
     assert (tmp_path / ".bos" / ".gitignore").is_file()
@@ -46,6 +47,7 @@ def test_package_scaffold_layout_and_tool_registration(tmp_path, monkeypatch):
     scaffold_workspace(tmp_path, "package", context, env_content="X=1\n")
 
     assert (tmp_path / "pyproject.toml").is_file()
+    assert (tmp_path / "llm-full.md").is_file()
     assert (tmp_path / "src" / "my_pkg_proj" / "tools.py").is_file()
     assert (tmp_path / "tests" / "test_tools.py").is_file()
     assert (tmp_path / ".bos" / "config.toml").is_file()
