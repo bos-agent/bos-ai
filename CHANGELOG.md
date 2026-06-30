@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v1.10.0 (2026-06-30)
+
+### Features
+
+- **scaffold**: Ship llm-full.md reference in scaffolded projects
+  ([#68](https://github.com/bos-agent/bos-ai/pull/68),
+  [`84d1e81`](https://github.com/bos-agent/bos-ai/commit/84d1e81f9212d758c28f55d62d291ac654ebc45b))
+
+
 ## v1.9.0 (2026-06-30)
 
 ### Features
