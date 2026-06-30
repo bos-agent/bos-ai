@@ -27,6 +27,7 @@ def test_archetype_scaffold_loads_and_resolves_agents(tmp_path, archetype):
     assert (tmp_path / "README.md").is_file()
     assert (tmp_path / ".bos" / ".env").is_file()
     assert (tmp_path / ".gitignore").is_file()
+    assert (tmp_path / ".bos" / ".gitignore").is_file()
     assert (tmp_path / ".bos" / "extensions" / "project_tools.py").is_file()
     assert (tmp_path / ".bos" / "skills" / "example-skill" / "SKILL.md").is_file()
 

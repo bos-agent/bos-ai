@@ -95,6 +95,10 @@ def scaffold_workspace(
         write(config_file, config_text)
         write(workspace / "README.md", render_template(readme_template, context))
         write(bos_dir / ".env", env_content)
+        # Always keep the .bos/ dir clean in git: ignore runtime/state files but
+        # track the durable config, agents, and skills — regardless of whether
+        # the workspace itself is a git repo.
+        write(bos_dir / ".gitignore", render_template("_shared/bos_gitignore.tmpl"))
         if not (workspace / ".gitignore").exists():
             write(workspace / ".gitignore", render_template("_shared/gitignore.tmpl"))
         if archetype == "package":
