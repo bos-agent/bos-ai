@@ -86,9 +86,10 @@ This means:
 - `[agents.<name>]` or an external file is the highest-priority layer and fully
   replaces any matching key from the layers below.
 
-If no agent named `BOS` (the built-in default kind) is registered, BOS automatically
-provides a general-purpose fallback with memory, planning, task, skills, and
-subagent plugins enabled.
+The built-in `BOS` agent — a general-purpose assistant with memory, planning, task,
+skills, and subagent plugins — is a normal builtin `@ep_agent` extension, registered
+when `bos.exts` is loaded (the default). Reference it by name (`agent = "BOS"`), override
+it via `[agents.BOS]`, or inherit from it with `_parent = "BOS"`.
 
 ### Inline agent config
 

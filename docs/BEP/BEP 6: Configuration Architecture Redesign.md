@@ -610,6 +610,59 @@ Either of the last two terms may be absent; a pure-TOML agent is the degenerate 
 
 **`AgentRegistry` becomes internal.** It remains the resolved-spec store read by `AgentHarness.create_agent()`, but it is written only by `bootstrap_platform()`. Direct `AgentRegistry.register()` calls from extension packages are no longer a documented or supported registration path.
 
+## Addendum: `_parent` — Agent Config Inheritance
+
+### Motivation
+
+`[agent.defaults]` provides a single global base merged into every agent. There is no way to share a base between *some* agents without repeating it. A family of related agents (`leader` → `niceleader`, `strictleader`) must each copy the full base table, and the copies drift. This addendum adds per-agent inheritance so an agent can name another `[agents.*]` agent as its base.
+
+### Design
+
+An agent table may set `_parent = "<name>"`. The named parent's *resolved* spec is deep-merged underneath the child, using the same BEP 6 merge semantics already used for `[agent.defaults]` and `[agents.<name>]` (dicts merge recursively; lists and scalars replace). Inheritance is a **generalization of the existing layering**, not a new mechanism — it adds per-family bases between the global defaults and the agent's own keys.
+
+```toml
+[agents.leader]
+system_prompt = "You coordinate a team."
+model = "anthropic/claude-opus-4-8"
+[agents.leader.tools]
+enabled = ["ReadFile", "AskSubagent"]
+
+[agents.niceleader]
+_parent = "leader"                 # inherits everything from `leader`
+system_prompt = "You coordinate a team, warmly."   # overrides just this
+```
+
+**Resolution chain.** With inheritance, the per-agent chain becomes:
+
+```
+[agent.defaults]  →  ( _parent chain, root-first )  →  @ep_agent factory (same name)  →  [agents.<name>]
+```
+
+`_parent` resolution happens *within* the `[agents.*]` layer, before the existing `defaults → factory → agent` merge. Concretely, the resolved spec for `niceleader` is `deep_merge(resolve("leader"), niceleader_own)`, and that resolved value then takes the place of the `[agents.niceleader]` term in the existing chain. `[agent.defaults]` therefore stays the global floor for every agent, inherited or not.
+
+**Multi-level.** Chains resolve transitively (`c._parent = "b"`, `b._parent = "a"`) via depth-first resolution with memoization, so each agent is resolved once regardless of fan-in.
+
+**Field, not extra key.** `_parent` is a typed `AgentConfig` field (`parent: str | None`, TOML alias `_parent`), not an `extra="allow"` pass-through. This validates its type and keeps it from silently reaching the `Agent` constructor. It is stripped from every resolved spec before registration.
+
+**Scope (v1).** `_parent` may reference only another `[agents.<name>]` agent (inline or external file) — the `config_specs` domain. It may **not** reference an `@ep_agent` factory-only agent or `[agent.defaults]`; an unknown parent raises at bootstrap with the known-agent list. This keeps resolution independent of factory invocation order. Multiple parents and list-union semantics are explicit non-goals for v1.
+
+**Errors.** A `_parent` cycle (`a → b → a`) and an unknown parent both raise `ValueError` during `bootstrap_platform()` (agent-registration step), naming the offending chain / agent. These are configuration errors surfaced eagerly, before any agent runs.
+
+**Interaction with external files.** External `.toml`/`.md` agents merge into `[agents.*]` before resolution, so an external agent may set `_parent`, and may itself be a parent, as long as the referenced name exists in the merged agent set.
+
+### Aliasing note
+
+Inheritance deep-merges cached parent specs into children, so the resolver **deep-copies** a parent's resolved spec before merging the child on top — otherwise a child mutating a nested dict (e.g. `plugins`) would corrupt the shared parent spec and leak into siblings.
+
+## Addendum: built-in BOS agent as a normal builtin extension
+
+This supersedes the earlier `_default`-style fallback described in this BEP's body and the `ep_agent` addendum's `_default` bullet. The built-in default agent is no longer special-cased.
+
+- **It is a normal builtin `ep_agent` extension.** The `BOS` agent (system prompt + spec + factory) lives in `bos.extensions.agents.bos` and registers via `@ep_agent(name="BOS")` when that module is imported by `bos.exts` — exactly like the built-in tools/plugins. It is **not** imported unconditionally during bootstrap and is **not** "always available independent of `[platform.extensions]`": drop `bos.exts` from the extensions list and there is no `BOS` agent. Operators who do that are expected to define their own agents.
+- **No fallback registration step.** `bootstrap_platform()` registers `BOS` through the ordinary factory path (`[agent.defaults] → _parent chain → factory → [agents.BOS]`); there is no separate "register the default if absent" branch.
+- **No `DEFAULT_AGENT_KIND` constant in `bos.core`.** The literal name `"BOS"` lives with the extension; `Workspace.get_main_agent_kind()` uses it only as a no-actors convenience fallback (a path no shipped config or live caller exercises — every preset names its actors' agents explicitly).
+- **Subagent membership is config-only.** `SubagentPlugin` no longer implicitly excludes the default agent from its candidate pool. The candidate set is purely `enabled`/`disabled` over the registry (default empty = none). With `enabled = ["*"]` an agent that is itself registered will appear in its own subagent list, so topology — shaped via `[agents.*]` and `_parent` inheritance — is the control, not a built-in exclusion.
+
 ## Revision History
 
 | Date | Change | Intention |
@@ -620,3 +673,5 @@ Either of the last two terms may be absent; a pure-TOML agent is the degenerate 
 | 2026-05-30 | Rename [ext] → [harness] | TOML section, Pydantic model, and all references renamed for clarity |
 | 2026-05-30 | Design accepted | Full design approved — ready for implementation planning |
 | 2026-06-12 | Addendum: `ep_agent` agent spec factories | Replace direct `AgentRegistry.register` from extension packages with a core EP; one validated agent schema, config-driven factory params, deterministic merge chain |
+| 2026-06-30 | Addendum: `_parent` agent config inheritance | Per-agent inheritance via a typed `_parent` field; deep-merge of a referenced `[agents.*]` base, multi-level chains, cycle/unknown-parent errors |
+| 2026-06-30 | Addendum: built-in BOS as a normal builtin extension | BOS moves to `bos.extensions.agents.bos` (loaded via `bos.exts`); drop the unconditional import, the fallback registration step, the `bos.core` `DEFAULT_AGENT_KIND` constant, and the subagent default-exclusion — topology is config-driven |

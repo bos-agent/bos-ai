@@ -44,11 +44,6 @@ from .sinks import derive_event_sink
 
 logger = logging.getLogger(__name__)
 
-# The kind under which the built-in fallback agent (from default_agent_spec) is
-# registered, and the kind create_agent / get_main_agent_kind resolve to when no
-# agent is otherwise specified. Configs reference it by this literal name.
-DEFAULT_AGENT_KIND = "BOS"
-
 _structured_validator_singleton: Any = None
 
 

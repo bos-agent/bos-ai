@@ -195,10 +195,12 @@ class SubagentAgentPlugin:
         return "\n\n".join(sections)
 
     def _available_subagents(self) -> dict[str, str]:
-        from bos.core import DEFAULT_AGENT_KIND, AgentRegistry
+        from bos.core import AgentRegistry
 
+        # Subagent membership is purely the configured allow/deny lists (default
+        # empty = none). No agent is implicitly excluded; topology is config-driven
+        # (see [agents.*] / _parent inheritance).
         available = dict(AgentRegistry.describe())
-        available.pop(DEFAULT_AGENT_KIND, None)
         return _pick_collection(available, self._enabled, self._disabled)
 
     def get_interceptors(self) -> Sequence[TurnInterceptor]:

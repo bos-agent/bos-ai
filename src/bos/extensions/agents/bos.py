@@ -1,4 +1,21 @@
+"""The built-in BOS agent — a general-purpose assistant registered as an ``ep_agent`` factory.
+
+Importing this module (via ``bos.exts``) registers the ``BOS`` agent kind. It is a
+normal builtin extension: available when ``bos.exts`` is on the ``[platform.extensions]``
+list (the default), not unconditionally. Configs reference it by the literal name
+``"BOS"`` (e.g. ``[runtime.actors.main] agent = "BOS"``), and may override its spec via
+``[agents.BOS]`` or inherit from it via ``_parent = "BOS"``.
+"""
+
+from __future__ import annotations
+
 from typing import Any
+
+from bos.core import ep_agent
+
+#: The kind under which the built-in agent is registered. Presets/templates reference
+#: this literal; there is no implicit "default agent" fallback beyond what configs name.
+BOS_AGENT_NAME = "BOS"
 
 _system_prompt = """
 <role>
@@ -80,8 +97,10 @@ tasks by inspecting context, using tools, editing files, and verifying results.
 </tool_discipline>
 """
 
+_BOS_DESCRIPTION = "General-purpose BOS assistant with memory, planning, tasks, skills, and subagents."
+
 default_agent_spec: dict[str, Any] = {
-    "description": "General-purpose BOS assistant with memory, planning, tasks, skills, and subagents.",
+    "description": _BOS_DESCRIPTION,
     "system_prompt": _system_prompt,
     "tools": {
         "enabled": ["*"],
@@ -93,3 +112,13 @@ default_agent_spec: dict[str, Any] = {
         "disabled": [],
     },
 }
+
+
+@ep_agent(name=BOS_AGENT_NAME, description=_BOS_DESCRIPTION)
+def bos_agent() -> dict[str, Any]:
+    """Return the built-in BOS agent spec.
+
+    Resolves through the normal agent chain like any ``ep_agent``:
+    ``[agent.defaults] -> _parent chain -> factory -> [agents.BOS]``.
+    """
+    return default_agent_spec
