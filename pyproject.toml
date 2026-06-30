@@ -1,6 +1,6 @@
 [project]
 name = "bos-ai"
-version = "1.8.0"
+version = "1.9.0"
 description = "Lightweight, extensible framework for building and running multi-agent systems"
 readme = "README.md"
 license = { file = "LICENSE" }

@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v1.9.0 (2026-06-30)
+
+### Features
+
+- **config**: Agent inheritance, BOS-as-extension, and .bos/.gitignore scaffolding
+  ([#67](https://github.com/bos-agent/bos-ai/pull/67),
+  [`c4cb0f6`](https://github.com/bos-agent/bos-ai/commit/c4cb0f6425786523c3a950dc3e8075c73981697e))
+
+
 ## v1.8.0 (2026-06-29)
 
 ### Documentation
