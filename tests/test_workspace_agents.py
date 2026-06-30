@@ -406,3 +406,156 @@ def test_ep_agent_factory_invalid_spec_raises(tmp_path):
         ws = Workspace(tmp_path, tmp_path / ".bos", {})
         with pytest.raises(ValueError, match="invalid_agent"):
             ws.bootstrap_platform()
+
+
+# ── _parent inheritance (BEP 6 addendum) ────────────────────────────
+
+
+def test_parent_inheritance_basic(tmp_path):
+    """A child inherits the parent's fields and overrides only what it sets."""
+    config = {
+        "agents": {
+            "leader": {
+                "system_prompt": "You coordinate.",
+                "model": "anthropic/claude-opus-4-8",
+                "tools": {"enabled": ["ReadFile", "AskSubagent"]},
+            },
+            "niceleader": {
+                "_parent": "leader",
+                "system_prompt": "You coordinate, warmly.",
+            },
+        }
+    }
+    ws = Workspace(tmp_path, tmp_path / ".bos", config)
+    ws.bootstrap_platform()
+    nice = AgentRegistry.get_defaults("niceleader")
+    assert nice["system_prompt"] == "You coordinate, warmly."  # child override
+    assert nice["model"] == "anthropic/claude-opus-4-8"  # inherited
+    assert nice["tools"] == ["ReadFile", "AskSubagent"]  # inherited
+    # _parent is an inheritance directive, never an Agent kwarg.
+    assert "_parent" not in nice
+    assert "parent" not in nice
+
+
+def test_parent_inheritance_list_replace(tmp_path):
+    """A child's list (tools.enabled) replaces the parent's, not unions it."""
+    config = {
+        "agents": {
+            "base": {"tools": {"enabled": ["ReadFile", "GrepSearch", "AskSubagent"]}},
+            "leaf": {"_parent": "base", "tools": {"enabled": ["ReadFile"]}},
+        }
+    }
+    ws = Workspace(tmp_path, tmp_path / ".bos", config)
+    ws.bootstrap_platform()
+    assert AgentRegistry.get_defaults("leaf")["tools"] == ["ReadFile"]
+
+
+def test_parent_inheritance_dict_merge(tmp_path):
+    """Dict values (plugin-bindings) merge recursively across inheritance."""
+    config = {
+        "agents": {
+            "base": {
+                "plugin-bindings": {"SubagentPlugin": {"enabled": ["writer"], "task_template": "T"}},
+            },
+            "leaf": {
+                "_parent": "base",
+                "plugin-bindings": {"SubagentPlugin": {"enabled": ["reviewer"]}},
+            },
+        }
+    }
+    ws = Workspace(tmp_path, tmp_path / ".bos", config)
+    ws.bootstrap_platform()
+    binding = AgentRegistry.get_defaults("leaf")["plugin-bindings"]["SubagentPlugin"]
+    assert binding["enabled"] == ["reviewer"]  # child replaces the list
+    assert binding["task_template"] == "T"  # but inherits the sibling key
+
+
+def test_parent_inheritance_multilevel(tmp_path):
+    """Inheritance resolves transitively through a chain."""
+    config = {
+        "agents": {
+            "a": {"model": "m-a", "system_prompt": "A"},
+            "b": {"_parent": "a", "system_prompt": "B"},
+            "c": {"_parent": "b", "max_iterations": 5},
+        }
+    }
+    ws = Workspace(tmp_path, tmp_path / ".bos", config)
+    ws.bootstrap_platform()
+    c = AgentRegistry.get_defaults("c")
+    assert c["model"] == "m-a"  # from a
+    assert c["system_prompt"] == "B"  # b overrode a
+    assert c["max_iterations"] == 5  # c's own
+
+
+def test_parent_inheritance_defaults_remain_floor(tmp_path):
+    """[agent.defaults] stays the global base under the _parent chain."""
+    config = {
+        "agent": {"defaults": {"model": "default-model", "max_iterations": 9}},
+        "agents": {
+            "base": {"system_prompt": "Base"},
+            "leaf": {"_parent": "base"},
+        },
+    }
+    ws = Workspace(tmp_path, tmp_path / ".bos", config)
+    ws.bootstrap_platform()
+    leaf = AgentRegistry.get_defaults("leaf")
+    assert leaf["model"] == "default-model"  # from agent.defaults
+    assert leaf["max_iterations"] == 9
+    assert leaf["system_prompt"] == "Base"  # from parent
+
+
+def test_parent_inheritance_cycle_raises(tmp_path):
+    """A _parent cycle raises a clear error at bootstrap."""
+    config = {
+        "agents": {
+            "a": {"_parent": "b"},
+            "b": {"_parent": "a"},
+        }
+    }
+    ws = Workspace(tmp_path, tmp_path / ".bos", config)
+    with pytest.raises(ValueError, match="cycle"):
+        ws.bootstrap_platform()
+
+
+def test_parent_inheritance_unknown_parent_raises(tmp_path):
+    """Referencing an undefined parent raises at bootstrap."""
+    config = {"agents": {"leaf": {"_parent": "ghost"}}}
+    ws = Workspace(tmp_path, tmp_path / ".bos", config)
+    with pytest.raises(ValueError, match="ghost"):
+        ws.bootstrap_platform()
+
+
+def test_parent_inheritance_sibling_isolation(tmp_path):
+    """Two children of one parent don't corrupt each other via shared nested dicts."""
+    config = {
+        "agents": {
+            "base": {"plugin-bindings": {"SubagentPlugin": {"enabled": ["w"], "task_template": "T"}}},
+            "x": {"_parent": "base", "plugin-bindings": {"SubagentPlugin": {"enabled": ["x-only"]}}},
+            "y": {"_parent": "base"},
+        }
+    }
+    ws = Workspace(tmp_path, tmp_path / ".bos", config)
+    ws.bootstrap_platform()
+    # x's override must not leak into y (which inherits the parent verbatim).
+    assert AgentRegistry.get_defaults("x")["plugin-bindings"]["SubagentPlugin"]["enabled"] == ["x-only"]
+    assert AgentRegistry.get_defaults("y")["plugin-bindings"]["SubagentPlugin"]["enabled"] == ["w"]
+
+
+def test_parent_inheritance_from_external_file(tmp_path):
+    """An external agent file can use _parent against an inline [agents.*] base."""
+    bos_dir = tmp_path / ".bos"
+    agents_dir = bos_dir / "agents"
+    agents_dir.mkdir(parents=True)
+    (agents_dir / "leaf.toml").write_text('_parent = "base"\nsystem_prompt = "Leaf."\n')
+
+    config = {
+        "platform": {"agent_dirs": ["./agents"]},
+        "agents": {"base": {"model": "base-model", "tools": {"enabled": ["ReadFile"]}}},
+    }
+    ws = Workspace(tmp_path, bos_dir, config)
+    ws.resolve_agents()
+    ws.bootstrap_platform()
+    leaf = AgentRegistry.get_defaults("leaf")
+    assert leaf["system_prompt"] == "Leaf."
+    assert leaf["model"] == "base-model"  # inherited from inline base
+    assert leaf["tools"] == ["ReadFile"]

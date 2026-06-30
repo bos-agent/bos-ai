@@ -203,6 +203,7 @@ enabled = ["writer"]
 | `tools` | `{ enabled, disabled, usages }` | `enabled=["*"]` = all; `usages` overrides per-tool guidance. |
 | `plugins` | `{ enabled, disabled }` | `enabled=["*"]` = all registered plugins. |
 | `plugin-bindings` | `{ <Plugin>: {…} }` | Per-plugin config (key is hyphenated in TOML). |
+| `_parent` | `str` | Inherit from another `[agents.*]` agent — see [Agent inheritance](#agent-inheritance-_parent). |
 
 !!! info "Note the hyphen"
     Per-plugin configuration uses `plugin-bindings` (with a hyphen) in TOML, e.g.
@@ -221,6 +222,35 @@ A model value is resolved in this order (highest first):
 ```
 [agents.<name>].model  >  [agent.defaults].model  >  BOS_MODEL  >  [exts.ep_provider.<provider>].model
 ```
+
+### Agent inheritance (`_parent`)
+
+An `[agents.<name>]` table can set `_parent = "<other agent>"` to inherit that agent's
+resolved spec. The parent is deep-merged **underneath** the child — the child's own keys
+win, using the same merge rules as everywhere else (dicts merge, lists/scalars replace).
+Use it to share a base across a family of related agents instead of repeating it.
+
+```toml
+[agents.leader]
+system_prompt = "You coordinate a team."
+model = "anthropic/claude-opus-4-8"
+[agents.leader.tools]
+enabled = ["ReadFile", "AskSubagent"]
+
+[agents.niceleader]
+_parent = "leader"                                # inherits model, tools, plugins, …
+system_prompt = "You coordinate a team, warmly."  # overrides just this field
+```
+
+- **Multi-level**: chains resolve transitively (`c` → `b` → `a`).
+- **Floor still applies**: `[agent.defaults]` is merged in under the `_parent` chain for every agent.
+- **Scope**: `_parent` may name only another `[agents.*]` agent (inline or an external file) — not an
+  `@ep_agent` factory agent or `[agent.defaults]`.
+- **Errors**: a cycle (`a` → `b` → `a`) or an unknown parent fails fast at startup with a clear message.
+
+!!! warning "Lists replace, they don't union"
+    If the child sets `tools.enabled = ["ReadFile"]`, it **replaces** the parent's list entirely.
+    To extend a parent's list, restate the full list in the child.
 
 ### External agent files (`agent_dirs`)
 
@@ -262,11 +292,13 @@ alphabetically within a directory, directories in list order; later wins.
 For each agent name, the final spec is a deep merge in this order:
 
 ```
-[agent.defaults]  →  @ep_agent factory result (if any)  →  [agents.<name>] / external file
+[agent.defaults]  →  ( _parent chain )  →  @ep_agent factory result (if any)  →  [agents.<name>] / external file
 ```
 
-If no agent named `BOS` is registered, BOS registers a built-in general-assistant fallback
-(memory, planning, tasks, skills, and sub-agent delegation enabled).
+The built-in `BOS` agent is itself an `@ep_agent` factory (a general assistant with memory,
+planning, tasks, skills, and sub-agent delegation), so it resolves through this same chain —
+`[agents.BOS]` composes over it rather than replacing it. It is always registered, independent
+of which extensions are loaded.
 
 ---
 

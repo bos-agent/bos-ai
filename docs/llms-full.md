@@ -281,6 +281,7 @@ enabled = ["ReadFile", "GrepSearch", "WebSearch"]
 | `tools` | `{enabled, disabled, usages}` | `enabled=["*"]` for all; `usages` overrides per-tool guidance. |
 | `plugins` | `{enabled, disabled}` | `enabled=["*"]` for all registered plugins. |
 | `plugin-bindings` | `{<Plugin>: {…}}` | Per-plugin settings; key is hyphenated in TOML. |
+| `_parent` | `str` | Inherit from another `[agents.*]` agent (deep-merged underneath; see §4.8). |
 
 **Model precedence** (see `bos.core.llm.LLMClient`): `[agents.<name>].model` → `[agent.defaults].model`
 → `BOS_MODEL` env → `[exts.ep_provider.<provider>].model`.
@@ -372,7 +373,26 @@ You are a meticulous technical writer. Produce clear, accurate docs.
 For each agent name, the final spec is a deep merge in this order (`bos.config.workspace.bootstrap_platform`):
 
 ```
-[agent.defaults]  →  @ep_agent factory result (if any)  →  [agents.<name>] / external file
+[agent.defaults]  →  ( _parent chain, root-first )  →  @ep_agent factory result (if any)  →  [agents.<name>] / external file
+```
+
+**Inheritance (`_parent`).** An `[agents.<name>]` table may set `_parent = "<other agent>"` to
+inherit that agent's resolved spec, deep-merged underneath it (same merge semantics: dicts merge,
+lists/scalars replace). Chains resolve transitively (`c` → `b` → `a`); `[agent.defaults]` remains
+the global floor under the chain. `_parent` may reference only another `[agents.*]` agent (inline or
+external file) — not an `@ep_agent` factory or `[agent.defaults]`. A cycle or unknown parent raises at
+bootstrap. The directive is stripped before registration and never reaches the `Agent` constructor.
+(`bos.config.workspace._resolve_agent_inheritance`.)
+
+```toml
+[agents.leader]
+system_prompt = "You coordinate a team."
+[agents.leader.tools]
+enabled = ["ReadFile", "AskSubagent"]
+
+[agents.niceleader]
+_parent = "leader"                               # inherits model/tools/plugins/…
+system_prompt = "You coordinate a team, warmly."  # overrides just this
 ```
 
 The built-in `BOS` agent (the `DEFAULT_AGENT_KIND`) is registered as an `@ep_agent` factory

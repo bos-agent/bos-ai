@@ -76,6 +76,11 @@ class AgentConfig(BaseModel):
         default_factory=lambda: KeyedConfigs.model_validate({}),
         alias="plugin-bindings",
     )
+    # BEP 6 addendum: inherit from another [agents.<name>] agent. The named
+    # parent's resolved spec is deep-merged underneath this one at bootstrap.
+    # Typed (not an extra="allow" pass-through) so it validates and never
+    # reaches the Agent constructor; resolution strips it. TOML key: `_parent`.
+    parent: str | None = Field(default=None, alias="_parent")
 
 
 # ── Top-level sections ──────────────────────────────────────────────

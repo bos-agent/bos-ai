@@ -610,6 +610,50 @@ Either of the last two terms may be absent; a pure-TOML agent is the degenerate 
 
 **`AgentRegistry` becomes internal.** It remains the resolved-spec store read by `AgentHarness.create_agent()`, but it is written only by `bootstrap_platform()`. Direct `AgentRegistry.register()` calls from extension packages are no longer a documented or supported registration path.
 
+## Addendum: `_parent` — Agent Config Inheritance
+
+### Motivation
+
+`[agent.defaults]` provides a single global base merged into every agent. There is no way to share a base between *some* agents without repeating it. A family of related agents (`leader` → `niceleader`, `strictleader`) must each copy the full base table, and the copies drift. This addendum adds per-agent inheritance so an agent can name another `[agents.*]` agent as its base.
+
+### Design
+
+An agent table may set `_parent = "<name>"`. The named parent's *resolved* spec is deep-merged underneath the child, using the same BEP 6 merge semantics already used for `[agent.defaults]` and `[agents.<name>]` (dicts merge recursively; lists and scalars replace). Inheritance is a **generalization of the existing layering**, not a new mechanism — it adds per-family bases between the global defaults and the agent's own keys.
+
+```toml
+[agents.leader]
+system_prompt = "You coordinate a team."
+model = "anthropic/claude-opus-4-8"
+[agents.leader.tools]
+enabled = ["ReadFile", "AskSubagent"]
+
+[agents.niceleader]
+_parent = "leader"                 # inherits everything from `leader`
+system_prompt = "You coordinate a team, warmly."   # overrides just this
+```
+
+**Resolution chain.** With inheritance, the per-agent chain becomes:
+
+```
+[agent.defaults]  →  ( _parent chain, root-first )  →  @ep_agent factory (same name)  →  [agents.<name>]
+```
+
+`_parent` resolution happens *within* the `[agents.*]` layer, before the existing `defaults → factory → agent` merge. Concretely, the resolved spec for `niceleader` is `deep_merge(resolve("leader"), niceleader_own)`, and that resolved value then takes the place of the `[agents.niceleader]` term in the existing chain. `[agent.defaults]` therefore stays the global floor for every agent, inherited or not.
+
+**Multi-level.** Chains resolve transitively (`c._parent = "b"`, `b._parent = "a"`) via depth-first resolution with memoization, so each agent is resolved once regardless of fan-in.
+
+**Field, not extra key.** `_parent` is a typed `AgentConfig` field (`parent: str | None`, TOML alias `_parent`), not an `extra="allow"` pass-through. This validates its type and keeps it from silently reaching the `Agent` constructor. It is stripped from every resolved spec before registration.
+
+**Scope (v1).** `_parent` may reference only another `[agents.<name>]` agent (inline or external file) — the `config_specs` domain. It may **not** reference an `@ep_agent` factory-only agent or `[agent.defaults]`; an unknown parent raises at bootstrap with the known-agent list. This keeps resolution independent of factory invocation order. Multiple parents and list-union semantics are explicit non-goals for v1.
+
+**Errors.** A `_parent` cycle (`a → b → a`) and an unknown parent both raise `ValueError` during `bootstrap_platform()` (agent-registration step), naming the offending chain / agent. These are configuration errors surfaced eagerly, before any agent runs.
+
+**Interaction with external files.** External `.toml`/`.md` agents merge into `[agents.*]` before resolution, so an external agent may set `_parent`, and may itself be a parent, as long as the referenced name exists in the merged agent set.
+
+### Aliasing note
+
+Inheritance deep-merges cached parent specs into children, so the resolver **deep-copies** a parent's resolved spec before merging the child on top — otherwise a child mutating a nested dict (e.g. `plugins`) would corrupt the shared parent spec and leak into siblings.
+
 ## Revision History
 
 | Date | Change | Intention |
@@ -620,3 +664,4 @@ Either of the last two terms may be absent; a pure-TOML agent is the degenerate 
 | 2026-05-30 | Rename [ext] → [harness] | TOML section, Pydantic model, and all references renamed for clarity |
 | 2026-05-30 | Design accepted | Full design approved — ready for implementation planning |
 | 2026-06-12 | Addendum: `ep_agent` agent spec factories | Replace direct `AgentRegistry.register` from extension packages with a core EP; one validated agent schema, config-driven factory params, deterministic merge chain |
+| 2026-06-30 | Addendum: `_parent` agent config inheritance | Per-agent inheritance via a typed `_parent` field; deep-merge of a referenced `[agents.*]` base, multi-level chains, cycle/unknown-parent errors |
