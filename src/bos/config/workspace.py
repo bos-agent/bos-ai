@@ -425,16 +425,23 @@ def _invoke_agent_factories() -> dict[str, dict[str, Any]]:
     return specs
 
 
-def _resolve_agent_inheritance(specs: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    """Resolve ``_parent`` inheritance among ``[agents.<name>]`` specs (BEP 6 addendum).
+def _resolve_agent_inheritance(
+    specs: dict[str, dict[str, Any]],
+    factory_specs: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Resolve ``_parent`` inheritance among agent specs (BEP 6 addendum).
 
-    Each spec may name another ``[agents.*]`` agent via ``_parent``; the parent's
-    resolved spec is deep-merged underneath the child (child keys win, per BEP 6
+    Each ``[agents.*]`` spec may name another agent via ``_parent`` — either
+    another ``[agents.*]`` table or an ``ep_agent`` factory agent (e.g. the
+    built-in ``BOS``), whose spec is passed via ``factory_specs``. The parent's
+    resolved spec (factory terms underneath its ``[agents.<parent>]`` overrides,
+    if any) is deep-merged underneath the child (child keys win, per BEP 6
     merge semantics: dicts merge recursively, lists/scalars replace). Multi-level
     chains resolve transitively via memoized depth-first resolution. ``_parent`` is
     stripped from every returned spec. Cycles and unknown parents raise
     ``ValueError`` naming the offending chain / agent.
     """
+    factory_specs = factory_specs or {}
     resolved: dict[str, dict[str, Any]] = {}
 
     def resolve(name: str, stack: tuple[str, ...]) -> dict[str, Any]:
@@ -445,14 +452,18 @@ def _resolve_agent_inheritance(specs: dict[str, dict[str, Any]]) -> dict[str, di
         spec = dict(specs[name])
         parent = spec.pop("_parent", None)
         if parent is not None:
-            if parent not in specs:
-                known = ", ".join(sorted(specs)) or "none"
+            if parent not in specs and parent not in factory_specs:
+                known = ", ".join(sorted({*specs, *factory_specs})) or "none"
                 raise ValueError(
-                    f"Agent {name!r} _parent={parent!r} is not a defined [agents.*] agent. Known: {known}."
+                    f"Agent {name!r} _parent={parent!r} is not a defined [agents.*] agent "
+                    f"or registered agent factory. Known: {known}."
                 )
             # Deep-copy the parent so merging the child cannot mutate the parent's
             # cached nested dicts (which would leak into siblings sharing the parent).
-            spec = _deep_merge(copy.deepcopy(resolve(parent, (*stack, name))), spec)
+            parent_spec = copy.deepcopy(factory_specs.get(parent, {}))
+            if parent in specs:
+                parent_spec = _deep_merge(parent_spec, copy.deepcopy(resolve(parent, (*stack, name))))
+            spec = _deep_merge(parent_spec, spec)
         resolved[name] = spec
         return spec
 
@@ -622,7 +633,8 @@ class Workspace:
         }
         # Resolve [agents.<name>] _parent inheritance before the defaults/factory
         # merge, so each agent's effective TOML spec already folds in its base.
-        config_specs = _resolve_agent_inheritance(config_specs)
+        # Factory agents (ep_agent, e.g. the built-in BOS) are valid parents too.
+        config_specs = _resolve_agent_inheritance(config_specs, factory_specs)
 
         for name in {**factory_specs, **config_specs}:
             merged = _deep_merge(dict(agent_defaults), dict(factory_specs.get(name, {})))

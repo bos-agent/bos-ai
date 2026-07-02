@@ -50,6 +50,24 @@ def test_inspect_text_reports_harness_and_capabilities(tmp_path, monkeypatch):
     assert "Extension points" in result.output
 
 
+def test_inspect_text_surfaces_capabilities_error(tmp_path, monkeypatch):
+    """A bootstrap failure must be visible in text mode, not render as empty sections."""
+    monkeypatch.delenv("BOS_CONFIG", raising=False)
+    _init_project(tmp_path)
+    monkeypatch.chdir(tmp_path)
+
+    config = tmp_path / ".bos" / "config.toml"
+    config.write_text(
+        config.read_text() + '\n[agents.broken]\n_parent = "ghost"\n',
+        encoding="utf-8",
+    )
+
+    result = _invoke(["inspect"])
+
+    assert result.exit_code == 0, result.output
+    assert "ghost" in result.output  # the bootstrap error is shown, not swallowed
+
+
 def test_inspect_json_shape(tmp_path, monkeypatch):
     monkeypatch.delenv("BOS_CONFIG", raising=False)
     _init_project(tmp_path)

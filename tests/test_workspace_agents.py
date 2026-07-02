@@ -504,6 +504,48 @@ def test_parent_inheritance_defaults_remain_floor(tmp_path):
     assert leaf["system_prompt"] == "Base"  # from parent
 
 
+def test_parent_inheritance_from_factory_agent(tmp_path):
+    """_parent may name an ep_agent factory agent (e.g. the built-in BOS)."""
+
+    def base_agent():
+        return {"system_prompt": "From factory", "model": "factory-model"}
+
+    config = {
+        "agents": {
+            "main": {"_parent": "base_agent", "description": "Main agent"},
+        }
+    }
+    with _agent_factory("base_agent", base_agent):
+        ws = Workspace(tmp_path, tmp_path / ".bos", config)
+        ws.bootstrap_platform()
+        main = AgentRegistry.get_defaults("main")
+        assert main["system_prompt"] == "From factory"
+        assert main["model"] == "factory-model"
+        assert AgentRegistry.describe()["main"] == "Main agent"
+        assert "_parent" not in main
+
+
+def test_parent_inheritance_factory_parent_with_toml_override(tmp_path):
+    """A child of a factory agent also inherits the parent's [agents.<parent>] overrides."""
+
+    def base_agent():
+        return {"system_prompt": "From factory", "model": "factory-model"}
+
+    config = {
+        "agents": {
+            "base_agent": {"model": "toml-model"},
+            "main": {"_parent": "base_agent", "description": "Main agent"},
+        }
+    }
+    with _agent_factory("base_agent", base_agent):
+        ws = Workspace(tmp_path, tmp_path / ".bos", config)
+        ws.bootstrap_platform()
+        main = AgentRegistry.get_defaults("main")
+        assert main["system_prompt"] == "From factory"  # factory term survives
+        assert main["model"] == "toml-model"  # [agents.base_agent] override wins
+        assert AgentRegistry.describe()["main"] == "Main agent"
+
+
 def test_parent_inheritance_cycle_raises(tmp_path):
     """A _parent cycle raises a clear error at bootstrap."""
     config = {

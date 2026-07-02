@@ -349,8 +349,12 @@ def _render_text(report: dict[str, Any]) -> None:
         return
 
     caps = report.get("capabilities", {})
-    for label in ("agents", "plugins", "tools", "skills"):
-        _render_caps_table(console, label.capitalize(), caps.get(label, {}))
+    if "<error>" in caps:
+        console.print("\n[bold]Capabilities[/]")
+        console.print(f"  [red]error: {caps['<error>']}[/]")
+    else:
+        for label in ("agents", "plugins", "tools", "skills"):
+            _render_caps_table(console, label.capitalize(), caps.get(label, {}))
 
     eps = report.get("extension_points", {})
     if eps:
