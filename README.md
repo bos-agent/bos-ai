@@ -9,7 +9,7 @@
 ░░░░░░░░░░░     ░░░░░░░     ░░░░░░░░░
 ```
 
-> From zero to agent in a single command.
+> An agent out of the box. A framework for your own agent-native applications.
 
 <div align="center">
   <p>
