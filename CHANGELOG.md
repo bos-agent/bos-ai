@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v1.10.1 (2026-07-02)
+
+### Bug Fixes
+
+- **config**: Allow _parent to inherit from ep_agent factory agents
+  ([#69](https://github.com/bos-agent/bos-ai/pull/69),
+  [`113997e`](https://github.com/bos-agent/bos-ai/commit/113997e6ed535d9ffe4d0eaf37874fe69a2203fc))
+
+
 ## v1.10.0 (2026-06-30)
 
 ### Features
