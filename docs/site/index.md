@@ -1,10 +1,9 @@
 # BOS
 
-> From zero to agent in a single command.
+> An agent out of the box. A framework for your own agent-native applications.
 
-**BOS** is a lightweight, extensible framework for building and running multi-agent
-systems. Install it, and you have a working agent in one command — then grow it into
-a multi-agent project as your needs expand.
+**BOS** gives you a working agent in one command — then grows with you into your
+own agent-native application, from a single assistant to a multi-agent system.
 
 ## Quick Start
 

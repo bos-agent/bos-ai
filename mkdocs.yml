@@ -1,5 +1,5 @@
 site_name: BOS
-site_description: Lightweight, extensible framework for building and running multi-agent systems — from zero to agent in one command.
+site_description: An agent out of the box. A framework for your own agent-native applications.
 site_url: https://bos-agent.github.io/bos-ai/
 repo_url: https://github.com/bos-agent/bos-ai
 repo_name: bos-agent/bos-ai
