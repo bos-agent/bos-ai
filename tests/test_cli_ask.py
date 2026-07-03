@@ -107,3 +107,40 @@ def test_ask_unknown_agent_errors(tmp_path, monkeypatch):
     result = CliRunner().invoke(ask, ["--agent", "nope", "hi"], obj={})
     assert result.exit_code != 0
     assert "nope" in result.output
+
+
+def test_ask_passes_only_explicit_actor_overrides(tmp_path, monkeypatch):
+    """An actor with no explicit agent_cfg must contribute no overrides.
+
+    A raw model_dump() materializes pydantic defaults (plugins.enabled=[],
+    tools.enabled=[], system_prompt=None, ...) which _deep_merge treats as
+    explicit overrides, wiping the agent kind's registry defaults — the agent
+    ends up with no plugins, no tools, and no system prompt.
+    """
+    _project(tmp_path, monkeypatch)
+    _patch_harness(monkeypatch)
+    monkeypatch.setattr("bos.config.workspace.Workspace.resolve_agents", lambda self: None)
+    monkeypatch.setattr("bos.config.workspace.Workspace.bootstrap_platform", lambda self: None)
+
+    result = CliRunner().invoke(ask, ["hello"], obj={})
+    assert result.exit_code == 0, result.output
+    assert _StubAgent.last_agent_cfg == {}
+
+
+def test_ask_converts_explicit_actor_overrides_to_core_kwargs(tmp_path, monkeypatch):
+    (tmp_path / ".bos").mkdir()
+    (tmp_path / ".bos" / "config.toml").write_text(
+        '[runtime]\nmain_actor = "main"\n'
+        '[runtime.actors.main]\nagent = "react"\n'
+        "[runtime.actors.main.agent_cfg]\nmax_iterations = 5\n"
+        '[runtime.actors.main.agent_cfg.tools]\nenabled = ["*"]\n'
+    )
+    monkeypatch.chdir(tmp_path)
+    _patch_harness(monkeypatch)
+    monkeypatch.setattr("bos.config.workspace.Workspace.resolve_agents", lambda self: None)
+    monkeypatch.setattr("bos.config.workspace.Workspace.bootstrap_platform", lambda self: None)
+
+    result = CliRunner().invoke(ask, ["hello"], obj={})
+    assert result.exit_code == 0, result.output
+    # Core-kwargs shape: tools.enabled == ["*"] becomes tools=None (no filter).
+    assert _StubAgent.last_agent_cfg == {"max_iterations": 5, "tools": None}

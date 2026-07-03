@@ -384,11 +384,16 @@ def ask(
         agent_kind = agent_name
         agent_cfg: dict[str, Any] | None = None
     else:
+        from bos.config.schema import _agent_config_to_core_kwargs
+
         runtime = ws.config.runtime
         actors = runtime.actors if runtime else {}
         actor_cfg = actors[ws.resolve_default_actor()]
         agent_kind = actor_cfg.agent
-        agent_cfg = actor_cfg.agent_cfg.model_dump()
+        # Only explicitly-set overrides, in core-kwargs shape — a raw
+        # model_dump() would materialize defaults (plugins.enabled=[], ...)
+        # that wipe the agent kind's registry defaults on merge.
+        agent_cfg = _agent_config_to_core_kwargs(actor_cfg.agent_cfg)
 
     async def _run() -> str:
         async with ws.harness() as harness:
