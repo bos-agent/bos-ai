@@ -89,6 +89,7 @@ def test_bos_config_workflow_in_place(tmp_path):
     assert "uv run boscli doctor" in prompt                  # validation gates still apply
     assert 'uv run boscli ask "say hello to me"' in prompt
     assert "NEVER run" in prompt                             # stop-before-restart still applies
+    assert "merge" not in prompt.lower()                     # no merge-back semantics leak in
 
 
 def test_bos_config_invalid_workflow_raises(tmp_path):

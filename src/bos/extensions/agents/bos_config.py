@@ -31,8 +31,7 @@ _BOS_CONFIG_DESCRIPTION = (
 _PROMPT_HEADER = """
 <role>
 You are bos_config, the BOS project configuration specialist. You change BOS project
-configuration safely: isolate, edit, validate, merge back, stop, and report. You never
-restart the gateway yourself.
+configuration safely: {role_verbs}. You never restart the gateway yourself.
 </role>
 
 <scope>
@@ -87,6 +86,12 @@ _ISOLATION_WORKTREE = """
   the doctor/smoke output. The live config was never touched.
 - Merge conflict: abort the merge, KEEP the `bos-config/<short-slug>` branch, and report
   it for manual resolution.
+- In-place fallback (non-git workspace) failure: if validation fails on the fallback edit
+  and you cannot fix it, restore the `<file>.bak.<UTC-timestamp>` backup copies and report
+  the failure with the doctor/smoke output.
+- Always remove the scratch directory before finishing, on success or failure —
+  `git worktree remove "$scratch"` (fallback: `rm -rf "$scratch"`) — so copied secrets
+  (e.g. `.env`) do not linger under /tmp.
 </failure_recovery>
 """
 
@@ -118,17 +123,33 @@ _PROMPT_FOOTER = """
 - NEVER run `boscli gateway restart`, `boscli gateway stop`, or `boscli gateway start` —
   you run inside the gateway process; restarting it would kill your own session.
 - Your final report must state: the files and keys you changed (old value → new value),
-  the doctor result, the smoke-turn result, the merge status, and the literal next step
+  the doctor result, the smoke-turn result{merge_status_clause}, and the literal next step
   for the user: run `uv run boscli gateway restart` to apply the change.
 - Use precise claims: "validated with doctor and a smoke turn" — never "gateway
   restarted" or "verified running".
 </stop_and_report>
 """
 
+#: Per-workflow role-sentence verbs (Fix 2): the in_place workflow never merges, so it
+#: must not claim to.
+_ROLE_VERBS = {
+    "worktree": "isolate, edit, validate, merge back, stop, and report",
+    "in_place": "back up, edit, validate, stop, and report",
+}
+
+#: Per-workflow report-checklist clause for the merge status (Fix 2): only the worktree
+#: workflow has a merge step to report on.
+_MERGE_STATUS_CLAUSE = {
+    "worktree": ", the merge status",
+    "in_place": "",
+}
+
 
 def _system_prompt(workflow: str) -> str:
     isolation = _ISOLATION_WORKTREE if workflow == "worktree" else _ISOLATION_IN_PLACE
-    return _PROMPT_HEADER + isolation + _PROMPT_FOOTER
+    header = _PROMPT_HEADER.format(role_verbs=_ROLE_VERBS[workflow])
+    footer = _PROMPT_FOOTER.format(merge_status_clause=_MERGE_STATUS_CLAUSE[workflow])
+    return header + isolation + footer
 
 
 @ep_agent(name=BOS_CONFIG_AGENT_NAME, description=_BOS_CONFIG_DESCRIPTION)
