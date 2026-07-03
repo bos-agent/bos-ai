@@ -44,7 +44,7 @@ Both ship built-in with BOS (cf. the `python` skill at `src/bos/skills/python/SK
 
 ### 3.2 Registration and ownership
 
-- **Module:** `src/bos/extensions/agents/config.py`, mirroring `bos.py`. Exports `BOS_CONFIG_AGENT_NAME = "bos_config"` and registers via `@ep_agent(name=BOS_CONFIG_AGENT_NAME, description=...)`.
+- **Module:** `src/bos/extensions/agents/bos_config.py`, mirroring `bos.py`. Exports `BOS_CONFIG_AGENT_NAME = "bos_config"` and registers via `@ep_agent(name=BOS_CONFIG_AGENT_NAME, description=...)`.
 - **Loading:** one import line in `src/bos/exts.py`, next to `import bos.extensions.agents.bos`. Like `BOS`, it is available when `bos.exts` is on `[platform.extensions]` — not unconditionally.
 - **Source of truth:** the factory owns the default spec; per-project overrides flow through the existing chain `[agent.defaults] -> factory -> [agents.bos_config]`. Factory kwargs come from `[exts.ep_agent.bos_config]` (per the `ep_agent` contract in `src/bos/core/contract.py`). No new config keys or mechanisms are introduced.
 - **Name-collision stance:** a project that already defines `[agents.bos_config]` merges over the factory result — the same defined behavior `BOS` has. Documented, accepted.
@@ -125,7 +125,7 @@ Purely additive: a new module, one import in `bos/exts.py`. No existing contract
 
 ## 6. Implementation plan (dependency-ordered)
 
-1. **Factory module** — `src/bos/extensions/agents/config.py`: name constant, description (routing rule), system prompt (workflow contract §3.4–§3.6), spec dict, `@ep_agent` factory with `workflow: str = "worktree"` kwarg validated to the two allowed values.
+1. **Factory module** — `src/bos/extensions/agents/bos_config.py`: name constant, description (routing rule), system prompt (workflow contract §3.4–§3.6), spec dict, `@ep_agent` factory with `workflow: str = "worktree"` kwarg validated to the two allowed values.
 2. **Registration** — import line in `src/bos/exts.py`.
 3. **Tests** — `tests/test_config_agent.py` (mirroring existing agent/extension tests): factory registers under `ep_agent`; spec validates as `AgentConfig`; resolution merge with `[agents.bos_config]` override works; `_parent = "bos_config"` resolves (regression vs #69); `workflow` kwarg accepted, invalid value rejected; prompt contains the load-bearing contract strings (never-restart, doctor gate, smoke-turn gate, worktree branch prefix).
 4. **Docs** — `llm-full.md` section describing the built-in kind and the `[exts.ep_agent.bos_config]` knob.
