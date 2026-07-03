@@ -24,7 +24,7 @@ Both ship built-in with BOS (cf. the `python` skill at `src/bos/skills/python/SK
 
 - Ship a built-in `bos_config` agent kind, registered like `BOS`, available in every project whose `[platform.extensions]` includes `bos.exts` (the default).
 - Encode the conservative workflow — worktree → edit → validate → merge back → report — in its system prompt as a contract, not a suggestion.
-- Make the user's main agent delegate configuration changes to it by default, via description-based routing (§3.7), with zero scaffold or config changes.
+- Make the user's main agent delegate configuration changes to it by default, via description-based routing (§3.7). This requires a scaffold template change (an active `plugin-bindings.SubagentPlugin` binding on `[agents.main]`) and a corresponding default in the built-in `BOS` agent spec — see §3.7.
 - Ground its edits in the shipped BOS reference (`llm-full.md`).
 
 ### 2.2 Non-Goals
@@ -97,13 +97,25 @@ Passing both still does **not** guarantee the gateway will serve traffic after r
 
 ### 3.7 Binding and routing (how the main agent uses it)
 
-No binding work is needed. `SubagentAgentPlugin` treats `enabled = ["*"]` (or the string `"*"`) as "all registered agents" (`_normalize_enabled`, `src/bos/plugins/subagent.py`), and both the built-in `BOS` agent (`plugins.enabled` includes `SubagentPlugin`) and the scaffolded project (`[agent.defaults.plugins] enabled = ["*"]` in `config.toml.tmpl`) hit that default. Registering the kind is sufficient: `bos_config` appears in the main agent's `<available_subagents>` prompt section automatically.
+Registering the `bos_config` kind is *not* sufficient by itself. `SubagentPlugin`'s allow-list (`plugin-bindings.SubagentPlugin.enabled`) is a separate mechanism from enabling the plugin, and it defaults to `[]` (`SubagentHarnessPlugin.default_config`, `src/bos/plugins/subagent.py`) — an empty allow-list means `SubagentAgentPlugin.register_tools` finds no available subagents and never registers `AskSubagent` at all (`src/bos/plugins/subagent.py`). Enabling `SubagentPlugin` (`plugins.enabled`) only makes the plugin *loadable*; it does not populate its allow-list. Before this revision, neither the built-in `BOS` agent nor a scaffolded `main` agent carried any such binding, so `bos_config` was unreachable via `AskSubagent` regardless of registration.
 
-Routing therefore rides on the description, which is written as a rule, not a summary:
+This BEP therefore ships the binding, not just the registration:
+
+- The built-in `BOS` agent's `default_agent_spec` (`src/bos/extensions/agents/bos.py`) gains `"plugin-bindings": {"SubagentPlugin": {"enabled": ["*"]}}`.
+- Both scaffold templates (`src/bos/cli/scaffold/templates/{workspace,package}/config.toml.tmpl`) gain an active `[agents.main.plugin-bindings.SubagentPlugin] enabled = ["*"]` section.
+
+`SubagentAgentPlugin` treats `enabled = ["*"]` (or the string `"*"`) as "all registered agents" (`_normalize_enabled`, `src/bos/plugins/subagent.py`). With the binding shipped, `bos_config` appears in the main agent's `<available_subagents>` prompt section automatically, for both the built-in `BOS` agent and every newly scaffolded project. Pre-existing projects (scaffolded before this change, or with a custom main agent) do not get the binding retroactively — they opt in with the same 3-line TOML block:
+
+```toml
+[agents.main.plugin-bindings.SubagentPlugin]
+enabled = ["*"]
+```
+
+Routing (once delegation is reachable) rides on the description, which is written as a rule, not a summary:
 
 > "BOS project configuration specialist. ALWAYS delegate changes to BOS project configuration (`.bos/config.toml`, `[agents.*]`, `[exts.*]`, `[runtime.*]`, agent/skill registration) to this agent instead of editing those files directly. It validates changes in an isolated git worktree with `boscli doctor` before merging back, and reports the restart step for the user."
 
-Projects that want direct addressing add `[runtime.actors.config] agent = "bos_config"` themselves (existing mechanism, documented in the scaffolded config comments); this BEP changes no templates.
+Projects that want direct addressing add `[runtime.actors.config] agent = "bos_config"` themselves (existing mechanism, documented in the scaffolded config comments).
 
 ### 3.8 Interactions with look-alikes
 
@@ -121,29 +133,36 @@ Projects that want direct addressing add `[runtime.actors.config] agent = "bos_c
 
 ## 5. Compatibility and fallout
 
-Purely additive: a new module, one import in `bos/exts.py`. No existing contract changes, no template changes, no test rewrites. Two visible effects: (a) every project with default extensions gains one entry in `<available_subagents>` (bounded by the existing `BOS_CAPABILITY_LIMIT` rendering cap); (b) a project already defining `[agents.bos_config]` now merges over a factory (previously the name was purely theirs) — behavior is the defined merge chain, called out in release notes.
+Not purely additive: shipping working delegation (§3.7) requires a default-spec change to the built-in `BOS` agent and a scaffold template change, both with real fallout:
+
+- (a) The built-in `BOS` agent and every newly scaffolded project now expose `AskSubagent` over **all** registered agent kinds by default (`plugin-bindings.SubagentPlugin.enabled = ["*"]`). This is a behavior change for existing projects whose main actor runs the built-in `BOS` agent unmodified: on upgrade, `BOS` gains the ability to delegate to any registered kind (including `bos_config` and any project-defined agent), where previously `AskSubagent` was not registered on it at all. Projects that want a narrower topology must set an explicit allow-list in `[agents.BOS].plugin-bindings.SubagentPlugin.enabled`.
+- (b) `config.toml.tmpl` (both `workspace` and `package` archetypes) changes: `[agents.main.plugin-bindings.SubagentPlugin] enabled = ["*"]` is now an active section, not a commented example. This only affects newly scaffolded projects; existing projects are untouched by a template change and do not receive the binding retroactively (§3.7).
+- (c) Every project with default extensions and the shipped binding gains one entry in `<available_subagents>` (bounded by the existing `BOS_CAPABILITY_LIMIT` rendering cap).
+- (d) A project already defining `[agents.bos_config]` now merges over a factory (previously the name was purely theirs) — behavior is the defined merge chain, called out in release notes.
 
 ## 6. Implementation plan (dependency-ordered)
 
 1. **Factory module** — `src/bos/extensions/agents/bos_config.py`: name constant, description (routing rule), system prompt (workflow contract §3.4–§3.6), spec dict, `@ep_agent` factory with `workflow: str = "worktree"` kwarg validated to the two allowed values.
 2. **Registration** — import line in `src/bos/exts.py`.
-3. **Tests** — `tests/test_config_agent.py` (mirroring existing agent/extension tests): factory registers under `ep_agent`; spec validates as `AgentConfig`; resolution merge with `[agents.bos_config]` override works; `_parent = "bos_config"` resolves (regression vs #69); `workflow` kwarg accepted, invalid value rejected; prompt contains the load-bearing contract strings (never-restart, doctor gate, smoke-turn gate, worktree branch prefix).
-4. **Docs** — `llm-full.md` section describing the built-in kind and the `[exts.ep_agent.bos_config]` knob.
+3. **Default delegation binding (§3.7)** — add `"plugin-bindings": {"SubagentPlugin": {"enabled": ["*"]}}` to `default_agent_spec` in `src/bos/extensions/agents/bos.py`, and an active `[agents.main.plugin-bindings.SubagentPlugin] enabled = ["*"]` section to both `src/bos/cli/scaffold/templates/{workspace,package}/config.toml.tmpl`. Without this step, registering the `bos_config` kind alone does not make it reachable (§3.7).
+4. **Tests** — `tests/test_config_agent.py` (mirroring existing agent/extension tests): factory registers under `ep_agent`; spec validates as `AgentConfig`; resolution merge with `[agents.bos_config]` override works; `_parent = "bos_config"` resolves (regression vs #69); `workflow` kwarg accepted, invalid value rejected; prompt contains the load-bearing contract strings (never-restart, doctor gate, smoke-turn gate, worktree branch prefix); the `BOS` agent's resolved defaults carry the `["*"]` binding; a functional regression proves `bos_config` is surfaced by `SubagentAgentPlugin` when the binding is set; scaffold tests assert the template binding is active and validates.
+5. **Docs** — `llm-full.md` section describing the built-in kind, the `[exts.ep_agent.bos_config]` knob, and the corrected routing precondition (§3.7).
 
-Each step depends only on what precedes it; step 1+2 alone yield a working agent.
+Each step depends only on what precedes it; step 1+2 alone yield a registered-but-unreachable agent — step 3 is required for delegation to actually work.
 
 ## 7. Acceptance criteria
 
-- With a scaffolded project and default extensions, `AskSubagent(role="bos_config", ...)` resolves the kind (precondition: `SubagentPlugin` enabled on the calling agent, which is the scaffold/built-in default).
+- With a scaffolded project and default extensions, `AskSubagent(role="bos_config", ...)` resolves the kind (precondition: the calling agent's `plugin-bindings.SubagentPlugin.enabled` allow-list includes `bos_config` or `"*"` — shipped by default in the built-in `BOS` agent spec and in the scaffolded `[agents.main]`, per §3.7; merely enabling `SubagentPlugin` is not sufficient, since its allow-list defaults to `[]`).
 - `uv run boscli ask --agent bos_config ...` runs it oneshot (precondition: a configured model).
 - `uv run pytest -q`, `uv run ruff check src tests`, `npx -y pyright src` — all clean.
 - The rendered system prompt contains no instruction to run `gateway restart|start|stop`.
 
 ## 8. Open questions
 
-- Whether the scaffolded `config.toml.tmpl` comments should mention `bos_config` in the subagent-delegation example (nice-to-have; not required for the routing to work).
+None outstanding — the delegation-binding question (whether the scaffold needs a real binding, not just a comment) is resolved in §3.7/§5/§6: both scaffold templates now ship an active `[agents.main.plugin-bindings.SubagentPlugin] enabled = ["*"]` section.
 
 ## 9. Revision history
 
 - 2026-07-03 — Draft. Decisions: `ep_agent` over skill; stop-before-restart (no self-restart); description-based auto-binding; no BOS-agent posture fork; single `workflow` factory kwarg.
 - 2026-07-03 — Added the live smoke-turn validation layer (`boscli ask` in the worktree) alongside `doctor`; two-layer vocabulary in §3.5.
+- 2026-07-03 — Final-review correction: §3.7's routing claim was false — registering the `bos_config` kind does not make it reachable, because `SubagentPlugin`'s allow-list (`plugin-bindings.SubagentPlugin.enabled`) defaults to `[]`, independent of the plugin being enabled. Decision: ship an active `["*"]` binding in the built-in `BOS` agent spec (`src/bos/extensions/agents/bos.py`) and in both scaffold templates' `[agents.main]` section, making delegation automatic for the built-in agent and new projects; pre-existing projects opt in with the same 3-line TOML binding. §2.1, §3.7, §5, §6, and §7 updated accordingly.
