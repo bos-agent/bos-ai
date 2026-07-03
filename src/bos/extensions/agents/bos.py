@@ -111,6 +111,10 @@ default_agent_spec: dict[str, Any] = {
         "enabled": ["MemoryPlugin", "PlanPlugin", "TaskPlugin", "SkillsPlugin", "SubagentPlugin"],
         "disabled": [],
     },
+    # SubagentPlugin's allowlist defaults to empty (no delegation at all); bind it to
+    # "*" so the BOS agent can actually reach registered subagents (e.g. bos_config)
+    # via AskSubagent out of the box.
+    "plugin-bindings": {"SubagentPlugin": {"enabled": ["*"]}},
 }
 
 

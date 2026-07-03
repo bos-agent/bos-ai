@@ -1,6 +1,7 @@
 """Tests for the built-in bos_config agent (BEP 15)."""
 
 import pytest
+from conftest import dummy_turn_context
 
 from bos.config.workspace import Workspace
 from bos.core import AgentRegistry, ep_agent
@@ -98,3 +99,22 @@ def test_bos_config_invalid_workflow_raises(tmp_path):
     ws = Workspace(tmp_path, tmp_path / ".bos", config)
     with pytest.raises(ValueError, match="workflow"):
         ws.bootstrap_platform()
+
+
+@pytest.mark.asyncio
+async def test_bos_agent_can_delegate_to_bos_config_by_default(tmp_path):
+    """Regression for final-review Fix 1: the BOS agent's default
+    ``plugin-bindings.SubagentPlugin.enabled = ["*"]`` binding is what actually makes
+    ``bos_config`` reachable via ``AskSubagent`` — not just registering the kind. Before
+    the fix, ``SubagentPlugin``'s own default allow-list is empty, so ``AskSubagent``
+    would never even register on the built-in ``BOS`` agent."""
+    ws = Workspace(tmp_path, tmp_path / ".bos", {})
+    ws.bos_dir.mkdir(parents=True, exist_ok=True)
+    ws.bootstrap_platform()
+
+    async with ws.harness() as harness:
+        agent = await harness.create_agent("BOS")
+        prompt = await agent._build_system_prompt(dummy_turn_context())
+
+    assert agent._tools.has("AskSubagent")
+    assert f'<agent role="{BOS_CONFIG_AGENT_NAME}">' in prompt
