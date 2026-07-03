@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import logging
 import os
 from pathlib import Path
@@ -393,7 +394,10 @@ class AgentHarness:
                 "tools": [],
             }
 
-        merged_cfg = _deep_merge(dict(agent_defaults), agent_cfg or {})
+        # Deep-copy the defaults: _deep_merge mutates its base in place, and a
+        # shallow copy would let per-agent overrides write through the shared
+        # nested dicts into the registry's stored defaults.
+        merged_cfg = _deep_merge(copy.deepcopy(agent_defaults), agent_cfg or {})
 
         agent_name = kind or merged_cfg.get("kind") or "undef"
         plugins = await self._bind_plugins_for_agent(merged_cfg)

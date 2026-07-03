@@ -182,6 +182,35 @@ async def test_harness_binds_subagent_plugin_bindings_from_validated_config(tmp_
 
 
 @pytest.mark.asyncio
+async def test_create_agent_does_not_mutate_registry_defaults(tmp_path):
+    """Per-agent overrides must not leak into AgentRegistry defaults.
+
+    create_agent merges agent_cfg over a copy of the registered defaults; a
+    shallow copy shares the nested dicts (plugins, tools), so the first agent
+    created with nested overrides would poison the defaults for every agent
+    created afterwards in the same process.
+    """
+    role = f"defaults_mutation_{uuid.uuid4().hex}"
+    bos_dir = tmp_path / ".bos"
+    bos_dir.mkdir()
+    try:
+        AgentRegistry.register(
+            name=role,
+            description="defaults mutation guard",
+            tools=None,
+            plugins={"enabled": ["TaskPlugin"], "disabled": []},
+        )
+        async with AgentHarness(bos_dir=bos_dir, workspace=tmp_path) as harness:
+            await harness.create_agent(role, agent_cfg={"plugins": {"enabled": []}})
+
+        defaults = AgentRegistry.get_defaults(role)
+        assert defaults["plugins"]["enabled"] == ["TaskPlugin"]
+        assert defaults["tools"] is None
+    finally:
+        AgentRegistry._registry.pop(role, None)
+
+
+@pytest.mark.asyncio
 async def test_harness_create_agent_defaults_to_no_capabilities(tmp_path):
     bos_dir = tmp_path / ".bos"
     bos_dir.mkdir()
