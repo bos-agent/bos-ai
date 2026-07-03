@@ -336,6 +336,13 @@ class _TaskProgressDisplay:
 @click.option("--model", "model", default=None, help="Model id to use for this run (overrides BOS_MODEL).")
 @click.option("--agent", "agent_name", default=None, help="Agent to run (defaults to the main actor's agent).")
 @click.option(
+    "--no-steps",
+    "no_steps",
+    is_flag=True,
+    default=False,
+    help="Suppress step-by-step progress output; print only the final reply (useful in scripts).",
+)
+@click.option(
     "-w",
     "--workspace",
     "workspace_dir",
@@ -349,6 +356,7 @@ def ask(
     use_stdin: bool,
     model: str | None,
     agent_name: str | None,
+    no_steps: bool,
     workspace_dir: str | None,
 ):
     """Run a oneshot agent task in-process and print the agent's final reply.
@@ -361,6 +369,7 @@ def ask(
         boscli ask "refactor the auth module"
         boscli -c coding ask "explain this"
         boscli ask --agent researcher "summarize the spec"
+        boscli ask --no-steps "explain this" > answer.md
         cat spec.md | boscli ask --stdin
     """
     if use_stdin and not sys.stdin.isatty():
@@ -396,7 +405,7 @@ def ask(
             result = await agent.run(
                 uuid.uuid4().hex,
                 message,
-                event_sink=_TaskProgressDisplay(),
+                event_sink=None if no_steps else _TaskProgressDisplay(),
                 llm_args={"model": model} if model else None,
             )
             return str(result.output or "")
