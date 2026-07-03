@@ -1,8 +1,25 @@
 """Tests for the built-in bos_config agent (BEP 15)."""
 
+import pytest
+
 from bos.config.workspace import Workspace
-from bos.core import AgentRegistry
+from bos.core import AgentRegistry, ep_agent
 from bos.extensions.agents.bos_config import BOS_CONFIG_AGENT_NAME
+
+
+@pytest.fixture(autouse=True)
+def _reset_ep_agent_defaults():
+    """Tests here run ``bootstrap_platform`` with ``[exts.ep_agent.*]`` config,
+    which writes into the process-global ``ep_agent`` extension defaults (before
+    the factory can even reject a bad value). Snapshot and restore them so a
+    test's workflow setting does not leak into other tests."""
+    saved_defaults = {name: dict(ext.defaults) for name, ext in ep_agent._extensions.items()}
+    try:
+        yield
+    finally:
+        for name, ext in ep_agent._extensions.items():
+            ext.defaults.clear()
+            ext.defaults.update(saved_defaults.get(name, {}))
 
 
 def test_bos_config_registered_at_bootstrap(tmp_path):
@@ -59,3 +76,24 @@ def test_bos_config_parentable(tmp_path):
     assert child["model"] == "openai/gpt-4o"
     assert "boscli doctor" in child["system_prompt"]
     assert "_parent" not in child
+
+
+def test_bos_config_workflow_in_place(tmp_path):
+    """[exts.ep_agent.bos_config] workflow="in_place" swaps the isolation section (BEP 15 §3.6)."""
+    config = {"exts": {"ep_agent": {"bos_config": {"workflow": "in_place"}}}}
+    ws = Workspace(tmp_path, tmp_path / ".bos", config)
+    ws.bootstrap_platform()
+    prompt = AgentRegistry.get_defaults(BOS_CONFIG_AGENT_NAME)["system_prompt"]
+    assert "worktree" not in prompt                          # no worktree steps
+    assert ".bak." in prompt                                 # timestamped backups
+    assert "uv run boscli doctor" in prompt                  # validation gates still apply
+    assert 'uv run boscli ask "say hello to me"' in prompt
+    assert "NEVER run" in prompt                             # stop-before-restart still applies
+
+
+def test_bos_config_invalid_workflow_raises(tmp_path):
+    """An unknown workflow value fails bootstrap loudly, naming the key."""
+    config = {"exts": {"ep_agent": {"bos_config": {"workflow": "yolo"}}}}
+    ws = Workspace(tmp_path, tmp_path / ".bos", config)
+    with pytest.raises(ValueError, match="workflow"):
+        ws.bootstrap_platform()
