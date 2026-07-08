@@ -91,6 +91,13 @@ def test_bos_config_workflow_in_place(tmp_path):
     assert 'uv run boscli ask "say hello to me"' in prompt
     assert "NEVER run" in prompt                             # stop-before-restart still applies
     assert "merge" not in prompt.lower()                     # no merge-back semantics leak in
+    # The routing description is the contract shown to delegating agents; it must
+    # describe the in_place workflow, not promise worktree isolation or a merge.
+    description = AgentRegistry.describe()[BOS_CONFIG_AGENT_NAME]
+    assert "ALWAYS delegate" in description                  # routing rule survives
+    assert "worktree" not in description
+    assert "merg" not in description.lower()                 # no "merge"/"merging"
+    assert "backup" in description.lower() or "backups" in description.lower()
 
 
 def test_bos_config_invalid_workflow_raises(tmp_path):

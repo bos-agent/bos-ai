@@ -20,13 +20,32 @@ BOS_CONFIG_AGENT_NAME = "bos_config"
 #: Allowed values for the ``workflow`` factory kwarg (BEP 15 §3.6).
 _VALID_WORKFLOWS = ("worktree", "in_place")
 
-_BOS_CONFIG_DESCRIPTION = (
+_DESCRIPTION_HEAD = (
     "BOS project configuration specialist. ALWAYS delegate changes to BOS project "
     "configuration (.bos/config.toml, [agents.*], [exts.*], [runtime.*], agent/skill "
-    "registration) to this agent instead of editing those files directly. It validates "
-    "changes with `boscli doctor` and a live smoke turn in an isolated git worktree "
-    "before merging back, and reports the gateway-restart step for the user to run."
+    "registration) to this agent instead of editing those files directly. "
 )
+
+#: Per-workflow routing descriptions: the description is the routing contract shown to
+#: delegating agents, so it must describe the configured workflow — the in_place
+#: variant must not promise worktree isolation or a merge.
+_WORKFLOW_DESCRIPTIONS = {
+    "worktree": _DESCRIPTION_HEAD
+    + (
+        "It validates changes with `boscli doctor` and a live smoke turn in an isolated "
+        "git worktree before merging back, and reports the gateway-restart step for the "
+        "user to run."
+    ),
+    "in_place": _DESCRIPTION_HEAD
+    + (
+        "It edits in place with timestamped backups, validates changes with `boscli "
+        "doctor` and a live smoke turn, and reports the gateway-restart step for the "
+        "user to run."
+    ),
+}
+
+#: Default-workflow description, used at registration time (before config resolution).
+_BOS_CONFIG_DESCRIPTION = _WORKFLOW_DESCRIPTIONS["worktree"]
 
 _PROMPT_HEADER = """
 <role>
@@ -165,7 +184,7 @@ def bos_config_agent(workflow: str = "worktree") -> dict[str, Any]:
             f"[exts.ep_agent.bos_config] workflow must be one of {_VALID_WORKFLOWS}, got {workflow!r}"
         )
     return {
-        "description": _BOS_CONFIG_DESCRIPTION,
+        "description": _WORKFLOW_DESCRIPTIONS[workflow],
         "system_prompt": _system_prompt(workflow),
         "tools": {
             "enabled": ["Bash", "ReadFile", "EditFile", "WriteFile", "GrepSearch", "GlobSearch"],
