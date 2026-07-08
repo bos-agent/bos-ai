@@ -36,6 +36,9 @@ def test_archetype_scaffold_loads_and_resolves_agents(tmp_path, archetype):
     ws.resolve_agents()
     assert "main" in ws.config.agents
     assert ws.config.runtime.actors["main"].agent == "main"
+    # Final-review Fix 1: main ships an active subagent-delegation binding so
+    # AskSubagent works out of the box (SubagentPlugin's own allow-list defaults empty).
+    assert ws.config.agents["main"].plugin_bindings.root["SubagentPlugin"]["enabled"] == ["*"]
 
 
 def test_package_scaffold_layout_and_tool_registration(tmp_path, monkeypatch):
@@ -58,6 +61,7 @@ def test_package_scaffold_layout_and_tool_registration(tmp_path, monkeypatch):
     ws.resolve_agents()
     assert "main" in ws.config.agents
     assert ws.config.platform.extensions == ["bos.exts"]
+    assert ws.config.agents["main"].plugin_bindings.root["SubagentPlugin"]["enabled"] == ["*"]
 
     pyproject = tomllib.loads((tmp_path / "pyproject.toml").read_text(encoding="utf-8"))
     (target,) = pyproject["project"]["entry-points"]["bos.exts"].values()

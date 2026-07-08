@@ -22,4 +22,4 @@ source file on GitHub.
 - [BEP 12: Structured Agent Output and the AgentResult Primitive](https://github.com/bos-agent/bos-ai/blob/main/docs/BEP/BEP%2012%3A%20Structured%20Agent%20Output%20and%20the%20AgentResult%20Primitive.md)
 - [BEP 13: Clean Architecture — Concentric Dependency Rings](https://github.com/bos-agent/bos-ai/blob/main/docs/BEP/BEP%2013%3A%20Clean%20Architecture%20%E2%80%94%20Concentric%20Dependency%20Rings.md)
 - [BEP 14: Multi-Agent Project Collaboration](https://github.com/bos-agent/bos-ai/blob/main/docs/BEP/BEP%2014%3A%20Multi-Agent%20Project%20Collaboration.md)
-- [BEP 15: Agent-Backed Command Workflow](https://github.com/bos-agent/bos-ai/blob/main/docs/BEP/BEP%2015%3A%20Agent-Backed%20Command%20Workflow.md)
+- [BEP 15: Built-in Config Agent for BOS Project Configuration](https://github.com/bos-agent/bos-ai/blob/main/docs/BEP/BEP%2015%3A%20Built-in%20Config%20Agent%20for%20BOS%20Project%20Configuration.md)

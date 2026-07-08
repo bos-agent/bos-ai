@@ -29,6 +29,9 @@ Help the user accomplish this purpose. Use the available tools, skills, and
 memory; keep answers concrete and grounded in what you can verify.
 """
 
+[agents.main.plugin-bindings.SubagentPlugin]
+enabled = ["*"]   # delegate to any named agent (e.g. bos_config) via AskSubagent
+
 [runtime]
 main_actor = "main"
 
@@ -40,10 +43,11 @@ port = 0
 agent = "main"
 display_name = "Main"
 
-# ── Optional: delegate to specialist sub-agents ──────────────────
-# Add agents under ./agents (e.g. agents/researcher.md, agents/writer.md;
-# filename stem = agent name), then let main delegate to them with the
-# AskSubagent tool by binding the SubagentPlugin:
+# ── Optional: narrow subagent delegation ──────────────────────────
+# main can already delegate to any registered agent (e.g. the built-in
+# bos_config) via AskSubagent, per the binding above. Add agents under
+# ./agents (e.g. agents/researcher.md, agents/writer.md; filename stem =
+# agent name) and list them explicitly to restrict the allow-list instead:
 #
 # [agents.main.plugin-bindings.SubagentPlugin]
 # enabled = ["researcher", "writer"]

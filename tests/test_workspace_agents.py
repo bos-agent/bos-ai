@@ -67,6 +67,20 @@ def test_default_agent_registered_from_python_spec(tmp_path):
     assert defaults["tools"] is None  # "*" → None (all)
 
 
+def test_default_agent_binds_subagent_plugin_to_all(tmp_path):
+    """The BOS agent ships an active SubagentPlugin allow-list (final-review Fix 1):
+    the plugin's own default is an empty allow-list (no delegation at all), so
+    without this binding AskSubagent is never even registered on BOS."""
+    ws = Workspace(
+        tmp_path,
+        tmp_path / ".bos",
+        {"runtime": {"location": "process", "actors": {"main": {"agent": "BOS"}}}},
+    )
+    ws.bootstrap_platform()
+    defaults = AgentRegistry.get_defaults("BOS")
+    assert defaults["plugin-bindings"]["SubagentPlugin"]["enabled"] == ["*"]
+
+
 def test_default_agent_can_be_overridden_in_toml(tmp_path):
     """[agents.BOS] in TOML composes over the built-in factory spec.
 

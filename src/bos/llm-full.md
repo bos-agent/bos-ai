@@ -616,6 +616,30 @@ def weather_agent(region: str = "us") -> dict:
 region = "eu"
 ```
 
+Two factory agents ship built-in (registered whenever `bos.exts` is on
+`[platform.extensions]`, the default):
+
+- **`BOS`** — the general-purpose assistant (memory, planning, tasks, skills, subagents).
+- **`bos_config`** — the BOS project configuration specialist. Delegate configuration
+  changes (`.bos/config.toml`, `[agents.*]`, `[exts.*]`, `[runtime.*]`, agent/skill
+  registration) to it: it isolates edits in a scratch git worktree, validates with
+  `boscli doctor` plus one live smoke turn (`boscli ask`), merges back only on success,
+  and never restarts the gateway — it reports `uv run boscli gateway restart` as the
+  user's final step. Any agent whose `SubagentPlugin` binding allow-list includes it
+  (e.g. `enabled = ["*"]` — shipped by default in the built-in `BOS` agent and in
+  scaffolded projects' `[agents.main]`) can reach it via
+  `AskSubagent(role="bos_config", ...)`; run it directly with
+  `boscli ask --agent bos_config "..."`.
+
+```toml
+[exts.ep_agent.bos_config]
+workflow = "in_place"   # default "worktree"; "in_place" edits directly with
+                        # timestamped backups (validation still applies)
+```
+
+Both are overridable via `[agents.BOS]` / `[agents.bos_config]` and inheritable via
+`_parent`, like any factory agent.
+
 ---
 
 ## 7. Plugins
@@ -740,7 +764,10 @@ Registered when `bos.exts` is loaded; the default agent enables
 `SubagentPlugin.enabled` is the allow-list of agent kinds the agent may delegate to; `"*"`
 means all registered agents (no implicit exclusions — including the agent itself if it is
 registered, so use explicit allow/deny lists to shape topology). It requires
-`services.agent_runner` (raises in `setup` if absent).
+`services.agent_runner` (raises in `setup` if absent). The plugin's own default allow-list
+is empty (`[]`) — enabling the plugin does not by itself register `AskSubagent`; a binding
+is required. The built-in `BOS` agent ships `plugin-bindings.SubagentPlugin.enabled =
+["*"]` by default, and scaffolded projects ship the same binding on `[agents.main]`.
 
 ---
 
