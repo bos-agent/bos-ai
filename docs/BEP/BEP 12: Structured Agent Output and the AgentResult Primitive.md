@@ -82,7 +82,7 @@ When `schema` is supplied:
 - It is passed as the provider hint into `self._llm.complete(...)` (the same `response_schema` kwarg `LLM.complete` already forwards — `BackgroundLLM` uses exactly this).
 - When the model emits a **final** message (no tool calls), the answer is validated locally with `jsonschema` against the authoritative schema. On success, `output` = parsed object, `structured=True`. On failure, a corrective message is appended and the loop re-enters, bounded by `max_schema_retries`; exhaustion raises (reusing `BackgroundLLM`'s `_UNUSABLE_FINISH_REASONS` distinction so a truncation/filter/error isn't mislabeled a schema failure).
 
-Tools may still run before the final answer — so an agent can *research, then propose a typed result* (the capability BEP 15 §A4 assumes).
+Tools may still run before the final answer — so an agent can *research, then propose a typed result*.
 
 > **As-built amendment (2026-06-26).** The original sketch above ("extract into one shared *helper* in `bos.core.defaults`") could not stand as written: the agent ring (`src/bos/core/agent/`) is enforced **stdlib-pure** (`tests/test_agent_ring_isolation.py`), so it cannot import `jsonschema`. Validation therefore shipped as a **port + adapter**, not a flat shared function:
 > - **Agent ring (stdlib only)** — `src/bos/core/agent/_structured.py`: `provider_hint_schema`, `UNUSABLE_FINISH_REASONS`, `StructuredOutputError`, a `StructuredValidator` Protocol, and a `parse_json` fallback.
@@ -233,7 +233,6 @@ Tracks 5–7 depend on 1–4 (shipped) and on `create_agent`/`Agent.run` being r
 | Subagent tool | `src/bos/plugins/subagent.py:168` | `AskSubagent` → `agent_runner.run(kind=…, parent=ctx.parent)`, read `.output` | track 7 |
 | Memory curation | `src/bos/plugins/memory/consolidator.py`, `.../memory/plugin.py` | `DefaultMemoryConsolidator` → `agent_runner.run(agent_cfg=…, schema=…)`, read `.output` | track 7 |
 | Delete old lanes | `contract.py` (`SubagentRuntime`, `BackgroundLLM`), `defaults/background_llm.py`, `harness.py` (`_HarnessSubagentRuntime`), `tests/test_background_llm.py` | remove protocols/adapters/wiring/tests | track 7 |
-| Consumer | BEP 15 §A4 | gains the structured-output primitive it presumes | n/a |
 
 ---
 
@@ -255,7 +254,6 @@ Tracks 5–7 depend on 1–4 (shipped) and on `create_agent`/`Agent.run` being r
 
 - BEP 11: Async Tasks and Scheduling (defines `BackgroundLLM`, §3 — **superseded**: `BackgroundLLM` is removed and folded into `AgentRunner` by this BEP).
 - BEP 13: Ring isolation (the `agent` ring is stdlib-pure — why structured validation is a port+adapter, and why the `AgentRunner` adapter lives in the harness/assembly ring).
-- BEP 15: Agent-Backed Command Workflow (§A4 structured-output contract — primary consumer; depends on this BEP).
 - Chat-id internal-convention helpers (`INTERNAL_CHAT_SEPARATOR`/`make_subagent_chat_id`/`is_internal_chat`/`filter_internal_chats`, `src/bos/core/_chat_store_utils.py`) used to keep disposable-agent turns out of the user's chat list/recall.
 
 ---
@@ -266,3 +264,4 @@ Tracks 5–7 depend on 1–4 (shipped) and on `create_agent`/`Agent.run` being r
 - **2026-06-26** — Tracks 1–4 shipped (`70793d6`). Recorded the as-built amendment: structured validation landed as a **port + adapter** (forced by the stdlib-pure agent ring), not a flat shared helper (§C). Replaced original tracks 5–6 ("migrate consolidator, retire `BackgroundLLM`") with the broader **`AgentRunner` unification**: a single disposable-agent port subsuming both `SubagentRuntime` and `BackgroundLLM`, with the parent turn as an optional per-call param (Goals 4–5; Design §§D–F; tracks 5–7; resolved Open Issues 1–3, 5).
 - **2026-06-26** — Open Issue #7 resolved: `ToolContext` now composes a single `parent: ParentTurn` (the four turn fields removed, `.parent` property dropped, `ParentTurn.agent_name` made required). Turn fields read via `ctx.parent.*`. Also removed the flat `chat_id`/`turn_id`/`event_sink` tool-call injection — the task/plan tools now read `context.parent.chat_id` and `context` is the sole runtime injection into a tool call.
 - **2026-06-26** — Tracks 5–7 shipped (`acd4ee4`, `315fcf4`, `9d8300f`, `7d62192`). The port takes `parent: ParentTurn` (a minimal linkage descriptor in the agent ring, exposed via `ToolContext.parent`), *not* `ToolContext`, so it stays non-tool-specific. Chat-ids unified into `make_internal_chat_id`. `AskSubagent` and the memory consolidator migrated; `SubagentRuntime`/`BackgroundLLM`/`DefaultBackgroundLLM`/`_HarnessSubagentRuntime` and the old `PluginServices` fields deleted. **Verified and rejected** folding `llm`/`consolidator` into `agent_runner`: the skills `_SkillTestRuntime` needs them to hand-build an instrumented single-skill agent (§F); a future `TestSkill` redo atop `AgentRunner` + an A/B test sandbox (git-worktree isolation) may revisit it.
+- **2026-07-08** — BEP 15 (Agent-Backed Command Workflow) withdrawn before implementation; removed its consumer references from the design table and References. The 2026-06-25 renumbering note above is retained as historical record.
