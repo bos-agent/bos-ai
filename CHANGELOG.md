@@ -2,6 +2,24 @@
 
 <!-- version list -->
 
+## v1.11.0 (2026-07-09)
+
+### Bug Fixes
+
+- **cli**: Stop boscli ask from wiping the agent's registry defaults
+  ([#72](https://github.com/bos-agent/bos-ai/pull/72),
+  [`eadbf0d`](https://github.com/bos-agent/bos-ai/commit/eadbf0db1451c71be4525340fd2e198fc53aa359))
+
+### Features
+
+- **agents**: Add built-in bos_config agent for safe project configuration (BEP 15)
+  ([#70](https://github.com/bos-agent/bos-ai/pull/70),
+  [`6a9da4e`](https://github.com/bos-agent/bos-ai/commit/6a9da4e8634782aab9f351613c76fe96df4dc747))
+
+- **cli**: Add --no-steps option to boscli ask ([#71](https://github.com/bos-agent/bos-ai/pull/71),
+  [`982412d`](https://github.com/bos-agent/bos-ai/commit/982412d0c9b6028b59257d2e695323217fa916af))
+
+
 ## v1.10.1 (2026-07-02)
 
 ### Bug Fixes
