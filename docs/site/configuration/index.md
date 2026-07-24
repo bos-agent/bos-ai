@@ -169,6 +169,7 @@ Both use the same `AgentConfig` schema. `[agent.defaults]` is merged into every 
 # model = "openai/gpt-4o"
 max_tokens = 131072
 max_iterations = 80
+# max_iteration_handoff = true       # summarize the turn into a handoff when the budget runs out
 # reasoning_effort = "medium"        # low | medium | high
 # tool_noise_filter = "strip_all"    # strip_all | keep_all
 
@@ -198,6 +199,7 @@ enabled = ["writer"]
 | `reasoning_effort` | `low \| medium \| high` | Passed to the model if supported. |
 | `max_tokens` | `int` = `131072` | Context budget before compaction. |
 | `max_iterations` | `int` = `80` | Max tool-call iterations per turn. |
+| `max_iteration_handoff` | `bool` = `true` | On hitting `max_iterations`, summarize the turn into a handoff response (goal / done / left / needs-you) instead of returning the bare `(max iterations reached)` marker. Costs one consolidator call on that path. |
 | `tool_noise_filter` | `strip_all \| keep_all` | How prior tool output is retained. |
 | `history_attribution` | `bool` = `false` | Tag history with the speaking actor. |
 | `tools` | `{ enabled, disabled, usages }` | `enabled=["*"]` = all; `usages` overrides per-tool guidance. |

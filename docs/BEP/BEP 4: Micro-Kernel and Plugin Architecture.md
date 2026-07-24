@@ -528,7 +528,7 @@ TaskPlugin owns task state and task tools:
 
 Task lists are stored on the agent-scoped TaskPlugin, keyed by `chat_id`.
 
-BEP 4 removes dynamic iteration-budget scaling. The agent uses fixed `max_iterations`. A future BEP may define graceful max-iteration abortion by summarizing turn progress and clearly stating the stop reason so the work can continue in a new turn.
+BEP 4 removes dynamic iteration-budget scaling. The agent uses fixed `max_iterations`. Exhausting the budget ends the turn gracefully: the agent consolidates the turn's context into a handoff response stating the stop reason and what remains, so the work can continue in a new turn (`max_iteration_handoff`, default on; falls back to the static `(max iterations reached)` marker if consolidation fails).
 
 Task tools should return updated task state in tool results so the model sees the current state through the normal tool-message path.
 
@@ -659,7 +659,7 @@ Default agent capabilities may be expressed in `src/bos/core/defaults/agent_spec
 9. Use shallow config merge.
 10. Unknown plugin names warn; invalid known-plugin config fails startup.
 11. Remove dynamic task iteration budget adjustment.
-12. Use fixed `max_iterations`; graceful max-iteration continuation is future work.
+12. Use fixed `max_iterations`; exhausting it ends the turn with a consolidated handoff response.
 13. Plugin prompt order is base → plugin sections → tools → system info.
 14. Plugin interceptors run before configured harness/workspace interceptors.
 15. `event_sink` is first-class on `TurnContext`.
