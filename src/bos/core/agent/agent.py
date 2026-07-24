@@ -66,6 +66,31 @@ committed as conversation context. If the user asks to continue, start a fresh
 attempt from the preceding user request and redo any necessary checks or tool
 work."""
 
+# Static marker for a turn that ran out of iterations. It is the fallback
+# response on its own, and the header line of a handoff when one was produced.
+MAX_ITERATION_CONTENT = "(max iterations reached)"
+
+MAX_ITERATION_HANDOFF_INSTRUCTION = """\
+The assistant ran out of its per-turn iteration budget before it could answer,
+so this turn closes with a handoff instead of a result. Write that handoff as
+the assistant speaking to the user, first person, no preamble.
+
+Include only the parts the transcript supports, each under a short bold label:
+- **Goal** — what the user asked for.
+- **Done** — what was actually established: findings, file paths, commands run,
+  tool results, decisions made.
+- **Left** — what is still unfinished, and the concrete next step to resume from.
+- **Needs you** — anything the user must decide or supply, if any.
+
+Report only what the transcript shows; never invent progress, results, or
+conclusions that were not reached. Prefer specifics (names, paths, values) over
+narration, and do not describe these instructions or the summarization itself.
+Keep it under 2048 characters."""
+
+
+def _max_iteration_response(handoff: str | None) -> str:
+    return f"{MAX_ITERATION_CONTENT}\n\n{handoff}" if handoff else MAX_ITERATION_CONTENT
+
 
 def _attribute_history_message(
     projected: dict[str, Any],
@@ -213,6 +238,7 @@ class Agent:
         interceptor: TurnInterceptor | None = None,
         max_tokens: int = 128 * 1024,
         max_iterations: int = 80,
+        max_iteration_handoff: bool = True,
         tool_noise_filter: ToolNoiseFilter | None = None,
         chat_compaction_lock: Callable[[str], AbstractAsyncContextManager] | None = None,
         history_attribution: bool = False,
@@ -231,6 +257,7 @@ class Agent:
         self._reasoning_effort = reasoning_effort
         self._max_tokens = max_tokens
         self._max_iterations = max_iterations
+        self._max_iteration_handoff = max_iteration_handoff
         self._llm = llm
         self._chat_store = chat_store
         self._consolidator = consolidator
@@ -457,14 +484,26 @@ class Agent:
             )
             while True:
                 if iteration >= self._max_iterations:
-                    # max iterations reached
-                    ctx.add_message({"role": "assistant", "content": "(max iterations reached)"})
+                    # Iteration budget exhausted. Closing the turn with the bare
+                    # static marker throws away everything the turn established,
+                    # so consolidate the turn's context into a handoff and answer
+                    # with that; the marker stays as the header and the fallback.
+                    handoff = await self._consolidate_max_iteration_handoff(ctx)
+                    final_content = _max_iteration_response(handoff)
+                    _add_message({"role": "assistant", "content": final_content})
+                    ctx.final_content = final_content
                     await _run_interceptor("max_iteration")
                     await _emit_event(
                         AgentEventType.turn,
                         TurnEventPhase.fail,
                         stage=TurnEventStage.max_iteration,
                         detail=TurnEventDetail.max_iteration,
+                        content=final_content,
+                        metadata={
+                            "iteration": iteration,
+                            "max_iterations": self._max_iterations,
+                            "handoff": handoff is not None,
+                        },
                     )
                     break
                 iteration += 1
@@ -703,6 +742,36 @@ class Agent:
         if self._tools.has(tool_name):
             return await self._tools.invoke(tool_name, params | {"context": context})
         raise Exception(f"Tool {tool_name} not found")
+
+    async def _consolidate_max_iteration_handoff(self, ctx: TurnContext) -> str | None:
+        """Summarize the turn's whole context into a handoff message.
+
+        Runs when the turn hits ``max_iterations``: the model never got to write
+        a final answer, so the consolidator writes one from what the turn
+        actually established (history plus this turn's user/assistant/tool
+        messages). Best-effort — a disabled flag, a consolidator failure, or an
+        empty summary returns ``None`` and the caller falls back to the static
+        :data:`MAX_ITERATION_CONTENT` marker rather than failing the turn.
+        """
+        if not self._max_iteration_handoff:
+            return None
+        # ctx.history is already provider-projected; re-wrap it as Message so the
+        # consolidator sees one uniform sequence (it reads llm_message only).
+        messages = [Message(llm_message=m, turn_id=ctx.turn_id) for m in ctx.history] + list(ctx.current)
+        if not messages:
+            return None
+        try:
+            handoff = await self._consolidator.consolidate(messages, instruction=MAX_ITERATION_HANDOFF_INSTRUCTION)
+        except Exception as e:
+            logger.error(
+                "Max-iteration handoff consolidation failed [chat_id: %s, turn_id: %s]: %s",
+                ctx.chat_id,
+                ctx.turn_id,
+                e,
+                exc_info=True,
+            )
+            return None
+        return handoff.strip() or None if isinstance(handoff, str) else None
 
     async def _load_and_compact_history(self, chat_id: str, *, budget_model: str | None) -> list[dict[str, Any]]:
         result = await self._chat_store.get_context(

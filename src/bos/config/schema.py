@@ -67,6 +67,10 @@ class AgentConfig(BaseModel):
     reasoning_effort: ReasoningEffort | None = None
     max_tokens: int = 131_072
     max_iterations: int = 80
+    # When a turn exhausts max_iterations, summarize its context into a handoff
+    # message and answer with it instead of the bare static marker. Costs one
+    # consolidator LLM call on that path; set false to keep the marker only.
+    max_iteration_handoff: bool = True
     tool_noise_filter: ToolNoiseFilter | None = None
     history_attribution: bool = False
 
