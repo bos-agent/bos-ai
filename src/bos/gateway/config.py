@@ -22,6 +22,7 @@ class ResolvedGatewayConfig:
     upload_dir: str = ".bos/uploads/http"
     max_upload_bytes: int = 20 * 1024 * 1024
     api_key_env: str = "BOS_GATEWAY_API_KEY"
+    shutdown_grace_seconds: float = 30.0
 
 
 @dataclass(frozen=True)

@@ -20,7 +20,7 @@ ToolNoiseFilter = Literal["strip_all", "keep_all"]
 TokenEstimateSource = Literal["litellm", "fallback", "fallback-error"]
 ReasoningEffort = Literal["low", "medium", "high"]
 InterceptorStage = Literal[
-    "prepare", "before_llm", "after_llm", "after_tool", "final_response", "max_iteration", "error"
+    "prepare", "before_llm", "after_llm", "after_tool", "final_response", "max_iteration", "shutdown", "error"
 ]
 
 
@@ -60,6 +60,7 @@ class TurnEventStage:
     after_tool = "after_tool"
     final_response = "final_response"
     max_iteration = "max_iteration"
+    shutdown = "shutdown"
     error = "error"
 
 
@@ -74,6 +75,7 @@ class TurnEventDetail:
     tool_call = "tool_call"
     tool_result = "tool_result"
     max_iteration = "max_iteration"
+    shutdown = "shutdown"
     error = "error"
 
 

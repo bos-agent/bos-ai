@@ -689,6 +689,7 @@ class Workspace:
             upload_dir=gateway.upload_dir,
             max_upload_bytes=gateway.max_upload_bytes,
             api_key_env=gateway.api_key_env,
+            shutdown_grace_seconds=gateway.shutdown_grace_seconds,
         )
 
     def resolve_gateway_actors(self) -> dict[str, ResolvedActorConfig]:

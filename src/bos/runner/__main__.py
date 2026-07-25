@@ -14,6 +14,7 @@ import logging
 import os
 import signal
 import sys
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -65,13 +66,25 @@ def main() -> None:
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     main_task: asyncio.Task | None = None
+    gateway: Any = None
 
     def _on_sigterm(*_) -> None:
-        logger.info("SIGTERM received — shutting down")
+        # First signal asks for a graceful stop: in-flight turns are told to
+        # close with a handoff, within the configured grace. A second signal
+        # (an impatient operator, or the CLI escalating) cancels outright.
+        if gateway is not None and not gateway.shutdown_requested:
+            logger.info("SIGTERM received — draining in-flight turns, then shutting down")
+            loop.call_soon_threadsafe(gateway.request_shutdown)
+            return
+        logger.info("SIGTERM received — stopping now")
         if main_task and not main_task.done():
             loop.call_soon_threadsafe(main_task.cancel)
 
     signal.signal(signal.SIGTERM, _on_sigterm)
+
+    def _gateway_ready(instance: Any) -> None:
+        nonlocal gateway
+        gateway = instance
 
     async def _watch_singleton_lock(target: asyncio.Task | None) -> None:
         # Singleton authority must hold for the whole process lifetime, not just
@@ -96,7 +109,7 @@ def main() -> None:
         rd.pid_file.write_text(str(os.getpid()), encoding="utf-8")
         watch_task = asyncio.ensure_future(_watch_singleton_lock(asyncio.current_task()))
         try:
-            await start(ws)
+            await start(ws, on_ready=_gateway_ready)
         except asyncio.CancelledError:
             logger.info("Gateway cancelled — exiting cleanly")
         finally:

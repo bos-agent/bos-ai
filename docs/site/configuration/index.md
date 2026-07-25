@@ -170,6 +170,7 @@ Both use the same `AgentConfig` schema. `[agent.defaults]` is merged into every 
 max_tokens = 131072
 max_iterations = 80
 # max_iteration_handoff = true       # summarize the turn into a handoff when the budget runs out
+# shutdown_handoff = true            # …and when the host stops the agent mid-turn
 # reasoning_effort = "medium"        # low | medium | high
 # tool_noise_filter = "strip_all"    # strip_all | keep_all
 
@@ -200,6 +201,7 @@ enabled = ["writer"]
 | `max_tokens` | `int` = `131072` | Context budget before compaction. |
 | `max_iterations` | `int` = `80` | Max tool-call iterations per turn. |
 | `max_iteration_handoff` | `bool` = `true` | On hitting `max_iterations`, summarize the turn into a handoff response (goal / done / left / needs-you) instead of returning the bare `(max iterations reached)` marker. Costs one consolidator call on that path. |
+| `shutdown_handoff` | `bool` = `true` | Same handoff when the host stops the agent mid-turn (gateway shutdown) instead of the bare `(interrupted: the agent is shutting down)` marker. The consolidator call runs inside `shutdown_grace_seconds`. |
 | `tool_noise_filter` | `strip_all \| keep_all` | How prior tool output is retained. |
 | `history_attribution` | `bool` = `false` | Tag history with the speaking actor. |
 | `tools` | `{ enabled, disabled, usages }` | `enabled=["*"]` = all; `usages` overrides per-tool guidance. |
@@ -317,6 +319,7 @@ port = 0                       # 0 = auto-assign a free port; discover via gatew
 api_key_env = "BOS_GATEWAY_API_KEY"
 # upload_dir = ".bos/uploads/http"
 # max_upload_bytes = 20971520
+# shutdown_grace_seconds = 30    # how long a stop gives in-flight turns to close with a handoff
 
 [runtime.actor_resolver]
 mention_prefix = "@"           # how channels resolve @actor mentions
@@ -348,6 +351,13 @@ overrides in the same shape as `[agent.defaults]`.
 assign a free port; the actual port and PID are written to `gateway.state` so clients (the
 TUI, `boscli gateway status`) can find the running gateway. The control plane is
 authenticated with the key in the environment variable named by `api_key_env`.
+
+`shutdown_grace_seconds` bounds a graceful stop. On `boscli gateway stop` (or the first
+`SIGTERM`/`Ctrl-C`), the gateway stops admitting turns and asks in-flight ones to close: each
+abandons whatever it was awaiting, answers with a handoff summarizing what it established,
+and that reply goes out over the normal channel path. The budget covers that closure — one
+consolidator call — not the turn's remaining work, so a long turn does not delay the stop.
+Turns that miss the deadline are cancelled, and a second signal skips the drain entirely.
 
 **`[[runtime.channels]]`** is an array of tables — declare one per persistent channel. Rules:
 

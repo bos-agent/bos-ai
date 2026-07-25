@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,6 +21,10 @@ from .state import GatewayRunDir, write_gateway_state
 
 if TYPE_CHECKING:
     from bos.core import AgentHarness
+
+# Settle window after the actor drain, so polling channels can pick up the last
+# handoff replies before their consumers stop. Covers a few JSONL poll cycles.
+_REPLY_FLUSH_SECONDS = 2.0
 
 
 class Gateway:
@@ -77,6 +82,19 @@ class Gateway:
         )
         # Channel instantiation is async (ep_channel.invoke); deferred to run().
         self._persistent_channel_configs = runtime.channels
+        self._shutdown = asyncio.Event()
+
+    @property
+    def shutdown_requested(self) -> bool:
+        return self._shutdown.is_set()
+
+    def request_shutdown(self) -> None:
+        """Ask ``run`` to return and begin the graceful drain (§ ``run``).
+
+        Idempotent, and safe to call from a signal handler via
+        ``loop.call_soon_threadsafe``. Cancelling the task running ``run`` still
+        works and remains the forceful path — it skips the drain."""
+        self._shutdown.set()
 
     def status_snapshot(self) -> dict[str, Any]:
         gateway = {
@@ -175,12 +193,37 @@ class Gateway:
         await self.actor_manager.start_all()
         await self.channel_manager.start_all()
         write_gateway_state(GatewayRunDir(self.bos_dir), self.status_snapshot())
+        graceful = True
         try:
-            import asyncio
-
-            await asyncio.Event().wait()
+            await self._shutdown.wait()
+        except asyncio.CancelledError:
+            # Being cancelled is the forceful path — an operator escalating, or
+            # the process going down now. Skip the drain rather than holding the
+            # stop open for turns that were told to hurry.
+            graceful = False
+            raise
         finally:
+            # Order matters. Actors stop *before* channels so a turn closing
+            # during the drain still has a live consumer for its reply; the old
+            # order dropped the consumer first and left clients hanging. Each
+            # step is bounded, so the stop cannot be held open by a long turn.
+            await self.actor_manager.stop_all(
+                drain_grace=self.config.shutdown_grace_seconds if graceful else 0.0
+            )
+            if graceful:
+                await self._flush_replies()
             await self.channel_manager.stop_all()
-            await self.actor_manager.stop_all()
             write_gateway_state(GatewayRunDir(self.bos_dir), self.status_snapshot() | {"status": "stopped"})
             await runner.cleanup()
+
+    async def _flush_replies(self) -> None:
+        """Give channels a moment to deliver replies produced during the drain.
+
+        Channels poll their mailbox, so a handoff written in the last instant of
+        the drain is not necessarily on the wire yet. This is a bounded
+        best-effort settle, not a delivery guarantee — a channel that is slower
+        than the window (or a client that has already gone) still loses the
+        reply, and the handoff remains committed to chat history either way."""
+        if self.config.shutdown_grace_seconds <= 0:
+            return
+        await asyncio.sleep(min(_REPLY_FLUSH_SECONDS, self.config.shutdown_grace_seconds))

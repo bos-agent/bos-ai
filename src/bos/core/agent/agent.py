@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
 import json
 import logging
 import os
 import platform
 import uuid
+from collections.abc import Coroutine, Iterable
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal, Sequence
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal, Sequence, TypeVar
 from xml.sax.saxutils import escape
 
 from ._structured import (
@@ -57,6 +59,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_T = TypeVar("_T")
+
 
 ABORTED_TURN_CONTENT = """(turn aborted before completion)
 
@@ -66,12 +70,28 @@ committed as conversation context. If the user asks to continue, start a fresh
 attempt from the preceding user request and redo any necessary checks or tool
 work."""
 
-# Static marker for a turn that ran out of iterations. It is the fallback
-# response on its own, and the header line of a handoff when one was produced.
+# Static markers for a turn cut short before the model wrote a final answer.
+# Each is the fallback response on its own, and the header line of a handoff
+# when one was produced.
 MAX_ITERATION_CONTENT = "(max iterations reached)"
+SHUTDOWN_CONTENT = "(interrupted: the agent is shutting down)"
 
-MAX_ITERATION_HANDOFF_INSTRUCTION = """\
-The assistant ran out of its per-turn iteration budget before it could answer,
+# Stands in for a tool call abandoned by a cooperative stop, so the persisted
+# turn keeps one result per advertised call.
+INTERRUPTED_TOOL_CONTENT = "(interrupted: the agent is shutting down)"
+
+# Why the turn is closing, phrased for the consolidator. Keyed by closure reason.
+_CLOSURE_CAUSE: dict[str, str] = {
+    "max_iterations": "The assistant ran out of its per-turn iteration budget before it could answer",
+    "shutdown": "The assistant was interrupted mid-turn because its host is shutting down",
+}
+
+_CLOSURE_MARKER: dict[str, str] = {
+    "max_iterations": MAX_ITERATION_CONTENT,
+    "shutdown": SHUTDOWN_CONTENT,
+}
+
+_HANDOFF_INSTRUCTION_BODY = """\
 so this turn closes with a handoff instead of a result. Write that handoff as
 the assistant speaking to the user, first person, no preamble.
 
@@ -88,8 +108,26 @@ narration, and do not describe these instructions or the summarization itself.
 Keep it under 2048 characters."""
 
 
-def _max_iteration_response(handoff: str | None) -> str:
-    return f"{MAX_ITERATION_CONTENT}\n\n{handoff}" if handoff else MAX_ITERATION_CONTENT
+def _handoff_instruction(reason: str) -> str:
+    return f"{_CLOSURE_CAUSE[reason]},\n{_HANDOFF_INSTRUCTION_BODY}"
+
+
+MAX_ITERATION_HANDOFF_INSTRUCTION = _handoff_instruction("max_iterations")
+SHUTDOWN_HANDOFF_INSTRUCTION = _handoff_instruction("shutdown")
+
+
+def _closure_response(reason: str, handoff: str | None) -> str:
+    marker = _CLOSURE_MARKER[reason]
+    return f"{marker}\n\n{handoff}" if handoff else marker
+
+
+class _StopRequested(Exception):
+    """Internal: a cooperative stop was requested while the turn was awaiting."""
+
+
+async def _gather(coros: Iterable[Coroutine[Any, Any, _T]]) -> list[_T]:
+    """``asyncio.gather`` as a coroutine, so it can be raced against a stop."""
+    return list(await asyncio.gather(*coros))
 
 
 def _attribute_history_message(
@@ -239,6 +277,7 @@ class Agent:
         max_tokens: int = 128 * 1024,
         max_iterations: int = 80,
         max_iteration_handoff: bool = True,
+        shutdown_handoff: bool = True,
         tool_noise_filter: ToolNoiseFilter | None = None,
         chat_compaction_lock: Callable[[str], AbstractAsyncContextManager] | None = None,
         history_attribution: bool = False,
@@ -258,6 +297,11 @@ class Agent:
         self._max_tokens = max_tokens
         self._max_iterations = max_iterations
         self._max_iteration_handoff = max_iteration_handoff
+        self._shutdown_handoff = shutdown_handoff
+        # Cooperative stop. Set by ``request_stop`` when the host is shutting
+        # down: in-flight turns abandon what they are awaiting and close with a
+        # handoff instead of being cancelled mid-flight.
+        self._stop_requested = asyncio.Event()
         self._llm = llm
         self._chat_store = chat_store
         self._consolidator = consolidator
@@ -277,6 +321,48 @@ class Agent:
     @property
     def name(self) -> str:
         return self._name
+
+    @property
+    def stop_requested(self) -> bool:
+        return self._stop_requested.is_set()
+
+    def request_stop(self) -> None:
+        """Ask in-flight turns to close early, cooperatively.
+
+        The host calls this when it is shutting down. Each running turn
+        abandons whatever it is awaiting (an LLM call, a tool batch), closes
+        with a handoff summarizing what it established, persists it, and
+        returns normally — so the caller still receives a reply instead of a
+        cancellation. Idempotent; a turn started after this returns closes
+        immediately with the static marker."""
+        self._stop_requested.set()
+
+    async def _await_or_stop(self, coro: Coroutine[Any, Any, _T]) -> _T:
+        """Await *coro*, abandoning it if a cooperative stop is requested.
+
+        Raises :class:`_StopRequested` instead of returning, so the turn loop
+        can close with a handoff rather than waiting out a long tool call or
+        model response. The abandoned work is cancelled, not left running."""
+        if self._stop_requested.is_set():
+            coro.close()
+            raise _StopRequested
+        work = asyncio.ensure_future(coro)
+        stop = asyncio.ensure_future(self._stop_requested.wait())
+        try:
+            await asyncio.wait({work, stop}, return_when=asyncio.FIRST_COMPLETED)
+        except asyncio.CancelledError:
+            # The whole turn is being cancelled (the hard path) — take the
+            # in-flight work down with it rather than orphaning the task.
+            work.cancel()
+            raise
+        finally:
+            stop.cancel()
+        if work.done():
+            return work.result()
+        work.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await work
+        raise _StopRequested
 
     async def ask(
         self,
@@ -468,6 +554,36 @@ class Agent:
             if interrupt and (llm_message := await _apply_async(interrupt, {})):
                 ctx.add_message(llm_message, merge=True)
 
+        async def _close_with_handoff(reason: Literal["max_iterations", "shutdown"]) -> None:
+            """End the turn early with a handoff instead of a bare marker.
+
+            The model never got to write a final answer, so closing on the
+            static marker alone would throw away everything the turn
+            established. Consolidate that context into an actionable handoff
+            and answer with it; the marker stays as the header and as the
+            fallback when consolidation is disabled, fails, or has nothing to
+            summarize."""
+            handoff = await self._consolidate_closure_handoff(ctx, reason=reason)
+            final_content = _closure_response(reason, handoff)
+            _add_message({"role": "assistant", "content": final_content})
+            ctx.final_content = final_content
+            stage = TurnEventStage.shutdown if reason == "shutdown" else TurnEventStage.max_iteration
+            detail = TurnEventDetail.shutdown if reason == "shutdown" else TurnEventDetail.max_iteration
+            await _run_interceptor("shutdown" if reason == "shutdown" else "max_iteration")
+            await _emit_event(
+                AgentEventType.turn,
+                TurnEventPhase.fail,
+                stage=stage,
+                detail=detail,
+                content=final_content,
+                metadata={
+                    "iteration": iteration,
+                    "max_iterations": self._max_iterations,
+                    "handoff": handoff is not None,
+                    "closure_reason": reason,
+                },
+            )
+
         try:
             await _run_interceptor("prepare")
             # Build the system prompt once per turn (after prepare). It is not
@@ -484,27 +600,13 @@ class Agent:
             )
             while True:
                 if iteration >= self._max_iterations:
-                    # Iteration budget exhausted. Closing the turn with the bare
-                    # static marker throws away everything the turn established,
-                    # so consolidate the turn's context into a handoff and answer
-                    # with that; the marker stays as the header and the fallback.
-                    handoff = await self._consolidate_max_iteration_handoff(ctx)
-                    final_content = _max_iteration_response(handoff)
-                    _add_message({"role": "assistant", "content": final_content})
-                    ctx.final_content = final_content
-                    await _run_interceptor("max_iteration")
-                    await _emit_event(
-                        AgentEventType.turn,
-                        TurnEventPhase.fail,
-                        stage=TurnEventStage.max_iteration,
-                        detail=TurnEventDetail.max_iteration,
-                        content=final_content,
-                        metadata={
-                            "iteration": iteration,
-                            "max_iterations": self._max_iterations,
-                            "handoff": handoff is not None,
-                        },
-                    )
+                    await _close_with_handoff("max_iterations")
+                    break
+                if self._stop_requested.is_set():
+                    # The host is shutting down between iterations. Close on
+                    # what this turn already established rather than being
+                    # cancelled and losing it.
+                    await _close_with_handoff("shutdown")
                     break
                 iteration += 1
                 await _interrupt()
@@ -517,11 +619,16 @@ class Agent:
                     metadata={"iteration": iteration, "max_iterations": self._max_iterations},
                 )
 
-                ctx.current_llm_response = response = await self._llm.complete(
-                    ctx.get_llm_messages(),
-                    tools=ctx.tool_defs,
-                    cache_control_injection_points=_cache_control_injection_points(),
-                    **llm_params,
+                # Interruptible: a stop mid-completion abandons the call rather
+                # than making shutdown wait out a long response. Nothing has
+                # been added to the context yet, so there is nothing to repair.
+                ctx.current_llm_response = response = await self._await_or_stop(
+                    self._llm.complete(
+                        ctx.get_llm_messages(),
+                        tools=ctx.tool_defs,
+                        cache_control_injection_points=_cache_control_injection_points(),
+                        **llm_params,
+                    )
                 )
                 cache_index = -1
                 for _k, _v in (response.usage or {}).items():
@@ -617,6 +724,8 @@ class Agent:
                     "thinking_blocks": response.thinking_blocks,
                 })
 
+                answered: set[str] = set()
+                stopped_in_tools = False
                 for batch in self._tool_call_batches(response.tool_calls):
                     for tc in batch:
                         await _emit_event(
@@ -626,13 +735,22 @@ class Agent:
                             tool_name=tc.name,
                             content=json.dumps(tc.arguments, default=str),
                         )
-                    if len(batch) > 1:
-                        tool_results = await asyncio.gather(
-                            *(self._call_tool(tc, ctx, event_sink=event_sink) for tc in batch)
-                        )
-                    else:
-                        tool_results = [await self._call_tool(batch[0], ctx, event_sink=event_sink)]
+                    try:
+                        # Interruptible: a stop abandons the running batch
+                        # instead of waiting out a long-running tool.
+                        if len(batch) > 1:
+                            tool_results = await self._await_or_stop(
+                                _gather(self._call_tool(tc, ctx, event_sink=event_sink) for tc in batch)
+                            )
+                        else:
+                            tool_results = [
+                                await self._await_or_stop(self._call_tool(batch[0], ctx, event_sink=event_sink))
+                            ]
+                    except _StopRequested:
+                        stopped_in_tools = True
+                        break
                     for tc, tool_result in zip(batch, tool_results):
+                        answered.add(tc.id)
                         _add_message({
                             "role": "tool",
                             "tool_call_id": tc.id,
@@ -648,6 +766,25 @@ class Agent:
                             tool_name=tc.name,
                             content=tool_result,
                         )
+                if stopped_in_tools:
+                    # The assistant message already advertises every tool call,
+                    # so each one needs a result message or the persisted turn
+                    # is an invalid sequence the next turn cannot replay.
+                    for tc in response.tool_calls:
+                        if tc.id in answered:
+                            continue
+                        _add_message({
+                            "role": "tool",
+                            "tool_call_id": tc.id,
+                            "name": tc.name,
+                            "content": INTERRUPTED_TOOL_CONTENT,
+                        })
+                    await _close_with_handoff("shutdown")
+                    break
+            turn_status = "completed"
+        except _StopRequested:
+            # Raised by the LLM call, where the context is still clean.
+            await _close_with_handoff("shutdown")
             turn_status = "completed"
         except AbortTurn:
             turn_status = "aborted"
@@ -743,17 +880,26 @@ class Agent:
             return await self._tools.invoke(tool_name, params | {"context": context})
         raise Exception(f"Tool {tool_name} not found")
 
-    async def _consolidate_max_iteration_handoff(self, ctx: TurnContext) -> str | None:
+    async def _consolidate_closure_handoff(
+        self, ctx: TurnContext, *, reason: Literal["max_iterations", "shutdown"]
+    ) -> str | None:
         """Summarize the turn's whole context into a handoff message.
 
-        Runs when the turn hits ``max_iterations``: the model never got to write
-        a final answer, so the consolidator writes one from what the turn
-        actually established (history plus this turn's user/assistant/tool
-        messages). Best-effort — a disabled flag, a consolidator failure, or an
-        empty summary returns ``None`` and the caller falls back to the static
-        :data:`MAX_ITERATION_CONTENT` marker rather than failing the turn.
+        Runs when a turn is cut short — the iteration budget ran out, or the
+        host asked it to stop — so the model never got to write a final answer
+        and the consolidator writes one from what the turn actually established
+        (history plus this turn's user/assistant/tool messages).
+
+        Best-effort — a disabled flag, a turn that established nothing yet, a
+        consolidator failure, or an empty summary returns ``None`` and the
+        caller falls back to the static marker rather than failing the turn.
         """
-        if not self._max_iteration_handoff:
+        if not (self._max_iteration_handoff if reason == "max_iterations" else self._shutdown_handoff):
+            return None
+        # A turn stopped before it produced anything has nothing to hand off;
+        # spending a consolidator call on the user message alone would only
+        # paraphrase the request back. The marker is the honest answer.
+        if not any(m.llm_message.get("role") in ("assistant", "tool") for m in ctx.current):
             return None
         # ctx.history is already provider-projected; re-wrap it as Message so the
         # consolidator sees one uniform sequence (it reads llm_message only).
@@ -761,12 +907,13 @@ class Agent:
         if not messages:
             return None
         try:
-            handoff = await self._consolidator.consolidate(messages, instruction=MAX_ITERATION_HANDOFF_INSTRUCTION)
+            handoff = await self._consolidator.consolidate(messages, instruction=_handoff_instruction(reason))
         except Exception as e:
             logger.error(
-                "Max-iteration handoff consolidation failed [chat_id: %s, turn_id: %s]: %s",
+                "Closure handoff consolidation failed [chat_id: %s, turn_id: %s, reason: %s]: %s",
                 ctx.chat_id,
                 ctx.turn_id,
+                reason,
                 e,
                 exc_info=True,
             )
