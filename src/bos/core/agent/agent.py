@@ -77,8 +77,9 @@ MAX_ITERATION_CONTENT = "(max iterations reached)"
 SHUTDOWN_CONTENT = "(interrupted: the agent is shutting down)"
 
 # Stands in for a tool call abandoned by a cooperative stop, so the persisted
-# turn keeps one result per advertised call.
-INTERRUPTED_TOOL_CONTENT = "(interrupted: the agent is shutting down)"
+# turn keeps one result per advertised call. Worded so the handoff summarizer
+# cannot read it as the tool having succeeded — it is the absence of a result.
+INTERRUPTED_TOOL_CONTENT = "(no result: this tool call was abandoned unfinished when the agent was told to shut down)"
 
 # Why the turn is closing, phrased for the consolidator. Keyed by closure reason.
 _CLOSURE_CAUSE: dict[str, str] = {

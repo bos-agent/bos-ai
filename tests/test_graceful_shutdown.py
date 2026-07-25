@@ -450,3 +450,33 @@ async def test_cancelling_the_gateway_skips_the_drain(tmp_path, monkeypatch):
     await asyncio.gather(run, return_exceptions=True)
 
     assert grace_used == [0.0]
+
+
+# ── consolidator projection ────────────────────────────────────────────────
+
+
+def test_consolidation_prompt_has_no_unpaired_tool_messages():
+    """A handoff summarizes a turn that was mid-tool-call, so its history
+    carries tool traffic. Projecting that to a bare `role: "tool"` message
+    drops the call it answers, and strict providers reject the whole prompt —
+    which would silently degrade every handoff to the static marker."""
+    from bos.core import Message
+    from bos.core.defaults.consolidator import _project_history
+
+    projected = _project_history([
+        Message(llm_message={"role": "user", "content": "sleep then report"}),
+        Message(
+            llm_message={
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "Sleep", "arguments": "{}"}}],
+            }
+        ),
+        Message(llm_message={"role": "tool", "tool_call_id": "call_1", "name": "Sleep", "content": "(interrupted)"}),
+    ])
+
+    assert [m["role"] for m in projected] == ["user", "assistant", "user"]
+    assert all("tool_call_id" not in m and "tool_calls" not in m for m in projected)
+    # The tool traffic is still legible to the summarizer, just as plain text.
+    assert "Sleep" in projected[1]["content"]
+    assert "(interrupted)" in projected[2]["content"]
