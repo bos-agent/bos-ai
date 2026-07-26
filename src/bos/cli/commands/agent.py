@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import getpass
 import json
+import math
 import os
 import re
 import signal
@@ -315,6 +317,9 @@ class _TaskProgressDisplay:
         if event.detail == "max_iteration":
             return ["[yellow]  max iterations reached[/]"]
 
+        if event.detail == "shutdown":
+            return ["[yellow]  interrupted — agent shutting down[/]"]
+
         if event.detail == "error":
             return [f"[red]  error: {escape(str(event.content or 'unknown error'))}[/]"]
 
@@ -442,6 +447,41 @@ def gateway():
 # ── boscli gateway start ────────────────────────────────────────
 
 
+async def _run_foreground_gateway(start_gateway, ws) -> None:
+    """Run the gateway in this process, with Ctrl-C as a graceful stop.
+
+    First interrupt drains in-flight turns (each closes with a handoff); a
+    second stops immediately. Without this the foreground gateway would die on
+    the first Ctrl-C mid-turn, unlike the daemon under SIGTERM."""
+    loop = asyncio.get_running_loop()
+    main_task = asyncio.current_task()
+    handled: list[Any] = []
+
+    def _on_ready(instance) -> None:
+        handled.append(instance)
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            with contextlib.suppress(NotImplementedError):
+                loop.add_signal_handler(sig, _request_stop)
+
+    def _request_stop() -> None:
+        instance = handled[0]
+        if not instance.shutdown_requested:
+            click.echo("\nStopping — draining in-flight turns…", err=True)
+            instance.request_shutdown()
+            return
+        click.echo("\nStopping now.", err=True)
+        # Hand the signals back to the default handlers on the way out, so a
+        # third Ctrl-C can still kill a teardown that has gone wrong.
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            with contextlib.suppress(NotImplementedError, RuntimeError):
+                loop.remove_signal_handler(sig)
+        if main_task is not None:
+            main_task.cancel()
+
+    with contextlib.suppress(asyncio.CancelledError):
+        await start_gateway(ws, on_ready=_on_ready)
+
+
 @gateway.command()
 @click.option("--foreground", "-f", is_flag=True, default=False, help="Run in the foreground (don't daemonize).")
 @click.option(
@@ -482,7 +522,7 @@ def start(ctx, foreground: bool, workspace_dir: str | None):
 
     if foreground:
         click.echo("Starting gateway in foreground…")
-        asyncio.run(start_gateway(ws))
+        asyncio.run(_run_foreground_gateway(start_gateway, ws))
         return
 
     argv = [sys.executable, "-m", "bos.runner", "--config", runner_config_arg]
@@ -514,12 +554,37 @@ def start(ctx, foreground: bool, workspace_dir: str | None):
 
 # ── boscli gateway stop ─────────────────────────────────────────
 
+# Headroom over the drain grace before `stop` escalates to SIGKILL: the reply
+# flush, harness teardown, and process exit.
+_STOP_DEADLINE_MARGIN = 5.0
+
+
+def _resolved_stop_grace(ws, state: dict) -> float:
+    """The grace the *running* gateway is using, if it published one.
+
+    The process resolved its config at startup; re-reading config from disk can
+    disagree with it (the file may have been edited since), which would either
+    SIGKILL a handoff still in flight or wait far longer than the operator asked
+    for. Falls back to this workspace's config, then to the schema default — and
+    says so, because past that point the deadline below is a guess."""
+    from bos.config.schema import GatewayConfig
+
+    published = state.get("gateway", {}).get("shutdown_grace_seconds")
+    if isinstance(published, (int, float)) and math.isfinite(published) and published >= 0:
+        return float(published)
+    try:
+        return ws.resolve_gateway_config().shutdown_grace_seconds
+    except Exception as exc:
+        fallback = float(GatewayConfig.model_fields["shutdown_grace_seconds"].default)
+        click.echo(f"Could not resolve shutdown_grace_seconds ({exc}); assuming {fallback}s.", err=True)
+        return fallback
+
 
 @gateway.command()
 @click.pass_context
 def stop(ctx):
     """Stop the running gateway."""
-    _, rd = _get_ws_and_rd(ctx)
+    ws, rd = _get_ws_and_rd(ctx)
     from bos.runner.proc import is_running, read_state, stop_gateway
 
     if not is_running(rd):
@@ -531,8 +596,11 @@ def stop(ctx):
 
     stop_gateway(rd, signal.SIGTERM)
 
-    # Wait up to 5s for clean exit
-    deadline = time.monotonic() + 5
+    # The gateway drains in-flight turns before exiting, so the kill deadline
+    # has to outlast that grace — otherwise this command SIGKILLs the very
+    # handoff it asked for. Budget the grace plus room to flush and unwind.
+    grace = _resolved_stop_grace(ws, state)
+    deadline = time.monotonic() + grace + _STOP_DEADLINE_MARGIN
     while time.monotonic() < deadline:
         time.sleep(0.2)
         if not is_running(rd):

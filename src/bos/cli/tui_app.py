@@ -882,6 +882,9 @@ class ChatApp(App):
         elif event.detail == "max_iteration":
             log.write("[yellow]  max iterations reached[/]")
 
+        elif event.detail == "shutdown":
+            log.write("[yellow]  interrupted — agent shutting down[/]")
+
         elif event.detail == "error":
             log.write(f"[red]  error: {event.content or 'unknown error'}[/]")
 

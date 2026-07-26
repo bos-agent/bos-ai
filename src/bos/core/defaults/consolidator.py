@@ -8,7 +8,41 @@ from ..llm import LLMClient
 
 
 def _project_history(messages: list[Message]) -> list[dict[str, Any]]:
-    return [_compact({"role": m.llm_message["role"], "content": m.llm_message.get("content", "")}) for m in messages]
+    """Flatten history to plain role/content text for the summarization prompt.
+
+    Tool-call *linkage* (``tool_calls`` / ``tool_call_id``) is deliberately not
+    carried over — a summary prompt has no use for it. But dropping it while
+    keeping ``role: "tool"`` leaves an unpaired tool response, which strict
+    providers reject outright ("Missing corresponding tool call for tool
+    response message"), failing the whole consolidation. So tool traffic is
+    rendered as text on ordinary roles instead: the content still informs the
+    summary, and the prompt stays valid everywhere."""
+    projected: list[dict[str, Any]] = []
+    for message in messages:
+        llm_message = message.llm_message
+        # A stored message without a role is a data defect, but consolidation is
+        # best-effort context for the *next* turn — it must not be the thing that
+        # fails one. Treat it as user-supplied text and keep the content.
+        role = llm_message.get("role") or "user"
+        content = llm_message.get("content", "")
+        if role == "tool":
+            name = llm_message.get("name") or "tool"
+            content = f"[tool result: {name}]\n{content}"
+            role = "user"
+        elif role == "assistant" and (tool_calls := llm_message.get("tool_calls")):
+            called = ", ".join(_tool_call_name(call) for call in tool_calls)
+            content = f"{content}\n[called: {called}]".strip() if called else content
+        projected.append(_compact({"role": role, "content": content}))
+    return projected
+
+
+def _tool_call_name(call: Any) -> str:
+    if isinstance(call, dict):
+        function = call.get("function")
+        if isinstance(function, dict):
+            return str(function.get("name") or "tool")
+        return str(call.get("name") or "tool")
+    return "tool"
 
 
 DEFAULT_COMPACTION_INSTRUCTION = """\

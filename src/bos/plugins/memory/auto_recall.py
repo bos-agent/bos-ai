@@ -27,6 +27,7 @@ InterceptStage = Literal[
     "after_tool",
     "final_response",
     "max_iteration",
+    "shutdown",
     "error",
 ]
 

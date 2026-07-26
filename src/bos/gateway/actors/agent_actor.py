@@ -19,6 +19,11 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# How long a hard stop waits for cancelled turn tasks to unwind before giving up
+# on them. The process is going down; a task that will not unwind must not take
+# the rest of teardown with it.
+_FORCED_CANCEL_SECONDS = 5.0
+
 
 @dataclass
 class SessionExecution:
@@ -110,13 +115,45 @@ class AgentActor(Actor):
         # (e.g. a bare actor in a test), the turn hooks below are no-ops beyond
         # the session-event emit.
         self._chat_coordinator = chat_coordinator
+        self._draining = False
+
+    async def drain(self, grace: float) -> None:
+        """Close in-flight turns cooperatively, within *grace* seconds.
+
+        Shutdown does not wait for a turn's work to finish — a turn can run for
+        minutes. It asks the agent to stop, and each running turn abandons what
+        it was awaiting and closes with a handoff, which travels out over the
+        normal reply path so the waiting client gets an actionable answer
+        instead of a dropped connection. Whatever misses the deadline is
+        cancelled by ``aclose`` as before, so the drain is bounded.
+
+        New turns are refused for the rest of the process's life; the caller is
+        expected to be shutting down."""
+        self._draining = True
+        self._agent.request_stop()
+        tasks = [s.execution.task for s in self._sessions.values() if s.execution.task is not None]
+        if not tasks or grace <= 0:
+            return
+        _, pending = await asyncio.wait(tasks, timeout=grace)
+        if pending:
+            logger.warning(
+                "Shutdown grace of %.1fs expired with %d turn(s) still closing; cancelling them",
+                grace,
+                len(pending),
+            )
 
     async def aclose(self) -> None:
         session_tasks = [s.execution.task for s in self._sessions.values() if s.execution.task is not None]
         for task in session_tasks:
             task.cancel()
         if session_tasks:
-            await asyncio.gather(*session_tasks, return_exceptions=True)
+            _, pending = await asyncio.wait(set(session_tasks), timeout=_FORCED_CANCEL_SECONDS)
+            if pending:
+                logger.warning(
+                    "%d turn task(s) did not unwind within %.1fs of cancellation; abandoning them",
+                    len(pending),
+                    _FORCED_CANCEL_SECONDS,
+                )
         for session in self._sessions.values():
             session.execution.task = None
         await super().aclose()  # drains command tasks tracked by the base
@@ -136,6 +173,19 @@ class AgentActor(Actor):
             return
 
         chat_id = env.chat_id
+
+        if self._draining and env.content_type == MessageType.MESSAGE:
+            # Admitting a turn we are about to stop would burn a model call and
+            # leave the sender waiting on a reply that never lands.
+            await self._mailbox.send(
+                env.sender,
+                "(unavailable: the agent is shutting down)",
+                content_type=MessageType.SYSTEM,
+                chat_id=chat_id,
+                metadata={"event": "shutting_down"},
+            )
+            return
+
         session = self._get_or_create_session(chat_id)
 
         if session.execution.task is None:

@@ -71,6 +71,11 @@ class AgentConfig(BaseModel):
     # message and answer with it instead of the bare static marker. Costs one
     # consolidator LLM call on that path; set false to keep the marker only.
     max_iteration_handoff: bool = True
+    # When the host stops the agent mid-turn (gateway shutdown), close the turn
+    # with the same kind of handoff instead of the bare marker. Costs one
+    # consolidator LLM call inside the shutdown grace budget; set false to skip
+    # it and close on the marker alone.
+    shutdown_handoff: bool = True
     tool_noise_filter: ToolNoiseFilter | None = None
     history_attribution: bool = False
 
@@ -143,6 +148,11 @@ class GatewayConfig(BaseModel):
     upload_dir: str = ".bos/uploads/http"
     max_upload_bytes: int = 20 * 1024 * 1024
     api_key_env: str = "BOS_GATEWAY_API_KEY"
+    # How long shutdown gives in-flight turns to close with a handoff before
+    # they are cancelled outright. It bounds the stop, so it must cover one
+    # consolidator call — not the turn's remaining work. 0 disables the drain
+    # and reverts to immediate cancellation.
+    shutdown_grace_seconds: float = Field(default=30.0, ge=0, allow_inf_nan=False)
 
 
 class ActorResolverConfig(BaseModel):

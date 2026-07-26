@@ -79,6 +79,11 @@ class ActorManager:
         await self._notify_state_changed()
 
     async def stop_all(self) -> None:
+        """Cancel every actor and release its mailbox.
+
+        This is the hard stop. A caller that wants running turns to close with a
+        handoff first calls :meth:`drain_all` — separately, because the drain is
+        interruptible and this is not."""
         tasks = [record.task for record in self._actors.values() if record.task is not None]
         for task in tasks:
             task.cancel()
@@ -90,6 +95,22 @@ class ActorManager:
             record.actor = None
             record.mailbox = None
         await self._notify_state_changed()
+
+    async def drain_all(self, grace: float) -> None:
+        """Ask every running actor to close its in-flight turns within *grace*.
+
+        The budget is wall-clock and shared: actors drain concurrently, so a
+        slow one cannot extend the stop past the operator's deadline."""
+        running = [record for record in self._actors.values() if record.actor is not None]
+        if not running:
+            return
+        results = await asyncio.gather(
+            *(record.actor.drain(grace) for record in running if record.actor is not None),
+            return_exceptions=True,
+        )
+        for record, result in zip(running, results):
+            if isinstance(result, BaseException):
+                logger.error("Actor %s failed to drain cleanly", record.name, exc_info=result)
 
     def status_payload(self) -> dict[str, dict[str, Any]]:
         payload = {name: record.snapshot() for name, record in self._actors.items()}

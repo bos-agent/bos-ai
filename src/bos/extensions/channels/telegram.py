@@ -255,6 +255,9 @@ def _render_turn_event(event: TurnEvent) -> str | None:
     if event.detail == "max_iteration":
         return f"{label} reached the maximum iteration limit."
 
+    if event.detail == "shutdown":
+        return f"{label} was interrupted — the agent is shutting down."
+
     if event.detail == "error":
         return f"{label} error: {event.content or 'unknown error'}"
 

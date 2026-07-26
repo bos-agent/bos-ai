@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import os
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,6 +22,10 @@ from .state import GatewayRunDir, write_gateway_state
 
 if TYPE_CHECKING:
     from bos.core import AgentHarness
+
+# Settle window after the actor drain, so polling channels can pick up the last
+# handoff replies before their consumers stop. Covers a few JSONL poll cycles.
+_REPLY_FLUSH_SECONDS = 2.0
 
 
 class Gateway:
@@ -77,6 +83,19 @@ class Gateway:
         )
         # Channel instantiation is async (ep_channel.invoke); deferred to run().
         self._persistent_channel_configs = runtime.channels
+        self._shutdown = asyncio.Event()
+
+    @property
+    def shutdown_requested(self) -> bool:
+        return self._shutdown.is_set()
+
+    def request_shutdown(self) -> None:
+        """Ask ``run`` to return and begin the graceful drain (§ ``run``).
+
+        Idempotent, and safe to call from a signal handler via
+        ``loop.call_soon_threadsafe``. Cancelling the task running ``run`` still
+        works and remains the forceful path — it skips the drain."""
+        self._shutdown.set()
 
     def status_snapshot(self) -> dict[str, Any]:
         gateway = {
@@ -84,6 +103,10 @@ class Gateway:
             "port": self.actual_port,
             "base_url": f"http://{self.actual_host}:{self.actual_port}",
             "auth": {"type": "api_key", "configured": bool(os.environ.get(self.config.api_key_env))},
+            # Published so `boscli gateway stop` can size its kill deadline from
+            # the grace *this* process resolved at startup, rather than from a
+            # config file that may have been edited since.
+            "shutdown_grace_seconds": self.config.shutdown_grace_seconds,
         }
         actors = self.actor_manager.status_payload()
         channels = self.channel_manager.status_payload()
@@ -108,6 +131,12 @@ class Gateway:
         )
 
     async def handle_ws(self, request: web.Request) -> web.StreamResponse:
+        if self.shutdown_requested:
+            # Registering a channel now would race ``ChannelManager.stop_all``,
+            # which has already snapshotted the tasks it will cancel — the new
+            # channel would be marked stopped with its task still running, and
+            # the client would get a consumer that is about to disappear.
+            return web.json_response({"ok": False, "error": "shutting_down"}, status=503)
         channel_id = (request.query.get("channel_id") or "").strip()
         if not channel_id:
             return web.json_response({"ok": False, "error": "channel_id is required"}, status=400)
@@ -175,12 +204,54 @@ class Gateway:
         await self.actor_manager.start_all()
         await self.channel_manager.start_all()
         write_gateway_state(GatewayRunDir(self.bos_dir), self.status_snapshot())
+        graceful = True
         try:
-            import asyncio
-
-            await asyncio.Event().wait()
+            await self._shutdown.wait()
+        except asyncio.CancelledError:
+            # Being cancelled is the forceful path — an operator escalating, or
+            # the process going down now. Skip the drain rather than holding the
+            # stop open for turns that were told to hurry.
+            graceful = False
+            raise
         finally:
-            await self.channel_manager.stop_all()
-            await self.actor_manager.stop_all()
-            write_gateway_state(GatewayRunDir(self.bos_dir), self.status_snapshot() | {"status": "stopped"})
-            await runner.cleanup()
+            if graceful:
+                # The drain is the one cancellable part of shutdown: a second,
+                # escalating signal lands here and should cost the *remaining
+                # grace*, not the teardown that follows. Channels stay up across
+                # it — a turn closing during the drain still needs a live
+                # consumer for its reply.
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self.actor_manager.drain_all(self.config.shutdown_grace_seconds)
+                    await self._flush_replies()
+            # Mandatory teardown. Re-awaited through a shield so an escalating
+            # signal cannot leave the listening socket, the channel sessions and
+            # the on-disk state behind; every step in it is bounded, so this
+            # cannot hold the stop open. An outer CancelledError that brought us
+            # into this block still propagates once the block completes.
+            teardown = asyncio.ensure_future(self._teardown(runner))
+            while not teardown.done():
+                with contextlib.suppress(asyncio.CancelledError):
+                    await asyncio.shield(teardown)
+
+    async def _teardown(self, runner: web.AppRunner) -> None:
+        """Stop everything, in the one order that does not drop replies.
+
+        Actors stop *before* channels so a turn closing during the drain still
+        has a live consumer for its reply; the old order dropped the consumer
+        first and left clients hanging."""
+        await self.actor_manager.stop_all()
+        await self.channel_manager.stop_all()
+        write_gateway_state(GatewayRunDir(self.bos_dir), self.status_snapshot() | {"status": "stopped"})
+        await runner.cleanup()
+
+    async def _flush_replies(self) -> None:
+        """Give channels a moment to deliver replies produced during the drain.
+
+        Channels poll their mailbox, so a handoff written in the last instant of
+        the drain is not necessarily on the wire yet. This is a bounded
+        best-effort settle, not a delivery guarantee — a channel that is slower
+        than the window (or a client that has already gone) still loses the
+        reply, and the handoff remains committed to chat history either way."""
+        if self.config.shutdown_grace_seconds <= 0:
+            return
+        await asyncio.sleep(min(_REPLY_FLUSH_SECONDS, self.config.shutdown_grace_seconds))
