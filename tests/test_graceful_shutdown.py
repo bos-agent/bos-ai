@@ -59,6 +59,29 @@ def _blocking_tool(started: asyncio.Event) -> ToolRegistry:
     return tools
 
 
+def _slow_teardown_tool(started: asyncio.Event, tearing_down: asyncio.Event, *, teardown: float) -> ToolRegistry:
+    """A tool that blocks, and whose cancellation teardown itself takes time —
+    the shape that used to let an abandoned tool hold the whole stop open."""
+    tools = ToolRegistry(f"_slow_teardown_tools:{uuid.uuid4().hex}")
+
+    @tools(
+        name="SlowStep",
+        description="Work with slow async teardown on cancellation.",
+        parameters={"type": "object", "properties": {}, "required": []},
+    )
+    async def slow_step() -> str:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            tearing_down.set()
+            await asyncio.sleep(teardown)
+            raise
+        return "never"
+
+    return tools
+
+
 # ── agent: closing a turn on request ───────────────────────────────────────
 
 
@@ -164,6 +187,66 @@ async def test_stop_during_llm_call_abandons_it_without_a_handoff():
 
     assert result == SHUTDOWN_CONTENT
     assert consolidator.calls == []
+
+
+@pytest.mark.asyncio
+async def test_abandoning_a_slow_unwinding_tool_is_bounded(monkeypatch):
+    """A tool that drags its heels on cancellation must not extend the stop:
+    the turn stops waiting for the unwind and goes on to close."""
+    from bos.core.agent import agent as agent_mod
+
+    monkeypatch.setattr(agent_mod, "_ABANDON_TEARDOWN_SECONDS", 0.05)
+    started, tearing_down = asyncio.Event(), asyncio.Event()
+    provider_name = _tool_calling_provider(tool_name="SlowStep")
+
+    try:
+        agent = create_test_agent(
+            model=f"{provider_name}/loop",
+            local_tools=_slow_teardown_tool(started, tearing_down, teardown=30),
+            tools=["SlowStep"],
+            chat_store=InMemChatStore(),
+            consolidator=RecordingConsolidator("**Done** — read BEP 4."),
+        )
+        turn = asyncio.create_task(agent.ask("slow-unwind-chat", "go", event_sink=CaptureSink()))
+        await asyncio.wait_for(started.wait(), timeout=2)
+        agent.request_stop()
+        result = await asyncio.wait_for(turn, timeout=2)
+    finally:
+        ep_provider._extensions.pop(provider_name, None)
+
+    assert result.startswith(SHUTDOWN_CONTENT)
+    assert tearing_down.is_set()  # the tool was cancelled, we just did not wait it out
+
+
+@pytest.mark.asyncio
+async def test_escalating_while_a_tool_unwinds_cancels_the_turn():
+    """The hard path must stay hard. A cancel landing while the turn waits for
+    an abandoned tool to unwind is *ours* — it must not be mistaken for the
+    tool finishing, which would let a turn the host gave up on run a handoff."""
+    started, tearing_down = asyncio.Event(), asyncio.Event()
+    provider_name = _tool_calling_provider(tool_name="SlowStep")
+    consolidator = RecordingConsolidator("should never be produced")
+
+    try:
+        agent = create_test_agent(
+            model=f"{provider_name}/loop",
+            local_tools=_slow_teardown_tool(started, tearing_down, teardown=30),
+            tools=["SlowStep"],
+            chat_store=InMemChatStore(),
+            consolidator=consolidator,
+        )
+        turn = asyncio.create_task(agent.ask("escalate-chat", "go", event_sink=CaptureSink()))
+        await asyncio.wait_for(started.wait(), timeout=2)
+        agent.request_stop()
+        await asyncio.wait_for(tearing_down.wait(), timeout=2)
+        turn.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(turn, timeout=2)
+    finally:
+        ep_provider._extensions.pop(provider_name, None)
+
+    assert turn.cancelled()
+    assert consolidator.calls == []  # no handoff was produced for an escalated turn
 
 
 @pytest.mark.asyncio

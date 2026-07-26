@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import inspect
 import json
 import logging
@@ -124,6 +123,12 @@ def _closure_response(reason: str, handoff: str | None) -> str:
 
 class _StopRequested(Exception):
     """Internal: a cooperative stop was requested while the turn was awaiting."""
+
+
+# How long a turn waits for work it has abandoned to finish unwinding. Bounded
+# on purpose: a provider or tool that delays — or swallows — ``CancelledError``
+# must not be able to hold the turn, and through it the whole stop, open.
+_ABANDON_TEARDOWN_SECONDS = 2.0
 
 
 async def _gather(coros: Iterable[Coroutine[Any, Any, _T]]) -> list[_T]:
@@ -338,6 +343,28 @@ class Agent:
         immediately with the static marker."""
         self._stop_requested.set()
 
+    @staticmethod
+    async def _abandon(*futures: asyncio.Future[Any]) -> None:
+        """Cancel *futures* and wait a bounded moment for them to unwind.
+
+        Two things must not happen here. The wait must not be open-ended — a
+        tool that delays or swallows ``CancelledError`` would otherwise hold the
+        turn past the host's deadline. And *our own* cancellation must not be
+        read as the abandoned work finishing: suppressing it would let a turn
+        the host has already given up on carry on into a full handoff.
+        ``asyncio.wait`` gives both properties — it reports a child's outcome
+        through the future rather than raising it, so a ``CancelledError``
+        escaping it can only be ours. Whatever is still unwinding when the
+        budget expires is left to the loop; the turn does not wait for it."""
+        pending = [future for future in futures if not future.done()]
+        for future in pending:
+            future.cancel()
+        if pending:
+            await asyncio.wait(set(pending), timeout=_ABANDON_TEARDOWN_SECONDS)
+        for future in futures:
+            if future.done() and not future.cancelled():
+                future.exception()  # consumed, so the loop does not log it as unretrieved
+
     async def _await_or_stop(self, coro: Coroutine[Any, Any, _T]) -> _T:
         """Await *coro*, abandoning it if a cooperative stop is requested.
 
@@ -353,16 +380,15 @@ class Agent:
             await asyncio.wait({work, stop}, return_when=asyncio.FIRST_COMPLETED)
         except asyncio.CancelledError:
             # The whole turn is being cancelled (the hard path) — take the
-            # in-flight work down with it rather than orphaning the task.
+            # in-flight work down with it rather than orphaning the task. No
+            # wait for its unwind: the host has already stopped waiting for us.
             work.cancel()
             raise
         finally:
             stop.cancel()
         if work.done():
             return work.result()
-        work.cancel()
-        with contextlib.suppress(asyncio.CancelledError, Exception):
-            await work
+        await self._abandon(work)
         raise _StopRequested
 
     async def ask(
