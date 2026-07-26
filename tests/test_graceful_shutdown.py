@@ -162,6 +162,84 @@ async def test_abandoned_tool_calls_still_get_results():
     assert len(interrupted) == len(advertised)
 
 
+def _parallel_pair(fast_done: asyncio.Event, slow_started: asyncio.Event) -> ToolRegistry:
+    """Two parallel-safe tools, so the turn runs them as one batch. ``AskSubagent``
+    is the real instance of this shape: parallel-safe *and* side-effecting."""
+    tools = ToolRegistry(f"_parallel_stop_tools:{uuid.uuid4().hex}")
+
+    @tools(
+        name="FastStep",
+        description="Completes before the stop lands.",
+        parameters={"type": "object", "properties": {}, "required": []},
+        parallel_safe=True,
+    )
+    async def fast_step() -> str:
+        fast_done.set()
+        return "FAST_RESULT"
+
+    @tools(
+        name="SlowStep",
+        description="Work that outlives the shutdown grace.",
+        parameters={"type": "object", "properties": {}, "required": []},
+        parallel_safe=True,
+    )
+    async def slow_step() -> str:
+        slow_started.set()
+        await asyncio.Event().wait()
+        return "never"
+
+    return tools
+
+
+@pytest.mark.asyncio
+async def test_completed_calls_in_an_abandoned_batch_keep_their_results():
+    """A parallel batch is abandoned as a unit, but a call that already returned
+    has already had its effect. Recording it as "abandoned unfinished" tells the
+    next turn to redo it."""
+    fast_done, slow_started = asyncio.Event(), asyncio.Event()
+    provider_name = f"test_shutdown_parallel_{uuid.uuid4().hex}"
+    store = InMemChatStore()
+
+    @ep_provider(name=provider_name)
+    async def provider(messages, model=None, **kwargs):
+        return LLMResponse(
+            content="",
+            tool_calls=[
+                ToolCallRequest(id="call_fast", name="FastStep", arguments={}),
+                ToolCallRequest(id="call_slow", name="SlowStep", arguments={}),
+            ],
+            finish_reason="tool_calls",
+        )
+
+    try:
+        agent = create_test_agent(
+            model=f"{provider_name}/loop",
+            local_tools=_parallel_pair(fast_done, slow_started),
+            tools=["FastStep", "SlowStep"],
+            chat_store=store,
+            consolidator=RecordingConsolidator("**Done** — ran FastStep."),
+        )
+        turn = asyncio.create_task(agent.ask("parallel-stop-chat", "go", event_sink=CaptureSink()))
+        await asyncio.wait_for(fast_done.wait(), timeout=2)
+        await asyncio.wait_for(slow_started.wait(), timeout=2)
+        agent.request_stop()
+        await asyncio.wait_for(turn, timeout=3)
+    finally:
+        ep_provider._extensions.pop(provider_name, None)
+
+    persisted = await store.get_messages("parallel-stop-chat")
+    results = {
+        m.llm_message["tool_call_id"]: m.llm_message["content"]
+        for m in persisted
+        if m.llm_message.get("role") == "tool"
+    }
+    # Both calls are answered — the persisted turn stays replayable …
+    assert set(results) == {"call_fast", "call_slow"}
+    # … but only the one that really did not finish is marked interrupted.
+    assert results["call_fast"] == "FAST_RESULT"
+    assert results["call_slow"] == INTERRUPTED_TOOL_CONTENT
+
+
 @pytest.mark.asyncio
 async def test_stop_during_llm_call_abandons_it_without_a_handoff():
     """Nothing was established yet, so the marker is the honest answer — and no

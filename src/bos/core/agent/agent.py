@@ -7,7 +7,7 @@ import logging
 import os
 import platform
 import uuid
-from collections.abc import Coroutine, Iterable
+from collections.abc import Coroutine
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal, Sequence, TypeVar
 from xml.sax.saxutils import escape
@@ -129,11 +129,6 @@ class _StopRequested(Exception):
 # on purpose: a provider or tool that delays — or swallows — ``CancelledError``
 # must not be able to hold the turn, and through it the whole stop, open.
 _ABANDON_TEARDOWN_SECONDS = 2.0
-
-
-async def _gather(coros: Iterable[Coroutine[Any, Any, _T]]) -> list[_T]:
-    """``asyncio.gather`` as a coroutine, so it can be raced against a stop."""
-    return list(await asyncio.gather(*coros))
 
 
 def _attribute_history_message(
@@ -390,6 +385,31 @@ class Agent:
             return work.result()
         await self._abandon(work)
         raise _StopRequested
+
+    async def _await_tasks_or_stop(self, tasks: Sequence[asyncio.Future[str]]) -> bool:
+        """Wait for *tasks*, abandoning the unfinished ones on a cooperative stop.
+
+        Returns whether a stop cut the wait short. Unlike ``_await_or_stop`` the
+        caller keeps the individual futures, so results that landed before the
+        stop are still readable — work that completed must not be reported as
+        never having run."""
+        if self._stop_requested.is_set():
+            await self._abandon(*tasks)
+            return True
+        work = asyncio.ensure_future(asyncio.gather(*tasks))
+        stop = asyncio.ensure_future(self._stop_requested.wait())
+        try:
+            await asyncio.wait({work, stop}, return_when=asyncio.FIRST_COMPLETED)
+        except asyncio.CancelledError:
+            work.cancel()
+            raise
+        finally:
+            stop.cancel()
+        if work.done():
+            await work  # re-raises a tool failure, as the plain gather did
+            return False
+        await self._abandon(work, *tasks)
+        return True
 
     async def ask(
         self,
@@ -762,21 +782,20 @@ class Agent:
                             tool_name=tc.name,
                             content=json.dumps(tc.arguments, default=str),
                         )
-                    try:
-                        # Interruptible: a stop abandons the running batch
-                        # instead of waiting out a long-running tool.
-                        if len(batch) > 1:
-                            tool_results = await self._await_or_stop(
-                                _gather(self._call_tool(tc, ctx, event_sink=event_sink) for tc in batch)
-                            )
-                        else:
-                            tool_results = [
-                                await self._await_or_stop(self._call_tool(batch[0], ctx, event_sink=event_sink))
-                            ]
-                    except _StopRequested:
-                        stopped_in_tools = True
-                        break
-                    for tc, tool_result in zip(batch, tool_results):
+                    # Interruptible: a stop abandons whatever is still running
+                    # instead of waiting out a long tool call.
+                    tool_tasks: list[asyncio.Future[str]] = [
+                        asyncio.ensure_future(self._call_tool(tc, ctx, event_sink=event_sink)) for tc in batch
+                    ]
+                    stopped_in_tools = await self._await_tasks_or_stop(tool_tasks)
+                    # Record every call that produced a result, stop or no stop.
+                    # A parallel batch is abandoned as a unit, but a call that
+                    # already returned has already had its effect — calling it
+                    # unfinished invites the next turn to repeat it.
+                    for tc, task in zip(batch, tool_tasks):
+                        if not task.done() or task.cancelled() or task.exception() is not None:
+                            continue
+                        tool_result = task.result()
                         answered.add(tc.id)
                         _add_message({
                             "role": "tool",
@@ -793,6 +812,8 @@ class Agent:
                             tool_name=tc.name,
                             content=tool_result,
                         )
+                    if stopped_in_tools:
+                        break
                 if stopped_in_tools:
                     # The assistant message already advertises every tool call,
                     # so each one needs a result message or the persisted turn
