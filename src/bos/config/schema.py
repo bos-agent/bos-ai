@@ -152,7 +152,7 @@ class GatewayConfig(BaseModel):
     # they are cancelled outright. It bounds the stop, so it must cover one
     # consolidator call — not the turn's remaining work. 0 disables the drain
     # and reverts to immediate cancellation.
-    shutdown_grace_seconds: float = Field(default=30.0, ge=0)
+    shutdown_grace_seconds: float = Field(default=30.0, ge=0, allow_inf_nan=False)
 
 
 class ActorResolverConfig(BaseModel):

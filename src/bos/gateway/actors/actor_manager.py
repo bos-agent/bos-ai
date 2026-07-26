@@ -101,11 +101,14 @@ class ActorManager:
 
         The budget is wall-clock and shared: actors drain concurrently, so a
         slow one cannot extend the stop past the operator's deadline."""
-        actors = [record.actor for record in self._actors.values() if record.actor is not None]
-        if not actors:
+        running = [record for record in self._actors.values() if record.actor is not None]
+        if not running:
             return
-        results = await asyncio.gather(*(actor.drain(grace) for actor in actors), return_exceptions=True)
-        for record, result in zip([r for r in self._actors.values() if r.actor is not None], results):
+        results = await asyncio.gather(
+            *(record.actor.drain(grace) for record in running if record.actor is not None),
+            return_exceptions=True,
+        )
+        for record, result in zip(running, results):
             if isinstance(result, BaseException):
                 logger.error("Actor %s failed to drain cleanly", record.name, exc_info=result)
 

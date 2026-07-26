@@ -823,3 +823,68 @@ def test_consolidation_prompt_has_no_unpaired_tool_messages():
     # The tool traffic is still legible to the summarizer, just as plain text.
     assert "Sleep" in projected[1]["content"]
     assert "(interrupted)" in projected[2]["content"]
+
+
+def test_projection_keeps_a_role_on_every_message():
+    """The projection also serves ordinary compaction. A message that reaches it
+    without a role must not become a role-less prompt entry — ``_compact`` drops
+    ``None`` values, so the provider would receive content with no role at all."""
+    from bos.core import Message
+    from bos.core.defaults.consolidator import _project_history
+
+    projected = _project_history([
+        Message(llm_message={"content": "no role in the store"}),
+        Message(llm_message={"role": "tool", "tool_call_id": "call_1", "name": "Sleep", "content": "(interrupted)"}),
+    ])
+
+    assert all(m.get("role") for m in projected)
+    assert all(m.get("content") for m in projected)
+
+
+# ── config and CLI: one bounded source of truth for the grace ───────────────
+
+
+def test_shutdown_grace_must_be_finite():
+    """The grace is what *bounds* the stop. ``inf`` — a valid TOML float — would
+    make both the actor drain and the CLI's kill deadline unbounded."""
+    import pydantic
+
+    from bos.config.schema import GatewayConfig
+
+    for bad in (float("inf"), float("-inf"), float("nan")):
+        with pytest.raises(pydantic.ValidationError):
+            GatewayConfig(shutdown_grace_seconds=bad)
+
+
+def test_status_snapshot_publishes_the_running_grace(tmp_path, monkeypatch):
+    """``boscli gateway stop`` sizes its SIGKILL deadline from this. Re-reading
+    config from disk would use a value the running process never saw."""
+    from bos.config import Workspace
+    from bos.extensions.chat_stores.in_memory import InMemChatStore as Store
+    from bos.gateway import Gateway
+
+    monkeypatch.setenv("BOS_TEST_GATEWAY_KEY", "secret")
+
+    class FakeHarness:
+        def __init__(self) -> None:
+            InMemMailRoute._queues = {}
+            self.chat_store = Store()
+            self.mail_route = InMemMailRoute()
+
+        async def create_agent(self, kind=None, agent_cfg=None):
+            return StopAwareAgent()
+
+    ws = Workspace(
+        tmp_path,
+        tmp_path / ".bos",
+        {
+            "runtime": {
+                "gateway": {"port": 0, "api_key_env": "BOS_TEST_GATEWAY_KEY", "shutdown_grace_seconds": 7.5},
+                "main_actor": "main",
+                "actors": {"main": {"agent": "main"}},
+            }
+        },
+    )
+    gateway = Gateway(runtime=ws.resolve_gateway_runtime(), harness=FakeHarness())
+
+    assert gateway.status_snapshot()["gateway"]["shutdown_grace_seconds"] == 7.5

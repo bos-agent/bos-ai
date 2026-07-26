@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import getpass
 import json
+import math
 import os
 import re
 import signal
@@ -467,8 +468,14 @@ async def _run_foreground_gateway(start_gateway, ws) -> None:
         if not instance.shutdown_requested:
             click.echo("\nStopping — draining in-flight turns…", err=True)
             instance.request_shutdown()
-        elif main_task is not None:
-            click.echo("\nStopping now.", err=True)
+            return
+        click.echo("\nStopping now.", err=True)
+        # Hand the signals back to the default handlers on the way out, so a
+        # third Ctrl-C can still kill a teardown that has gone wrong.
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            with contextlib.suppress(NotImplementedError, RuntimeError):
+                loop.remove_signal_handler(sig)
+        if main_task is not None:
             main_task.cancel()
 
     with contextlib.suppress(asyncio.CancelledError):
@@ -552,6 +559,27 @@ def start(ctx, foreground: bool, workspace_dir: str | None):
 _STOP_DEADLINE_MARGIN = 5.0
 
 
+def _resolved_stop_grace(ws, state: dict) -> float:
+    """The grace the *running* gateway is using, if it published one.
+
+    The process resolved its config at startup; re-reading config from disk can
+    disagree with it (the file may have been edited since), which would either
+    SIGKILL a handoff still in flight or wait far longer than the operator asked
+    for. Falls back to this workspace's config, then to the schema default — and
+    says so, because past that point the deadline below is a guess."""
+    from bos.config.schema import GatewayConfig
+
+    published = state.get("gateway", {}).get("shutdown_grace_seconds")
+    if isinstance(published, (int, float)) and math.isfinite(published) and published >= 0:
+        return float(published)
+    try:
+        return ws.resolve_gateway_config().shutdown_grace_seconds
+    except Exception as exc:
+        fallback = float(GatewayConfig.model_fields["shutdown_grace_seconds"].default)
+        click.echo(f"Could not resolve shutdown_grace_seconds ({exc}); assuming {fallback}s.", err=True)
+        return fallback
+
+
 @gateway.command()
 @click.pass_context
 def stop(ctx):
@@ -571,10 +599,7 @@ def stop(ctx):
     # The gateway drains in-flight turns before exiting, so the kill deadline
     # has to outlast that grace — otherwise this command SIGKILLs the very
     # handoff it asked for. Budget the grace plus room to flush and unwind.
-    try:
-        grace = ws.resolve_gateway_config().shutdown_grace_seconds
-    except Exception:
-        grace = 30.0
+    grace = _resolved_stop_grace(ws, state)
     deadline = time.monotonic() + grace + _STOP_DEADLINE_MARGIN
     while time.monotonic() < deadline:
         time.sleep(0.2)

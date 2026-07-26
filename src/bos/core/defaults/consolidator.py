@@ -20,13 +20,16 @@ def _project_history(messages: list[Message]) -> list[dict[str, Any]]:
     projected: list[dict[str, Any]] = []
     for message in messages:
         llm_message = message.llm_message
-        role = llm_message.get("role")
+        # A stored message without a role is a data defect, but consolidation is
+        # best-effort context for the *next* turn — it must not be the thing that
+        # fails one. Treat it as user-supplied text and keep the content.
+        role = llm_message.get("role") or "user"
         content = llm_message.get("content", "")
         if role == "tool":
             name = llm_message.get("name") or "tool"
-            projected.append({"role": "user", "content": f"[tool result: {name}]\n{content}"})
-            continue
-        if role == "assistant" and (tool_calls := llm_message.get("tool_calls")):
+            content = f"[tool result: {name}]\n{content}"
+            role = "user"
+        elif role == "assistant" and (tool_calls := llm_message.get("tool_calls")):
             called = ", ".join(_tool_call_name(call) for call in tool_calls)
             content = f"{content}\n[called: {called}]".strip() if called else content
         projected.append(_compact({"role": role, "content": content}))

@@ -103,6 +103,10 @@ class Gateway:
             "port": self.actual_port,
             "base_url": f"http://{self.actual_host}:{self.actual_port}",
             "auth": {"type": "api_key", "configured": bool(os.environ.get(self.config.api_key_env))},
+            # Published so `boscli gateway stop` can size its kill deadline from
+            # the grace *this* process resolved at startup, rather than from a
+            # config file that may have been edited since.
+            "shutdown_grace_seconds": self.config.shutdown_grace_seconds,
         }
         actors = self.actor_manager.status_payload()
         channels = self.channel_manager.status_payload()
