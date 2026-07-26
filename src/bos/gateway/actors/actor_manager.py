@@ -78,16 +78,12 @@ class ActorManager:
                 await self._start_record(record)
         await self._notify_state_changed()
 
-    async def stop_all(self, *, drain_grace: float = 0.0) -> None:
-        """Stop every actor, optionally draining in-flight turns first.
+    async def stop_all(self) -> None:
+        """Cancel every actor and release its mailbox.
 
-        With a non-zero *drain_grace*, running turns are asked to close with a
-        handoff and given that long (in total, across all actors) to land their
-        reply; anything still running is then cancelled as before. The caller
-        must keep the channels alive across this call — the handoffs travel out
-        over the normal reply path."""
-        if drain_grace > 0:
-            await self.drain_all(drain_grace)
+        This is the hard stop. A caller that wants running turns to close with a
+        handoff first calls :meth:`drain_all` — separately, because the drain is
+        interruptible and this is not."""
         tasks = [record.task for record in self._actors.values() if record.task is not None]
         for task in tasks:
             task.cancel()

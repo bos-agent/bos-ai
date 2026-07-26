@@ -17,6 +17,7 @@ from bos.core.agent.agent import INTERRUPTED_TOOL_CONTENT, SHUTDOWN_CONTENT, SHU
 from bos.core.registry import ToolRegistry
 from bos.extensions.mailboxes.in_memory import InMemMailRoute
 from bos.gateway.actors.agent_actor import AgentActor
+from bos.gateway.state import GatewayRunDir, read_gateway_state
 
 
 class CaptureSink:
@@ -589,16 +590,22 @@ async def test_gateway_stops_actors_before_channels(tmp_path, monkeypatch):
     gateway = Gateway(runtime=ws.resolve_gateway_runtime(), harness=FakeHarness())
 
     order: list[str] = []
-    actor_stop, channel_stop = gateway.actor_manager.stop_all, gateway.channel_manager.stop_all
+    actor_drain, actor_stop = gateway.actor_manager.drain_all, gateway.actor_manager.stop_all
+    channel_stop = gateway.channel_manager.stop_all
 
-    async def _actors(**kwargs):
-        order.append(f"actors(drain_grace={kwargs.get('drain_grace')})")
-        await actor_stop(**kwargs)
+    async def _drain(grace):
+        order.append(f"drain(grace={grace})")
+        await actor_drain(grace)
+
+    async def _actors():
+        order.append("actors")
+        await actor_stop()
 
     async def _channels():
         order.append("channels")
         await channel_stop()
 
+    monkeypatch.setattr(gateway.actor_manager, "drain_all", _drain)
     monkeypatch.setattr(gateway.actor_manager, "stop_all", _actors)
     monkeypatch.setattr(gateway.channel_manager, "stop_all", _channels)
 
@@ -609,7 +616,7 @@ async def test_gateway_stops_actors_before_channels(tmp_path, monkeypatch):
     gateway.request_shutdown()
     await asyncio.wait_for(run, timeout=5)
 
-    assert order == ["actors(drain_grace=0.1)", "channels"]
+    assert order == ["drain(grace=0.1)", "actors", "channels"]
 
 
 @pytest.mark.asyncio
@@ -648,13 +655,18 @@ async def test_cancelling_the_gateway_skips_the_drain(tmp_path, monkeypatch):
     )
     gateway = Gateway(runtime=ws.resolve_gateway_runtime(), harness=FakeHarness())
 
-    grace_used: list[float] = []
+    drained: list[float] = []
+    stopped: list[bool] = []
     actor_stop = gateway.actor_manager.stop_all
 
-    async def _actors(**kwargs):
-        grace_used.append(kwargs.get("drain_grace"))
-        await actor_stop(**kwargs)
+    async def _drain(grace):
+        drained.append(grace)
 
+    async def _actors():
+        stopped.append(True)
+        await actor_stop()
+
+    monkeypatch.setattr(gateway.actor_manager, "drain_all", _drain)
     monkeypatch.setattr(gateway.actor_manager, "stop_all", _actors)
 
     run = asyncio.create_task(gateway.run())
@@ -662,7 +674,80 @@ async def test_cancelling_the_gateway_skips_the_drain(tmp_path, monkeypatch):
     run.cancel()
     await asyncio.gather(run, return_exceptions=True)
 
-    assert grace_used == [0.0]
+    assert drained == []  # the forceful path never drains
+    assert stopped == [True]  # but it always stops the actors
+
+
+@pytest.mark.asyncio
+async def test_escalating_during_the_drain_still_finishes_teardown(tmp_path, monkeypatch):
+    """A second signal gives up the *remaining grace*, not the teardown. Skipping
+    it leaks the listening socket and channel sessions and leaves the state file
+    claiming the gateway is up."""
+    from bos.config import Workspace
+    from bos.extensions.chat_stores.in_memory import InMemChatStore as Store
+    from bos.gateway import Gateway
+    from bos.gateway import gateway as gateway_mod
+
+    monkeypatch.setenv("BOS_TEST_GATEWAY_KEY", "secret")
+
+    class FakeHarness:
+        def __init__(self) -> None:
+            InMemMailRoute._queues = {}
+            self.chat_store = Store()
+            self.mail_route = InMemMailRoute()
+
+        async def create_agent(self, kind=None, agent_cfg=None):
+            return StopAwareAgent()
+
+    ws = Workspace(
+        tmp_path,
+        tmp_path / ".bos",
+        {
+            "runtime": {
+                "gateway": {
+                    "port": 0,
+                    "api_key_env": "BOS_TEST_GATEWAY_KEY",
+                    "shutdown_grace_seconds": 30,
+                },
+                "main_actor": "main",
+                "actors": {"main": {"agent": "main"}},
+            }
+        },
+    )
+    gateway = Gateway(runtime=ws.resolve_gateway_runtime(), harness=FakeHarness())
+
+    order: list[str] = []
+    in_drain = asyncio.Event()
+    channel_stop = gateway.channel_manager.stop_all
+    real_write = gateway_mod.write_gateway_state
+
+    async def _drain(grace):
+        order.append("drain")
+        in_drain.set()
+        await asyncio.sleep(30)  # a turn taking its whole grace to close
+
+    async def _channels():
+        order.append("channels")
+        await channel_stop()
+
+    def _write(rd, payload):
+        if payload.get("status") == "stopped":
+            order.append("state:stopped")
+        return real_write(rd, payload)
+
+    monkeypatch.setattr(gateway.actor_manager, "drain_all", _drain)
+    monkeypatch.setattr(gateway.channel_manager, "stop_all", _channels)
+    monkeypatch.setattr(gateway_mod, "write_gateway_state", _write)
+
+    run = asyncio.create_task(gateway.run())
+    await asyncio.sleep(0.1)
+    gateway.request_shutdown()
+    await asyncio.wait_for(in_drain.wait(), timeout=2)
+    run.cancel()  # the escalating second signal
+    await asyncio.wait_for(asyncio.gather(run, return_exceptions=True), timeout=5)
+
+    assert order == ["drain", "channels", "state:stopped"]
+    assert read_gateway_state(GatewayRunDir(tmp_path / ".bos")).get("status") == "stopped"
 
 
 # ── consolidator projection ────────────────────────────────────────────────

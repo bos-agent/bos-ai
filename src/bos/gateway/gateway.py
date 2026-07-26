@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 from datetime import datetime, timezone
 from pathlib import Path
@@ -203,18 +204,35 @@ class Gateway:
             graceful = False
             raise
         finally:
-            # Order matters. Actors stop *before* channels so a turn closing
-            # during the drain still has a live consumer for its reply; the old
-            # order dropped the consumer first and left clients hanging. Each
-            # step is bounded, so the stop cannot be held open by a long turn.
-            await self.actor_manager.stop_all(
-                drain_grace=self.config.shutdown_grace_seconds if graceful else 0.0
-            )
             if graceful:
-                await self._flush_replies()
-            await self.channel_manager.stop_all()
-            write_gateway_state(GatewayRunDir(self.bos_dir), self.status_snapshot() | {"status": "stopped"})
-            await runner.cleanup()
+                # The drain is the one cancellable part of shutdown: a second,
+                # escalating signal lands here and should cost the *remaining
+                # grace*, not the teardown that follows. Channels stay up across
+                # it — a turn closing during the drain still needs a live
+                # consumer for its reply.
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self.actor_manager.drain_all(self.config.shutdown_grace_seconds)
+                    await self._flush_replies()
+            # Mandatory teardown. Re-awaited through a shield so an escalating
+            # signal cannot leave the listening socket, the channel sessions and
+            # the on-disk state behind; every step in it is bounded, so this
+            # cannot hold the stop open. An outer CancelledError that brought us
+            # into this block still propagates once the block completes.
+            teardown = asyncio.ensure_future(self._teardown(runner))
+            while not teardown.done():
+                with contextlib.suppress(asyncio.CancelledError):
+                    await asyncio.shield(teardown)
+
+    async def _teardown(self, runner: web.AppRunner) -> None:
+        """Stop everything, in the one order that does not drop replies.
+
+        Actors stop *before* channels so a turn closing during the drain still
+        has a live consumer for its reply; the old order dropped the consumer
+        first and left clients hanging."""
+        await self.actor_manager.stop_all()
+        await self.channel_manager.stop_all()
+        write_gateway_state(GatewayRunDir(self.bos_dir), self.status_snapshot() | {"status": "stopped"})
+        await runner.cleanup()
 
     async def _flush_replies(self) -> None:
         """Give channels a moment to deliver replies produced during the drain.
