@@ -357,7 +357,16 @@ authenticated with the key in the environment variable named by `api_key_env`.
 abandons whatever it was awaiting, answers with a handoff summarizing what it established,
 and that reply goes out over the normal channel path. The budget covers that closure — one
 consolidator call — not the turn's remaining work, so a long turn does not delay the stop.
-Turns that miss the deadline are cancelled, and a second signal skips the drain entirely.
+Turns that miss the deadline are cancelled. The value must be finite; `0` disables the drain
+and reverts to cancelling in-flight turns immediately.
+
+It bounds the *drain* only. Total stop time is the grace, plus a short settle (≈2s) that lets
+polling channels pick up handoffs written in the last instant, plus teardown. A second signal
+gives up whatever grace is left, but teardown still runs to completion — channels close, the
+HTTP socket closes, and `gateway.state` is left reading `status: "stopped"`. New WebSocket
+clients are refused with `503` from the moment a stop begins. `boscli gateway stop` sizes its
+SIGKILL deadline from the grace the *running* process published in `gateway.state`, so editing
+this value while the gateway is up does not change how long that command waits for it.
 
 **`[[runtime.channels]]`** is an array of tables — declare one per persistent channel. Rules:
 
