@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v1.12.0 (2026-07-26)
+
+### Features
+
+- **agent**: Hand off turn context when max iterations are reached
+  ([#75](https://github.com/bos-agent/bos-ai/pull/75),
+  [`a54fdc5`](https://github.com/bos-agent/bos-ai/commit/a54fdc52ad1ab1a9fc4e95b290bc83bf735d30c7))
+
+- **gateway**: Close in-flight turns with a handoff on shutdown
+  ([#79](https://github.com/bos-agent/bos-ai/pull/79),
+  [`44697ae`](https://github.com/bos-agent/bos-ai/commit/44697ae4c2eeac0d641db8ca012a383f2cefaed2))
+
+
 ## v1.11.0 (2026-07-09)
 
 ### Bug Fixes
