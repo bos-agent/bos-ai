@@ -497,6 +497,58 @@ async def test_drain_is_bounded_when_a_turn_ignores_the_stop():
         await asyncio.gather(task, return_exceptions=True)
 
 
+class UnyieldingAgent:
+    """A turn that will not unwind on cancellation. Pathological, but it is what
+    the drain's last line of defence has to survive."""
+
+    name = "main"
+
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    def request_stop(self) -> None:
+        return None
+
+    async def ask(self, chat_id, content, **kwargs):
+        self.started.set()
+        while True:
+            try:
+                await self.release.wait()
+                return "eventually"
+            except asyncio.CancelledError:
+                if self.release.is_set():
+                    raise
+                continue
+
+
+@pytest.mark.asyncio
+async def test_aclose_is_bounded_when_a_turn_will_not_unwind(monkeypatch):
+    """``aclose`` is the hard stop. Waiting forever on a task that refuses to
+    unwind would hold the whole gateway stop open through it."""
+    from bos.gateway.actors import agent_actor as agent_actor_mod
+
+    monkeypatch.setattr(agent_actor_mod, "_FORCED_CANCEL_SECONDS", 0.05)
+    agent = UnyieldingAgent()
+    actor, client_box, _ = _actor_with(agent)
+    run = asyncio.create_task(actor.run())
+    turn = None
+    try:
+        await client_box.send("agent@main", "job", chat_id="chat-unyielding")
+        await asyncio.wait_for(agent.started.wait(), timeout=2)
+        turn = actor._sessions["chat-unyielding"].execution.task
+
+        await asyncio.wait_for(actor.aclose(), timeout=2)
+
+        assert turn is not None and not turn.done()  # abandoned, not waited out
+    finally:
+        agent.release.set()
+        run.cancel()
+        await asyncio.gather(run, return_exceptions=True)
+        if turn is not None:
+            await asyncio.gather(turn, return_exceptions=True)
+
+
 # ── gateway: stop ordering ─────────────────────────────────────────────────
 
 

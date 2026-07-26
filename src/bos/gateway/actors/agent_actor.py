@@ -19,6 +19,11 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# How long a hard stop waits for cancelled turn tasks to unwind before giving up
+# on them. The process is going down; a task that will not unwind must not take
+# the rest of teardown with it.
+_FORCED_CANCEL_SECONDS = 5.0
+
 
 @dataclass
 class SessionExecution:
@@ -142,7 +147,13 @@ class AgentActor(Actor):
         for task in session_tasks:
             task.cancel()
         if session_tasks:
-            await asyncio.gather(*session_tasks, return_exceptions=True)
+            _, pending = await asyncio.wait(set(session_tasks), timeout=_FORCED_CANCEL_SECONDS)
+            if pending:
+                logger.warning(
+                    "%d turn task(s) did not unwind within %.1fs of cancellation; abandoning them",
+                    len(pending),
+                    _FORCED_CANCEL_SECONDS,
+                )
         for session in self._sessions.values():
             session.execution.task = None
         await super().aclose()  # drains command tasks tracked by the base
