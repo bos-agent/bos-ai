@@ -750,6 +750,51 @@ async def test_escalating_during_the_drain_still_finishes_teardown(tmp_path, mon
     assert read_gateway_state(GatewayRunDir(tmp_path / ".bos")).get("status") == "stopped"
 
 
+@pytest.mark.asyncio
+async def test_ws_connects_are_refused_once_shutting_down(tmp_path, monkeypatch):
+    """A channel registered after ``stop_all`` snapshots its tasks would be
+    marked stopped while still running, and the client would get a consumer that
+    is already going away."""
+    from aiohttp import web
+    from aiohttp.test_utils import make_mocked_request
+
+    from bos.config import Workspace
+    from bos.extensions.chat_stores.in_memory import InMemChatStore as Store
+    from bos.gateway import Gateway
+
+    monkeypatch.setenv("BOS_TEST_GATEWAY_KEY", "secret")
+
+    class FakeHarness:
+        def __init__(self) -> None:
+            InMemMailRoute._queues = {}
+            self.chat_store = Store()
+            self.mail_route = InMemMailRoute()
+
+        async def create_agent(self, kind=None, agent_cfg=None):
+            return StopAwareAgent()
+
+    ws_cfg = Workspace(
+        tmp_path,
+        tmp_path / ".bos",
+        {
+            "runtime": {
+                "gateway": {"port": 0, "api_key_env": "BOS_TEST_GATEWAY_KEY", "shutdown_grace_seconds": 1},
+                "main_actor": "main",
+                "actors": {"main": {"agent": "main"}},
+            }
+        },
+    )
+    gateway = Gateway(runtime=ws_cfg.resolve_gateway_runtime(), harness=FakeHarness())
+    gateway.request_shutdown()
+
+    request = make_mocked_request("GET", "/ws?channel_id=late")
+    response = await gateway.handle_ws(request)
+
+    assert isinstance(response, web.Response)
+    assert response.status == 503
+    assert "late" not in gateway.channel_manager.channels
+
+
 # ── consolidator projection ────────────────────────────────────────────────
 
 

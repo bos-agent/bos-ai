@@ -127,6 +127,12 @@ class Gateway:
         )
 
     async def handle_ws(self, request: web.Request) -> web.StreamResponse:
+        if self.shutdown_requested:
+            # Registering a channel now would race ``ChannelManager.stop_all``,
+            # which has already snapshotted the tasks it will cancel — the new
+            # channel would be marked stopped with its task still running, and
+            # the client would get a consumer that is about to disappear.
+            return web.json_response({"ok": False, "error": "shutting_down"}, status=503)
         channel_id = (request.query.get("channel_id") or "").strip()
         if not channel_id:
             return web.json_response({"ok": False, "error": "channel_id is required"}, status=400)
