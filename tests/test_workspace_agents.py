@@ -615,3 +615,68 @@ def test_parent_inheritance_from_external_file(tmp_path):
     assert leaf["system_prompt"] == "Leaf."
     assert leaf["model"] == "base-model"  # inherited from inline base
     assert leaf["tools"] == ["ReadFile"]
+
+
+def test_per_agent_plugins_isolated_when_defaults_declare_plugins(tmp_path):
+    """Each agent keeps its own plugins.enabled on top of a shared [agent.defaults.plugins].
+
+    Registration deep-merges into a copy of the defaults; a shallow copy would let
+    every agent write through the same nested `plugins` dict, so the last agent
+    registered would win for all of them.
+    """
+    config = {
+        "agent": {"defaults": {"plugins": {"enabled": ["*"]}}},
+        "agents": {
+            "alpha": {"system_prompt": "alpha", "plugins": {"enabled": ["MemoryPlugin", "SubagentPlugin"]}},
+            "omega": {"system_prompt": "omega", "plugins": {"enabled": ["SkillsPlugin"]}},
+        },
+    }
+    ws = Workspace(tmp_path, tmp_path / ".bos", config)
+    ws.bootstrap_platform()
+
+    alpha = AgentRegistry.get_defaults("alpha")["plugins"]
+    omega = AgentRegistry.get_defaults("omega")["plugins"]
+    assert alpha["enabled"] == ["MemoryPlugin", "SubagentPlugin"]
+    assert omega["enabled"] == ["SkillsPlugin"]
+    # Distinct objects: aliasing cannot be caught by asserting on one agent alone.
+    assert alpha is not omega
+
+
+def test_per_agent_plugin_bindings_isolated_when_defaults_declare_bindings(tmp_path):
+    """plugin-bindings resolve per agent on top of a shared [agent.defaults.plugin-bindings]."""
+    config = {
+        "agent": {"defaults": {"plugin-bindings": {"MemoryPlugin": {"scope": "base"}}}},
+        "agents": {
+            "alpha": {"plugin-bindings": {"MemoryPlugin": {"scope": "alpha"}}},
+            "omega": {"plugin-bindings": {"MemoryPlugin": {"scope": "omega"}}},
+        },
+    }
+    ws = Workspace(tmp_path, tmp_path / ".bos", config)
+    ws.bootstrap_platform()
+
+    alpha = AgentRegistry.get_defaults("alpha")["plugin-bindings"]
+    omega = AgentRegistry.get_defaults("omega")["plugin-bindings"]
+    assert alpha["MemoryPlugin"]["scope"] == "alpha"
+    assert omega["MemoryPlugin"]["scope"] == "omega"
+    assert alpha is not omega
+
+
+def test_factory_agent_plugin_config_does_not_leak_into_config_agents(tmp_path):
+    """An ep_agent factory's plugin config stays on that agent.
+
+    The built-in BOS factory agent is registered in the same loop; its plugin
+    terms must not reach [agents.*] agents through the shared defaults.
+    """
+    config = {
+        "agent": {"defaults": {"plugins": {"enabled": ["*"]}}},
+        "agents": {"alpha": {"system_prompt": "alpha", "plugins": {"enabled": ["MemoryPlugin"]}}},
+    }
+    ws = Workspace(tmp_path, tmp_path / ".bos", config)
+    ws.bootstrap_platform()
+
+    bos_plugins = AgentRegistry.get_defaults("BOS")["plugins"]
+    alpha = AgentRegistry.get_defaults("alpha")
+    assert alpha["plugins"]["enabled"] == ["MemoryPlugin"]
+    assert alpha["plugins"] is not bos_plugins
+    assert "SkillsPlugin" in bos_plugins["enabled"]  # the factory agent keeps its own set
+    assert alpha.get("plugin-bindings", {}) == {}  # no bindings inherited from BOS

@@ -637,8 +637,13 @@ class Workspace:
         config_specs = _resolve_agent_inheritance(config_specs, factory_specs)
 
         for name in {**factory_specs, **config_specs}:
-            merged = _deep_merge(dict(agent_defaults), dict(factory_specs.get(name, {})))
-            merged = _deep_merge(merged, config_specs.get(name, {}))
+            # Deep-copy every term: _deep_merge mutates its base in place, so a
+            # shallow copy would leave nested dicts (plugins, plugin-bindings, ...)
+            # shared between the defaults, the factory specs and every agent
+            # registered here — each iteration would write that agent's config
+            # into objects the others hold, and the last one would win for all.
+            merged = _deep_merge(copy.deepcopy(agent_defaults), copy.deepcopy(factory_specs.get(name, {})))
+            merged = _deep_merge(merged, copy.deepcopy(config_specs.get(name, {})))
             merged.pop("name", None)  # name is the registration key, not a kwarg
             merged.pop("_parent", None)  # inheritance directive, not an Agent kwarg
             if "description" not in merged and name in factory_specs:
