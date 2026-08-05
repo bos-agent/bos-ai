@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v1.12.1 (2026-08-05)
+
+### Bug Fixes
+
+- **config**: Keep per-agent plugin config out of the shared defaults
+  ([#82](https://github.com/bos-agent/bos-ai/pull/82),
+  [`b2bd84f`](https://github.com/bos-agent/bos-ai/commit/b2bd84fee7270f65ebfe3d136416de2cd2fdb94a))
+
+
 ## v1.12.0 (2026-07-26)
 
 ### Features
