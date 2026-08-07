@@ -101,6 +101,43 @@ class TestJsonlMailRoute:
             )
 
     @pytest.mark.asyncio
+    async def test_send_between_bind_and_first_receive_is_delivered(self, tmp_path):
+        """An owner binds at startup but may not poll for a while.
+
+        The offset used to be pinned on the first receive, so everything written
+        in between was skipped past rather than queued — a lost notification, or
+        a caller hanging until timeout."""
+        route = JsonlMailRoute(store_dir=tmp_path)
+        receiver = route.bind("bob")
+        sender = route.bind("alice")
+
+        await sender.send("bob", "written before the first poll")
+
+        received = await receiver.receive_nowait()
+        assert received is not None
+        assert received.content == "written before the first poll"
+
+    @pytest.mark.asyncio
+    async def test_rebinding_keeps_unread_envelopes(self, tmp_path):
+        """Re-binding an address must not re-seek past what it has not read yet."""
+        route = JsonlMailRoute(store_dir=tmp_path)
+        route.bind("bob")
+        await route.bind("alice").send("bob", "still unread")
+
+        received = await route.bind("bob").receive_nowait()
+        assert received is not None
+        assert received.content == "still unread"
+
+    @pytest.mark.asyncio
+    async def test_bind_skips_messages_from_a_prior_run(self, tmp_path):
+        """A fresh process still starts at EOF — old inboxes are not replayed."""
+        old = JsonlMailRoute(store_dir=tmp_path)
+        await old.bind("alice").send("bob", "from the last run")
+
+        fresh = JsonlMailRoute(store_dir=tmp_path)
+        assert await fresh.bind("bob").receive_nowait() is None
+
+    @pytest.mark.asyncio
     async def test_cursor_advances(self, tmp_path):
         route = JsonlMailRoute(store_dir=tmp_path)
         sender = route.bind("alice")

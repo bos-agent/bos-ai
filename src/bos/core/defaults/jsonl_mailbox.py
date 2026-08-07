@@ -88,6 +88,12 @@ class JsonlMailRoute:
         return self._dir / f"{_slugify(address)}.jsonl"
 
     def bind(self, address: str) -> _JsonlMailBox:
+        # Pin the receive offset here rather than on the first receive: the owner
+        # binds while starting up but may not poll for a while, and everything
+        # written in between would be skipped past, not queued. Rebinding an
+        # address keeps the existing offset so unread envelopes survive it.
+        if address not in self._byte_offsets:
+            self._init_offset(address)
         return _JsonlMailBox(self, address)
 
     async def receive(self, address: str) -> Envelope:
