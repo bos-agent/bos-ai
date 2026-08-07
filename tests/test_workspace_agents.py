@@ -699,3 +699,27 @@ def test_explicit_empty_enabled_overrides_defaults(tmp_path):
     aud = AgentRegistry.get_defaults("aud")
     assert aud["plugins"]["enabled"] == []
     assert aud["tools"] == []  # not None — None is the "all tools" sentinel
+
+
+def test_explicit_null_does_not_clobber_an_inherited_value(tmp_path):
+    """A bare `model:` is "not configured", not "clear the inherited value".
+
+    Markdown frontmatter renders an empty scalar as None (as does an ep_agent
+    factory reading an absent env var), and `_deep_merge` overwrites
+    unconditionally — so an explicit null must not survive the dump or it would
+    wipe [agent.defaults].model for that agent.
+    """
+    bos_dir = tmp_path / ".bos"
+    agents_dir = bos_dir / "agents"
+    agents_dir.mkdir(parents=True)
+    (agents_dir / "helper.md").write_text("---\nmodel:\n---\nI help.\n")
+
+    config = {
+        "platform": {"agent_dirs": ["./agents"]},
+        "agent": {"defaults": {"model": "gpt-4o"}},
+    }
+    ws = Workspace(tmp_path, bos_dir, config)
+    ws.resolve_agents()  # bootstrap_platform does not scan agent_dirs on its own
+    ws.bootstrap_platform()
+
+    assert AgentRegistry.get_defaults("helper")["model"] == "gpt-4o"
