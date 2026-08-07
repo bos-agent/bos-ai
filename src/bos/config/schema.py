@@ -244,13 +244,30 @@ def validate_agent_config(raw: dict[str, Any]) -> dict[str, Any]:
     return _agent_config_to_dict(validated)
 
 
+_NULL_DEFAULT_KEYS = frozenset(
+    field.alias or name for name, field in AgentConfig.model_fields.items() if field.default is None
+)
+
+
 def _agent_config_to_dict(cfg: AgentConfig) -> dict[str, Any]:
     """Convert an :class:`AgentConfig` to a plain dict for downstream consumers.
 
-    Uses ``exclude_defaults=True`` so only explicitly-set fields appear.
-    Nested defaults inside sub-models (e.g. ``tools.enabled``) are also excluded.
+    Uses ``exclude_unset=True`` so only explicitly-set fields appear, and the
+    result can override ``[agent.defaults]`` in the downstream deep merge.
+    ``exclude_defaults`` would instead drop any value that *equals* its field
+    default — making an explicit ``tools.enabled = []`` / ``plugins.enabled = []``
+    (whose default is ``[]``) indistinguishable from "not configured", so an
+    agent asking for no tools silently inherited the defaults' ``["*"]``.
+
+    An explicit *null* on an optional field is still dropped. Markdown
+    frontmatter renders a bare ``model:`` as ``None`` and an ``ep_agent`` factory
+    can return one from an absent env var; ``_deep_merge`` overwrites
+    unconditionally, so keeping it would let either silently wipe an inherited
+    ``model`` rather than leave it alone. Only fields whose own default is
+    ``None`` are shed this way — extras (``extra='allow'``) pass through as-is.
     """
-    return cfg.model_dump(exclude_defaults=True, by_alias=True)
+    dumped = cfg.model_dump(exclude_unset=True, by_alias=True)
+    return {k: v for k, v in dumped.items() if not (v is None and k in _NULL_DEFAULT_KEYS)}
 
 
 def _agent_config_to_core_kwargs(cfg: AgentConfig) -> dict[str, Any]:

@@ -289,7 +289,9 @@ enabled = ["ReadFile", "GrepSearch", "WebSearch"]
 **Tool resolution**: an agent sees a merged, filtered view over `[agent-local plugin tools,
 global ep_tool registry]` (local wins on name clash). `enabled` is an include list
 (`"*"` / `None` = all), `disabled` is an exclude list. (`bos.core.harness`,
-`ResolvedToolSet` / `create_agent`.)
+`ResolvedToolSet` / `create_agent`.) An explicit `enabled = []` is an *empty* include list —
+no tools at all, and likewise no plugins under `[…plugins]`. That is not the same as omitting
+the key, which inherits `[agent.defaults]`; see §4.8.
 
 ### 4.6 `[runtime]` — actors, gateway, channels
 
@@ -375,6 +377,15 @@ For each agent name, the final spec is a deep merge in this order (`bos.config.w
 ```
 [agent.defaults]  →  ( _parent chain, root-first )  →  @ep_agent factory result (if any)  →  [agents.<name>] / external file
 ```
+
+**What counts as "set".** Only fields a term actually specifies take part in the merge; a
+field it omits inherits from the left. An explicit **empty list** *is* a value and replaces
+what it inherits (`enabled = []` → nothing enabled), but an explicit **null** on an optional
+field (`model`, `system_prompt`, `agent_name`, `reasoning_effort`, `tool_noise_filter`) is
+read as "not configured" and inherits instead of clearing. TOML cannot spell null; Markdown
+frontmatter and `@ep_agent` factories can, so a bare `model:` leaves an inherited `model`
+standing rather than wiping it. Clearing an inherited optional is not expressible.
+(`bos.config.schema._agent_config_to_dict`.)
 
 **Inheritance (`_parent`).** An `[agents.<name>]` table may set `_parent = "<other agent>"` to
 inherit that agent's resolved spec, deep-merged underneath it (same merge semantics: dicts merge,
