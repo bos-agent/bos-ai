@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v1.12.2 (2026-08-07)
+
+### Bug Fixes
+
+- Honor explicit empty `enabled` lists and route interrupts to the turn's actor
+  ([#85](https://github.com/bos-agent/bos-ai/pull/85),
+  [`2e159d8`](https://github.com/bos-agent/bos-ai/commit/2e159d847e02dd26f69372ab4cfdb9d7815de391))
+
+- **gateway**: Come up before serving, and pin mailbox offsets at bind
+  ([#86](https://github.com/bos-agent/bos-ai/pull/86),
+  [`2a59482`](https://github.com/bos-agent/bos-ai/commit/2a5948299784fae2ce1d55cf97e36dedf7558161))
+
+
 ## v1.12.1 (2026-08-05)
 
 ### Bug Fixes
