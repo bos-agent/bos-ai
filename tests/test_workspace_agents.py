@@ -5,6 +5,7 @@ from textwrap import dedent
 
 import pytest
 
+from bos.config.schema import AgentConfig, _agent_config_to_dict
 from bos.config.workspace import Workspace
 from bos.core import AgentRegistry
 
@@ -723,3 +724,26 @@ def test_explicit_null_does_not_clobber_an_inherited_value(tmp_path):
     ws.bootstrap_platform()
 
     assert AgentRegistry.get_defaults("helper")["model"] == "gpt-4o"
+
+
+@pytest.mark.parametrize(
+    ("label", "raw", "expected"),
+    [
+        ("unset inherits", {}, {}),
+        ("null optional inherits", {"model": None}, {}),
+        ("empty list replaces", {"plugins": {"enabled": []}}, {"plugins": {"enabled": []}}),
+        ("scalar re-asserting the default still wins", {"max_tokens": 131_072}, {"max_tokens": 131_072}),
+        ("extra keeps its explicit null", {"whatever": None}, {"whatever": None}),
+        ("null _parent inherits", {"_parent": None}, {}),
+    ],
+)
+def test_agent_config_dump_shape_table(label, raw, expected):
+    """Which shapes reach the deep merge, and which are read as "not configured".
+
+    This is the predicate two bugs turned on: dropping an explicit `[]` made an
+    agent inherit the defaults' `["*"]`, and keeping an explicit null let it wipe
+    an inherited value. Each cell is a decision, so each cell gets an assertion —
+    a later change to the dump mode should turn this red, not a user's config.
+    """
+    dumped = _agent_config_to_dict(AgentConfig.model_validate({"system_prompt": "x", **raw}))
+    assert dumped == {"system_prompt": "x", **expected}, label
