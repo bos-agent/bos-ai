@@ -195,14 +195,20 @@ class Gateway:
         runner = web.AppRunner(app, access_log=None)
         await runner.setup()
         site = web.TCPSite(runner, self.config.host, self.config.port)
+        # Actors and channels come up *before* the socket listens. Serving first
+        # accepted requests into a gateway with no consumers, and a mailbox pins
+        # its receive offset when its owner binds — so an envelope written before
+        # that bind is skipped for good, not merely delayed: a fire-and-forget
+        # notification vanishes and anything awaiting a reply hangs to timeout.
+        # Actors bind before channels so a channel cannot outrun an actor's bind.
+        await self.actor_manager.start_all()
+        await self.channel_manager.start_all()
         await site.start()
         server = getattr(site, "_server", None)
         sockets = server.sockets if server else None
         if sockets:
             self.actual_port = sockets[0].getsockname()[1]
         self.actual_host = self.config.host
-        await self.actor_manager.start_all()
-        await self.channel_manager.start_all()
         write_gateway_state(GatewayRunDir(self.bos_dir), self.status_snapshot())
         graceful = True
         try:

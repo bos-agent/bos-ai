@@ -554,6 +554,75 @@ async def test_aclose_is_bounded_when_a_turn_will_not_unwind(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_gateway_serves_only_after_actors_and_channels_are_up(tmp_path, monkeypatch):
+    """The socket must not accept before there is anything to consume the work.
+
+    Serving first let a request in while no actor or channel was running, and a
+    mailbox pins its receive offset when its owner binds — so an envelope written
+    before that bind is skipped for good, not merely delayed."""
+    from aiohttp import web
+
+    from bos.config import Workspace
+    from bos.extensions.chat_stores.in_memory import InMemChatStore as Store
+    from bos.gateway import Gateway
+
+    monkeypatch.setenv("BOS_TEST_GATEWAY_KEY", "secret")
+
+    class FakeHarness:
+        def __init__(self) -> None:
+            InMemMailRoute._queues = {}
+            self.chat_store = Store()
+            self.mail_route = InMemMailRoute()
+
+        async def create_agent(self, kind=None, agent_cfg=None):
+            return StopAwareAgent()
+
+    ws = Workspace(
+        tmp_path,
+        tmp_path / ".bos",
+        {
+            "runtime": {
+                "gateway": {"port": 0, "api_key_env": "BOS_TEST_GATEWAY_KEY", "shutdown_grace_seconds": 0.1},
+                "main_actor": "main",
+                "actors": {"main": {"agent": "main"}},
+            }
+        },
+    )
+    gateway = Gateway(runtime=ws.resolve_gateway_runtime(), harness=FakeHarness())
+
+    order: list[str] = []
+    actor_start = gateway.actor_manager.start_all
+    channel_start = gateway.channel_manager.start_all
+    site_start = web.TCPSite.start
+
+    async def _actors():
+        order.append("actors")
+        await actor_start()
+
+    async def _channels():
+        order.append("channels")
+        await channel_start()
+
+    async def _serve(self):
+        order.append("serve")
+        await site_start(self)
+
+    monkeypatch.setattr(gateway.actor_manager, "start_all", _actors)
+    monkeypatch.setattr(gateway.channel_manager, "start_all", _channels)
+    monkeypatch.setattr(web.TCPSite, "start", _serve)
+
+    run = asyncio.create_task(gateway.run())
+    await asyncio.sleep(0.1)
+
+    assert order == ["actors", "channels", "serve"]
+    # The published port comes from the listening socket, so it survives the move.
+    assert gateway.actual_port != 0
+
+    gateway.request_shutdown()
+    await asyncio.wait_for(run, timeout=5)
+
+
+@pytest.mark.asyncio
 async def test_gateway_stops_actors_before_channels(tmp_path, monkeypatch):
     """Channels must outlive the drain — they carry the handoff out. The old
     order stopped the consumer first and left clients waiting on nothing."""
