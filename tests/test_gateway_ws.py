@@ -45,6 +45,45 @@ class FakeHarness:
         return EchoCommitAgent(self.chat_store)
 
 
+class SlowAbortAgent:
+    """Blocks until cancelled, then commits abort-safe history like the real agent."""
+
+    name = "scout"
+
+    def __init__(self, store: InMemChatStore) -> None:
+        self.store = store
+        self.started = asyncio.Event()
+
+    async def ask(self, chat_id, content, *, turn_id, commit_observer=None, **kwargs):
+        self.started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            commit = await self.store.commit_turn(
+                chat_id,
+                [
+                    Message(llm_message={"role": "user", "content": content}),
+                    Message(llm_message={"role": "assistant", "content": "(turn aborted before completion)"}),
+                ],
+                turn_id=turn_id,
+            )
+            if commit_observer is not None:
+                commit_observer(commit)
+            raise
+        return "unreachable"
+
+
+class TwoActorHarness(FakeHarness):
+    """`main` echoes; `scout` hangs until aborted."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.scout = SlowAbortAgent(self.chat_store)
+
+    async def create_agent(self, kind=None, agent_cfg=None):
+        return self.scout if kind == "scout" else EchoCommitAgent(self.chat_store)
+
+
 def _workspace(tmp_path) -> Workspace:
     return Workspace(
         tmp_path,
@@ -54,6 +93,20 @@ def _workspace(tmp_path) -> Workspace:
                 "gateway": {"port": 0, "api_key_env": "BOS_TEST_GATEWAY_KEY"},
                 "main_actor": "main",
                 "actors": {"main": {"agent": "main"}},
+            }
+        },
+    )
+
+
+def _two_actor_workspace(tmp_path) -> Workspace:
+    return Workspace(
+        tmp_path,
+        tmp_path / ".bos",
+        {
+            "runtime": {
+                "gateway": {"port": 0, "api_key_env": "BOS_TEST_GATEWAY_KEY"},
+                "main_actor": "main",
+                "actors": {"main": {"agent": "main"}, "scout": {"agent": "scout"}},
             }
         },
     )
@@ -258,6 +311,41 @@ async def test_gateway_ws_new_command_updates_channel_cursor(tmp_path, monkeypat
                 gateway.chat_coordinator.get_cursor(gateway.channel_manager.channels["tui-a"].channel.ref)
                 == payload["chat_id"]
             )
+            await ws.close()
+    finally:
+        await gateway.actor_manager.stop_all()
+        await gateway.channel_manager.stop_all()
+        await runner.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_gateway_ws_interrupt_targets_the_mention_routed_actor(tmp_path, monkeypatch):
+    """An interrupt follows the turn in flight, not the channel's default actor.
+
+    `@scout` routes the turn to scout; an INTERRUPT_ABORT pinned to main_actor
+    would land in an idle mailbox and the running turn would never notice.
+    """
+    monkeypatch.setenv("BOS_TEST_GATEWAY_KEY", "secret")
+    harness = TwoActorHarness()
+    gateway = Gateway(runtime=_two_actor_workspace(tmp_path).resolve_gateway_runtime(), harness=harness)
+    runner, base_url = await _start_gateway_app(gateway)
+    try:
+        async with aiohttp.ClientSession(headers={"Authorization": "Bearer secret"}) as session:
+            ws = await session.ws_connect(f"{base_url}/ws?channel_id=tui-a&chat_id=chat-1")
+            await ws.receive_json()
+
+            await ws.send_json({"content": "@scout dig", "content_type": MessageType.MESSAGE, "base_revision": 0})
+            await asyncio.wait_for(harness.scout.started.wait(), timeout=2)
+            active = gateway.chat_coordinator.active_turn_status("chat-1")
+            assert active is not None and active["actor"] == "scout"
+
+            await ws.send_json({"content": "", "content_type": MessageType.INTERRUPT_ABORT, "base_revision": 0})
+            events = []
+            while "turn_aborted" not in events:
+                message = await ws.receive_json(timeout=2)
+                events.append(message["metadata"].get("event"))
+
+            assert gateway.chat_coordinator.active_turn_status("chat-1") is None
             await ws.close()
     finally:
         await gateway.actor_manager.stop_all()

@@ -206,6 +206,12 @@ class WSChannel(BaseChannel[dict[str, Any]]):
             target_address = route.target_address
             content = route.content
             metadata = route.metadata
+        elif (active := self._runtime.chat_coordinator.active_turn_status(chat_id)) is not None:
+            # Interrupts belong to the turn in flight, not to this channel's
+            # default actor: a @mention-routed turn runs elsewhere and would
+            # never see an interrupt mailed to the default. Preflight only
+            # admits an interrupt past an active turn, so this is that path.
+            target_address = f"agent@{active['actor']}"
 
         await mailbox.send(
             target_address,
