@@ -680,3 +680,22 @@ def test_factory_agent_plugin_config_does_not_leak_into_config_agents(tmp_path):
     assert alpha["plugins"] is not bos_plugins
     assert "SkillsPlugin" in bos_plugins["enabled"]  # the factory agent keeps its own set
     assert alpha.get("plugin-bindings", {}) == {}  # no bindings inherited from BOS
+
+
+def test_explicit_empty_enabled_overrides_defaults(tmp_path):
+    """`enabled = []` means "none", not "unset" — it must not fall back to the defaults' `*`.
+
+    The conversion to core kwargs used to drop any value equal to its field
+    default, so an explicit empty list vanished before the deep merge and the
+    agent silently resolved to every plugin and every tool.
+    """
+    config = {
+        "agent": {"defaults": {"plugins": {"enabled": ["*"]}, "tools": {"enabled": ["*"]}}},
+        "agents": {"aud": {"system_prompt": "aud", "plugins": {"enabled": []}, "tools": {"enabled": []}}},
+    }
+    ws = Workspace(tmp_path, tmp_path / ".bos", config)
+    ws.bootstrap_platform()
+
+    aud = AgentRegistry.get_defaults("aud")
+    assert aud["plugins"]["enabled"] == []
+    assert aud["tools"] == []  # not None — None is the "all tools" sentinel

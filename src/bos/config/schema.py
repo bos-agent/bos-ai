@@ -247,10 +247,14 @@ def validate_agent_config(raw: dict[str, Any]) -> dict[str, Any]:
 def _agent_config_to_dict(cfg: AgentConfig) -> dict[str, Any]:
     """Convert an :class:`AgentConfig` to a plain dict for downstream consumers.
 
-    Uses ``exclude_defaults=True`` so only explicitly-set fields appear.
-    Nested defaults inside sub-models (e.g. ``tools.enabled``) are also excluded.
+    Uses ``exclude_unset=True`` so only explicitly-set fields appear, and the
+    result can override ``[agent.defaults]`` in the downstream deep merge.
+    ``exclude_defaults`` would instead drop any value that *equals* its field
+    default — making an explicit ``tools.enabled = []`` / ``plugins.enabled = []``
+    (whose default is ``[]``) indistinguishable from "not configured", so an
+    agent asking for no tools silently inherited the defaults' ``["*"]``.
     """
-    return cfg.model_dump(exclude_defaults=True, by_alias=True)
+    return cfg.model_dump(exclude_unset=True, by_alias=True)
 
 
 def _agent_config_to_core_kwargs(cfg: AgentConfig) -> dict[str, Any]:
