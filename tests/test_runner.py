@@ -100,3 +100,33 @@ def test_gateway_start_without_workspace_falls_back_to_default_preset(tmp_path, 
     assert captured["argv"][-2:] == ["--config", "default"]
     assert captured["run_root"] == (tmp_path / "home" / "presets" / "default" / "run").resolve()
     assert captured["cwd"] == (tmp_path / "home" / "presets" / "default").resolve()
+
+
+def test_gateway_status_marks_stale_state_and_hides_dead_details(tmp_path, monkeypatch):
+    """A leftover state file must not be reported as a live endpoint/actors."""
+    from click.testing import CliRunner
+
+    from bos.cli.entry import cli
+
+    monkeypatch.setenv("BOS_HOME", str(tmp_path / "home"))
+    monkeypatch.setattr("bos.runner.proc.is_running", lambda rd: False)
+    monkeypatch.setattr(
+        "bos.runner.proc.read_state",
+        lambda rd: {
+            "runtime": "process",
+            "pid": 1234,
+            "started_at": "2026-09-01T00:00:00+00:00",
+            "gateway": {"host": "127.0.0.1", "port": 37701},
+            "actors": {"main": {"display_name": "Main", "status": "running"}},
+        },
+    )
+
+    result = CliRunner().invoke(cli, ["-c", "default", "gateway", "status"])
+
+    assert result.exit_code == 0, result.output
+    assert "stopped" in result.output
+    assert "stale" in result.output
+    assert "2026-09-01T00:00:00+00:00" in result.output  # the stale timestamp is the evidence
+    assert "37701" not in result.output  # nothing is listening there
+    assert "running" not in result.output  # actors belong to the dead process
+    assert "Uptime" not in result.output

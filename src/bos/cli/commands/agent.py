@@ -635,7 +635,16 @@ def status(ctx):
         click.echo("Gateway is not running.")
         return
 
-    status_str = click.style("● running", fg="green") if running else click.style("○ stopped", fg="red")
+    if not running:
+        # Leftover state from a killed or crashed gateway: the uptime, endpoint
+        # and "running" actors below all describe a process that is gone, and
+        # anything tailing this output would read them as live.
+        stopped = click.style("○ stopped", fg="red")
+        click.echo(f"Status:      {stopped} (stale state from {state.get('started_at', '—')})")
+        click.echo("Run `boscli gateway start` to clear it and start fresh.")
+        return
+
+    status_str = click.style("● running", fg="green")
     runtime = state.get("runtime", "process")
     pid = state.get("pid", "—")
     started = state.get("started_at", "—")
