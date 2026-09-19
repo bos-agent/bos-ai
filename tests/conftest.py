@@ -14,6 +14,23 @@ from bos.extensions.mailboxes.in_memory import InMemMailRoute  # noqa: F401
 from bos.extensions.memory_stores.in_memory import InMemMemoryExtension  # noqa: F401
 
 
+class BlockImport:
+    """Meta-path finder that makes *name* unimportable.
+
+    Simulates an install where an optional dependency's extra was never
+    installed, without uninstalling anything. Insert at the head of
+    ``sys.meta_path`` via monkeypatch and drop *name* from ``sys.modules``.
+    """
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname == self.name or fullname.startswith(f"{self.name}."):
+            raise ModuleNotFoundError(f"No module named {fullname!r}", name=fullname)
+        return None
+
+
 def resolve_test_tools(
     *,
     plugins: list[Any] | None = None,

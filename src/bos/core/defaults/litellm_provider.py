@@ -43,7 +43,17 @@ def _normalize_litellm_message(message: dict[str, Any]) -> dict[str, Any]:
 
 @ep_provider(name="litellm")
 async def litellm_complete(messages: list[dict], model: str, **kwargs: Any) -> LLMResponse:
-    import litellm
+    try:
+        import litellm
+    except ModuleNotFoundError as exc:
+        # This provider registers at import time — the decorator runs whether or
+        # not litellm is installed — so a base install fails here, on the first
+        # call, rather than at resolution. Name the remedy instead of surfacing
+        # a bare ModuleNotFoundError from the middle of a turn.
+        raise ValueError(
+            "The built-in 'litellm' LLM provider needs the litellm package, which is not installed. "
+            "Install bos-ai[litellm], or register your own provider with @ep_provider."
+        ) from exc
 
     try:
         normalized_messages = [_normalize_litellm_message(message) for message in messages]

@@ -251,20 +251,19 @@ The intended change, and the only user-visible one. Affected call sites:
 
 ### 5.3 Breaking: a base install has no LLM provider
 
-`AgentHarness.__aenter__` constructs `LLMClient()` (`harness.py:328`), whose `__init__` body is `pass` — provider resolution is deferred, so **opening the harness still succeeds**. The failure surfaces on the first LLM call, in `LLMClient.complete()` (`core/llm.py`), which resolves a provider name and calls `ep_provider.invoke(provider_name, params)`. With nothing registered, `ExtensionPoint.invoke` (`core/registry.py:76`) raises:
+`AgentHarness.__aenter__` constructs `LLMClient()` (`harness.py:328`), whose `__init__` body is `pass`, so **opening the harness still succeeds**.
+
+Resolution succeeds too, which is the part that is easy to get wrong: `core/defaults/litellm_provider.py` registers via the `@ep_provider(name="litellm")` decorator **at import time**, and its `import litellm` is inside the function body. On a base install the provider is therefore *registered*, `ep_provider.has("litellm")` is `True`, and a guard in `LLMClient.complete()` would never fire. The failure can only surface from inside the call, as a bare `ModuleNotFoundError: No module named 'litellm'` raised mid-turn.
+
+The guard accordingly lives in `litellm_complete` itself, around its own import, and raises `ValueError` with the remedy:
 
 ```
-ValueError: Extension 'litellm' not found for 'LLM provider...'
+ValueError: The built-in 'litellm' LLM provider needs the litellm package, which
+is not installed. Install bos-ai[litellm], or register your own provider with
+@ep_provider.
 ```
 
-which names neither the cause nor the remedy. `complete()` gains a guard before the invoke, keeping the `ValueError` type so no caller's exception handling changes:
-
-```
-ValueError: No LLM provider 'litellm' registered. Install bos-ai[litellm]
-for the built-in provider, or register your own with @ep_provider.
-```
-
-The guard also covers a pre-existing rough edge: `complete()` already falls back to `"litellm"` when a model string's prefix is not a registered provider, so a *misspelled* provider name produces the same opaque message today.
+What the user sees depends on the caller. `LLMClient.complete()` raises. `Agent.run()` does **not** propagate it: the turn loop catches provider errors and returns them as the turn's output, so an embedder gets `AgentResult(output="(error: The built-in 'litellm' …)")` and a CLI or channel user reads the message as the agent's reply. Both paths carry the remedy; neither shows a traceback.
 
 This is the one place Track A adds a user-facing string that did not exist. Every documented install path for running an agent (`bos-ai[litellm]`, `bos-ai[cli]` via `boscli`, `bos-ai[all]`) includes a provider, so the message targets a deliberate bare install.
 
@@ -300,7 +299,7 @@ Each states its preconditions.
 
 1. Given a clean Python 3.13 venv and `pip install <bos-ai wheel>`: the closure is ≤ 20 MB, `import bos.core`, `import bos.config` and `import bos.exts` all succeed, and no `boscli` executable is created in the venv's `bin/`.
 2. Given the same base install: `import bos.exts` emits a warning naming `bos-ai[search]` for the knowledge tools and `bos-ai[gateway]` for the Telegram channel, and raises nothing.
-3. Given the same base install: constructing an `AgentHarness` and running a turn with no provider registered fails with the §5.3 message, not a bare extension-point lookup error.
+3. Given the same base install (no `[litellm]`): constructing an `AgentHarness` and running a turn returns an `AgentResult` whose `output` carries the §5.3 message, and calling `LLMClient.complete()` directly raises `ValueError` with it — in neither case a bare `ModuleNotFoundError`.
 4. Given a base install plus `fastapi`: `examples/embed_fastapi.py` serves a turn end to end from an in-memory config dict against its own stub `@ep_provider`, leaving its `bos_dir` empty and importing neither `bos.cli` nor `bos.gateway`. It needs no `[litellm]` extra, which is itself the point — an embedder supplying its own provider installs nothing beyond the base.
 5. Given `pip install '<wheel>[cli]'`: every `boscli` subcommand's `--help` renders, and `gateway start/status/stop` behaves as on today's `main`.
 6. Given the published `boscli` distribution built from step 4: `uvx boscli ask "..."` succeeds against a configured provider, matching today's behavior.
@@ -334,6 +333,7 @@ None outstanding.
 
 ## 10. Revision history
 
+- 2026-09-19 — Implementation finding, §5.3 corrected again. The guard does **not** belong in `LLMClient.complete()`: `litellm_provider.py` registers at import time while its `import litellm` is function-local, so on a base install `ep_provider.has("litellm")` is `True` and such a guard never fires. Verified against a real base install — the guard belongs in `litellm_complete` around its own import. Also recorded that `Agent.run()` does not propagate the `ValueError`; the turn loop returns it as the turn's output, which is how a CLI or channel user actually sees it. §7.3 restated accordingly.
 - 2026-09-19 — Implementation findings, two corrections. §3.4 listed two built-ins losing a base dependency; it is three — `extensions/channels/lark.py:34` imports `bos.gateway` at module level, so it needs the `gateway` extra to import even though its own SDK import is already deferred. §3.3/§5.1 did not say how to run the CLI once the console script is gone: `src/bos/cli/__main__.py` is added so `python -m bos.cli` works, without which `bos-ai[cli]` installs dependencies for a CLI that cannot be invoked, and `CLAUDE.md`'s `uv run boscli` workflow breaks with no replacement.
 - 2026-09-19 — Pre-implementation code re-check, two corrections. §5.3 claimed provider resolution fails at `AgentHarness.__aenter__`; it does not — `LLMClient.__init__` is a no-op and the failure surfaces at the first `complete()` call, so the guard belongs in `core/llm.py` and keeps the existing `ValueError` type. §6.6 assumed an existing CI workflow to add a job to; the repository has none that runs tests (`release.yml` is `workflow_dispatch`-only), so the step creates `.github/workflows/packaging.yml`.
 - 2026-09-19 — Review pass: both §9 open questions closed. `search` stays in the `boscli` pin because the CLI's default config enables the web-search tools; de-hardcoding the `boscli` literals is deferred out of scope. No design change.
