@@ -4,30 +4,16 @@ import importlib
 import logging
 import sys
 
+from conftest import BlockImport
+
 from bos.exts import _optional
 
 _KNOWLEDGE = "bos.extensions.tools.knowledge"
 
 
-class _BlockImport:
-    """Meta-path finder that makes *name* unimportable.
-
-    Simulates the post-extras-split state where the adapter module still
-    ships in the wheel but its third-party dependency was never installed.
-    """
-
-    def __init__(self, name: str) -> None:
-        self.name = name
-
-    def find_spec(self, fullname, path=None, target=None):
-        if fullname == self.name or fullname.startswith(f"{self.name}."):
-            raise ModuleNotFoundError(f"No module named {fullname!r}", name=fullname)
-        return None
-
-
 class TestOptionalExtension:
     def test_missing_dependency_warns_naming_the_extra_and_does_not_raise(self, caplog, monkeypatch):
-        monkeypatch.setattr(sys, "meta_path", [_BlockImport("ddgs"), *sys.meta_path])
+        monkeypatch.setattr(sys, "meta_path", [BlockImport("ddgs"), *sys.meta_path])
         for cached in (_KNOWLEDGE, "ddgs", "ddgs.exceptions"):
             monkeypatch.delitem(sys.modules, cached, raising=False)
 
