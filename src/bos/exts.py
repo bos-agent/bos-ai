@@ -53,9 +53,6 @@ import logging
 import bos.extensions.agents.bos  # noqa: F401
 import bos.extensions.agents.bos_config  # noqa: F401
 
-# Channels
-import bos.extensions.channels.lark  # noqa: F401
-
 # Chat stores
 import bos.extensions.chat_stores.in_memory  # noqa: F401
 
@@ -102,7 +99,10 @@ def _optional(module_path: str, *, extra: str) -> None:
 # Built-ins whose third-party dependency lives in an extra. Grouped here rather
 # than beside their siblings above because a call is not an import, and every
 # plain import has to precede it.
-_optional("bos.extensions.channels.telegram", extra="gateway")  # aiohttp + bos.gateway
+# Both channels import bos.gateway for ChannelRuntimeContext, so both need the
+# gateway extra even though lark's own SDK import is already deferred.
+_optional("bos.extensions.channels.lark", extra="gateway")
+_optional("bos.extensions.channels.telegram", extra="gateway")
 _optional("bos.extensions.tools.knowledge", extra="search")  # bs4 + ddgs
 
 

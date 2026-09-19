@@ -10,8 +10,9 @@ This file provides guidance to AI coding agent while working with code in this r
 - Run a single test: `uv run pytest -q tests/test_harness.py -k test_name`
 - Lint: `uv run ruff check src tests`
 - Type-check: `npx -y pyright src` (Pylance/pyright is the project's type checker; `.vscode/settings.json` pins `typeCheckingMode = basic`). Pyright is not a project dependency, so run it via `npx`.
-- CLI help: `uv run boscli --help`
-- Prefer `uv run boscli ...` for local CLI invocation (not system `boscli`).
+- CLI help: `uv run python -m bos.cli --help`
+- Prefer `uv run python -m bos.cli ...` for local CLI invocation (not system `boscli`). `bos-ai` ships no
+  console script — the `boscli` command comes from the separate `boscli` distribution (BEP 16).
 
 ## Repo Layout
 

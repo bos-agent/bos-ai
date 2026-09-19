@@ -169,28 +169,46 @@ name = "bos-ai"
 version = "1.12.2"
 source = { editable = "." }
 dependencies = [
-    { name = "aiohttp" },
-    { name = "beautifulsoup4" },
-    { name = "click" },
-    { name = "ddgs" },
     { name = "filelock" },
     { name = "jsonschema" },
-    { name = "litellm" },
-    { name = "prompt-toolkit" },
     { name = "pydantic" },
     { name = "python-dotenv" },
     { name = "pyyaml" },
-    { name = "rich" },
-    { name = "textual" },
-    { name = "textual-autocomplete" },
 ]
 
 [package.optional-dependencies]
 all = [
+    { name = "aiohttp" },
+    { name = "beautifulsoup4" },
+    { name = "click" },
+    { name = "ddgs" },
     { name = "lark-oapi" },
+    { name = "litellm" },
+    { name = "prompt-toolkit" },
+    { name = "rich" },
+    { name = "textual" },
+    { name = "textual-autocomplete" },
+]
+cli = [
+    { name = "aiohttp" },
+    { name = "click" },
+    { name = "prompt-toolkit" },
+    { name = "rich" },
+    { name = "textual" },
+    { name = "textual-autocomplete" },
+]
+gateway = [
+    { name = "aiohttp" },
 ]
 lark = [
     { name = "lark-oapi" },
+]
+litellm = [
+    { name = "litellm" },
+]
+search = [
+    { name = "beautifulsoup4" },
+    { name = "ddgs" },
 ]
 
 [package.dev-dependencies]
@@ -206,24 +224,25 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "aiohttp", specifier = "==3.13.5" },
-    { name = "beautifulsoup4", specifier = "==4.14.3" },
-    { name = "click", specifier = "==8.3.2" },
-    { name = "ddgs", specifier = "==9.14.4" },
+    { name = "aiohttp", marker = "extra == 'gateway'", specifier = "==3.13.5" },
+    { name = "beautifulsoup4", marker = "extra == 'search'", specifier = "==4.14.3" },
+    { name = "bos-ai", extras = ["gateway"], marker = "extra == 'cli'" },
+    { name = "bos-ai", extras = ["litellm", "gateway", "search", "lark", "cli"], marker = "extra == 'all'" },
+    { name = "click", marker = "extra == 'cli'", specifier = "==8.3.2" },
+    { name = "ddgs", marker = "extra == 'search'", specifier = "==9.14.4" },
     { name = "filelock", specifier = "==3.25.2" },
     { name = "jsonschema", specifier = ">=4.21" },
-    { name = "lark-oapi", marker = "extra == 'all'", specifier = "==1.6.8" },
     { name = "lark-oapi", marker = "extra == 'lark'", specifier = "==1.6.8" },
-    { name = "litellm", specifier = "==1.84.0" },
-    { name = "prompt-toolkit", specifier = "==3.0.52" },
+    { name = "litellm", marker = "extra == 'litellm'", specifier = "==1.84.0" },
+    { name = "prompt-toolkit", marker = "extra == 'cli'", specifier = "==3.0.52" },
     { name = "pydantic", specifier = "==2.12.5" },
     { name = "python-dotenv", specifier = "==1.2.2" },
     { name = "pyyaml", specifier = "==6.0.3" },
-    { name = "rich", specifier = "==14.3.3" },
-    { name = "textual", specifier = "==8.2.3" },
-    { name = "textual-autocomplete", specifier = "==4.0.6" },
+    { name = "rich", marker = "extra == 'cli'", specifier = "==14.3.3" },
+    { name = "textual", marker = "extra == 'cli'", specifier = "==8.2.3" },
+    { name = "textual-autocomplete", marker = "extra == 'cli'", specifier = "==4.0.6" },
 ]
-provides-extras = ["search", "lark", "all"]
+provides-extras = ["litellm", "gateway", "search", "lark", "cli", "all"]
 
 [package.metadata.requires-dev]
 dev = [
