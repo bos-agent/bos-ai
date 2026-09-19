@@ -429,3 +429,43 @@ async def test_gateway_client_send_omits_workdir_when_unset():
     await client.send("hello")
 
     assert "workdir" not in sent[0]["metadata"]
+
+
+@pytest.mark.asyncio
+async def test_gateway_client_connect_failure_closes_session():
+    """A refused connect must not leave an unclosed aiohttp session behind."""
+    client = GatewayClient("127.0.0.1", 1, channel_id="probe")
+
+    with pytest.raises(aiohttp.ClientError):
+        await client.connect()
+
+    assert client._session is None
+
+
+@pytest.mark.asyncio
+async def test_gateway_client_bad_session_ack_closes_transport():
+    """A socket that opens but never acks must not leak the ws or the session."""
+
+    async def _handler(request):
+        ws = web.WebSocketResponse()
+        await ws.prepare(request)
+        await ws.send_json({"content": "not an ack", "content_type": MessageType.MESSAGE})
+        return ws
+
+    app = web.Application()
+    app.router.add_get("/ws", _handler)
+    runner = web.AppRunner(app, access_log=None)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = site._server.sockets[0].getsockname()[1]  # type: ignore[union-attr]
+
+    client = GatewayClient("127.0.0.1", port, channel_id="probe")
+    try:
+        with pytest.raises(RuntimeError):
+            await client.connect()
+
+        assert client._ws is None
+        assert client._session is None
+    finally:
+        await runner.cleanup()

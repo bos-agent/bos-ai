@@ -154,11 +154,7 @@ class GatewayClient:
         """Low-level connect (or reconnect). Creates session + WS."""
         import aiohttp
 
-        # Clean up any previous session
-        if self._ws and not self._ws.closed:
-            await self._ws.close()
-        if self._session and not self._session.closed:
-            await self._session.close()
+        await self._close_transport()  # drop any previous session
 
         self._session = aiohttp.ClientSession(headers=self._auth_headers())
         query: dict[str, str] = {"channel_id": self._channel_id}
@@ -167,8 +163,15 @@ class GatewayClient:
         if takeover:
             query["takeover"] = "1"
         url = f"{self._url}?{urlencode(query)}"
-        self._ws = await self._session.ws_connect(url)
-        await self._receive_session_ack()
+        try:
+            self._ws = await self._session.ws_connect(url)
+            await self._receive_session_ack()
+        except BaseException:
+            # A failed connect owns the session it just opened — close it here so
+            # callers don't have to know aclose() is needed after connect() raised.
+            # BaseException, not Exception: a cancelled connect leaks just the same.
+            await self._close_transport()
+            raise
         self._connected.set()
 
     async def _receive_session_ack(self) -> None:
@@ -370,11 +373,17 @@ class GatewayClient:
         if self._reader_task:
             self._reader_task.cancel()
             await asyncio.gather(self._reader_task, return_exceptions=True)
+        await self._close_transport()
+        logger.debug("GatewayClient disconnected")
+
+    async def _close_transport(self) -> None:
+        """Close the WS and the session if open, and drop both references."""
         if self._ws and not self._ws.closed:
             await self._ws.close()
         if self._session and not self._session.closed:
             await self._session.close()
-        logger.debug("GatewayClient disconnected")
+        self._ws = None
+        self._session = None
 
 
 def _coerce_revision(raw: Any) -> int | None:
