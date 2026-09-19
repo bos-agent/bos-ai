@@ -77,7 +77,8 @@ Key vocabulary:
 ## 2. Install & quick start
 
 ```bash
-pip install bos-ai            # or: uvx boscli ...   (no install)
+uvx boscli ...                # the CLI; `pip install bos-ai` is the LIBRARY and
+                              # provides no `boscli` command (see §2.1)
 
 # One-shot, no project:
 OPENAI_API_KEY=<key> boscli ask "how are you" --model openai/gpt-4o
@@ -95,8 +96,50 @@ provider prefix also selects a custom `@ep_provider` if one is registered under 
 name (see §6.2); otherwise it falls back to LiteLLM, which reads the matching
 `*_API_KEY` env var.
 
-Optional extras: `pip install 'bos-ai[search]'` (Tavily web search),
-`'bos-ai[lark]'` (Lark/Feishu channel), `'bos-ai[all]'`.
+### 2.1 Two distributions, and the extras
+
+`bos-ai` is the **library**; it ships no console script. `boscli` is a code-free
+distribution that exists so `uvx boscli` resolves (tool runners assume the PyPI
+name matches the command); it depends on `bos-ai[cli,litellm,search]` and points
+its `boscli` entry point at `bos.cli.entry:main`. A `bos-ai[cli]` install without
+the shim runs the same CLI as `python -m bos.cli`.
+
+| Install | Adds |
+|---|---|
+| `bos-ai` | The library: `bos.core`, `bos.config`, plugins. ~14 MB |
+| `bos-ai[litellm]` | The built-in LLM provider. Without it, calls fail with a message naming this extra; register your own with `@ep_provider` instead (§6.2) |
+| `bos-ai[gateway]` | `aiohttp`: the gateway process and the Telegram/Lark channels |
+| `bos-ai[search]` | `ddgs` + `beautifulsoup4`: the built-in web-search and page-fetch tools. The Tavily provider needs only an API key, not this extra |
+| `bos-ai[lark]` | The Lark/Feishu SDK |
+| `bos-ai[cli]` | The CLI's dependencies (implies `gateway`) |
+| `bos-ai[all]` | Everything |
+
+Built-in adapters whose extra is absent are **skipped with a warning naming the
+extra**, not an import error — so `import bos.exts` succeeds on any install. A
+config that then names a tool from a skipped module fails at resolution.
+
+### 2.2 Embedding (no CLI, no gateway, no TOML)
+
+`Workspace` accepts a plain dict, so configuration can come from anywhere; the
+file-discovery constructor is the CLI's convenience, not the only entry point:
+
+```python
+from bos.config import Workspace
+
+ws = Workspace(workspace=".", bos_dir="/var/lib/myapp", config=config_dict)
+ws.bootstrap_platform()
+
+async with ws.harness() as harness:
+    agent = await harness.create_agent(kind="assistant")
+    result = await agent.run(chat_id, "hello")   # result.output
+```
+
+Set `[platform] extensions = []` and import only the adapters you want, instead
+of `bos.exts` which loads every built-in. The supported surface is `bos.core`
+(`AgentHarness`, `Agent`, `AgentResult`, the `ep_*` points, the port protocols)
+and `bos.config` (`Workspace`, `RootConfig`, `validate_config`); `_`-prefixed
+re-exports are for extensions and are not stable. See `examples/embed_fastapi.py`
+in the repository for a runnable version.
 
 ---
 

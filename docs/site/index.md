@@ -8,9 +8,12 @@ own agent-native application, from a single assistant to a multi-agent system.
 ## Quick Start
 
 ```bash
-pip install bos-ai
-OPENAI_API_KEY=<api-key> boscli ask "how are you" --model openai/gpt-4o
+OPENAI_API_KEY=<api-key> uvx boscli ask "how are you" --model openai/gpt-4o
 ```
+
+The CLI ships as the `boscli` distribution. `pip install bos-ai` installs the
+**library** and provides no `boscli` command — see
+[Embedding BOS](getting-started.md#embedding-bos-in-your-own-application).
 
 Prefer to set the credentials and model once instead of repeating them on every
 call? Export them into your environment — `boscli ask` reads `BOS_MODEL` when
@@ -32,12 +35,13 @@ export BOS_MODEL=deepseek/deepseek-v4-pro
 boscli ask "how are you"
 ```
 
-Alternatively, use [uv](https://docs.astral.sh/uv/)'s `uvx` to start without installing:
+Install [uv](https://docs.astral.sh/uv/) to get `uvx`, or install the CLI
+permanently with `uv tool install boscli` / `pipx install boscli`:
 
 ```bash
 export OPENAI_API_KEY=<api-key>
 export BOS_MODEL=openai/gpt-4o
-uvx boscli ask "how are you"
+boscli ask "how are you"
 ```
 
 ## Where to go next
