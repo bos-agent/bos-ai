@@ -2,6 +2,39 @@
 
 <!-- version list -->
 
+## v2.0.0 (2026-09-19)
+
+### Bug Fixes
+
+- Close the gateway client session on failed connect and stop reporting a dead gateway as live
+  ([#90](https://github.com/bos-agent/bos-ai/pull/90),
+  [`d6c7ba2`](https://github.com/bos-agent/bos-ai/commit/d6c7ba248eed9630127d8d4191a28b3adc0c3181))
+
+### Documentation
+
+- Document the library install, extras, and the embedding contract
+  ([#95](https://github.com/bos-agent/bos-ai/pull/95),
+  [`682de73`](https://github.com/bos-agent/bos-ai/commit/682de73db4add0699ebb6cd6fa31334cc532b0cf))
+
+- **bep**: Add BEP 16 — embeddable core packaging and CLI distribution split
+  ([#91](https://github.com/bos-agent/bos-ai/pull/91),
+  [`ca18afd`](https://github.com/bos-agent/bos-ai/commit/ca18afdb2263b0143b9feb4418077bdeec928c1e))
+
+### Features
+
+- **core**: Name the litellm extra when the built-in provider's package is missing
+  ([#93](https://github.com/bos-agent/bos-ai/pull/93),
+  [`b9060ae`](https://github.com/bos-agent/bos-ai/commit/b9060ae7c0e9371d2b43d6643479dede7e568277))
+
+- **examples**: Add a FastAPI embedding example and a clean-install CI guard
+  ([#94](https://github.com/bos-agent/bos-ai/pull/94),
+  [`90e1af4`](https://github.com/bos-agent/bos-ai/commit/90e1af4e78613c2005424dbd70750c12e16b7f92))
+
+- **packaging**: Split dependencies into extras and drop the boscli console script
+  ([#92](https://github.com/bos-agent/bos-ai/pull/92),
+  [`eb60610`](https://github.com/bos-agent/bos-ai/commit/eb60610caccdc7964fdd9e2706f16aa9ac807824))
+
+
 ## v1.12.2 (2026-08-07)
 
 ### Bug Fixes
