@@ -1,0 +1,46 @@
+name: Packaging
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  base-install:
+    name: Base install is a library
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.13
+
+      # Extras govern which dependencies are installed, not which files ship, so
+      # only a real install can catch a dependency landing in the wrong extra.
+      # The ring-isolation guards check import direction, not this.
+      - name: Base distribution installs and imports with no console script
+        run: ./scripts/check_base_install.sh
+
+      # Installed without extras on purpose: the example registers its own
+      # provider, so an embedder supplying their own model client needs nothing
+      # beyond the base distribution.
+      - name: Embedding example runs against a base install
+        run: |
+          uv venv --python 3.13 /tmp/embed
+          VIRTUAL_ENV=/tmp/embed uv pip install --quiet . fastapi httpx
+          VIRTUAL_ENV=/tmp/embed /tmp/embed/bin/python - <<'PY'
+          from fastapi.testclient import TestClient
+
+          from examples.embed_fastapi import app
+
+          with TestClient(app) as client:
+              response = client.post("/ask", json={"chat_id": "ci", "message": "hello"})
+          assert response.status_code == 200, response.text
+          assert "echo: hello" in response.json()["reply"], response.json()
+          print("embed example OK on a base install")
+          PY
