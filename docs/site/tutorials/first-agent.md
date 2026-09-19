@@ -7,11 +7,14 @@ agent query — all without creating any project files.
 
 ## Install
 
-=== "pip"
+=== "uv tool"
 
     ```bash
-    pip install bos-ai
+    uv tool install boscli      # or: pipx install boscli
     ```
+
+    The CLI ships as the `boscli` distribution. `pip install bos-ai` installs the
+    library and provides no `boscli` command.
 
 === "uv (no install)"
 
@@ -135,7 +138,7 @@ Useful options:
 
 ## What you learned
 
-- Install BOS with `pip install bos-ai` or run it ephemerally with `uvx boscli`.
+- Install the CLI with `uv tool install boscli`, or run it ephemerally with `uvx boscli`.
 - The `provider/model` string selects the LLM provider and routes credentials
   via environment variables.
 - `boscli ask` runs a single in-process turn — no gateway, no project needed.

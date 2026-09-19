@@ -124,8 +124,12 @@ Each channel is bound to exactly one actor (`target_actor`).  The actor's mailbo
 
 | Name | Requires | Notes |
 |------|---------|-------|
-| `TelegramChannel` | `pip install bos-ai` | `settings.token_env` names the env var holding the bot token |
-| `LarkChannel` | `pip install 'bos-ai[lark]'` | Lark/Feishu; settings include `app_id_env`, `app_secret_env` |
+| `TelegramChannel` | `bos-ai[gateway]` | `settings.token_env` names the env var holding the bot token |
+| `LarkChannel` | `bos-ai[gateway,lark]` | Lark/Feishu; settings include `app_id_env`, `app_secret_env` |
+
+Both channels import `bos.gateway`, so both need the `gateway` extra to load at
+all; `lark` adds the Lark SDK on top. An install missing either one skips the
+channel with a warning naming the extra, rather than failing the import.
 
 ---
 

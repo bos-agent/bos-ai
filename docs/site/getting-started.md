@@ -12,18 +12,32 @@ linear version.
 
 ## Install
 
-```bash
-pip install bos-ai
-```
-
-Or run without installing, using [uv](https://docs.astral.sh/uv/):
+The CLI ships as the `boscli` distribution. Run it without installing, using
+[uv](https://docs.astral.sh/uv/):
 
 ```bash
 uvx boscli ask "how are you" --model openai/gpt-4o
 ```
 
-Optional extras: `pip install 'bos-ai[search]'` (Tavily web search), `'bos-ai[lark]'`
-(Lark/Feishu channel), or `'bos-ai[all]'`.
+Or install it permanently:
+
+```bash
+uv tool install boscli      # or: pipx install boscli
+```
+
+`pip install bos-ai` installs the **library** and provides no `boscli` command.
+That is the install to use when you are embedding BOS rather than running it —
+see [below](#embedding-bos-in-your-own-application).
+
+| Install | Adds |
+|---|---|
+| `bos-ai` | The library: `bos.core`, `bos.config`, plugins |
+| `bos-ai[litellm]` | The built-in LLM provider. Without it, register your own with `@ep_provider` |
+| `bos-ai[gateway]` | The gateway process and the Telegram/Lark channels |
+| `bos-ai[search]` | The built-in web-search and page-fetch tools |
+| `bos-ai[lark]` | The Lark/Feishu SDK |
+| `bos-ai[cli]` | The CLI's dependencies — run it with `python -m bos.cli` |
+| `bos-ai[all]` | Everything |
 
 ## First run (no project)
 
@@ -79,6 +93,36 @@ boscli inspect       # show the resolved harness, config, agents, and actors
   See [Connect a channel](tutorials/channels.md).
 - **Tune behavior** — edit `.bos/config.toml`. See the
   [Configuration reference](configuration/index.md).
+
+## Embedding BOS in your own application
+
+`pip install bos-ai` is a library install — no console script, no terminal UI, no
+gateway process. Configuration is a plain dict, so it can come from a database,
+your environment, or a control plane rather than a TOML file on disk:
+
+```python
+from bos.config import Workspace
+
+workspace = Workspace(workspace=".", bos_dir="/var/lib/myapp", config=my_config_dict)
+workspace.bootstrap_platform()
+
+async with workspace.harness() as harness:
+    agent = await harness.create_agent(kind="assistant")
+    result = await agent.run(chat_id, "hello")
+    print(result.output)
+```
+
+Set `[platform] extensions = []` in that dict and import only the adapters you
+want, rather than `bos.exts`, which loads every built-in. With your own
+`@ep_provider` registered you need no extras at all — the base install is enough.
+
+The supported surface is `bos.core` (`AgentHarness`, `Agent`, `AgentResult`, the
+`ep_*` extension points, and the port protocols) plus `bos.config` (`Workspace`,
+`RootConfig`, `validate_config`). Names prefixed with `_` are re-exported for
+extensions and are **not stable**.
+
+`examples/embed_fastapi.py` in the repository is a runnable version that serves
+turns from a FastAPI route and writes nothing to disk.
 
 ## Where to go next
 
