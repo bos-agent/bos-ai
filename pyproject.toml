@@ -6,35 +6,32 @@ readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.13"
 dependencies = [
-    "litellm==1.84.0",
-    "python-dotenv==1.2.2",
-    "filelock==3.25.2",
-    "click==8.3.2",
-    "rich==14.3.3",
-    "textual==8.2.3",
-    "prompt_toolkit==3.0.52",
-    "tomli==2.0.1; python_version<'3.11'",
-    "beautifulsoup4==4.14.3",
-    "aiohttp==3.13.5",
-    "textual-autocomplete==4.0.6",
-    "pydantic==2.12.5",
-    "ddgs==9.14.4",
-    "tomlkit==0.15.0",
-    "pyyaml==6.0.3",
     "jsonschema>=4.21",
+    "filelock==3.25.2",
+    "pydantic==2.12.5",
+    "python-dotenv==1.2.2",
+    "pyyaml==6.0.3",
 ]
 
 [project.urls]
 Homepage = "https://github.com/bos-agent/bos-ai"
 
 
-[project.scripts]
-boscli = "bos.cli.entry:main"
-
 [project.optional-dependencies]
-search = ["tavily-python==0.7.23"]
+litellm = ["litellm==1.84.0"]
+gateway = ["aiohttp==3.13.5"]
+search = ["ddgs==9.14.4", "beautifulsoup4==4.14.3"]
 lark = ["lark-oapi==1.6.8"]
-all = ["tavily-python==0.7.23", "lark-oapi==1.6.8"]
+# bos.cli imports bos.gateway.client for the TUI's WebSocket connection.
+cli = [
+    "bos-ai[gateway]",
+    "click==8.3.2",
+    "rich==14.3.3",
+    "textual==8.2.3",
+    "prompt_toolkit==3.0.52",
+    "textual-autocomplete==4.0.6",
+]
+all = ["bos-ai[litellm,gateway,search,lark,cli]"]
 
 [build-system]
 requires = ["hatchling"]

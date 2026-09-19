@@ -46,13 +46,12 @@ the bos builtins and before workspace skill dirs — so workspace skills win
 on name clashes.
 """
 
+import importlib
+import logging
+
 # Built-in agents
 import bos.extensions.agents.bos  # noqa: F401
 import bos.extensions.agents.bos_config  # noqa: F401
-
-# Channels
-import bos.extensions.channels.lark  # noqa: F401
-import bos.extensions.channels.telegram  # noqa: F401
 
 # Chat stores
 import bos.extensions.chat_stores.in_memory  # noqa: F401
@@ -65,7 +64,6 @@ import bos.extensions.memory_stores.in_memory  # noqa: F401
 
 # Tools
 import bos.extensions.tools.filesystem  # noqa: F401
-import bos.extensions.tools.knowledge  # noqa: F401
 import bos.extensions.tools.system  # noqa: F401
 
 # Plugin defaults register via their own ExtensionPoints on import
@@ -75,13 +73,42 @@ import bos.plugins.skills  # noqa: F401
 import bos.plugins.subagent  # noqa: F401
 import bos.plugins.task  # noqa: F401
 
+logger = logging.getLogger(__name__)
+
+
+def _optional(module_path: str, *, extra: str) -> None:
+    """Import a built-in extension module, skipping it if its third-party
+    dependency is not installed.
+
+    Mirrors the entry-point loop's contract below: a missing optional
+    dependency is a warning naming the extra that provides it, never an
+    ImportError that takes every other extension down with it. Built-ins
+    whose dependencies are base dependencies keep a plain ``import`` above.
+    """
+    try:
+        importlib.import_module(module_path)
+    except ModuleNotFoundError as exc:
+        logger.warning(
+            "Extension '%s' not loaded: missing dependency '%s'. Install bos-ai[%s] to enable it.",
+            module_path,
+            exc.name,
+            extra,
+        )
+
+
+# Built-ins whose third-party dependency lives in an extra. Grouped here rather
+# than beside their siblings above because a call is not an import, and every
+# plain import has to precede it.
+# Both channels import bos.gateway for ChannelRuntimeContext, so both need the
+# gateway extra even though lark's own SDK import is already deferred.
+_optional("bos.extensions.channels.lark", extra="gateway")
+_optional("bos.extensions.channels.telegram", extra="gateway")
+_optional("bos.extensions.tools.knowledge", extra="search")  # bs4 + ddgs
+
 
 # Entry point extensions
 def _discover_entry_point_extensions():
     from importlib.metadata import entry_points
-    from logging import getLogger
-
-    logger = getLogger(__name__)
 
     eps = entry_points(group="bos.exts")
     for ep in eps:

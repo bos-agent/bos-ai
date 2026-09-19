@@ -115,12 +115,15 @@ Removing them is behavior-preserving and independent of the rest of this BEP.
 
 [`src/bos/exts.py`](../../src/bos/exts.py) imports every built-in adapter unconditionally, but wraps entry-point-discovered extensions in `try/except` with a warning. That asymmetry is invisible today because every built-in adapter's dependency is a base dependency, and because `extensions/channels/lark.py` already defers `lark_oapi` into function bodies.
 
-After §3.2, two built-ins acquire a missing top-level dependency on a base install:
+After §3.2, three built-ins acquire a missing top-level dependency on a base install:
 
-- `extensions/tools/knowledge.py:10-12` — `from bs4 import BeautifulSoup`, `from ddgs import DDGS`, `from ddgs.exceptions import DDGSException`
-- `extensions/channels/telegram.py:14` — `from aiohttp import ClientSession, ClientTimeout, FormData`
+- `extensions/tools/knowledge.py:10-12` — `from bs4 import BeautifulSoup`, `from ddgs import DDGS`, `from ddgs.exceptions import DDGSException` → `search`
+- `extensions/channels/telegram.py:14` — `from aiohttp import ClientSession, ClientTimeout, FormData` → `gateway`
+- `extensions/channels/lark.py:34` — `from bos.gateway import ...`, which imports `aiohttp` → `gateway`
 
-Patching those two modules to defer their imports would fix today's two symptoms and leave the asymmetry for the next adapter that moves to an extra. **The fix belongs in `exts.py`**, where all built-in imports converge: an `_optional(module_path, extra)` helper that imports, catches `ModuleNotFoundError`, and logs which extra to install — the same contract the entry-point loop already has. Built-ins whose dependencies are base dependencies keep a plain `import`.
+The third is the one a source-level audit misses: `lark.py` already defers its own `lark_oapi` SDK into function bodies, so it looks safe, but it imports `bos.gateway` for `ChannelRuntimeContext` at module level. Both channels therefore need the `gateway` extra to be *importable*, independently of the channel-specific SDK each needs to *run*.
+
+Patching those modules to defer their imports would fix today's three symptoms and leave the asymmetry for the next adapter that moves to an extra. **The fix belongs in `exts.py`**, where all built-in imports converge: an `_optional(module_path, extra)` helper that imports, catches `ModuleNotFoundError`, and logs which extra to install — the same contract the entry-point loop already has. Built-ins whose dependencies are base dependencies keep a plain `import`.
 
 The warning names the extra, so the failure is self-describing:
 
@@ -163,6 +166,8 @@ and `examples/embed_fastapi.py`: an in-memory config dict → `Workspace(...)` �
 | **`bos.cli`** (Python package) | The CLI implementation and BEP 13's leaf composition root | Yes — ~4000 lines, stays in `bos-ai` |
 
 The `boscli` distribution's daily auto-release works precisely *because* it holds no code: [`.github/scripts/sync_version.py`](https://github.com/bos-agent/boscli) fetches bos-ai's latest PyPI version and rewrites two strings, so its version is a pure function of bos-ai's. Moving code there would make that function ill-defined — a repo with real changes cannot be auto-bumped to match another repo's version — and would force CLI development against unreleased bos-ai builds. This is the mechanism behind §2.2.2.
+
+`bos-ai` itself keeps a module entry point, `python -m bos.cli`, added as `src/bos/cli/__main__.py` alongside the existing `bos/runner/__main__.py`. Without it, `pip install bos-ai[cli]` would install the CLI's dependencies with no way to invoke the CLI, and this repository's own `uv run boscli ...` workflow would have no replacement. The `boscli` command remains the packaged, user-facing form.
 
 **Change to `boscli`** (one string plus one regex, in the other repo):
 
@@ -232,6 +237,7 @@ The intended change, and the only user-visible one. Affected call sites:
 
 | Location | Change |
 |---|---|
+| `CLAUDE.md` Tooling | `uv run boscli ...` → `uv run python -m bos.cli ...`; this repository's own workflow used the console script |
 | `README.md` Quick Start | `pip install bos-ai` + `boscli ask` → `uvx boscli ask` (already the documented alternative) or `pip install bos-ai[cli]` |
 | `src/bos/llm-full.md` | Any installation instruction naming `pip install bos-ai` as the way to get the CLI |
 | Docs site install pages | Same |
@@ -328,6 +334,7 @@ None outstanding.
 
 ## 10. Revision history
 
+- 2026-09-19 — Implementation findings, two corrections. §3.4 listed two built-ins losing a base dependency; it is three — `extensions/channels/lark.py:34` imports `bos.gateway` at module level, so it needs the `gateway` extra to import even though its own SDK import is already deferred. §3.3/§5.1 did not say how to run the CLI once the console script is gone: `src/bos/cli/__main__.py` is added so `python -m bos.cli` works, without which `bos-ai[cli]` installs dependencies for a CLI that cannot be invoked, and `CLAUDE.md`'s `uv run boscli` workflow breaks with no replacement.
 - 2026-09-19 — Pre-implementation code re-check, two corrections. §5.3 claimed provider resolution fails at `AgentHarness.__aenter__`; it does not — `LLMClient.__init__` is a no-op and the failure surfaces at the first `complete()` call, so the guard belongs in `core/llm.py` and keeps the existing `ValueError` type. §6.6 assumed an existing CI workflow to add a job to; the repository has none that runs tests (`release.yml` is `workflow_dispatch`-only), so the step creates `.github/workflows/packaging.yml`.
 - 2026-09-19 — Review pass: both §9 open questions closed. `search` stays in the `boscli` pin because the CLI's default config enables the web-search tools; de-hardcoding the `boscli` literals is deferred out of scope. No design change.
 - 2026-09-19 — Draft. Decisions: single distribution with extras over a `bos-core` package or repo split (§2.2.1–2); CLI implementation stays in `bos-ai` while `[project.scripts]` moves to the `boscli` distribution (§3.3, §3.7); `litellm` becomes an extra and a base install has no provider (§3.2, §5.3); the `bos.exts` degradation fix goes in `exts.py` rather than in the two affected adapter modules (§3.4); `bos.core.__init__` is left unchanged and the embed contract is documented rather than enforced (§2.2.4, §3.6); no `ConfigStore` abstraction, because `Workspace(config=dict)` already provides storage-agnostic configuration (§2.2.3, §3.5); ASGI gateway split into Track B with no anticipatory seam in Track A (§2.2.6, §8). Measured figures (190 MB / 77 packages today; 14 MB / 16 packages base; 24 MB / 24 packages base+gateway) from clean 3.13 venvs. Three dead dependencies found and scheduled for removal: `tomlkit`, the unreachable `tomli` marker line, and `tavily-python` (§3.3).
