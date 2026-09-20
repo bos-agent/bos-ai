@@ -20,6 +20,11 @@ jobs:
       # Plain `uv sync`, on purpose: it is what a fresh clone runs, and the dev
       # group is what makes the extras (BEP 16) present. If that drifts, 16 test
       # modules stop importing and this job is the only thing that would notice.
+      # Pinned to match packaging.yml and the gates CLAUDE.md documents; without
+      # it the runner picks whatever satisfies requires-python.
+      - name: Set up Python
+        run: uv python install 3.13
+
       - name: Sync
         run: uv sync
 

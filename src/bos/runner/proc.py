@@ -83,7 +83,11 @@ def _pid_is_gateway(pid: int) -> bool:
         return False  # process gone between checks
     except OSError:
         return True  # /proc unavailable/unreadable — cannot disprove; assume ours
-    return b"bos.runner" in raw or (b"bos" in raw and b"runner" in raw)
+    # Both tokens must be adjacent. Matching them independently made any
+    # cmdline holding "bos" and "runner" anywhere — e.g. a CI checkout at
+    # /home/runner/work/bos-ai — look like a gateway, which is exactly the
+    # PID reuse this guard exists to catch.
+    return b"bos.runner" in raw or b"bos/runner" in raw
 
 
 def is_running(rd: LifecycleRunDir) -> bool:
