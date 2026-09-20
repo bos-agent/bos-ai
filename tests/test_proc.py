@@ -1,4 +1,6 @@
 import os
+import subprocess
+import sys
 
 from bos.gateway.state import GatewayRunDir, read_gateway_state, write_gateway_state
 from bos.runner.proc import (
@@ -124,6 +126,20 @@ def test_is_running_false_for_reused_non_gateway_pid(tmp_path):
     # as a running gateway — guards against PID reuse blocking a fresh start.
     rd.pid_file.write_text(str(os.getpid()))
     assert is_running(rd) is False
+
+
+def test_is_running_false_for_pid_whose_cmdline_merely_mentions_bos_and_runner(tmp_path):
+    rd = GatewayRunDir(tmp_path / ".bos")
+    rd.ensure()
+    # A live process carrying both words without being `-m bos.runner`. Real
+    # shape: pytest run from a CI checkout at /home/runner/work/bos-ai.
+    decoy = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)", "bos", "runner"])
+    try:
+        rd.pid_file.write_text(str(decoy.pid))
+        assert is_running(rd) is False
+    finally:
+        decoy.kill()
+        decoy.wait()
 
 
 def test_reap_stale_clears_leftover_files(tmp_path):

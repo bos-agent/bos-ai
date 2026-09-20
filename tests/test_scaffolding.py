@@ -73,6 +73,9 @@ def test_init_package_archetype(tmp_path, monkeypatch):
     assert pyproject["project"]["name"] == "my-weather-tools"
     assert pyproject["project"]["entry-points"]["bos.exts"] == {"my_weather_tools": "my_weather_tools.tools"}
     assert "uv run boscli gateway start" in result.output
+    # The next step above runs in the project venv, and bos-ai ships no console
+    # script (BEP 16), so the venv only has `boscli` if the template asks for it.
+    assert "boscli" in pyproject["dependency-groups"]["dev"]
 
 
 def test_init_package_name_override(tmp_path, monkeypatch):

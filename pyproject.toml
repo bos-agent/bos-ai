@@ -42,6 +42,10 @@ packages = ["src/bos"]
 
 [dependency-groups]
 dev = [
+    # Every extra, so a plain `uv sync` still yields a runnable CLI and a
+    # collectable test suite. Without it the extras split (BEP 16) leaves the
+    # dev venv without click/aiohttp/litellm and 16 test modules fail to import.
+    "bos-ai[all]",
     "ipdb==0.13.13",
     "pre-commit==4.6.0",
     "pytest==9.0.3",

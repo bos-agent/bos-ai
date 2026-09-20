@@ -166,7 +166,7 @@ wheels = [
 
 [[package]]
 name = "bos-ai"
-version = "1.12.2"
+version = "2.0.0"
 source = { editable = "." }
 dependencies = [
     { name = "filelock" },
@@ -213,6 +213,7 @@ search = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "bos-ai", extra = ["all"] },
     { name = "ipdb" },
     { name = "pre-commit" },
     { name = "pytest" },
@@ -246,6 +247,7 @@ provides-extras = ["litellm", "gateway", "search", "lark", "cli", "all"]
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "bos-ai", extras = ["all"] },
     { name = "ipdb", specifier = "==0.13.13" },
     { name = "pre-commit", specifier = "==4.6.0" },
     { name = "pytest", specifier = "==9.0.3" },

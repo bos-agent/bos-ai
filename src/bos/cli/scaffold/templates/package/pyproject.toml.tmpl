@@ -29,4 +29,7 @@ build-backend = "hatchling.build"
 packages = ["src/${pkg_name}"]
 
 [dependency-groups]
-dev = ["pytest"]
+# `boscli` is the CLI distribution (bos-ai itself ships no console script), and
+# it belongs here rather than in `dependencies`: projects that install this
+# package want its tools and skills, not a terminal UI.
+dev = ["pytest", "boscli"]
