@@ -252,7 +252,7 @@ Tracks 5–7 depend on 1–4 (shipped) and on `create_agent`/`Agent.run` being r
 
 ## References
 
-- `BackgroundLLM` (a provider-level off-turn call, proposed by the since-withdrawn BEP 11) is **superseded**: it was never built, and off-turn reasoning goes through `AgentRunner` instead.
+- `BackgroundLLM` (a provider-level off-turn call, specified by the since-withdrawn BEP 11) is **superseded**: this BEP folded it into `AgentRunner` and deleted it in track 7. The sections above describe that migration and remain accurate as a record of it.
 - BEP 13: Ring isolation (the `agent` ring is stdlib-pure — why structured validation is a port+adapter, and why the `AgentRunner` adapter lives in the harness/assembly ring).
 - Chat-id internal-convention helpers (`INTERNAL_CHAT_SEPARATOR`/`make_subagent_chat_id`/`is_internal_chat`/`filter_internal_chats`, `src/bos/core/_chat_store_utils.py`) used to keep disposable-agent turns out of the user's chat list/recall.
 

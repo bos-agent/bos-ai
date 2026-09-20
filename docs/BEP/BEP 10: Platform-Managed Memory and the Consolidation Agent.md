@@ -10,8 +10,9 @@ specified are **withdrawn** — see the note below.
 > the event bus survives (as the harness `EventBus`, which the recall-log flush of §6 uses). The
 > `JobRunner` and its `session_close`/`idle` triggers have been **deleted**: consolidation was their
 > only consumer, it was off by default, and the queue, its trigger bindings and its
-> `status`/`list`/`retry`/`cancel` surface never earned their complexity. `BackgroundLLM` was never
-> built — BEP 12's `AgentRunner` took its place. Consolidation now runs **in-line, on demand**, from
+> `status`/`list`/`retry`/`cancel` surface never earned their complexity. `BackgroundLLM` was built
+> (2026-06-17) and then deleted by BEP 12 (2026-06-26), which folded it into `AgentRunner`.
+> Consolidation now runs **in-line, on demand**, from
 > the CLI (§4). Every "trigger", "job", and "durability" claim below has been rewritten to match;
 > nothing about §1–§3, §5–§10 storage/capture/read semantics changed.
 
@@ -159,9 +160,10 @@ observe     telemetry: recall-hit-rate, dead-memory ratio, maxim churn, cost, fa
 ```
 
 Audit is first-class and built: an operator can trace *why* any entry exists or was invalidated.
-Dry-run is **not built** — the surviving `consolidate` command always applies. It stays listed here
-because reviewing proposals before trusting them is still the intent; it is a real gap, not a
-description of today's CLI.
+Dry-run is **not built** — the `consolidate` command always applies. It was implemented on this BEP's
+development branch (alongside an `auto_apply` policy key) but dropped before that branch squash-merged,
+so it has never existed on `main`. It stays listed here because reviewing proposals before trusting
+them is still the intent; it is a real gap, not a description of today's CLI.
 
 ---
 
@@ -304,9 +306,10 @@ class MemoryConsolidationRequest:
 
 Implementation note: the shipped request carries no `trigger` (there is only one way in) and no
 `policy`. A separate `raw_appends` field was specified — the agent's uncurated `Remember` captures, to
-be *folded* rather than *reconciled against* — but was never populated distinctly; captures reach the
-handler inside `candidate_memories` like any other entry. Restoring the distinction is open work, not
-a shipped behaviour.
+be *folded* rather than *reconciled against*. It shipped as a field but was **always passed `[]`**:
+captures reach the handler inside `candidate_memories` like any other entry, so the fold/reconcile
+distinction has never actually been made. The field is now removed; restoring the distinction is open
+work, not a regression.
 
 The operation service (L1) is the single write door for curation:
 
@@ -566,8 +569,11 @@ backend = "_default"                              # markdown default; swappable 
 model = ""                          # consolidation agent's model; else BOS_CONSOLIDATOR_MODEL
 # No `enabled` / `trigger` key: consolidation runs only when invoked (§4).
 # `retention_days` was specified here for purging soft-deleted entries; the purge
-# is NOT built (`purge_invalidated` has no caller), so the key is not accepted.
-# `auto_apply` is likewise gone: a run always applies, because the operator chose to run it.
+# is NOT built: `purge_invalidated()` is on the backend protocol and both backends
+# implement it, but nothing in the repo's history has ever called it. The key is
+# therefore not accepted rather than silently doing nothing.
+# `auto_apply` likewise never shipped (see §1.5): a run always applies, because
+# the operator chose to run it.
 
 [exts.ep_plugin.MemoryPlugin.retrieval]
 auto_recall     = true
@@ -664,7 +670,7 @@ parallelizable.
 - **Capture stays on-turn; curation moves off-turn.** The agent keeps `Remember` + `ReviseMaxim` (append-only) + `Recall`; `Forget` is removed (negation via `Remember` + off-turn INVALIDATE). Raw appends are persisted immediately and curated off-turn.
 - **Projection = per-turn rebuild + content-addressed caching.** The maxim block/index are rebuilt at each turn start; within-turn byte-stability is preserved and the cache re-hits across turns when unchanged.
 - **Orchestration = Model B.** The memory plugin owns the consolidation body; the harness provides generic infra only (L2/L3).
-- **Off-turn LLM = `AgentRunner`** (BEP 12): a disposable, history-less agent, not a faked `Agent.ask`. (A provider-level `BackgroundLLM` was specified here and never built.)
+- **Off-turn LLM = `AgentRunner`** (BEP 12): a disposable, history-less agent, not a faked `Agent.ask`. (This BEP originally specified a provider-level `BackgroundLLM`; it was built, then superseded and deleted by BEP 12.)
 - **Consolidation contract = a real handler** (`propose` + operation-service `apply`); the backend `optimize()` is **removed**. Invocation is the operator's, not the runtime's.
 - **Memory operation service (L1)** is the single validated/audited write door for **curation**; it is memory-domain (swaps with the plugin).
 - **Lifecycle transport = the harness `EventBus`** (`turn_complete`/`session_close`), not an interceptor stage or envelope. Only the §6 recall flush consumes it.
@@ -674,7 +680,7 @@ parallelizable.
 
 **Open:**
 
-1. **Dry-run and retention purge** — both specified above, neither built. `consolidate --dry-run` has no flag and `purge_invalidated()` has no caller, so `retention_days` does nothing. Build or drop them; do not leave them half-documented.
+1. **Dry-run and retention purge** — both specified above, neither reaching `main`. `consolidate --dry-run` was written on this BEP's branch and dropped before merge; `purge_invalidated()` is implemented by both backends but has never had a caller, so `retention_days` would do nothing. Build them or drop the spec; do not leave them half-documented.
 2. **Writer naming** (cosmetic) — name the memory writer to avoid the `ep_consolidator` collision (e.g. `MemoryCurator`/`MemoryWriter`). Shape is decided; only the identifier is open.
 3. **Compaction fold (BEP 5 follow-up)** — fold chat compaction into `ChatStore` (delegating the LLM transform to `AgentRunner`), retiring the standalone `ep_consolidator` and with it the `consolidator` name collision (open issue 2). Memory consolidation never uses it (Model B).
 4. **BEP 1 reconciliation** — wire in or retire the "USING YOUR MEMORY" prompt pending the eval (§8).
@@ -685,4 +691,4 @@ parallelizable.
 |---|---|---|
 | 2026-06-13 | Initial draft | Platform-managed memory: off-turn consolidation handler, operation service, provenance/audit, soft forgetting, BEP 11 dependency |
 | 2026-06-17 | Capture/curation split + per-turn projection | Settle the agent surface as append + read (`Remember`/`ReviseMaxim`/`Recall`, no `Forget`); move all curation off-turn; set the maxim projection cadence to per-turn rebuild + content-addressed caching |
-| 2026-09-19 | Withdraw off-turn automation | BEP 11 was withdrawn and its `JobRunner` deleted — consolidation was its only consumer, was off by default, and the queue/triggers/`retry`/`cancel` surface never earned their cost. Consolidation is now an on-demand run (`boscli memory consolidate`), repeat runs are an external scheduler's concern, and the `EventBus` survives for the §6 recall flush. Also corrected: `--dry-run`, `auto_apply`, `retention_days` purge and the distinct `raw_appends` input are specified here but were never built — each is now marked as a gap rather than described as shipped. |
+| 2026-09-19 | Withdraw off-turn automation | BEP 11 was withdrawn and its `JobRunner` deleted — consolidation was its only consumer, was off by default, and the queue/triggers/`retry`/`cancel` surface never earned their cost. Consolidation is now an on-demand run (`boscli memory consolidate`), repeat runs are an external scheduler's concern, and the `EventBus` survives for the §6 recall flush. Also corrected four claims this BEP stated as shipped: `--dry-run` and `auto_apply` were built on this BEP's branch but dropped before it merged, so never reached `main`; `purge_invalidated()` (the `retention_days` purge) has never had a caller; and `raw_appends` shipped as a field that was always `[]`. Each is now marked as a gap. |
