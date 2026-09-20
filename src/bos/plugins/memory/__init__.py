@@ -2,12 +2,11 @@
 
 from . import markdown_backend  # noqa: E402
 from .consolidator import (  # noqa: E402
-    ConsolidationPolicy,
     DefaultMemoryConsolidator,
     MemoryConsolidationRequest,
     MemoryConsolidator,
+    run_consolidation,
 )
-from .job import MemoryConsolidationJob  # noqa: E402
 from .operation_service import (  # noqa: E402
     AuditRecord,
     DefaultMemoryOperationService,
@@ -19,11 +18,9 @@ from .scoped_memory import MemoryBackend, MemoryEntry, MemoryIndexEntry, Request
 
 __all__ = [
     "AuditRecord",
-    "ConsolidationPolicy",
     "DefaultMemoryConsolidator",
     "DefaultMemoryOperationService",
     "MemoryAgentPlugin",
-    "MemoryConsolidationJob",
     "MemoryConsolidationRequest",
     "MemoryConsolidator",
     "MemoryBackend",
@@ -33,6 +30,7 @@ __all__ = [
     "MemoryOperation",
     "MemoryOperationService",
     "RequestedBy",
+    "run_consolidation",
     "markdown_backend",
     "pep_memory_backend",
 ]

@@ -24,7 +24,6 @@ from .contract import (
     EventBus,
     HarnessPlugin,
     InterceptorStage,
-    JobRunner,
     MailRoute,
     MessageContent,
     ParentTurn,
@@ -33,7 +32,6 @@ from .contract import (
     TurnInterceptor,
     ep_chat_store,
     ep_consolidator,
-    ep_job_runner,
     ep_mail_route,
     ep_plugin,
     ep_tool,
@@ -228,7 +226,7 @@ class _HarnessAgentRunner:
     The single way a plugin/tool spins up a disposable agent. ``parent`` is
     optional: on-turn callers (the AskSubagent tool) pass it so the child chat
     nests under the parent and the event sink is parented; off-turn callers
-    (the memory consolidator, run inside a job) omit it and get a standalone
+    (the memory consolidator) omit it and get a standalone
     internal chat-id with no parent sink. Either way the disposable agent has a
     fresh chat-id, so there is no chat history and no compaction recursion.
     """
@@ -282,7 +280,6 @@ class AgentHarness:
         consolidator: str = "LLMConsolidator",
         chat_store: str = "JsonlChatStore",
         mail_route: str = "JsonlMailRoute",
-        job_runner: str = "InProcJobRunner",
         interceptors: list[str | dict[str, Any]] | None = None,
     ) -> None:
         self._bos_root = Path(bos_dir).expanduser().resolve()
@@ -291,7 +288,6 @@ class AgentHarness:
         self._consolidator_impl = consolidator
         self._chat_store_impl = chat_store
         self._mail_route_impl = mail_route
-        self._job_runner_impl = job_runner
         self._interceptors_impl = interceptors or []
 
         self._owned: list[Any] = []
@@ -302,7 +298,6 @@ class AgentHarness:
         self.interceptor: ChainInterceptor | None = None
         self.llm: LLMClient | None = None
         self.events: EventBus | None = None
-        self.jobs: JobRunner | None = None
 
         # Plugin state
         self._harness_plugins: dict[str, HarnessPlugin] = {}
@@ -316,7 +311,7 @@ class AgentHarness:
             raise RuntimeError("AgentHarness is already active; do not re-enter the same instance.")
 
         # The assembly ring registers its own built-in adapters (LLMConsolidator,
-        # litellm provider, JsonlChatStore/JsonlMailRoute, InProcJobRunner) — the
+        # litellm provider, JsonlChatStore/JsonlMailRoute) — the
         # harness depends on them being resolvable by name below, so it does not rely
         # on an outer ring (``bos.exts``) having imported them. Idempotent; deferred to
         # open-time to avoid import-order coupling during ``bos.core`` package init.
@@ -329,14 +324,10 @@ class AgentHarness:
         self.consolidator = await self._create_consolidator()
         self.interceptor = ChainInterceptor(await self._resolve_interceptors(self._interceptors_impl))
 
-        # BEP 11 services: in-process EventBus, JobRunner.
+        # In-process EventBus: the session-lifecycle fan-out plugins subscribe to.
         from bos.core.defaults.eventbus import DefaultEventBus
 
         self.events = DefaultEventBus()
-        self.jobs = await ep_job_runner.invoke(self._job_runner_impl, {"bus": self.events})
-        assert self.jobs is not None  # ep_job_runner has a built-in, so creation never returns None
-        await self.jobs.start()
-        self._owned.append(self.jobs)
 
         # Build plugin services
         self._plugin_services = PluginServices(
@@ -346,7 +337,6 @@ class AgentHarness:
             chat_store=self.chat_store,
             consolidator=self.consolidator,
             events=self.events,
-            jobs=self.jobs,
             agent_runner=_HarnessAgentRunner(self),
         )
 
@@ -354,13 +344,6 @@ class AgentHarness:
         return self
 
     async def __aexit__(self, *exc) -> None:
-        # Drain BEP 11 JobRunner first — gives in-flight jobs a bounded window
-        # while the ChatStore is still alive (BEP 11 §4).
-        if self.jobs is not None:
-            try:
-                await self.jobs.drain(timeout=5.0)
-            except Exception:
-                logger.exception("Error draining JobRunner")
         await _aclose(self.interceptor)
         # Teardown harness plugins in reverse setup order
         for hp in reversed(list(self._harness_plugins.values())):

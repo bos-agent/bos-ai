@@ -112,7 +112,6 @@ name**. Unknown keys are rejected.
 consolidator = "LLMConsolidator"   # ep_consolidator
 chat_store   = "JsonlChatStore"    # ep_chat_store
 mail_route   = "JsonlMailRoute"    # ep_mail_route
-job_runner   = "InProcJobRunner"   # ep_job_runner
 interceptors = []                  # ordered list of ep_turn_interceptor names/configs
 ```
 

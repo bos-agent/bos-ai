@@ -1,8 +1,8 @@
 """Component evaluation harness for the memory subsystem (BEP 10 §8).
 
 Cheapest eval rung: retrieval recall@k over a labeled set. Runs in seconds and
-unblocks prompt iteration. Routing eval (transcript -> action) is deferred until
-the consolidation handler exists (BEP 10 P7, blocked on BEP 11)."""
+unblocks prompt iteration. Routing eval (transcript -> action) is deferred
+(BEP 10 P7)."""
 
 from __future__ import annotations
 

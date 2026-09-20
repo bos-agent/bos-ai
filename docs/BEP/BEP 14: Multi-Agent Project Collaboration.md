@@ -4,8 +4,15 @@ Status: **design — forward-looking draft.** Not slated for near-term implement
 the *intended end-state* for multiple agents collaborating on a goal, so that incremental work (and the
 simpler subagent-first path) does not paint the system into a corner.
 
-Builds on: Named Actors (BEP 2), actor/mailbox foundation (BEP 13), async-task layer (BEP 11),
+Builds on: Named Actors (BEP 2), actor/mailbox foundation (BEP 13), the harness `EventBus`,
 ChatStore (BEP 5).
+
+> **2026-09-19 — dependency withdrawn.** This BEP was drafted against BEP 11 (Async Tasks &
+> Scheduling), which has since been **withdrawn and its `JobRunner` deleted** — it had one
+> consumer (memory consolidation), which now runs in-line from the CLI. The `EventBus`
+> survives and is wired. Stage 2's dispatcher therefore keeps its *trigger* source but no
+> longer has a queue to reuse: whoever builds it must first propose the enqueue/execute layer
+> as its own BEP (§4.3, §12).
 
 ---
 
@@ -65,7 +72,7 @@ lower rungs are exhausted — not a default to reach for.
 2. A **Board**: shared task state (cards with status / owner / dependencies / artifacts) that is both the
    **source of truth** for the work and the **human's dashboard**.
 3. A **Dispatcher**: wakes the right agent when a card transitions to a state it owns (event → enqueue →
-   execute), reusing BEP 11 — **not** a new scheduler.
+   execute) — **not** a new scheduler of its own (§4.3).
 4. **Agents as workers** that read and write the board, mixing standing actors (roles) and subagents
    (scratch helpers) per §5.
 5. **Channel demoted to a view/control surface** onto a project (summaries, push notices, commands) —
@@ -80,9 +87,10 @@ lower rungs are exhausted — not a default to reach for.
 - Message-passing as the primary coordination mechanism. Agents coordinate **through the board** (shared
   state), not by addressing each other. Direct messaging may exist as a secondary affordance but is not
   the design's backbone (§4.4 explains why).
-- Cross-process / multi-host distribution (inherits BEP 11's single-process v1 stance).
-- A new LLM-call primitive, scheduler, or queue. Reuse BEP 11 (`JobRunner`/`EventBus`/`BackgroundLLM`)
-  and BEP 13 (`MailRoute`/`MailBox`). A domain BEP must not grow private infra (CLAUDE.md BEP rules).
+- Cross-process / multi-host distribution. Single-process for now.
+- A new LLM-call primitive, scheduler, or queue **inside this BEP**. Reuse the harness `EventBus`,
+  `AgentRunner` (BEP 12) and BEP 13 (`MailRoute`/`MailBox`); anything missing gets its own BEP. A
+  domain BEP must not grow private infra (CLAUDE.md BEP rules).
 - Replacing `AskSubagent`. It remains the rung-2 tool and an actor's internal helper (§5).
 
 ---
@@ -94,7 +102,7 @@ lower rungs are exhausted — not a default to reach for.
 | **Project** | Long-lived domain object: a goal, its board, participants, artifacts, history. Source of truth for the work. Exists with or without a channel attached. |
 | **Board** | The project's shared task state — cards (status, owner, deps, artifacts). The coordination substrate (blackboard) and the human's dashboard. |
 | **Card** | One unit of work with a lifecycle state (e.g. `backlog → ready → in-progress → review → blocked → done`), an owner (role/actor), and links/artifacts. |
-| **Dispatcher** | The component that, on a card transition, enqueues work for the responsible agent. A consumer of BEP 11 (`EventBus` → `JobRunner`), not new infra. |
+| **Dispatcher** | The component that, on a card transition, enqueues work for the responsible agent. A consumer of the harness `EventBus` plus a still-undesigned execution layer (§4.3), not new infra of its own. |
 | **Actor** | A standing, addressable `AgentActor` at `agent@<name>` (BEP 2): own mailbox, own scoped memory/persona, long-lived. A *role* on the team. |
 | **Subagent** | An ephemeral child agent run **synchronously inside one turn** (`AskSubagent`). No mailbox, no address, no standing identity. A *scratch helper*, not a team member. |
 | **Channel** | Edge adapter bridging an external client (Telegram). A **view/control surface** onto a project — transport, never the source of truth. |
@@ -141,17 +149,18 @@ The board is chosen because it makes the three hardest problems of multi-agent c
 What the board does **not** give for free is the **trigger** — something must wake the responsible agent
 on a relevant transition. That is the dispatcher (§4.3), and it is the one place real machinery is needed.
 
-### 4.3 Dispatcher as a BEP 11 consumer
+### 4.3 Dispatcher shape: trigger → enqueue → execute
 
 A card transition is an event; waking the owning agent is enqueued work; the agent's turn is the
-execution. That is exactly BEP 11's shape — **trigger → enqueue → execute** — so the dispatcher is a
-*consumer* of `EventBus` + `JobRunner` ([contract.py:181](../../src/bos/core/contract.py#L181)), not a new
-scheduler. A "card moved to `ready` for role=developer" event binds (via `bind_trigger`) to a job that
-delivers the card to the developer actor's mailbox (or spins one up — §5 lazy pool).
+execution. The **trigger** half exists: the harness `EventBus`
+([contract.py](../../src/bos/core/contract.py)) is live and a dispatcher can subscribe to it, so a
+"card moved to `ready` for role=developer" event reaches the dispatcher today.
 
-> Readiness note: these services are declared on the harness but currently initialized to `None`
-> ([harness.py:271-273](../../src/bos/core/harness.py#L271)) — BEP 11 is contract-defined, not yet wired.
-> The dispatcher is therefore **blocked on BEP 11 landing** (§12).
+The **enqueue/execute** half does not. BEP 11 would have supplied it; it was withdrawn (see the
+header note). The dispatcher still must not grow a private queue inside this domain BEP
+(CLAUDE.md BEP rules), so Stage 2 is gated on an execution-layer BEP being proposed and landed
+first — sized to the dispatcher's real needs rather than re-deriving BEP 11's speculative surface
+(`status`/`list`/`retry`/`cancel` never had a caller). See §12.
 
 ### 4.4 Why not primary message-passing
 
@@ -238,18 +247,21 @@ at any time (reassign a card, comment, `@carlos …`).
 
 ### 6.2 Operator / admin
 
-- **Inspect:** `boscli project status <id>` → board snapshot, per-card owner/state, in-flight dispatcher
-  jobs (`JobRunner.list`), active turns (`chat_coordinator.active_turns_status()`), resident actors.
-- **Recover:** a stuck card's work is a `JobRunner` job → `retry`/`cancel`. A wedged role → `retire_session`
+- **Inspect:** `boscli project status <id>` → board snapshot, per-card owner/state, in-flight dispatched
+  work, active turns (`chat_coordinator.active_turns_status()`), resident actors. Listing in-flight work
+  is a requirement on the execution layer of §4.3 — state it there rather than assuming it.
+- **Recover:** a stuck card is re-dispatched from the board. A wedged role → `retire_session`
   ([actor_manager.py:67](../../src/bos/gateway/actors/actor_manager.py#L67)) and re-dispatch. The board is
-  the durable record, so recovery is "re-run the card," not "replay a chat."
+  the durable record, so recovery is "re-run the card," not "replay a chat" — which is why the execution
+  layer needs no retry semantics of its own.
 
 ### 6.3 Background / automated
 
-Card transitions emit events; the dispatcher binds them to jobs (BEP 11). No daemon of its own — the
-`JobRunner` loop already lives in the runtime TaskGroup (BEP 11 §4). A project with no ready cards and no
-active turns is quiescent; the dispatcher does nothing until the next transition (human input, or a card
-freed by a completed dependency).
+Card transitions emit events; the dispatcher turns them into work for the owning actor. It has no
+daemon of its own — it runs inside the runtime TaskGroup that already hosts actors and channels. A
+project with no ready cards and no active turns is quiescent; the dispatcher does nothing until the
+next transition (human input, or a card freed by a completed dependency). The execution layer it
+enqueues into is still to be designed (§4.3).
 
 ---
 
@@ -259,7 +271,7 @@ freed by a completed dependency).
 |---|---|---|---|
 | Project | Domain aggregate + store record | new domain ring module + a `ProjectStore` | created on goal; persists until archived |
 | Board | State within the Project aggregate | same store | mutated by agent tool calls |
-| Dispatcher | A service subscribed to the `EventBus`, submitting to `JobRunner` | gateway/runtime ring | runs for the process lifetime in the runtime TaskGroup |
+| Dispatcher | A service subscribed to the `EventBus`, handing work to the §4.3 execution layer | gateway/runtime ring | runs for the process lifetime in the runtime TaskGroup |
 | Card-tool surface | Agent tools (`CreateCard`, `UpdateCard`, `ClaimCard`, `CommentCard`) registered by a `ProjectPlugin` | plugin (mirrors `SubagentPlugin`) | per-turn |
 | Actor (role) | `AgentActor` (BEP 2), possibly lazily pooled | gateway actors ring | start on assignment / retire on idle |
 | Channel view | Existing `Channel` adapter, project-aware | extensions | per-connection |
@@ -274,8 +286,8 @@ plugin tool surface, or existing actors/channels.
 | Concern | Owner |
 |---|---|
 | Goal, board state, cards, artifacts, project history | **Project / `ProjectStore`** (new domain store) |
-| Card transitions → waking agents | **Dispatcher** (consumes BEP 11 `EventBus` + `JobRunner`) |
-| Job execution / retry / cancel / status | `JobRunner` (BEP 11) |
+| Card transitions → waking agents | **Dispatcher** (subscribes to the harness `EventBus`) |
+| Off-turn execution of dispatched work | **Undesigned** — needs its own BEP before Stage 2 (§4.3) |
 | What cards exist, who owns them, when done | the **planner agent** (policy, not platform) |
 | Per-actor turn execution + concurrency | `AgentActor` + `ChatCoordinator` (unchanged invariant) |
 | Role identity / scoped memory | `AgentActor` + BEP 2 ScopedMemory |
@@ -301,10 +313,10 @@ of §1 — do not start a later stage until the earlier one is proven insufficie
   `ProjectPlugin` exposing board tools to agents. Channel gains a `/board` view + digest push. Still
   subagent-executed (no standing worker actors yet) — the board organizes a *single* orchestrator's work
   and makes it visible. Proves the board abstraction with minimal moving parts.
-- **Stage 2 — Dispatcher + standing actors (the full end-state).** Bind card-transition events to
-  `JobRunner` jobs that wake role actors (lazily pooled, §5). Promote the roles that hit an escalation
-  trigger (§5) from subagents to actors. This is the only stage that requires BEP 11 to be **landed**, not
-  just contract-defined.
+- **Stage 2 — Dispatcher + standing actors (the full end-state).** Turn card-transition events into
+  work that wakes role actors (lazily pooled, §5). Promote the roles that hit an escalation trigger
+  (§5) from subagents to actors. This is the only stage that needs an off-turn execution layer, which
+  does not exist — it must be proposed as its own BEP first (§4.3).
 
 Each stage ships as small PRs with tests (CLAUDE.md: small reversible diffs).
 
@@ -318,8 +330,8 @@ The design is **additive** — it leaves the existing single-agent channel path 
   is mediated by the board, not by re-routing agent replies or relaxing the turn coordinator.
 - **New domain store** (`ProjectStore`) and a new domain ring module — net new, no existing call sites.
 - **New `ProjectPlugin`** tool surface — additive, mirrors `SubagentPlugin`.
-- **Dispatcher** subscribes to the existing `EventBus`; depends on BEP 11 being wired (`events`/`jobs` are
-  `None` today, [harness.py:271-273](../../src/bos/core/harness.py#L271)).
+- **Dispatcher** subscribes to the existing `EventBus` (live on the harness); its execution layer is
+  undesigned (§4.3).
 - **Channel** gains project-view rendering — additive; non-project channels unchanged.
 - Topology relaxations from BEP 2 (`agent@` channel targets) remain sufficient; no new ref types needed.
 
@@ -352,7 +364,8 @@ behavior is unchanged.
 
 | Dependency | Needed for | Status |
 |---|---|---|
-| BEP 11 `JobRunner` + `EventBus` (`services.jobs` / `services.events`) | Stage 2 dispatcher | **Contract-defined but NOT wired** — `None` on the harness ([harness.py:271-273](../../src/bos/core/harness.py#L271)). Hard gate for Stage 2. |
+| Harness `EventBus` (`services.events`) | Stage 2 dispatcher trigger | Implemented and wired. Ready. |
+| An off-turn execution layer (enqueue → run) | Stage 2 dispatcher execution | **Does not exist.** BEP 11 would have supplied it and was withdrawn. Hard gate for Stage 2: needs its own BEP. |
 | BEP 2 Named Actors + `ActorResolver` | Stage 2 role actors | Implemented. Ready. |
 | BEP 2 ScopedMemory | role identity/memory | Design in BEP 2; confirm implementation before Stage 2. |
 | BEP 13 actor/mailbox foundation | delivery | Implemented. Ready. |
@@ -360,8 +373,9 @@ behavior is unchanged.
 | `AskSubagent` / `SubagentRuntime` | Stages 0–1 | Implemented ([subagent.py](../../src/bos/plugins/subagent.py)). Ready. |
 
 **Readiness:** Stage 0 is buildable now (and should be done first regardless). Stage 1 needs only the new
-`ProjectStore`/plugin — no BEP 11. Stage 2 is **blocked on BEP 11 being wired**, not merely defined. Do
-not mark this BEP "ready" for Stage 2 until `harness.jobs`/`harness.events` are real.
+`ProjectStore`/plugin and no execution layer. Stage 2 is **blocked on an off-turn execution layer that
+does not exist** — do not mark this BEP "ready" for Stage 2 until such a layer has its own accepted BEP
+and is wired.
 
 ---
 
@@ -386,3 +400,4 @@ not mark this BEP "ready" for Stage 2 until `harness.jobs`/`harness.events` are 
 | Date | Change | Intention |
 |---|---|---|
 | 2026-06-24 | Initial draft | Define the intended end-state for multi-agent collaboration: separate transport (channel) from coordination state (board) from execution (agents); adopt blackboard coordination over message-passing; establish the subagent-first escalation principle and the actor-vs-subagent decision criteria. Forward-looking draft; dispatcher gated on BEP 11 wiring. |
+| 2026-09-19 | Re-gate Stage 2 after BEP 11's withdrawal | BEP 11's `JobRunner` was deleted (one consumer, now in-line). The `EventBus` survives, so the dispatcher keeps its trigger; its execution layer is now explicitly undesigned and must land as its own BEP before Stage 2. Replaced every `JobRunner`/`retry`/`cancel` assumption with a stated requirement. |

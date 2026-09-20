@@ -22,7 +22,7 @@ external      │  channel ──► mailbox ──► actor ──► agent (LL
 client        │    ▲                       │              │                            │
 (TUI/Telegram)│    └──────── reply ────────┘        harness services:                 │
               │                                     chat_store, consolidator,          │
-              │                                     mail_route, job_runner             │
+              │                                     mail_route, events                 │
               └────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -56,7 +56,7 @@ interceptors), and config knobs. Configuration lives in one TOML file
 ```
 config.toml
 ├── [platform]        extensions to load, env file, agent_dirs
-├── [harness]         which chat_store / consolidator / mail_route / job_runner to use
+├── [harness]         which chat_store / consolidator / mail_route to use
 ├── [exts.ep.*.*]     per-extension configuration injected at invocation time
 ├── [agent.defaults]  base agent settings (model, tools, plugins, …)
 ├── [agents.<name>]   agent-specific overrides (or an external .md / .toml file)

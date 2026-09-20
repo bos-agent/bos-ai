@@ -1,8 +1,10 @@
 """Per-chat last-handled revision store (BEP 10 §4 watermark).
 
 Single JSON file under the agent's memory subtree. Atomic write via
-write-then-replace. Concurrency: relies on the JobRunner serializing
-consolidation per chat; no in-process lock needed.
+write-then-replace, so the file is never torn. There is no cross-process lock:
+consolidation is driven only by ``boscli memory consolidate``, which walks
+chats sequentially, so two concurrent invocations on the same chat can both
+consolidate the same window.
 
 Each agent has its own WatermarkStore instance (Ω: per-agent storage),
 so the store is keyed by chat_id only — no cross-agent dimension."""

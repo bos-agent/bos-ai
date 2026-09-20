@@ -1,6 +1,6 @@
 # Providers, Stores & Services
 
-Beyond tools, plugins, and channels, BOS exposes extension points for its core services: LLM provider dispatch, conversation persistence, memory consolidation, message routing, job scheduling, turn interception, and agent factories.  This page gives the signature and selection mechanism for each.
+Beyond tools, plugins, and channels, BOS exposes extension points for its core services: LLM provider dispatch, conversation persistence, memory consolidation, message routing, turn interception, and agent factories.  This page gives the signature and selection mechanism for each.
 
 ---
 
@@ -125,35 +125,6 @@ mail_route = "JsonlMailRoute"
 ```
 
 **Default:** `JsonlMailRoute` (durable, persists mailboxes under `bos_dir`).
-
----
-
-## Job runners — `@ep_job_runner`
-
-A job runner executes off-critical-path work (BEP 11): memory consolidation, background indexing, scheduled tasks.
-
-### `JobRunner` protocol
-
-```python
-class JobRunner(Protocol):
-    async def start(self) -> None: ...
-    async def submit(self, job: Job) -> str: ...
-    def bind_trigger(self, trigger: JobTrigger, factory: Callable[..., Job | None]) -> None: ...
-    async def drain(self, *, timeout: float) -> None: ...
-    async def status(self, job_id: str) -> JobStatus: ...
-    async def list(self, *, filter: dict | None = None) -> list[JobRecord]: ...
-    async def retry(self, job_id: str) -> None: ...
-    async def cancel(self, job_id: str) -> None: ...
-```
-
-**Triggers:** `"session_close"`, `"idle"`, `"manual"`.
-
-```toml
-[harness]
-job_runner = "InProcJobRunner"
-```
-
-**Default:** `InProcJobRunner` (in-process, built with `{bus: EventBus}`).
 
 ---
 

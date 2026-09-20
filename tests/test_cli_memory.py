@@ -74,10 +74,3 @@ def test_audit_empty_prints_nothing(tmp_path, monkeypatch):
     runner = CliRunner()
     result = runner.invoke(memory_cmd, ["audit"])
     assert result.exit_code == 0
-
-
-def test_jobs_lists(tmp_path, monkeypatch):
-    _seeded_workspace(tmp_path, monkeypatch)
-    runner = CliRunner()
-    result = runner.invoke(memory_cmd, ["jobs"])
-    assert result.exit_code == 0

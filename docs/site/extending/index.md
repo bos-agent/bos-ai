@@ -35,7 +35,6 @@ The `ep_` / `pep_` names are also the keys used in the `[exts]` config section.
 | `ep_chat_store` | Class/factory producing a `ChatStore` | `[harness].chat_store` |
 | `ep_consolidator` | Factory producing a `Consolidator` | `[harness].consolidator` |
 | `ep_turn_interceptor` | Factory producing a `TurnInterceptor` | `[harness].interceptors` chain |
-| `ep_job_runner` | Factory producing a `JobRunner` | `[harness].job_runner` |
 | `ep_mail_route` | Factory producing a `MailRoute` | `[harness].mail_route` |
 | `ep_channel` | Class/factory producing a `Channel` | `[[runtime.channels]].type` |
 | `ep_plugin` | Class/factory producing a `HarnessPlugin` | `[…plugins].enabled` |

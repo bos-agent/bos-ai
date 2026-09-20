@@ -47,7 +47,7 @@ background jobs, message routing — are owned by the **harness** and selected b
  (TUI/Telegram)  │     ▲                        │              │                           │
                  │     └──────── reply ─────────┘        harness services:                 │
                  │                                       chat_store, consolidator,         │
-                 │                                       mail_route, job_runner            │
+                 │                                       mail_route, events                │
                  └────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -228,7 +228,6 @@ Each key names a registered extension by name (`extra='forbid'` — unknown keys
 consolidator = "LLMConsolidator"   # ep_consolidator
 chat_store   = "JsonlChatStore"    # ep_chat_store
 mail_route   = "JsonlMailRoute"    # ep_mail_route
-job_runner   = "InProcJobRunner"   # ep_job_runner
 interceptors = []                  # ordered list of ep_turn_interceptor names/configs
 ```
 
@@ -497,7 +496,6 @@ in `bos.core.registry`.
 | `ep_chat_store` | factory/class | Builds a `ChatStore` (persistence + context assembly). |
 | `ep_consolidator` | factory | Builds a `Consolidator` (summarization/memory). |
 | `ep_turn_interceptor` | factory | Builds a `TurnInterceptor` (per-turn hooks). |
-| `ep_job_runner` | factory | Builds a `JobRunner` (off-critical-path jobs, BEP 11). |
 | `ep_mail_route` | factory | Builds a `MailRoute` (`bind(address)->MailBox`, `deliver(env)`). |
 | `ep_channel` | factory/class | Builds a `Channel` (bridges clients to a mailbox). |
 | `ep_plugin` | class/factory | A `HarnessPlugin` (adds tools/prompt/interceptors). |
@@ -607,9 +605,6 @@ Select via `[harness].chat_store`.
   config via `[exts.ep_consolidator.LLMConsolidator]` (e.g. `model`).
 - **`@ep_mail_route`** → a `MailRoute`: `bind(address) -> MailBox` and `async deliver(env)`.
   Default `JsonlMailRoute`. This is point-to-point message routing between actors/channels.
-- **`@ep_job_runner`** → a `JobRunner` (BEP 11): `start`, `submit(job)`, `bind_trigger`,
-  `drain`, `status/list/retry/cancel`. Default `InProcJobRunner`; built with `{bus: EventBus}`.
-  Used for off-turn work like memory consolidation. Triggers: `session_close | idle | manual`.
 - **`@ep_turn_interceptor`** → a `TurnInterceptor` with `async intercept(stage, context)`.
   Configure an ordered chain via `[harness].interceptors` (list of names or `{name=…, …}`
   tables). Plugin interceptors run best-effort first, then the configured chain
@@ -809,9 +804,9 @@ Registered when `bos.exts` is loaded; the default agent enables
 
 | Plugin | Adds | Key config (`plugin-bindings.<Plugin>`) |
 | --- | --- | --- |
-| `MemoryPlugin` | Persistent memory + recall tools; off-turn consolidation | `maxims` (categories, default `["user","self","rules"]`), `consolidation.{enabled,retention_days,model}` (`enabled` defaults `false`). No `scope` key — memory is isolated per agent identity (passing `scope` raises). |
+| `MemoryPlugin` | Persistent memory + recall tools; consolidation via `boscli memory consolidate` | `maxims` (categories, default `["user","self","rules"]`), `consolidation.model`. No `scope` key — memory is isolated per agent identity (passing `scope` raises). |
 | `PlanPlugin` | Planning tool(s) and prompt section | — |
-| `TaskPlugin` | Async task creation/scheduling tools (BEP 11) | — |
+| `TaskPlugin` | In-conversation task list: `TaskCreate`/`TaskUpdate`/`TaskList`/`TaskGet` | — |
 | `SkillsPlugin` | `LoadSkill` tool + skill discovery (§8) | `skill_dirs`, `allow`, `exclude`, `loader`, `preload` |
 | `SubagentPlugin` | `AskSubagent` tool to delegate to named agents | `enabled` (list/`"*"`), `disabled`, `task_template` |
 
@@ -915,8 +910,8 @@ through the project venv (`uv run boscli ...`) so the package is importable.
    `bos.exts`); there is no separate fallback step.
 
 Then the harness opens (`AgentHarness.__aenter__`): `bos.core.defaults` self-registers
-built-in adapters, the `[harness]`-named services are instantiated, the `EventBus` +
-`JobRunner` start, and `PluginServices` is assembled. Agents are built lazily by
+built-in adapters, the `[harness]`-named services and the `EventBus` are
+instantiated, and `PluginServices` is assembled. Agents are built lazily by
 `create_agent`.
 
 ---
@@ -990,14 +985,14 @@ listed in the prompt, default 50), `BOS_LOG_LEVEL`, plus provider `*_API_KEY`s.
 `[runtime]` / `[runtime.gateway]` / `[runtime.actors.<name>]` / `[[runtime.channels]]` (runtime).
 
 **Decorators** (`from bos.core import …`): `ep_tool`, `ep_provider`, `ep_agent`,
-`ep_chat_store`, `ep_consolidator`, `ep_turn_interceptor`, `ep_job_runner`, `ep_mail_route`,
+`ep_chat_store`, `ep_consolidator`, `ep_turn_interceptor`, `ep_mail_route`,
 `ep_channel`, `ep_plugin`.
 
 **Entry-point groups**: `bos.exts` (extensions) · `bos.skills` (skills) · `boscli.commands`
 (CLI).
 
-**Default harness impls**: `LLMConsolidator`, `JsonlChatStore`, `JsonlMailRoute`,
-`InProcJobRunner`. **Default plugins**: `MemoryPlugin`, `PlanPlugin`, `TaskPlugin`,
+**Default harness impls**: `LLMConsolidator`, `JsonlChatStore`, `JsonlMailRoute`.
+**Default plugins**: `MemoryPlugin`, `PlanPlugin`, `TaskPlugin`,
 `SkillsPlugin`, `SubagentPlugin`. **Default agent kind**: `BOS`.
 
 **Where to read the BOS source** (browse on GitHub at

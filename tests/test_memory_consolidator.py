@@ -4,25 +4,19 @@ import pytest
 
 
 class TestStructural:
-    def test_request_and_policy_exist(self):
+    def test_request_exists(self):
         from bos.plugins.memory.consolidator import (
-            ConsolidationPolicy,
             MemoryConsolidationRequest,
             MemoryConsolidator,
         )
 
-        pol = ConsolidationPolicy(enabled=True, retention_days=30)
-        assert pol.enabled is True
         req = MemoryConsolidationRequest(
             chat_id="c1",
             actor_name="A",
             base_revision=4,
-            trigger="manual",
             transcript_window=[],
-            raw_appends=[],
             candidate_memories=[],
             active_maxims={},
-            policy=pol,
         )
         assert req.chat_id == "c1"
         assert hasattr(MemoryConsolidator, "propose")
@@ -65,7 +59,6 @@ class TestDefaultConsolidator:
     @pytest.mark.asyncio
     async def test_parses_operations_payload(self):
         from bos.plugins.memory.consolidator import (
-            ConsolidationPolicy,
             DefaultMemoryConsolidator,
             MemoryConsolidationRequest,
         )
@@ -82,12 +75,9 @@ class TestDefaultConsolidator:
             chat_id="c1",
             actor_name=None,
             base_revision=1,
-            trigger="manual",
             transcript_window=[],
-            raw_appends=[],
             candidate_memories=[],
             active_maxims={"user": ""},
-            policy=ConsolidationPolicy(),
         )
         ops = await c.propose(req)
         assert [o.op for o in ops] == ["ADD", "NOOP"]
@@ -100,7 +90,6 @@ class TestDefaultConsolidator:
         It must raise so the job leaves the watermark in place and retries the turns."""
         from bos.core.agent import StructuredOutputError
         from bos.plugins.memory.consolidator import (
-            ConsolidationPolicy,
             ConsolidationUnavailable,
             DefaultMemoryConsolidator,
             MemoryConsolidationRequest,
@@ -112,12 +101,9 @@ class TestDefaultConsolidator:
             chat_id="c1",
             actor_name=None,
             base_revision=1,
-            trigger="manual",
             transcript_window=[],
-            raw_appends=[],
             candidate_memories=[],
             active_maxims={},
-            policy=ConsolidationPolicy(),
         )
         with pytest.raises(ConsolidationUnavailable):
             await c.propose(req)
@@ -125,7 +111,6 @@ class TestDefaultConsolidator:
     @pytest.mark.asyncio
     async def test_response_schema_required_keys(self):
         from bos.plugins.memory.consolidator import (
-            ConsolidationPolicy,
             DefaultMemoryConsolidator,
             MemoryConsolidationRequest,
         )
@@ -136,12 +121,9 @@ class TestDefaultConsolidator:
             chat_id="c1",
             actor_name=None,
             base_revision=1,
-            trigger="manual",
             transcript_window=[],
-            raw_appends=[],
             candidate_memories=[],
             active_maxims={},
-            policy=ConsolidationPolicy(),
         )
         await c.propose(req)
         sent_schema = blm.calls[0]["schema"]
@@ -159,7 +141,6 @@ class TestDefaultConsolidator:
         """A model configured on the consolidator is passed to the disposable
         agent run() call, overriding any env fallback."""
         from bos.plugins.memory.consolidator import (
-            ConsolidationPolicy,
             DefaultMemoryConsolidator,
             MemoryConsolidationRequest,
         )
@@ -171,12 +152,9 @@ class TestDefaultConsolidator:
             chat_id="c1",
             actor_name=None,
             base_revision=1,
-            trigger="manual",
             transcript_window=[],
-            raw_appends=[],
             candidate_memories=[],
             active_maxims={},
-            policy=ConsolidationPolicy(),
         )
         await c.propose(req)
         assert blm.calls[0]["model"] == "explicit/model"
@@ -186,7 +164,6 @@ class TestDefaultConsolidator:
         """With no configured model, the call site falls back to
         BOS_CONSOLIDATOR_MODEL."""
         from bos.plugins.memory.consolidator import (
-            ConsolidationPolicy,
             DefaultMemoryConsolidator,
             MemoryConsolidationRequest,
         )
@@ -198,12 +175,9 @@ class TestDefaultConsolidator:
             chat_id="c1",
             actor_name=None,
             base_revision=1,
-            trigger="manual",
             transcript_window=[],
-            raw_appends=[],
             candidate_memories=[],
             active_maxims={},
-            policy=ConsolidationPolicy(),
         )
         await c.propose(req)
         assert blm.calls[0]["model"] == "env/model"
@@ -213,7 +187,6 @@ class TestDefaultConsolidator:
         """No configured model and no env → None, so the provider falls back to
         BOS_MODEL downstream."""
         from bos.plugins.memory.consolidator import (
-            ConsolidationPolicy,
             DefaultMemoryConsolidator,
             MemoryConsolidationRequest,
         )
@@ -225,12 +198,9 @@ class TestDefaultConsolidator:
             chat_id="c1",
             actor_name=None,
             base_revision=1,
-            trigger="manual",
             transcript_window=[],
-            raw_appends=[],
             candidate_memories=[],
             active_maxims={},
-            policy=ConsolidationPolicy(),
         )
         await c.propose(req)
         assert blm.calls[0]["model"] is None
@@ -239,7 +209,6 @@ class TestDefaultConsolidator:
     async def test_prompt_includes_transcript_and_candidates(self):
         from bos.core.contract import Message
         from bos.plugins.memory.consolidator import (
-            ConsolidationPolicy,
             DefaultMemoryConsolidator,
             MemoryConsolidationRequest,
         )
@@ -251,12 +220,9 @@ class TestDefaultConsolidator:
             chat_id="c1",
             actor_name=None,
             base_revision=1,
-            trigger="manual",
             transcript_window=[Message(llm_message={"role": "user", "content": "I prefer dark mode"})],
-            raw_appends=[],
             candidate_memories=[MemoryEntry(id="m1", content="prefers light mode")],
             active_maxims={"user": "existing user maxim text"},
-            policy=ConsolidationPolicy(),
         )
         await c.propose(req)
         prompt = blm.calls[0]["message"]

@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar, Generic, Literal, Protocol, TypeVar, runtime_checkable
 
 from bos.core.actor import Envelope, Event, EventBus, MailBox, MessageType
 
-# Outer-ring contracts (extension registry, jobs, lifecycle, channels, mailbox
+# Outer-ring contracts (extension registry, lifecycle, channels, mailbox
 # wire, plugins). These depend *inward* on the agent core.
 #
 # The agent core (``bos.core.agent``) owns the contracts the Agent defines and
@@ -155,52 +155,6 @@ class SessionEvent(Event):
     payload: dict[str, Any] = field(default_factory=dict)
 
 
-# ── BEP 11 §2: Job runner ──────────────────────────────────────────────────
-
-JobTrigger = Literal["session_close", "idle", "manual"]
-JobStatus = Literal["queued", "running", "succeeded", "failed", "cancelled"]
-
-
-@runtime_checkable
-class Job(Protocol):
-    @property
-    def key(self) -> str: ...
-
-    async def run(self) -> None: ...
-
-
-@dataclass(frozen=True)
-class JobRecord:
-    id: str
-    key: str
-    status: JobStatus
-    error: str | None
-    submitted_at: str
-    finished_at: str | None
-
-
-@runtime_checkable
-class JobRunner(Protocol):
-    async def start(self) -> None: ...
-    async def submit(self, job: Job) -> str: ...
-    def bind_trigger(
-        self,
-        trigger: JobTrigger,
-        factory: Callable[[SessionEvent | None], Job | None],
-    ) -> None: ...
-    async def drain(self, *, timeout: float) -> None: ...
-    async def status(self, job_id: str) -> JobStatus: ...
-    async def list(self, *, filter: dict | None = None) -> list[JobRecord]: ...
-    async def retry(self, job_id: str) -> None: ...
-    async def cancel(self, job_id: str) -> None: ...
-
-
-ep_job_runner = ExtensionPoint(
-    name="ep_job_runner",
-    description="Off-critical-path job runner implementations (BEP 11 §2).",
-)
-
-
 ep_mail_route = ExtensionPoint(
     name="ep_mail_route",
     description="MailRoute. Used for message routing between agents. It should implement the MailRoute protocol.",
@@ -332,7 +286,6 @@ class PluginServices:
     consolidator: Consolidator
     chat_store: ChatStore
     events: EventBus | None = None
-    jobs: JobRunner | None = None
     # BEP 12: the single disposable-agent runner. Plugins guard on ``is None``
     # (the subagent tool requires it; memory consolidation skips when absent).
     agent_runner: AgentRunner | None = None
@@ -382,11 +335,6 @@ __all__ = [
     "Event",
     "EventBus",
     "HarnessPlugin",
-    "Job",
-    "JobRecord",
-    "JobRunner",
-    "JobStatus",
-    "JobTrigger",
     "MailBox",
     "MailRoute",
     "MessageType",
@@ -398,7 +346,6 @@ __all__ = [
     "ep_channel",
     "ep_chat_store",
     "ep_consolidator",
-    "ep_job_runner",
     "ep_mail_route",
     "ep_plugin",
     "ep_provider",

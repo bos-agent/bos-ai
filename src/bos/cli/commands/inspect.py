@@ -44,7 +44,6 @@ def _harness_info(ws, config_arg: str | None) -> dict[str, Any]:
             "consolidator": harness.consolidator,
             "chat_store": harness.chat_store,
             "mail_route": harness.mail_route,
-            "job_runner": harness.job_runner,
             "interceptors": list(harness.interceptors),
         },
     }
@@ -145,7 +144,6 @@ def _extension_points_info() -> dict[str, dict[str, str]]:
         ep_channel,
         ep_chat_store,
         ep_consolidator,
-        ep_job_runner,
         ep_mail_route,
         ep_provider,
         ep_turn_interceptor,
@@ -155,7 +153,6 @@ def _extension_points_info() -> dict[str, dict[str, str]]:
         "consolidator": ep_consolidator.describe(),
         "chat_store": ep_chat_store.describe(),
         "mail_route": ep_mail_route.describe(),
-        "job_runner": ep_job_runner.describe(),
         "turn_interceptor": ep_turn_interceptor.describe(),
         "provider": ep_provider.describe(),
         "channel": ep_channel.describe(),
@@ -301,7 +298,6 @@ def _render_text(report: dict[str, Any]) -> None:
     console.print(f"  consolidator: {impls['consolidator']}")
     console.print(f"  chat_store:   {impls['chat_store']}")
     console.print(f"  mail_route:   {impls['mail_route']}")
-    console.print(f"  job_runner:   {impls['job_runner']}")
     interceptors = ", ".join(impls["interceptors"]) or "—"
     console.print(f"  interceptors: {interceptors}")
 

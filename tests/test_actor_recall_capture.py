@@ -156,7 +156,6 @@ async def _make_harness_plugin(tmp_path, bus) -> MemoryHarnessPlugin:
         consolidator=None,
         chat_store=InMemChatStore(),
         events=bus,
-        jobs=None,
     )
     plugin = MemoryHarnessPlugin()
     plugin._cfg = {**plugin.default_config(), "backend": "in_memory"}

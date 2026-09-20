@@ -25,7 +25,7 @@ decisions, see the [BEP Index](beps.md).
  (TUI/Telegram)  │     ▲                        │              │                           │
                  │     └──────── reply ─────────┘        harness services:                 │
                  │                                       chat_store, consolidator,         │
-                 │                                       mail_route, job_runner            │
+                 │                                       mail_route, events                │
                  └────────────────────────────────────────────────────────────────────────┘
 ```
 
