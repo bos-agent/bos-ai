@@ -1,0 +1,33 @@
+name: Tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    name: pytest, ruff, pyright
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      # Plain `uv sync`, on purpose: it is what a fresh clone runs, and the dev
+      # group is what makes the extras (BEP 16) present. If that drifts, 16 test
+      # modules stop importing and this job is the only thing that would notice.
+      - name: Sync
+        run: uv sync
+
+      - name: Tests
+        run: uv run pytest -q
+
+      - name: Lint
+        run: uv run ruff check src tests examples
+
+      - name: Type-check
+        run: npx -y pyright src
