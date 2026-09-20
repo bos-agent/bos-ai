@@ -106,7 +106,6 @@ class HarnessConfig(BaseModel):
     consolidator: str = "LLMConsolidator"
     chat_store: str = "JsonlChatStore"
     mail_route: str = "JsonlMailRoute"
-    job_runner: str = "InProcJobRunner"
     interceptors: list[str] = Field(default_factory=list)
 
 

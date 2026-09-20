@@ -668,7 +668,6 @@ class Workspace:
             consolidator=kwargs.get("consolidator", "LLMConsolidator"),
             chat_store=kwargs.get("chat_store", "JsonlChatStore"),
             mail_route=kwargs.get("mail_route", "JsonlMailRoute"),
-            job_runner=kwargs.get("job_runner", "InProcJobRunner"),
             interceptors=kwargs.get("interceptors", []),
         )
 

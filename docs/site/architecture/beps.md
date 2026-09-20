@@ -18,7 +18,6 @@ source file on GitHub.
 - [BEP 8: Production-Grade TUI and CLI Revamp](https://github.com/bos-agent/bos-ai/blob/main/docs/BEP/BEP%208%3A%20Production-Grade%20TUI%20and%20CLI%20Revamp.md)
 - [BEP 9: Project Scaffolding and Guided Init](https://github.com/bos-agent/bos-ai/blob/main/docs/BEP/BEP%209%3A%20Project%20Scaffolding%20and%20Guided%20Init.md)
 - [BEP 10: Platform-Managed Memory and the Consolidation Agent](https://github.com/bos-agent/bos-ai/blob/main/docs/BEP/BEP%2010%3A%20Platform-Managed%20Memory%20and%20the%20Consolidation%20Agent.md)
-- [BEP 11: Async Tasks and Scheduling](https://github.com/bos-agent/bos-ai/blob/main/docs/BEP/BEP%2011%3A%20Async%20Tasks%20and%20Scheduling.md)
 - [BEP 12: Structured Agent Output and the AgentResult Primitive](https://github.com/bos-agent/bos-ai/blob/main/docs/BEP/BEP%2012%3A%20Structured%20Agent%20Output%20and%20the%20AgentResult%20Primitive.md)
 - [BEP 13: Clean Architecture — Concentric Dependency Rings](https://github.com/bos-agent/bos-ai/blob/main/docs/BEP/BEP%2013%3A%20Clean%20Architecture%20%E2%80%94%20Concentric%20Dependency%20Rings.md)
 - [BEP 14: Multi-Agent Project Collaboration](https://github.com/bos-agent/bos-ai/blob/main/docs/BEP/BEP%2014%3A%20Multi-Agent%20Project%20Collaboration.md)

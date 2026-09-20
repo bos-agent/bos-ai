@@ -388,13 +388,13 @@ of the ring, not a separate adapter layer. The harness reaches them two ways, an
 is self-contained — it does **not** rely on an outer composition root to register its own defaults:
 
 - **Registry-resolved** (`@ep_*(name="_default")`): `jsonl_chat_store`, `litellm_provider`, `consolidator`,
-  `jobs`, `jsonl_mailbox`. The harness resolves these *by name* through the `ep_*` registry. It guarantees
+  `jsonl_mailbox`. The harness resolves these *by name* through the `ep_*` registry. It guarantees
   their registration by importing `bos.core.defaults` at the top of `AgentHarness.__aenter__` (idempotent,
   deferred to open-time to avoid import-order coupling during package init) — so opening a harness always
   has its defaults, with no dependency on `bos.exts`.
-- **Imported directly** by the harness as concrete fallback wiring: `DefaultEventBus` and
-  `DefaultBackgroundLLM` ([harness.py](../../src/bos/core/harness.py)). Both are intra-ring imports, so
-  neither breaks ring purity — they are the ring's inner defaults for the `EventBus` / background-LLM ports.
+- **Imported directly** by the harness as concrete fallback wiring: `DefaultEventBus`
+  ([harness.py](../../src/bos/core/harness.py)). An intra-ring import, so it does not break ring
+  purity — it is the ring's inner default for the `EventBus` port.
 
 **Ports it owns (rule 2).** `contract.py` owns the outer-facing ports the adapter ring implements —
 `MailRoute`, `Channel`/`BaseChannel`, `AgentPlugin`, the `ep_*` extension points — and re-exports the

@@ -32,11 +32,9 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from bos.core.agent import TurnContext
-    from bos.core.contract import Job
 
     from ._watermark import WatermarkStore
     from .consolidator import DefaultMemoryConsolidator
-    from .job import TriggerName
     from .operation_service import DefaultMemoryOperationService
 
 MAXIM_LIMIT = 2048
@@ -128,12 +126,10 @@ class MemoryHarnessPlugin:
             "maxims": ["user", "self", "rules"],
             "backend": "MarkdownMemoryBackend",
             "retrieval": {"auto_recall": True, "index_in_prompt": True, "index_max": 50, "top_k": 5},
-            "consolidation": {"enabled": False, "retention_days": 30, "model": None},
+            "consolidation": {"model": None},
         }
 
     async def setup(self, services: PluginServices) -> None:
-        from .consolidator import ConsolidationPolicy
-
         self._services = services
         cfg = getattr(self, "_cfg", None) or dict(self.default_config())
         self._cfg = cfg
@@ -148,31 +144,14 @@ class MemoryHarnessPlugin:
         self._per_agent: dict[str, PerAgentMemory] = {}
 
         cons_cfg = dict(cfg.get("consolidation", {}))
-        self._policy = ConsolidationPolicy(
-            enabled=bool(cons_cfg.get("enabled", False)),
-            retention_days=int(cons_cfg.get("retention_days", 30)),
-        )
         self._consolidation_model = cons_cfg.get("model") or None
-
-        if (
-            self._policy.enabled
-            and services.events is not None
-            and services.jobs is not None
-            and services.agent_runner is not None
-            and services.chat_store is not None
-        ):
-            services.jobs.bind_trigger("session_close", self._make_consolidation_job_factory("session_close"))
-            # Off-turn consolidation after a chat goes quiet. The runner arms a
-            # per-chat idle timer on each turn_complete (default 5 min); when it
-            # lapses with no new turn it fires this factory for that chat.
-            services.jobs.bind_trigger("idle", self._make_consolidation_job_factory("idle"))
 
         # Recall-log flush (BEP 10 §6): on turn_complete, dispatch to the
         # event.actor_name's bundle. The bundle holds the ids its own
         # interceptor recorded this turn — the platform's turn_complete event
         # is the generic trigger; it carries no memory-specific payload.
         retrieval_cfg = dict(cfg.get("retrieval", {}))
-        if services.events is not None and (retrieval_cfg.get("auto_recall", True) or self._policy.enabled):
+        if services.events is not None and retrieval_cfg.get("auto_recall", True):
             services.events.subscribe(SessionEvent, self._handle_turn_complete_flush)
 
     def _build_for(self, agent_name: str) -> PerAgentMemory:
@@ -225,54 +204,28 @@ class MemoryHarnessPlugin:
         recalled = bundle.recalled_by_turn.pop(turn_id, []) if turn_id else []
         await RecallFlushSubscriber(bundle.op_service).flush(recalled, chat_id=event.chat_id)
 
-    def _make_consolidation_job_factory(self, trigger: TriggerName = "session_close"):
-        from .job import MemoryConsolidationJob
-
-        def factory(event: SessionEvent | None) -> Job | None:
-            if event is None or event.base_revision is None or not event.actor_name:
-                return None
-            bundle = self._per_agent.get(event.actor_name)
-            if bundle is None or bundle.consolidator is None:
-                return None
-            return MemoryConsolidationJob(
-                actor_name=event.actor_name,
-                chat_id=event.chat_id,
-                base_revision=int(event.base_revision),
-                trigger=trigger,
-                policy=self._policy,
-                chat_store=self._services.chat_store,
-                backend=bundle.backend,
-                consolidator=bundle.consolidator,
-                operation_service=bundle.op_service,
-                watermarks=bundle.watermarks,
-                maxim_keys=self._maxim_keys,
-            )
-
-        return factory
-
     async def run_consolidation_now(
         self,
         chat_id: str,
         *,
         agent_name: str,
     ):
-        """Build and run a consolidation job synchronously (admin "run now")."""
-        from .job import MemoryConsolidationJob
+        """Run consolidation for one chat, in-line. The only consolidation path:
+        invoked by ``boscli memory consolidate`` (directly, or from an external
+        scheduler)."""
+        from .consolidator import run_consolidation
 
         bundle = self._for(agent_name)
         if bundle.consolidator is None:
             return []
-        policy = self._policy
         rev = await self._services.chat_store.get_revision(chat_id)
         if rev == 0:
             return []
         before = len(await bundle.op_service.audit())
-        job = MemoryConsolidationJob(
+        await run_consolidation(
             actor_name=agent_name,
             chat_id=chat_id,
             base_revision=rev,
-            trigger="manual",
-            policy=policy,
             chat_store=self._services.chat_store,
             backend=bundle.backend,
             consolidator=bundle.consolidator,
@@ -280,7 +233,6 @@ class MemoryHarnessPlugin:
             watermarks=bundle.watermarks,
             maxim_keys=self._maxim_keys,
         )
-        await job.run()
         return (await bundle.op_service.audit())[before:]
 
     def validate_config(self, config: Mapping[str, Any]) -> None:

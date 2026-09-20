@@ -48,10 +48,9 @@ the `[harness]` section; the harness instantiates each by name at startup.
 
 ```toml
 [harness]
-consolidator = "LLMConsolidator"    # drives off-turn memory consolidation
+consolidator = "LLMConsolidator"    # summarises chat history for compaction/handoff
 chat_store   = "JsonlChatStore"     # conversation persistence + context assembly
 mail_route   = "JsonlMailRoute"     # actor-to-actor and actor-to-channel message routing
-job_runner   = "InProcJobRunner"    # off-critical-path background jobs
 interceptors = []                   # ordered list of turn interceptors (names or inline tables)
 ```
 
@@ -63,12 +62,12 @@ registering an alternative at the matching extension point and naming it here.
 - **`chat_store`** — persists and assembles conversation context. It owns token
   estimation, summary injection, and tool-noise filtering. The default
   `JsonlChatStore` stores messages under `.bos/messages/`.
-- **`consolidator`** — summarises history and consolidates memories. Called
-  off-turn by the job runner so it does not block responses.
+- **`consolidator`** — summarises chat history when the context window fills
+  (compaction) and when a turn hands off. Distinct from *memory* consolidation,
+  which is the MemoryPlugin's own concern — see
+  [Memory & skills](memory-and-skills.md).
 - **`mail_route`** — point-to-point message routing between actors and channels.
   The default `JsonlMailRoute` stores mailbox state under `.bos/mailboxes/`.
-- **`job_runner`** — runs background jobs (such as memory consolidation). The
-  default `InProcJobRunner` runs in the same process.
 - **`interceptors`** — an ordered chain of `TurnInterceptor` instances called
   around every agent turn. Plugin interceptors run ahead of this chain.
 

@@ -1,6 +1,6 @@
 """End-to-end BEP 10 off-turn consolidation:
-commit turns → emit session_close → consolidator proposes ADD → operation
-service applies → fact is queryable in a fresh harness."""
+commit turns → run consolidation → consolidator proposes ADD → operation
+service applies → fact is queryable and the watermark has advanced."""
 
 import pytest
 
@@ -22,15 +22,11 @@ class _CannedAgentRunner:
 
 @pytest.mark.asyncio
 async def test_mid_chat_fact_persists_into_next_session(tmp_path):
-    from bos.core.contract import Message, PluginServices, SessionEvent
+    from bos.core.contract import Message, PluginServices
     from bos.core.defaults.eventbus import DefaultEventBus
-    from bos.core.defaults.job_runner import InProcJobRunner
     from bos.extensions.chat_stores.in_memory import InMemChatStore
     from bos.plugins.memory.plugin import MemoryHarnessPlugin
 
-    bus = DefaultEventBus()
-    runner = InProcJobRunner(bus, max_concurrency=1, idle_after=300)
-    await runner.start()
     chat_store = InMemChatStore()
     canned = _CannedAgentRunner({
         "operations": [
@@ -50,45 +46,69 @@ async def test_mid_chat_fact_persists_into_next_session(tmp_path):
         llm=None,
         consolidator=None,
         chat_store=chat_store,
-        events=bus,
-        jobs=runner,
+        events=DefaultEventBus(),
         agent_runner=canned,
     )
 
     plugin = MemoryHarnessPlugin()
-    plugin._cfg = {
-        **plugin.default_config(),
-        "backend": "in_memory",
-        "consolidation": {"enabled": True, "retention_days": 30},
-    }
+    plugin._cfg = {**plugin.default_config(), "backend": "in_memory"}
     await plugin.setup(services)
 
-    try:
-        # Pre-bind the agent so the plugin has its bundle ready when session_close fires.
-        plugin.bind({**plugin._cfg, "agent_name": "alice"})
+    await chat_store.commit_turn(
+        "c1",
+        [
+            Message(llm_message={"role": "user", "content": "I always prefer dark mode"}),
+        ],
+        turn_id="t1",
+    )
+    head = await chat_store.get_revision("c1")
 
-        await chat_store.commit_turn(
-            "c1",
-            [
-                Message(llm_message={"role": "user", "content": "I always prefer dark mode"}),
-            ],
-            turn_id="t1",
-        )
-        head = await chat_store.get_revision("c1")
-        await bus.emit(
-            SessionEvent(
-                kind="session_close",
-                chat_id="c1",
-                actor_name="alice",
-                base_revision=head,
-                payload={},
-            )
-        )
-        await runner.drain(timeout=2.0)
+    records = await plugin.run_consolidation_now("c1", agent_name="alice")
+    assert [r.op.op for r in records] == ["ADD"]
 
-        bundle = plugin._for("alice")
-        hits = await bundle.backend.search_memories("dark mode")
-        assert hits and hits[0].content == "user prefers dark mode"
-        assert await bundle.watermarks.get("c1") == head
-    finally:
-        await runner.drain(timeout=0.0)
+    bundle = plugin._for("alice")
+    hits = await bundle.backend.search_memories("dark mode")
+    assert hits and hits[0].content == "user prefers dark mode"
+    assert await bundle.watermarks.get("c1") == head
+
+
+@pytest.mark.asyncio
+async def test_second_run_is_a_no_op_once_the_watermark_caught_up(tmp_path):
+    """The watermark, not a queue, is what stops the same window being
+    consolidated twice — so a repeat run proposes nothing."""
+    from bos.core.contract import Message, PluginServices
+    from bos.core.defaults.eventbus import DefaultEventBus
+    from bos.extensions.chat_stores.in_memory import InMemChatStore
+    from bos.plugins.memory.plugin import MemoryHarnessPlugin
+
+    chat_store = InMemChatStore()
+    calls: list[str] = []
+
+    class _CountingRunner(_CannedAgentRunner):
+        async def run(self, message, *args, **kwargs):
+            calls.append(message)
+            return await super().run(message, *args, **kwargs)
+
+    services = PluginServices(
+        bos_dir=tmp_path,
+        workspace=tmp_path,
+        llm=None,
+        consolidator=None,
+        chat_store=chat_store,
+        events=DefaultEventBus(),
+        agent_runner=_CountingRunner({
+            "operations": [
+                {"op": "ADD", "reason": "r", "content": "fact", "source_turn_ids": ["t1"]},
+            ]
+        }),
+    )
+    plugin = MemoryHarnessPlugin()
+    plugin._cfg = {**plugin.default_config(), "backend": "in_memory"}
+    await plugin.setup(services)
+
+    await chat_store.commit_turn("c1", [Message(llm_message={"role": "user", "content": "hi"})], turn_id="t1")
+
+    assert await plugin.run_consolidation_now("c1", agent_name="alice")
+    assert len(calls) == 1
+    assert await plugin.run_consolidation_now("c1", agent_name="alice") == []
+    assert len(calls) == 1, "no new turns past the watermark — the consolidator must not be called again"

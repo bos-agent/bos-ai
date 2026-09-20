@@ -204,7 +204,7 @@ def restore_cmd(agent: str | None, entry_id: str):
 @_AGENT_OPT
 @click.option("--filter", "filter_str", default=None, help="key=value filter, e.g. result=applied or op=ADD")
 def audit_cmd(agent: str | None, filter_str: str | None):
-    """Print the in-memory audit log (operations applied this process)."""
+    """Print the memory operation audit log (durable, from audit.jsonl)."""
 
     async def _audit(bundle, _plugin, _h):
         filt: dict | None = None
@@ -222,20 +222,3 @@ def audit_cmd(agent: str | None, filter_str: str | None):
             )
 
     _run(_audit, agent=agent)
-
-
-@memory.command("jobs")
-@click.option("--status", default=None, help="Filter by status: queued|running|succeeded|failed|cancelled")
-def jobs_cmd(status: str | None):
-    """List JobRunner records for this harness process."""
-
-    async def _jobs(_bundle, _plugin, h):
-        filt = {"status": status} if status else None
-        recs = await h.jobs.list(filter=filt)
-        if not recs:
-            click.echo("(no jobs)")
-            return
-        for r in recs:
-            click.echo(f"{r.submitted_at}  {r.status:10s}  {r.id[:8]}  {r.key}")
-
-    _run(_jobs, agent=None)

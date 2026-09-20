@@ -1,36 +1,30 @@
-"""Memory consolidation handler (BEP 10 §4) — proposes structured operations
-for off-turn curation. Runs a disposable agent (BEP 12 AgentRunner) with a JSON
-schema; never writes directly (writes go through the L1 operation service)."""
+"""Memory consolidation (BEP 10 §4) — proposes structured operations for
+off-turn curation, and the run that applies them. Proposal runs a disposable
+agent (BEP 12 AgentRunner) with a JSON schema; it never writes directly (writes
+go through the L1 operation service)."""
 
 from __future__ import annotations
 
 import logging
 import os
 from dataclasses import dataclass
-from typing import Literal, Protocol
+from typing import Protocol
 
 from bos.core.agent import StructuredOutputError
-from bos.core.contract import Message
+from bos.core.contract import ChatStore, Message
 
-from .operation_service import MemoryOperation
-from .scoped_memory import MemoryEntry
+from ._watermark import WatermarkStore
+from .operation_service import DefaultMemoryOperationService, MemoryOperation
+from .scoped_memory import MemoryBackend, MemoryEntry
 
 logger = logging.getLogger(__name__)
-
-JobTriggerName = Literal["session_close", "idle", "manual"]
 
 
 class ConsolidationUnavailable(Exception):
     """Raised when the consolidator cannot produce a trustworthy proposal (e.g.
-    the model returned an unparseable response). The job treats this as "no
+    the model returned an unparseable response). The caller treats this as "no
     result" and leaves the watermark untouched so the turns are retried, rather
     than silently burning the window with an empty apply."""
-
-
-@dataclass(frozen=True)
-class ConsolidationPolicy:
-    enabled: bool = False
-    retention_days: int = 30
 
 
 @dataclass(frozen=True)
@@ -38,12 +32,9 @@ class MemoryConsolidationRequest:
     chat_id: str
     actor_name: str
     base_revision: int
-    trigger: JobTriggerName
     transcript_window: list[Message]
-    raw_appends: list[MemoryEntry]
     candidate_memories: list[MemoryEntry]
     active_maxims: dict[str, str]
-    policy: ConsolidationPolicy
 
 
 class MemoryConsolidator(Protocol):
@@ -116,8 +107,7 @@ def _render_user_prompt(request: MemoryConsolidationRequest) -> str:
         lines.append("\n## Active maxims (note: 2048-char cap; consider Compact via UPDATE+maxim_key)")
         for key, text in request.active_maxims.items():
             lines.append(f"[maxim={key}] {text}")
-    lines.append("\n## Policy")
-    lines.append(f"actor={request.actor_name} trigger={request.trigger}")
+    lines.append(f"\n## Agent\n{request.actor_name}")
     return "\n".join(lines)
 
 
@@ -147,7 +137,7 @@ class DefaultMemoryConsolidator:
             )
         except StructuredOutputError as exc:
             # No valid structured proposal is NOT "nothing to consolidate" — it
-            # is a failure. Surface it so the job leaves the watermark in place
+            # is a failure. Surface it so the run leaves the watermark in place
             # and retries these turns later, instead of advancing past them.
             raise ConsolidationUnavailable("consolidator: model returned no valid structured proposal") from exc
         payload = result.output
@@ -172,3 +162,56 @@ class DefaultMemoryConsolidator:
             except (KeyError, TypeError):
                 logger.warning("consolidator: dropping malformed op %r", raw)
         return out
+
+
+async def run_consolidation(
+    *,
+    actor_name: str,
+    chat_id: str,
+    base_revision: int,
+    chat_store: ChatStore,
+    backend: MemoryBackend,
+    consolidator: MemoryConsolidator,
+    operation_service: DefaultMemoryOperationService,
+    watermarks: WatermarkStore,
+    maxim_keys: set[str],
+) -> None:
+    """Consolidate one chat's unprocessed turns: read the window past the
+    watermark, propose operations, apply them, then advance the watermark.
+
+    Runs in-line in the caller's task. ``boscli memory consolidate`` is the only
+    caller; an external scheduler drives repeat runs."""
+    watermark = await watermarks.get(chat_id)
+    if base_revision <= watermark:
+        logger.info(
+            "consolidation skipped (no new turns) chat=%s rev=%d wm=%d",
+            chat_id,
+            base_revision,
+            watermark,
+        )
+        return
+    transcript = await chat_store.get_messages_since(chat_id, revision=watermark)
+    candidates = await backend.search_memories("", top_k=10_000)
+    active_maxims = {key: await backend.get_maxim(key) for key in maxim_keys}
+    request = MemoryConsolidationRequest(
+        chat_id=chat_id,
+        actor_name=actor_name,
+        base_revision=base_revision,
+        transcript_window=transcript,
+        candidate_memories=candidates,
+        active_maxims=active_maxims,
+    )
+    # A propose() failure (e.g. ConsolidationUnavailable on an unparseable
+    # response, or a transport error) raises here; the watermark is left
+    # untouched so these turns are retried on the next run rather than silently
+    # burned by an empty apply.
+    ops = await consolidator.propose(request)
+    # Authoritative provenance for this run: the distinct turn ids actually in
+    # the consolidated window, app-derived (order-preserving), recorded on every
+    # audit record for audit/reconciliation.
+    window_turn_ids = list(dict.fromkeys(m.turn_id for m in transcript if m.turn_id))
+    await operation_service.apply(ops, window_turn_ids=window_turn_ids)
+    # Advance the watermark only after a trustworthy proposal was applied (an
+    # empty-but-valid proposal legitimately means "nothing durable here" and may
+    # advance). Failures never reach this line.
+    await watermarks.set(chat_id, base_revision)

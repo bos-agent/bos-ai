@@ -20,37 +20,36 @@ tutorial see [Tutorials](../tutorials/index.md).
 a conversation transcript — it is a curated set of _maxims_ (short, declarative
 facts) that the agent recalls across sessions.
 
-The agent does not write to memory directly during a turn. Instead, memory
-consolidation runs **off-turn**: when the job runner fires a consolidation job, the
-`LLMConsolidator` reads recent conversation history, extracts or updates maxims, and
-stores them. This keeps the critical response path fast.
+The agent does not curate memory during a turn. Instead, memory consolidation runs
+**off-turn**, from `boscli memory consolidate`: it reads the conversation turns a
+chat has accumulated since its last run, extracts or updates maxims, and stores
+them. This keeps the critical response path fast.
 
 ### The consolidation loop
 
+Consolidation runs **off the conversational turn, on demand** — nothing in the
+agent loop triggers it. You invoke it, or point a scheduler (cron, systemd timer,
+launchd) at the CLI:
+
 ```
-agent turn (in-process, fast)
-        │
-        │  session closes or idle trigger fires
-        ▼
-job_runner submits consolidation job
+boscli memory consolidate --all     # or --chat <id>
         │
         ▼
-LLMConsolidator reads chat history
+reads each chat's turns past its watermark
         │
         ▼
-Distills and writes maxims to MemoryPlugin store
+consolidation agent proposes ADD / UPDATE / INVALIDATE operations
+        │
+        ▼
+operation service applies them and advances the watermark
         │
         ▼
 Next agent turn sees updated maxims in system prompt
 ```
 
-The consolidator is selected in `[harness]`:
-
-```toml
-[harness]
-consolidator = "LLMConsolidator"   # reads history, writes condensed maxims
-job_runner   = "InProcJobRunner"   # schedules consolidation off-turn
-```
+Note that this is **not** the `[harness] consolidator` extension point — that one
+summarises chat history for context compaction. Memory consolidation is the
+MemoryPlugin's own, and runs a disposable agent with a structured-output schema.
 
 ### MemoryPlugin
 
@@ -63,8 +62,6 @@ by default in the built-in agent spec. Configure it per agent (or project-wide v
 maxims = ["user", "self", "rules"]   # which maxim categories the agent maintains (default)
 
 [agents.main.plugin-bindings.MemoryPlugin.consolidation]
-enabled        = false             # off-turn consolidation is OFF by default
-retention_days = 30                # maxims older than this are pruned
 model          = ""                # consolidation model; defaults to BOS_CONSOLIDATOR_MODEL
 ```
 
@@ -72,9 +69,8 @@ model          = ""                # consolidation model; defaults to BOS_CONSOL
 prompt — the default is `["user", "self", "rules"]` (facts about the user, the agent
 itself, and standing rules). It is **not** a list of pre-written memory strings.
 
-**`consolidation.enabled`** is `false` by default: turn it on to have the job runner
-distill maxims off-turn (`retention_days` prunes stale maxims; `model` overrides the
-consolidation model, otherwise `BOS_CONSOLIDATOR_MODEL`).
+**`consolidation.model`** overrides the model the consolidation agent runs on;
+otherwise it falls back to `BOS_CONSOLIDATOR_MODEL`, then the provider default.
 
 !!! note "Memory isolation is automatic — there is no `scope` option"
     Each agent's memory is isolated by its **agent identity** (the actor name), so two

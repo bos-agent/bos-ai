@@ -41,7 +41,6 @@ A **plugin** is the right unit when you want to bundle tools together with syste
 | `consolidator` | `Consolidator` | Memory/summary service |
 | `chat_store` | `ChatStore` | Conversation persistence |
 | `events` | `EventBus \| None` | Publish/subscribe event bus |
-| `jobs` | `JobRunner \| None` | Off-turn job runner |
 | `agent_runner` | `AgentRunner \| None` | Run a disposable sub-agent (BEP 12) |
 
 ---
@@ -172,9 +171,9 @@ These are registered when `bos.exts` is loaded and enabled by default in the bui
 
 | Plugin | What it adds | Key `plugin-bindings.<Plugin>` options |
 |--------|-------------|---------------------------------------|
-| `MemoryPlugin` | Persistent memory + recall tools; off-turn consolidation | `maxims` (categories, default `["user","self","rules"]`), `consolidation.{enabled,retention_days,model}` (consolidation off by default). Memory is isolated per agent identity — there is no `scope` option. |
+| `MemoryPlugin` | Persistent memory + recall tools; consolidation via `boscli memory consolidate` | `maxims` (categories, default `["user","self","rules"]`), `consolidation.model`. Memory is isolated per agent identity — there is no `scope` option. |
 | `PlanPlugin` | Planning tools and a system-prompt section | — |
-| `TaskPlugin` | Async task creation/scheduling tools (BEP 11) | — |
+| `TaskPlugin` | In-conversation task list (`TaskCreate`/`TaskUpdate`/`TaskList`/`TaskGet`) | — |
 | `SkillsPlugin` | `LoadSkill` tool + skill discovery | `skill_dirs`, `allow`, `exclude`, `loader`, `preload` |
 | `SubagentPlugin` | `AskSubagent` tool to delegate work to named agents | `enabled` (list or `"*"`), `disabled`, `task_template` |
 

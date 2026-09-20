@@ -720,8 +720,7 @@ The implementation should land as one atomic PR that keeps the repository green 
 
 ## Amendment (2026-06-15): Revision-Window Reads
 
-**Driver.** BEP 10 (Platform-Managed Memory) and BEP 11 (Async Tasks & Scheduling) run off-turn
-consolidation **incrementally**: a consumer remembers a per-chat **watermark** (last-handled revision)
+**Driver.** BEP 10 (Platform-Managed Memory) runs off-turn consolidation **incrementally**: a consumer remembers a per-chat **watermark** (last-handled revision)
 and, on each run, processes only the turns committed *after* it. The current `ChatStore` exposes
 `get_messages(chat_id, active_only=…)` but no way to read by revision, so a consumer cannot ask "what's
 new since revision *r*?" This amendment adds that read. It is **additive and non-breaking** — pure reads
@@ -766,7 +765,7 @@ commit order. Semantics:
   `get_messages`, raw access); the consumer filters if it wishes.
 - Concurrent-read safe and point-in-time consistent, per the existing Concurrency section.
 
-This is the **`get_messages_since`** referenced by BEP 11 §5; it replaces the earlier
+This is the **`get_messages_since`** BEP 10 §4 consolidation reads through; it replaces the earlier
 `get_messages_until` sketch (consumers always read forward from a watermark, never bounded above).
 
 ### Non-goals (still deferred)
