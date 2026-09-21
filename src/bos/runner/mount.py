@@ -154,6 +154,14 @@ class GatewayMount:
         instance must not do.
         """
         assert self._run_dir is not None
+        if self._gateway is not None:
+            # A runtime already exists, so whatever state the mount reports, one
+            # is being torn down somewhere else — the demoting watchdog goes to
+            # "standby" before its teardown, which takes the whole drain to run.
+            # Promoting again would build a second runtime over it, and that
+            # teardown would then null the new gateway, close the new harness
+            # and release the lock this call had just taken.
+            return False
         lock = acquire_singleton_lock(self._run_dir)
         if lock is None:
             # Assigned only on success: a failed restart leaves this mount in

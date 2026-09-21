@@ -32,13 +32,13 @@ class EchoChannel(BaseChannel[EchoSettings]):
         await asyncio.Event().wait()
 
 
-def _workspace(tmp_path):
+def _workspace(tmp_path, grace: float = 0.1):
     return Workspace(
         tmp_path,
         tmp_path / ".bos",
         {
             "runtime": {
-                "gateway": {"port": 0, "shutdown_grace_seconds": 0.1},
+                "gateway": {"port": 0, "shutdown_grace_seconds": grace},
                 "main_actor": "main",
                 "actors": {"main": {"agent": "main"}},
             },
@@ -317,3 +317,42 @@ async def test_failed_restart_stands_down_but_keeps_the_lock(tmp_path):
     released = acquire_singleton_lock(GatewayRunDir(tmp_path / ".bos"))
     assert released is not None
     released.close()
+
+
+@pytest.mark.asyncio
+async def test_acquire_refuses_while_a_demotion_teardown_is_in_flight(tmp_path):
+    """A demoting watchdog reports ``standby`` before it has let go of anything.
+
+    It flips the state first so that a ``restart()`` arriving mid-demotion is
+    refused rather than tearing the same runtime down alongside it — which
+    leaves a window, as long as the drain, where the mount reads ``standby``
+    while the lock and the runtime being torn down are both still there. The
+    lock file has been replaced by then, so a fresh acquire *succeeds* on the
+    new inode: a host calling ``acquire()`` in that window would build a second
+    runtime over the first, and the watchdog would go on to null it, close its
+    harness and release the flock this call had just taken.
+    """
+    mount = GatewayMount(lambda: _workspace(tmp_path, grace=1.0), lock_poll_seconds=0.05)
+    await mount.start()
+    assert mount.state == "live"
+    first = mount.gateway
+
+    # Another gateway replaced the lock file: ours now locks an orphaned inode,
+    # and the path itself is free for anyone to take.
+    GatewayRunDir(tmp_path / ".bos").lock_file.unlink()
+
+    for _ in range(500):  # catch it *inside* the teardown, not after it
+        if mount.state == "standby":
+            break
+        await asyncio.sleep(0.01)
+    assert mount.state == "standby"
+    assert mount.gateway is first  # the drain is still running
+    assert acquire_singleton_lock(GatewayRunDir(tmp_path / ".bos")) is not None  # and the path is free
+
+    assert await mount.acquire() is False
+    assert mount.gateway is first  # nothing was built over the runtime going away
+
+    await asyncio.wait_for(mount.wait_for_demotion(), timeout=10)
+    assert mount.gateway is None
+    await mount.stop()
+    assert mount.state == "stopped"
