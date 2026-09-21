@@ -182,7 +182,7 @@ start it
 
 | Changed | Picked up | Why |
 |---|---|---|
-| `config.toml` — actors, channels, plugin bindings, gateway settings | yes | re-read by the new `Workspace` |
+| `config.toml` — actors, channels, plugin bindings, gateway settings | yes, **except `host`/`port`** | re-read by the new `Workspace`; the socket is bound once by the caller and a restart only rebuilds the `Gateway` behind it, so a changed endpoint needs a host process restart |
 | `[[runtime.channels]]` added, removed, or re-configured | yes | `create_persistent` runs against the new config |
 | Agent definitions in `agent_dirs` — added or edited | yes | `resolve_agents()` + `AgentRegistry.register` overwrites by name |
 | Agent definitions — **deleted or renamed** | yes, **only with §3.5.4** | otherwise the stale registration survives and stays callable |
@@ -194,7 +194,7 @@ start it
 
 **Project-local extension files are not re-executed.** [`_load_ext_paths`](../../src/bos/core/_utils.py) *would* re-execute them — it uses `spec.loader.exec_module`, not the module cache. It is excluded anyway, because re-execution is unsafe: a file that constructs its own `ExtensionPoint(...)` hits [`registry.py:58`](../../src/bos/core/registry.py), which raises on a duplicate extension-point name, and `_load_ext_paths` swallows the exception into a warning — so the file silently fails to load and every tool it registered disappears. Making that safe means changing `bos.core.registry`, the innermost ring, for a mounted-mode developer convenience. Out of scope; §8 records it.
 
-One rule, no asterisk: **configuration and agent definitions reload; Python code does not.** The standalone `boscli gateway restart` is unaffected — it still replaces the process, so it still picks up everything. This limit belongs to the mounted mode and takes nothing away that exists today.
+One rule, one exception: **configuration and agent definitions reload; Python code does not, and neither does the bound endpoint — that socket belongs to the caller.** The standalone `boscli gateway restart` is unaffected — it still replaces the process, so it still picks up everything. This limit belongs to the mounted mode and takes nothing away that exists today.
 
 #### 3.5.3 Environment variables are not unset
 
