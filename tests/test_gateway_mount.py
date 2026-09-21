@@ -110,3 +110,40 @@ async def test_standby_serves_status_without_a_gateway(tmp_path):
     finally:
         await mount.stop()
         holder.close()
+
+
+@pytest.mark.asyncio
+async def test_demotion_releases_the_socket_instead_of_stranding_serve(tmp_path):
+    """Losing the lock must end the serving, not wedge the process.
+
+    ``Gateway.stop()`` never sets the shutdown event, so a ``serve()`` parked on
+    the gateway it captured would stay pending forever after the watchdog tore
+    that gateway down — holding the port in front of no runtime, while the
+    successor that actually won the lock dies on EADDRINUSE.
+    """
+    import socket
+
+    from bos.runner.runner import serve
+
+    mount = GatewayMount(lambda: _workspace(tmp_path), lock_poll_seconds=0.05)
+    await mount.start()
+    assert mount.state == "live"
+
+    served = asyncio.ensure_future(serve(mount))
+    for _ in range(200):
+        if mount.gateway is not None and mount.gateway.actual_port != 0:
+            break
+        await asyncio.sleep(0.02)
+    assert mount.gateway is not None
+    port = mount.gateway.actual_port
+    assert port != 0
+
+    # Another gateway replaced the lock file: our handle now locks an orphaned
+    # inode, which is exactly what lock_still_owned exists to catch.
+    GatewayRunDir(tmp_path / ".bos").lock_file.unlink()
+
+    await asyncio.wait_for(served, timeout=10)
+    assert mount.state == "stopped"
+    assert mount.gateway is None
+    with socket.socket() as probe:  # the port is free again
+        probe.bind(("127.0.0.1", port))

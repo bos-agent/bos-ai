@@ -33,7 +33,7 @@ def main() -> None:
     from bos.config import Workspace, resolve_config_source
     from bos.gateway.state import GatewayRunDir
     from bos.runner.mount import GatewayMount
-    from bos.runner.runner import serve
+    from bos.runner.runner import serve, shielded
 
     def _workspace_factory() -> Workspace:
         """Build a Workspace from this process's arguments.
@@ -85,22 +85,30 @@ def main() -> None:
         nonlocal gateway
         logger.info("Gateway process started (PID %d, workspace=%s)", os.getpid(), ws.workspace)
         mount = GatewayMount(_workspace_factory, runtime_label="process")
-        await mount.start()
-        if mount.state != "live":
-            # Another live gateway holds the flock for this run dir — however
-            # this one was launched (a duplicate `gateway start`, an `ask`
-            # auto-start racing an existing gateway). Exit rather than become a
-            # second poller; the pid file below stays the live process's.
-            logger.error("Another BOS gateway already running for %s — exiting.", ws.bos_dir)
-            await mount.stop()
-            return
-        gateway = mount.gateway
-        rd.pid_file.write_text(str(os.getpid()), encoding="utf-8")
+        # mount.start() is *inside* the try: until it returns there is no
+        # gateway, so every SIGTERM takes _on_sigterm's escalation branch and
+        # cancels this task mid-bring-up — with the lock taken and possibly the
+        # actors and channels already up. That cancel has to land on a teardown,
+        # not escape as a traceback.
         try:
+            await mount.start()
+            if mount.state != "live":
+                # Another live gateway holds the flock for this run dir — however
+                # this one was launched (a duplicate `gateway start`, an `ask`
+                # auto-start racing an existing gateway). Exit rather than become
+                # a second poller; the pid file stays the live process's.
+                logger.error("Another BOS gateway already running for %s — exiting.", ws.bos_dir)
+                return
+            gateway = mount.gateway
+            rd.pid_file.write_text(str(os.getpid()), encoding="utf-8")
             await serve(mount)
         except asyncio.CancelledError:
             logger.info("Gateway cancelled — exiting cleanly")
         finally:
+            # A no-op after serve(), which stops the mount itself; the work is
+            # for the bring-up and standby paths that never reached it. Shielded
+            # because the second SIGTERM of an escalating stop lands right here.
+            await shielded(mount.stop(graceful=False))
             rd.pid_file.unlink(missing_ok=True)
             logger.info("Gateway process stopped")
 

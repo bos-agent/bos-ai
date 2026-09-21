@@ -52,6 +52,7 @@ class GatewayMount:
         self._run_dir: GatewayRunDir | None = None
         self._lock: Any = None
         self._watchdog: asyncio.Task[None] | None = None
+        self._demoted = asyncio.Event()
         self._app: web.Application | None = None
 
     @property
@@ -61,6 +62,18 @@ class GatewayMount:
     @property
     def gateway(self) -> Gateway | None:
         return self._gateway
+
+    async def wait_for_demotion(self) -> None:
+        """Block until the watchdog tears a live runtime down (live → standby).
+
+        The mount never stops itself over a lost lock — an embedded host is
+        expected to stay up in standby and be promoted again later. A driver
+        that owns a socket cannot: the ``Gateway`` it captured is gone and will
+        never signal its own shutdown, so it must learn about the demotion here
+        and release the port. Only ever set *after* the teardown has finished,
+        so a waiter cannot race the watchdog into ``_tear_down_runtime``.
+        """
+        await self._demoted.wait()
 
     def status(self) -> dict[str, Any]:
         """The mount's view of the runtime, served at ``/api/status``.
@@ -130,6 +143,7 @@ class GatewayMount:
         await self._gateway.start()
         if self._public_base_url is not None:
             self._gateway.set_public_base_url(self._public_base_url)
+        self._demoted.clear()
         self._state = "live"
         return True
 
@@ -173,6 +187,10 @@ class GatewayMount:
                     await self._tear_down_runtime()
                     self._lock = None
                     self._state = "standby"
+                    # After the teardown, never before: _tear_down_runtime has
+                    # already cleared _gateway and _stack, so the stop() a woken
+                    # driver runs finds nothing left to tear down a second time.
+                    self._demoted.set()
             elif self._state == "standby":
                 if lock_is_free(self._run_dir) and await self._acquire_and_bring_up(self._workspace_factory()):
                     logger.info("Acquired the singleton lock for %s — going live.", self._run_dir.bos_dir)

@@ -507,6 +507,7 @@ def start(ctx, foreground: bool, workspace_dir: str | None):
         reap_stale,
         start_background,
     )
+    from bos.runner.runner import GatewayAlreadyRunningError
     from bos.runner.runner import start as start_gateway
 
     if is_running(rd):
@@ -522,7 +523,15 @@ def start(ctx, foreground: bool, workspace_dir: str | None):
 
     if foreground:
         click.echo("Starting gateway in foreground…")
-        asyncio.run(_run_foreground_gateway(start_gateway, ws))
+        try:
+            asyncio.run(_run_foreground_gateway(start_gateway, ws))
+        except GatewayAlreadyRunningError as exc:
+            # A foreground gateway writes no pid file, so the is_running check
+            # above can never see one — the mount's singleton flock is the only
+            # thing standing between this and a second poller on the same
+            # workspace. Report it the way the background path does.
+            click.echo(str(exc), err=True)
+            raise SystemExit(1) from exc
         return
 
     argv = [sys.executable, "-m", "bos.runner", "--config", runner_config_arg]

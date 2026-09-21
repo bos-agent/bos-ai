@@ -190,7 +190,7 @@ def test_runner_start_refuses_to_serve_when_another_gateway_holds_the_lock(tmp_p
     import pytest
 
     from bos.gateway.state import GatewayRunDir, acquire_singleton_lock
-    from bos.runner.runner import start
+    from bos.runner.runner import GatewayAlreadyRunningError, start
 
     calls: list[str] = []
 
@@ -220,7 +220,7 @@ def test_runner_start_refuses_to_serve_when_another_gateway_holds_the_lock(tmp_p
     holder = acquire_singleton_lock(rd)
     assert holder is not None
     try:
-        with pytest.raises(RuntimeError, match="singleton lock"):
+        with pytest.raises(GatewayAlreadyRunningError, match="already running"):
             asyncio.run(start(FakeWorkspace()))
     finally:
         holder.close()
@@ -228,6 +228,33 @@ def test_runner_start_refuses_to_serve_when_another_gateway_holds_the_lock(tmp_p
     # bootstrap_platform imports extension modules and writes os.environ; the
     # instance that loses the race must do neither.
     assert calls == []
+
+
+def test_gateway_start_foreground_refuses_cleanly_when_the_lock_is_held(tmp_path, monkeypatch):
+    """``--foreground`` writes no pid file, so ``is_running`` never sees one and
+    the mount's flock is the only guard. Its refusal must read like the
+    background path's — one line and exit 1 — not a stack trace."""
+    from click.testing import CliRunner
+
+    from bos.cli.entry import cli
+    from bos.gateway.state import GatewayRunDir, acquire_singleton_lock
+
+    monkeypatch.setenv("BOS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("BOS_GATEWAY_API_KEY", "secret")
+
+    rd = GatewayRunDir(tmp_path / "home" / "presets" / "default")
+    rd.ensure()
+    holder = acquire_singleton_lock(rd)
+    assert holder is not None
+    try:
+        result = CliRunner().invoke(cli, ["-c", "default", "gateway", "start", "--foreground"])
+    finally:
+        holder.close()
+
+    assert result.exit_code == 1
+    assert "already running" in result.output
+    assert "Traceback" not in result.output
+    assert isinstance(result.exception, SystemExit)
 
 
 def test_gateway_start_preserves_preset_name_for_background_runner(tmp_path, monkeypatch):
