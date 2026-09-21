@@ -110,7 +110,10 @@ async def test_standby_is_promoted_once_the_lock_frees(tmp_path):
 async def test_standby_serves_status_without_a_gateway(tmp_path):
     """The app is built once and indirects through the mount, so a standby can
     answer /api/status and refuse websockets while holding no runtime."""
+    import json
+
     from aiohttp import web
+    from aiohttp.test_utils import make_mocked_request
 
     rd = GatewayRunDir(tmp_path / ".bos")
     rd.ensure()
@@ -126,6 +129,12 @@ async def test_standby_serves_status_without_a_gateway(tmp_path):
         assert mount.build_app() is app  # built once, kept across restarts
         assert mount.status()["state"] == "standby"
         assert mount.status()["runtime"] == "embedded"
+        # …and refuse websockets. Production reaches /ws through the mount's
+        # dispatcher, never Gateway.build_app(), so this gate is the only thing
+        # standing between a client and a consumer that does not exist.
+        response = await mount._dispatch_ws(make_mocked_request("GET", "/ws?channel_id=early"))
+        assert response.status == 503
+        assert json.loads(response.text) == {"ok": False, "error": "standby"}
     finally:
         await mount.stop()
         holder.close()
