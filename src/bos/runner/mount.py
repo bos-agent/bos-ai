@@ -32,6 +32,11 @@ class GatewayMount:
 
     ``workspace_factory`` is a callable, not a ``Workspace``: a restart must
     re-read configuration, which means building a new one (BEP 17 §3.5.1).
+
+    ``state`` is one of ``starting``, ``live``, ``standby``, ``restarting`` or
+    ``stopped`` (BEP 17 §3.4.3). ``/api/status`` is served in all of them —
+    a status route that goes dark in the failure case is useless — and ``/ws``
+    in ``live`` alone.
     """
 
     def __init__(
@@ -53,6 +58,8 @@ class GatewayMount:
         self._lock: Any = None
         self._watchdog: asyncio.Task[None] | None = None
         self._demoted = asyncio.Event()
+        self._shutdown = asyncio.Event()
+        self._shutdown_bridge: asyncio.Task[None] | None = None
         self._app: web.Application | None = None
 
     @property
@@ -74,6 +81,23 @@ class GatewayMount:
         so a waiter cannot race the watchdog into ``_tear_down_runtime``.
         """
         await self._demoted.wait()
+
+    async def wait_for_shutdown(self) -> None:
+        """Block until the *current* gateway is asked to shut down.
+
+        The mount, not the ``Gateway``, is what a driver waits on, because
+        ``restart()`` replaces that object: a wait bound to the instance a
+        driver started with would never hear the new one's
+        ``request_shutdown()`` — a signal handler would stop reaching the
+        process. ``_forward_shutdown`` re-arms this on whichever gateway is
+        current, so the swap is invisible to the waiter.
+        """
+        await self._shutdown.wait()
+
+    async def _forward_shutdown(self, gateway: Gateway) -> None:
+        """Relay one gateway's shutdown request onto the mount's own signal."""
+        await gateway.wait_for_shutdown()
+        self._shutdown.set()
 
     def status(self) -> dict[str, Any]:
         """The mount's view of the runtime, served at ``/api/status``.
@@ -130,32 +154,109 @@ class GatewayMount:
         instance must not do.
         """
         assert self._run_dir is not None
-        self._lock = acquire_singleton_lock(self._run_dir)
-        if self._lock is None:
+        lock = acquire_singleton_lock(self._run_dir)
+        if lock is None:
+            # Assigned only on success: a failed restart leaves this mount in
+            # standby still holding the lock, and overwriting the handle there
+            # would drop the last reference to it — releasing the singleton
+            # lock as a side effect of failing to take it.
             return False
+        self._lock = lock
+        await self._bring_up_runtime(workspace)
+        self._state = "live"
+        return True
+
+    async def _bring_up_runtime(self, workspace: Workspace) -> Gateway:
+        """Build and start a runtime from *workspace*, under a lock we hold.
+
+        The one place that knows how a ``Gateway`` is assembled — the first
+        bring-up and every restart build it the same way, wholesale
+        (BEP 17 §3.5.1).
+        """
         from bos.gateway import Gateway
 
         workspace.resolve_agents()
         workspace.bootstrap_platform()
         self._stack = contextlib.AsyncExitStack()
         harness = await self._stack.enter_async_context(workspace.harness())
-        self._gateway = Gateway(runtime=workspace.resolve_gateway_runtime(), harness=harness)
-        await self._gateway.start()
+        gateway = Gateway(runtime=workspace.resolve_gateway_runtime(), harness=harness)
+        self._gateway = gateway
+        await gateway.start()
         if self._public_base_url is not None:
-            self._gateway.set_public_base_url(self._public_base_url)
+            gateway.set_public_base_url(self._public_base_url)
         self._demoted.clear()
-        self._state = "live"
-        return True
+        self._shutdown.clear()
+        self._shutdown_bridge = asyncio.ensure_future(self._forward_shutdown(gateway))
+        return gateway
 
     async def _tear_down_runtime(self, *, graceful: bool = True) -> None:
         """Stop the gateway and close the harness. Leaves the lock alone —
         a restart keeps it (BEP 17 §3.5.1)."""
+        if self._shutdown_bridge is not None:
+            # Before the gateway goes: the bridge must not outlive the instance
+            # it relays for, or a restart would leave a task parked on a dead
+            # gateway able to signal a shutdown the live one never asked for.
+            self._shutdown_bridge.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._shutdown_bridge
+            self._shutdown_bridge = None
         if self._gateway is not None:
             await self._gateway.stop(graceful=graceful)
             self._gateway = None
         if self._stack is not None:
             await self._stack.aclose()
             self._stack = None
+
+    async def restart(self) -> None:
+        """Tear the runtime down and rebuild it from freshly read configuration.
+
+        The whole ``Gateway`` is replaced, not restarted: ``create_persistent``
+        instantiates from the list ``Gateway.__init__`` captured, and
+        ``ChannelManager.stop_all()`` does not clear its registry — reusing the
+        manager would raise ``Duplicate channel_id`` on the second restart
+        (BEP 17 §3.5.1).
+
+        Configuration and agent definitions reload; Python code does not
+        (BEP 17 §3.5.2). The lock is held throughout, and so is the listening
+        socket: the host owns it, nothing is rebound, and a driver parked in
+        ``serve()`` stays parked — it waits on the mount, never on the gateway
+        this replaces, and the demotion signal that *does* end a serving is not
+        touched here.
+        """
+        # ponytail: no mutex — the mount is not re-entrant, and restart() has no
+        # caller yet (Layer 3's POST /api/restart is the first). The state
+        # machine is what keeps it clear of the watchdog: "restarting" matches
+        # neither of its branches, so a mid-restart mount is neither demoted nor
+        # promoted under us, and a demotion that got there first has already
+        # moved the state off "live", which the guard below refuses. Give it a
+        # concurrent caller — a host that can restart while stopping — and this
+        # wants an asyncio.Lock around start/stop/restart/acquire: a
+        # request_shutdown() aimed at the gateway being torn down lands on a
+        # relay that is already cancelled, so the stop is lost until the caller
+        # escalates.
+        if self._state != "live":
+            raise RuntimeError(f"Cannot restart a gateway that is {self._state!r}; it holds no lock.")
+        assert self._gateway is not None
+        # Carried across the swap: the socket is the host's and is not rebound,
+        # so what it bound is still the truth. A fresh Gateway reports the
+        # *configured* endpoint, which with ``port = 0`` is not a port anything
+        # can connect to — and it publishes that to gateway.state on start().
+        endpoint = (self._gateway.actual_host, self._gateway.actual_port)
+        self._state = "restarting"
+        try:
+            await self._tear_down_runtime()
+            gateway = await self._bring_up_runtime(self._workspace_factory())
+            gateway.set_endpoint(*endpoint)
+        except BaseException:
+            # A failed rebuild must not look live. The lock is kept: this
+            # instance is still the singleton, and dropping it here would invite
+            # another process in while this one is still wired up. Nothing
+            # promotes the mount back by itself — the watchdog's standby branch
+            # waits for a lock that *we* hold, and the guard above refuses a
+            # second restart() — so recovery is stop() then start().
+            self._state = "standby"
+            raise
+        self._state = "live"
 
     async def stop(self, *, graceful: bool = True) -> None:
         if self._state == "stopped":
@@ -184,9 +285,13 @@ class GatewayMount:
             if self._state == "live":
                 if not lock_still_owned(self._run_dir, self._lock):
                     logger.error("Lost singleton lock ownership for %s — standing down.", self._run_dir.bos_dir)
+                    # Off "live" before the teardown, which takes the drain's
+                    # grace to run: a restart() arriving during it must be
+                    # refused outright rather than tear the same runtime down a
+                    # second time alongside us.
+                    self._state = "standby"
                     await self._tear_down_runtime()
                     self._lock = None
-                    self._state = "standby"
                     # After the teardown, never before: _tear_down_runtime has
                     # already cleared _gateway and _stack, so the stop() a woken
                     # driver runs finds nothing left to tear down a second time.
@@ -204,7 +309,11 @@ class GatewayMount:
         return self._gateway.config if self._gateway is not None else ResolvedGatewayConfig()
 
     async def _dispatch_ws(self, request: web.Request) -> web.StreamResponse:
-        if self._gateway is None:
+        # Live only (BEP 17 §3.4.3). The state, not just the presence of a
+        # gateway: a restart installs the new instance before its actors and
+        # channels are up, and a websocket accepted in that window would get a
+        # consumer that does not exist yet.
+        if self._state != "live" or self._gateway is None:
             return web.json_response({"ok": False, "error": self._state}, status=503)
         return await self._gateway.handle_ws(request)
 

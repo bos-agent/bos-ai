@@ -73,8 +73,11 @@ async def serve(mount: GatewayMount) -> None:
         # gone and will never signal, so waiting only on it would park here
         # forever holding the port in front of no runtime — and the successor
         # that won the lock would then die on EADDRINUSE.
+        # Both waits are the mount's, not the gateway's: a hot restart replaces
+        # that object while this call stays parked, and a wait bound to the
+        # instance captured above would go deaf to the live gateway's shutdown.
         waiters = [
-            asyncio.ensure_future(gateway.wait_for_shutdown()),
+            asyncio.ensure_future(mount.wait_for_shutdown()),
             asyncio.ensure_future(mount.wait_for_demotion()),
         ]
         try:

@@ -3,14 +3,33 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 
 import pytest
 
 from bos.config import Workspace
+from bos.config.schema import AgentConfig, ChannelConfig
+from bos.core import BaseChannel, MailBox, ep_channel
 from bos.extensions.chat_stores.in_memory import InMemChatStore
 from bos.extensions.mailboxes.in_memory import InMemMailRoute
 from bos.gateway.state import GatewayRunDir, acquire_singleton_lock
 from bos.runner.mount import GatewayMount
+
+
+@dataclass(frozen=True)
+class EchoSettings:
+    pass
+
+
+@ep_channel(name="EchoChannel")
+class EchoChannel(BaseChannel[EchoSettings]):
+    """A persistent channel that exists only to be created and cancelled, so a
+    restart's channel rebuild is observable."""
+
+    SettingsType = EchoSettings
+
+    async def run(self, mailbox: MailBox) -> None:
+        await asyncio.Event().wait()
 
 
 def _workspace(tmp_path):
@@ -147,3 +166,154 @@ async def test_demotion_releases_the_socket_instead_of_stranding_serve(tmp_path)
     assert mount.gateway is None
     with socket.socket() as probe:  # the port is free again
         probe.bind(("127.0.0.1", port))
+
+
+@pytest.mark.asyncio
+async def test_restart_picks_up_a_new_channel_and_keeps_the_lock(tmp_path):
+    """A restart must rebuild the whole Gateway: create_persistent instantiates
+    from the list Gateway.__init__ captured, so new [[runtime.channels]] entries
+    are only seen by a new instance (BEP 17 §3.5.1)."""
+    channels: list[ChannelConfig] = []
+
+    def factory():
+        ws = _workspace(tmp_path)
+        ws.config.runtime.channels = list(channels)
+        return ws
+
+    mount = GatewayMount(factory, lock_poll_seconds=60)
+    await mount.start()
+    try:
+        assert mount.state == "live"
+        first = mount.gateway
+        assert mount.gateway is not None
+        assert mount.gateway.channel_manager.channels == {}
+
+        channels.append(ChannelConfig(type="EchoChannel", channel_id="added", target_actor="main"))
+        await mount.restart()
+
+        assert mount.state == "live"
+        assert mount.gateway is not first
+        assert mount.gateway is not None
+        assert "added" in mount.gateway.channel_manager.channels
+        # Held throughout: a released lock would let another process take over.
+        assert acquire_singleton_lock(GatewayRunDir(tmp_path / ".bos")) is None
+    finally:
+        await mount.stop()
+
+
+@pytest.mark.asyncio
+async def test_two_consecutive_restarts_do_not_collide(tmp_path):
+    """ChannelManager.stop_all() does not clear _channels, so an implementation
+    that reused the manager would raise Duplicate channel_id — on the *second*
+    restart, not the first."""
+    mount = GatewayMount(lambda: _workspace(tmp_path), lock_poll_seconds=60)
+    await mount.start()
+    try:
+        await mount.restart()
+        await mount.restart()
+        assert mount.state == "live"
+    finally:
+        await mount.stop()
+
+
+@pytest.mark.asyncio
+async def test_restart_drops_an_agent_that_left_the_config(tmp_path):
+    """The other half of Task 1: without AgentRegistry.clear() the deleted agent
+    stays registered and callable (BEP 17 §3.5.4)."""
+    from bos.core import AgentRegistry
+
+    agents = {"main": {"system_prompt": "hi"}, "researcher": {"system_prompt": "You research."}}
+
+    def factory():
+        ws = _workspace(tmp_path)
+        ws.config.agents = {name: AgentConfig(**cfg) for name, cfg in agents.items()}
+        return ws
+
+    mount = GatewayMount(factory, lock_poll_seconds=60)
+    await mount.start()
+    try:
+        assert AgentRegistry.has_registered("researcher")
+        del agents["researcher"]
+        await mount.restart()
+        assert not AgentRegistry.has_registered("researcher")
+        assert AgentRegistry.has_registered("main")
+    finally:
+        await mount.stop()
+
+
+@pytest.mark.asyncio
+async def test_restart_does_not_wake_serve(tmp_path):
+    """A restart must leave a driver parked on the socket.
+
+    ``serve()`` waits on the mount, not on the ``Gateway`` it started with: the
+    restart replaces that object, so a wait bound to it would either never fire
+    again (the new gateway's ``request_shutdown`` unheard, leaving the process
+    unstoppable) or — if the restart reused the demotion signal — fire straight
+    away and turn a restart into a stop.
+    """
+    import socket
+
+    from bos.runner.runner import serve
+
+    mount = GatewayMount(lambda: _workspace(tmp_path), lock_poll_seconds=60)
+    await mount.start()
+    assert mount.state == "live"
+
+    served = asyncio.ensure_future(serve(mount))
+    for _ in range(200):
+        if mount.gateway is not None and mount.gateway.actual_port != 0:
+            break
+        await asyncio.sleep(0.02)
+    assert mount.gateway is not None
+    port = mount.gateway.actual_port
+    assert port != 0
+
+    await mount.restart()
+    await asyncio.sleep(0.1)  # give a woken serve() every chance to finish
+
+    assert not served.done()
+    assert mount.state == "live"
+    assert mount.gateway is not None
+    # The socket is the driver's and is never rebound, so the rebuilt gateway
+    # must publish the port that is actually bound — not the configured 0.
+    assert mount.gateway.actual_port == port
+    with socket.socket() as probe, pytest.raises(OSError):
+        probe.bind(("127.0.0.1", port))
+
+    # And the *new* gateway can still end the serving — the wait survived the swap.
+    mount.gateway.request_shutdown()
+    await asyncio.wait_for(served, timeout=10)
+    assert mount.state == "stopped"
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", port))
+
+
+@pytest.mark.asyncio
+async def test_failed_restart_stands_down_but_keeps_the_lock(tmp_path):
+    """A rebuild that raises must not leave the mount looking live, and must not
+    hand the run dir to another process on the way out."""
+    calls: list[int] = []
+
+    def factory():
+        calls.append(1)
+        if len(calls) > 1:
+            raise RuntimeError("bad config")
+        return _workspace(tmp_path)
+
+    mount = GatewayMount(factory, lock_poll_seconds=60)
+    await mount.start()
+    try:
+        assert mount.state == "live"
+        with pytest.raises(RuntimeError, match="bad config"):
+            await mount.restart()
+        assert mount.state == "standby"
+        assert mount.gateway is None
+        assert acquire_singleton_lock(GatewayRunDir(tmp_path / ".bos")) is None
+        assert mount.status()["state"] == "standby"
+    finally:
+        await mount.stop()
+    assert mount.state == "stopped"
+    # stop() released it: the lock outlives a failed restart, not the mount.
+    released = acquire_singleton_lock(GatewayRunDir(tmp_path / ".bos"))
+    assert released is not None
+    released.close()
