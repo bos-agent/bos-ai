@@ -1,8 +1,8 @@
 # BEP 16: Embeddable Core — Dependency Extras and CLI Distribution Split
 
-- **Status:** Draft
+- **Status:** **Track A complete** — shipped in `bos-ai` 2.0.0 and `boscli` 2.0.0 (#92, #93, #94, #95, #97). **Track B** is no longer part of this BEP; it is designed in BEP 17 (§8).
 - **Depends on:** BEP 13 (concentric rings — this BEP packages the import graph BEP 13 already built and guards), BEP 4 (extension points / `bos.exts`), BEP 9 (scaffolding, `llm-full.md`), BEP 6 (configuration architecture)
-- **Blocked by:** nothing. **Track A** (§3–§7) is implementable now. **Track B** (§8, ASGI-mountable gateway) is *declared and scoped only* — it is not designed in this BEP and must not be presumed by Track A work.
+- **Amended by:** BEP 17 — it replaces the contents of the `gateway` extra (§3.2) and changes the reason, though not the text, of one `_optional` mapping (§3.4).
 
 ---
 
@@ -241,7 +241,7 @@ The intended change, and the only user-visible one. Affected call sites:
 | `README.md` Quick Start | `pip install bos-ai` + `boscli ask` → `uvx boscli ask` (already the documented alternative) or `pip install bos-ai[cli]` |
 | `src/bos/llm-full.md` | Any installation instruction naming `pip install bos-ai` as the way to get the CLI |
 | Docs site install pages | Same |
-| `cli/scaffold/templates/**` | Audit for generated README/docs that tell a scaffolded project's user how to install |
+| `cli/scaffold/templates/**` | **Audited late (#97).** The package archetype declared `dependencies = ["bos-ai"]` while its README and `boscli init`'s next-steps both say `uv run boscli …`, so every project scaffolded against 2.0.0 could not be run. `boscli` now goes in the template's dev group — not `dependencies`, since a project installing the package wants its tools and skills, not a terminal UI. |
 
 **Compatibility stance:** no shim, no deprecation period. `uvx boscli` and `pip install boscli` — the paths the README already leads with — are unaffected, so the migration for a CLI user is a one-line install change. A `bos-ai` release note calls it out.
 
@@ -307,18 +307,14 @@ Each states its preconditions.
 
 ---
 
-## 8. Track B: ASGI-mountable gateway (declared, not designed)
+## 8. Track B: ASGI-mountable gateway — moved to BEP 17
 
-**Readiness: blocked — not implementable from this BEP.** Track B needs its own BEP. It is named here so Track A's scope boundary is explicit and so no Track A reviewer adds a seam for it.
+Track B is designed in **BEP 17: ASGI-Mountable Gateway and In-Process Lifecycle**. Its two forks, left open here, were resolved there:
 
-The goal is that a host ASGI application (FastAPI, Starlette, Litestar) can mount the gateway's protocol surface instead of supervising a separate process. The surface is small — four routes and one WebSocket endpoint (`/api/status`, `/api/actors`, `/api/upload-image`, `/api/upload`, `/ws`; `gateway/http.py:56-60`) — but it is built on `aiohttp.web`, which is not ASGI.
+1. **Replace `aiohttp` or run both transports?** → Replace. Measured 11 MB for `aiohttp` against 6.3 MB for `starlette` + `uvicorn` + `python-multipart` + `httpx` + `websockets`, server and client together (BEP 17 §3.9).
+2. **Splitting `Gateway`'s two responsibilities.** → Only the socket leaves. The run directory, the state file and the singleton lock stay in the library, because one live gateway per `bos_dir` is a correctness requirement rather than an operational one (BEP 17 §3.2 and BEP 17 §3.4.1).
 
-Unresolved before that BEP can be written:
-
-1. **Replace `aiohttp` or run both transports?** Fallout of replacing: `gateway/http.py`, `gateway/gateway.py`, `gateway/channels/ws_channel.py`, `gateway/client.py` (the TUI's WebSocket client), `extensions/channels/telegram.py`, `bos/runner/`, and seven `tests/test_gateway_*.py` files.
-2. **Splitting `Gateway`'s two responsibilities.** It currently owns both the protocol surface and the process lifecycle (run directory, PID file, singleton lock, state file). An embedder wants only the former. This split is Track B's first step and can be done without changing the transport — but it is **not** part of Track A, by the explicit decision that Track A introduces no anticipatory structure.
-
-**Track A does not depend on Track B, and Track B's design must not be assumed by Track A work.**
+Track A shipped without any anticipatory seam for Track B, as intended.
 
 ---
 
@@ -332,6 +328,8 @@ None outstanding.
 ---
 
 ## 10. Revision history
+
+- 2026-09-20 — **Track A closed.** Shipped as `bos-ai` 2.0.0 and `boscli` 2.0.0; all seven steps of §6 landed. Two items the plan listed but did not carry out were found and fixed afterwards (#97): the `cli/scaffold/templates/**` audit §5.1 called for had been skipped, and every scaffolded package project was unrunnable as a result; and this repository's own dev environment lost the extras on a clean `uv sync`, which broke CLAUDE.md's `uv run python -m bos.cli` and stopped 16 test modules from importing. `bos-ai[all]` now sits in the dev group — `[tool.uv] default-extras` reads as the tidier fix but is silently ignored by uv 0.8.22 — and a new `tests.yml` runs a plain `uv sync` so the next drift is caught. That job went red on its first run and surfaced an unrelated real defect: `_pid_is_gateway`'s fallback matched `bos` and `runner` anywhere in a cmdline, so on a CI checkout at `/home/runner/work/bos-ai` every process looked like a gateway and the PID-reuse guard never fired. §8 was replaced by a pointer to BEP 17.
 
 - 2026-09-19 — Implementation finding, §5.3 corrected again. The guard does **not** belong in `LLMClient.complete()`: `litellm_provider.py` registers at import time while its `import litellm` is function-local, so on a base install `ep_provider.has("litellm")` is `True` and such a guard never fires. Verified against a real base install — the guard belongs in `litellm_complete` around its own import. Also recorded that `Agent.run()` does not propagate the `ValueError`; the turn loop returns it as the turn's output, which is how a CLI or channel user actually sees it. §7.3 restated accordingly.
 - 2026-09-19 — Implementation findings, two corrections. §3.4 listed two built-ins losing a base dependency; it is three — `extensions/channels/lark.py:34` imports `bos.gateway` at module level, so it needs the `gateway` extra to import even though its own SDK import is already deferred. §3.3/§5.1 did not say how to run the CLI once the console script is gone: `src/bos/cli/__main__.py` is added so `python -m bos.cli` works, without which `bos-ai[cli]` installs dependencies for a CLI that cannot be invoked, and `CLAUDE.md`'s `uv run boscli` workflow breaks with no replacement.
