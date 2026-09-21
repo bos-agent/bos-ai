@@ -496,8 +496,21 @@ def start(ctx, foreground: bool, workspace_dir: str | None):
     """Start the BOS gateway."""
     ws, rd = _get_ws_and_rd(ctx, workspace_dir)
 
-    ws.resolve_agents()
-    ws.bootstrap_platform()
+    # Background only. The foreground path hands this same Workspace to
+    # runner.start(), whose mount bootstraps it once it holds the singleton
+    # lock; doing it here as well re-executes every ./extensions/*.py, because
+    # _load_ext_paths uses spec.loader.exec_module rather than the module cache.
+    # A file that constructs its own ExtensionPoint raises on the second pass,
+    # _load_ext_paths swallows that into a warning, and every tool, plugin and
+    # channel it registered is then silently missing from the gateway
+    # (BEP 17 §3.5.2). Nothing between here and _run_foreground_gateway reads
+    # the registry, so the foreground path loses nothing by skipping it; the
+    # background path keeps it as its pre-flight, since the work happens in a
+    # child process there and a bad agent file should fail in front of the
+    # operator rather than in the daemon log.
+    if not foreground:
+        ws.resolve_agents()
+        ws.bootstrap_platform()
 
     from bos.runner.proc import (
         _pid_alive,

@@ -387,3 +387,49 @@ def test_gateway_status_marks_stale_state_and_hides_dead_details(tmp_path, monke
     assert "37701" not in result.output  # nothing is listening there
     assert "running" not in result.output  # actors belong to the dead process
     assert "Uptime" not in result.output
+
+
+def test_gateway_start_leaves_the_bootstrap_to_the_mount_in_foreground(tmp_path, monkeypatch):
+    """``--foreground`` must not bootstrap ahead of ``runner.start()``.
+
+    The mount bootstraps the same Workspace once it holds the singleton lock. A
+    second pass re-executes every ``./extensions/*.py`` — ``_load_ext_paths``
+    runs the file through ``spec.loader.exec_module``, not the module cache — so
+    a file that constructs its own ``ExtensionPoint`` raises on the replay, is
+    swallowed into a warning, and takes every tool, plugin and channel it
+    registered out of the gateway with it (BEP 17 §3.5.2). The background path
+    keeps it: the bootstrap happens in a child process there, so this is its
+    only pre-flight.
+    """
+    from click.testing import CliRunner
+
+    from bos.cli.entry import cli
+    from bos.config import Workspace
+
+    monkeypatch.setenv("BOS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("BOS_GATEWAY_API_KEY", "secret")
+
+    calls: list[str] = []
+    monkeypatch.setattr(Workspace, "resolve_agents", lambda self: calls.append("resolve_agents"))
+    monkeypatch.setattr(Workspace, "bootstrap_platform", lambda self: calls.append("bootstrap_platform"))
+
+    async def fake_start(workspace, *, on_ready=None):
+        calls.append("runner_start")
+
+    monkeypatch.setattr("bos.runner.runner.start", fake_start)
+
+    result = CliRunner().invoke(cli, ["-c", "default", "gateway", "start", "--foreground"])
+    assert result.exit_code == 0, result.output
+    assert calls == ["runner_start"]  # the mount, and only the mount, bootstraps
+
+    monkeypatch.setattr("bos.runner.proc.is_running", lambda rd: False)
+    monkeypatch.setattr(
+        "bos.runner.proc.read_state",
+        lambda rd: {"pid": 1234, "gateway": {"host": "127.0.0.1", "port": 5920}},
+    )
+    monkeypatch.setattr("bos.runner.proc.start_background", lambda argv, rd, env=None, cwd=None: 1234)
+
+    calls.clear()
+    result = CliRunner().invoke(cli, ["-c", "default", "gateway", "start"])
+    assert result.exit_code == 0, result.output
+    assert calls == ["resolve_agents", "bootstrap_platform"]
