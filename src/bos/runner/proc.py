@@ -17,9 +17,32 @@ import signal
 import subprocess
 from pathlib import Path
 
-from bos.gateway.state import GatewayRunDir
+from bos.gateway.state import (
+    GatewayRunDir,
+    acquire_singleton_lock,
+    lock_is_free,
+    lock_still_owned,
+)
 
 LifecycleRunDir = GatewayRunDir
+
+# Re-exported for bos.cli, which imports them from here (gateway restart/stop).
+__all__ = [
+    "GatewayRunDir",
+    "LifecycleRunDir",
+    "_pid_alive",
+    "_pid_is_gateway",
+    "acquire_singleton_lock",
+    "is_running",
+    "kill_process",
+    "lock_is_free",
+    "lock_still_owned",
+    "read_state",
+    "reap_stale",
+    "start_background",
+    "stop_gateway",
+    "write_state",
+]
 
 
 # ── state file ─────────────────────────────────────────────────
@@ -118,90 +141,6 @@ def reap_stale(rd: LifecycleRunDir) -> bool:
         except OSError:
             pass
     return cleaned
-
-
-def lock_still_owned(rd: LifecycleRunDir, handle) -> bool:
-    """Return True if *handle* still locks the live ``gateway.lock`` inode.
-
-    ``flock`` binds to an inode, not a path. If the lock file is unlinked and
-    recreated — a stale run dir wiped by hand, or a racing starter — the handle
-    keeps locking an orphaned inode while a fresh process can lock the new file,
-    so both would believe they are the singleton. Comparing the handle's inode
-    to the file currently at the path detects that divergence. Returns False if
-    either stat fails (file gone), which callers treat as lost ownership.
-    """
-    try:
-        held = os.fstat(handle.fileno())
-        on_disk = os.stat(rd.lock_file)
-    except OSError:
-        return False
-    return (held.st_dev, held.st_ino) == (on_disk.st_dev, on_disk.st_ino)
-
-
-def acquire_singleton_lock(rd: LifecycleRunDir):
-    """Acquire the exclusive, non-blocking gateway lock for this run dir.
-
-    Returns an open file object that MUST be kept referenced for the process
-    lifetime (closing it, or the process exiting/crashing, releases the lock).
-    Returns None if another live gateway already holds the lock. On platforms
-    without ``fcntl`` (e.g. Windows) locking is unsupported and a no-op handle
-    is returned so callers proceed unguarded.
-    """
-    rd.ensure()
-    try:
-        import fcntl
-    except ImportError:
-        return rd.lock_file.open("w")  # locking unsupported; behave as before
-
-    # Lock, then confirm the inode we locked is still the file at the path. If a
-    # racing starter replaced the file between open() and flock(), our lock is on
-    # an orphaned inode — drop it and retry against the current file. A bounded
-    # retry converges: either we lock the live file, or another holder owns it
-    # and flock fails.
-    for _ in range(5):
-        handle = rd.lock_file.open("w")
-        try:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            handle.close()
-            return None
-        if lock_still_owned(rd, handle):
-            return handle
-        handle.close()
-    return None
-
-
-def lock_is_free(rd: LifecycleRunDir) -> bool:
-    """Best-effort probe: True if the singleton flock is currently acquirable.
-
-    Acquires the lock non-blocking and releases it immediately, so a caller can
-    poll for a previous gateway to *actually* let go of the lock. This is the
-    correct signal for ``restart``: a dying gateway unlinks its pid file (and
-    ``stop`` removes the state file) well before the process has fully exited and
-    the OS has dropped the flock, so ``is_running`` — which keys off the pid file
-    — reports "stopped" while the lock is still held. Polling this avoids the
-    fresh gateway racing the still-exiting one and losing the lock.
-
-    On platforms without ``fcntl`` (e.g. Windows) locking is unsupported, so we
-    cannot observe contention and report free (matching ``acquire_singleton_lock``,
-    which proceeds unguarded there).
-    """
-    rd.ensure()
-    try:
-        import fcntl
-    except ImportError:
-        return True
-    try:
-        handle = rd.lock_file.open("w")
-    except OSError:
-        return True  # cannot open to probe — do not block the caller
-    try:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        return True
-    except OSError:
-        return False  # another live process still holds it
-    finally:
-        handle.close()  # releases the probe lock (if we took it)
 
 
 def kill_process(rd: LifecycleRunDir, sig: int = signal.SIGTERM) -> None:
