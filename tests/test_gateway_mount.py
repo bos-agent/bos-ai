@@ -365,3 +365,54 @@ async def test_acquire_refuses_while_a_demotion_teardown_is_in_flight(tmp_path):
     assert mount.gateway is None
     await mount.stop()
     assert mount.state == "stopped"
+
+
+@pytest.mark.asyncio
+async def test_escalating_through_serve_gives_up_the_remaining_grace(tmp_path, monkeypatch):
+    """A second signal must reach the drain, through ``serve()``.
+
+    ``serve()`` shields only the socket cleanup. Shielding the whole stop
+    instead puts the drain inside a child task, where the cancel lands on
+    ``asyncio.shield`` and is swallowed — so Ctrl-C twice costs a *full* grace
+    rather than cutting the remaining one short, while still printing
+    "Stopping now.". ``Gateway.stop()``'s own escalation test cancels that call
+    directly and cannot see this.
+    """
+    import socket
+
+    from bos.runner.runner import serve
+
+    mount = GatewayMount(lambda: _workspace(tmp_path, grace=30), lock_poll_seconds=60)
+    await mount.start()
+    assert mount.state == "live"
+    gateway = mount.gateway
+    assert gateway is not None
+
+    in_drain = asyncio.Event()
+
+    async def _drain(grace):  # a turn that takes its whole grace to close
+        in_drain.set()
+        await asyncio.sleep(grace)
+
+    monkeypatch.setattr(gateway.actor_manager, "drain_all", _drain)
+
+    served = asyncio.ensure_future(serve(mount))
+    for _ in range(200):
+        if gateway.actual_port != 0:
+            break
+        await asyncio.sleep(0.02)
+    port = gateway.actual_port
+    assert port != 0
+
+    gateway.request_shutdown()  # first signal: drain
+    await asyncio.wait_for(in_drain.wait(), timeout=5)
+    served.cancel()  # second signal: stop now
+    # Far below the 30s grace: with the drain shielded, this times out.
+    await asyncio.wait_for(asyncio.gather(served, return_exceptions=True), timeout=5)
+
+    # Cutting the drain short must not cost the teardown.
+    assert mount.state == "stopped"
+    assert mount.gateway is None
+    with socket.socket() as probe:  # the socket went with it
+        probe.bind(("127.0.0.1", port))
+

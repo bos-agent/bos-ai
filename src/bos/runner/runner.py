@@ -95,11 +95,17 @@ async def serve(mount: GatewayMount) -> None:
         # channels — and therefore a live socket — to deliver the replies it
         # produces, so the socket goes last. A demotion has already torn the
         # runtime down, which makes this stop() a lock release and nothing more.
-        async def _finish() -> None:
+        #
+        # mount.stop is deliberately *not* shielded: the drain inside it is the
+        # one cancellable part of a shutdown, and an escalating second signal
+        # must reach it so it costs the remaining grace rather than a fresh
+        # full one. Gateway.stop() suppresses that cancel itself and shields
+        # its own teardown, so what follows the drain still completes. Only the
+        # socket, which no cancel may leave behind, goes under the shield.
+        try:
             await mount.stop(graceful=graceful)
-            await runner.cleanup()
-
-        await shielded(_finish())
+        finally:
+            await shielded(runner.cleanup())
 
 
 async def start(workspace: Workspace, *, on_ready: Callable[[Gateway], None] | None = None) -> None:
