@@ -747,3 +747,23 @@ def test_agent_config_dump_shape_table(label, raw, expected):
     """
     dumped = _agent_config_to_dict(AgentConfig.model_validate({"system_prompt": "x", **raw}))
     assert dumped == {"system_prompt": "x", **expected}, label
+
+
+def test_rebootstrap_drops_an_agent_that_left_the_config(tmp_path):
+    """A second bootstrap must not leave the first one's agents registered.
+
+    Hot restart (BEP 17 §3.5.4) re-runs bootstrap_platform in a live process.
+    AgentRegistry is a class-level dict whose only writer is that loop, so a
+    deleted agent that stays registered is still offered by SubagentPlugin and
+    still resolvable by the harness — it runs with its old definition.
+    """
+    first = Workspace(tmp_path, tmp_path / ".bos", {"agents": {"researcher": {"system_prompt": "You research."}}})
+    first.bootstrap_platform()
+    assert AgentRegistry.has_registered("researcher")
+
+    second = Workspace(tmp_path, tmp_path / ".bos", {"agents": {"writer": {"system_prompt": "You write."}}})
+    second.bootstrap_platform()
+
+    assert AgentRegistry.has_registered("writer")
+    assert not AgentRegistry.has_registered("researcher")
+    assert "researcher" not in AgentRegistry.describe()

@@ -636,6 +636,11 @@ class Workspace:
         # Factory agents (ep_agent, e.g. the built-in BOS) are valid parents too.
         config_specs = _resolve_agent_inheritance(config_specs, factory_specs)
 
+        # Rebuild rather than accumulate: every entry below is derived from
+        # factory_specs (ep_agent) and config_specs (config.agents), so a
+        # re-bootstrap must not inherit a previous one's agents.
+        AgentRegistry.clear()
+
         for name in {**factory_specs, **config_specs}:
             # Deep-copy every term: _deep_merge mutates its base in place, so a
             # shallow copy would leave nested dicts (plugins, plugin-bindings, ...)

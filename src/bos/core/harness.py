@@ -83,6 +83,18 @@ class AgentRegistry:
         }
 
     @classmethod
+    def clear(cls) -> None:
+        """Drop every registration.
+
+        The registry is rebuilt in full by ``Workspace.bootstrap_platform``
+        from ``ep_agent`` factories plus ``config.agents``, which is its only
+        writer — so clearing first is what makes a re-bootstrap *replace* the
+        set rather than accumulate into it. Without this a hot restart keeps
+        agents whose definitions are gone (BEP 17 §3.5.4).
+        """
+        cls._registry.clear()
+
+    @classmethod
     def has_registered(cls, name: str) -> bool:
         return name in cls._registry
 
