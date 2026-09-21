@@ -81,9 +81,10 @@ class Gateway:
                 else Path(self.config.upload_dir),
             )
         )
-        # Channel instantiation is async (ep_channel.invoke); deferred to run().
+        # Channel instantiation is async (ep_channel.invoke); deferred to start().
         self._persistent_channel_configs = runtime.channels
         self._shutdown = asyncio.Event()
+        self._stopped = False
 
     @property
     def shutdown_requested(self) -> bool:
@@ -189,57 +190,63 @@ class Gateway:
     async def _write_state(self) -> None:
         write_gateway_state(GatewayRunDir(self.bos_dir), self.status_snapshot())
 
-    async def run(self) -> None:
+    async def start(self) -> None:
+        """Bring up actors and channels. Does not bind a socket, does not block.
+
+        The caller must not serve before this returns. Serving first accepts
+        requests into a gateway with no consumers, and a mailbox pins its
+        receive offset when its owner binds — so an envelope written before that
+        bind is skipped for good, not merely delayed: a fire-and-forget
+        notification vanishes and anything awaiting a reply hangs to timeout.
+        Actors bind before channels so a channel cannot outrun an actor's bind.
+        """
         await self.channel_manager.create_persistent(self._persistent_channel_configs)
-        app = self.build_app()
-        runner = web.AppRunner(app, access_log=None)
-        await runner.setup()
-        site = web.TCPSite(runner, self.config.host, self.config.port)
-        # Actors and channels come up *before* the socket listens. Serving first
-        # accepted requests into a gateway with no consumers, and a mailbox pins
-        # its receive offset when its owner binds — so an envelope written before
-        # that bind is skipped for good, not merely delayed: a fire-and-forget
-        # notification vanishes and anything awaiting a reply hangs to timeout.
-        # Actors bind before channels so a channel cannot outrun an actor's bind.
         await self.actor_manager.start_all()
         await self.channel_manager.start_all()
-        await site.start()
-        server = getattr(site, "_server", None)
-        sockets = server.sockets if server else None
-        if sockets:
-            self.actual_port = sockets[0].getsockname()[1]
-        self.actual_host = self.config.host
         write_gateway_state(GatewayRunDir(self.bos_dir), self.status_snapshot())
-        graceful = True
-        try:
-            await self._shutdown.wait()
-        except asyncio.CancelledError:
-            # Being cancelled is the forceful path — an operator escalating, or
-            # the process going down now. Skip the drain rather than holding the
-            # stop open for turns that were told to hurry.
-            graceful = False
-            raise
-        finally:
-            if graceful:
-                # The drain is the one cancellable part of shutdown: a second,
-                # escalating signal lands here and should cost the *remaining
-                # grace*, not the teardown that follows. Channels stay up across
-                # it — a turn closing during the drain still needs a live
-                # consumer for its reply.
-                with contextlib.suppress(asyncio.CancelledError):
-                    await self.actor_manager.drain_all(self.config.shutdown_grace_seconds)
-                    await self._flush_replies()
-            # Mandatory teardown. Re-awaited through a shield so an escalating
-            # signal cannot leave the listening socket, the channel sessions and
-            # the on-disk state behind; every step in it is bounded, so this
-            # cannot hold the stop open. An outer CancelledError that brought us
-            # into this block still propagates once the block completes.
-            teardown = asyncio.ensure_future(self._teardown(runner))
-            while not teardown.done():
-                with contextlib.suppress(asyncio.CancelledError):
-                    await asyncio.shield(teardown)
 
-    async def _teardown(self, runner: web.AppRunner) -> None:
+    def set_endpoint(self, host: str, port: int) -> None:
+        """Record the address the caller actually bound, and republish state.
+
+        The gateway no longer owns the socket, so it cannot read the port back
+        off it — with ``port = 0`` the configured value is not the real one.
+        """
+        self.actual_host = host
+        self.actual_port = port
+        write_gateway_state(GatewayRunDir(self.bos_dir), self.status_snapshot())
+
+    async def wait_for_shutdown(self) -> None:
+        """Block until ``request_shutdown`` is called."""
+        await self._shutdown.wait()
+
+    async def stop(self, *, graceful: bool = True) -> None:
+        """Drain in-flight turns, then tear down. Idempotent.
+
+        ``graceful=False`` skips the drain — the forceful path, an operator
+        escalating or the process going down now.
+        """
+        if self._stopped:
+            return
+        self._stopped = True
+        if graceful:
+            # The drain is the one cancellable part of shutdown: a second,
+            # escalating signal lands here and should cost the *remaining
+            # grace*, not the teardown that follows. Channels stay up across
+            # it — a turn closing during the drain still needs a live
+            # consumer for its reply.
+            with contextlib.suppress(asyncio.CancelledError):
+                await self.actor_manager.drain_all(self.config.shutdown_grace_seconds)
+                await self._flush_replies()
+        # Mandatory teardown. Re-awaited through a shield so an escalating
+        # signal cannot leave the channel sessions and the on-disk state
+        # behind; every step in it is bounded, so this cannot hold the stop
+        # open.
+        teardown = asyncio.ensure_future(self._teardown())
+        while not teardown.done():
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.shield(teardown)
+
+    async def _teardown(self) -> None:
         """Stop everything, in the one order that does not drop replies.
 
         Actors stop *before* channels so a turn closing during the drain still
@@ -248,7 +255,6 @@ class Gateway:
         await self.actor_manager.stop_all()
         await self.channel_manager.stop_all()
         write_gateway_state(GatewayRunDir(self.bos_dir), self.status_snapshot() | {"status": "stopped"})
-        await runner.cleanup()
 
     async def _flush_replies(self) -> None:
         """Give channels a moment to deliver replies produced during the drain.

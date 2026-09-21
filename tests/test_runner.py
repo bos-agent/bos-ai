@@ -1,5 +1,6 @@
 def test_runner_start_bootstraps_gateway(monkeypatch):
     import asyncio
+    from types import SimpleNamespace
 
     from bos.runner.runner import start
 
@@ -21,21 +22,56 @@ def test_runner_start_bootstraps_gateway(monkeypatch):
             return "runtime"
 
     class FakeGateway:
+        config = SimpleNamespace(host="127.0.0.1", port=0)
+
         def __init__(self, *, runtime, harness):
             calls.append(("gateway_init", (runtime, harness)))
 
-        async def run(self):
-            calls.append(("gateway_run", None))
+        async def start(self):
+            calls.append(("gateway_start", None))
+
+        def build_app(self):
+            return object()
+
+        def set_endpoint(self, host, port):
+            calls.append(("gateway_endpoint", (host, port)))
+
+        async def wait_for_shutdown(self):
+            calls.append(("gateway_wait", None))
+
+        async def stop(self, *, graceful=True):
+            calls.append(("gateway_stop", graceful))
+
+    class FakeAppRunner:
+        def __init__(self, app, access_log=None):
+            pass
+
+        async def setup(self):
+            pass
+
+        async def cleanup(self):
+            calls.append(("runner_cleanup", None))
+
+    class FakeSite:
+        def __init__(self, runner, host, port):
+            pass
+
+        async def start(self):
+            calls.append(("site_start", None))
 
     monkeypatch.setattr("bos.gateway.Gateway", FakeGateway)
+    monkeypatch.setattr("aiohttp.web.AppRunner", FakeAppRunner)
+    monkeypatch.setattr("aiohttp.web.TCPSite", FakeSite)
 
     asyncio.run(start(FakeWorkspace()))
 
     assert calls[0][0] == "harness_enter"
     assert calls[1][0] == "gateway_init"
     assert calls[1][1][1] == "harness"
-    assert calls[2] == ("gateway_run", None)
-    assert calls[3][0] == "harness_exit"
+    assert calls[-1][0] == "harness_exit"
+    # Actors and channels (gateway_start) come up before the socket serves.
+    assert calls.index(("gateway_start", None)) < calls.index(("site_start", None))
+    assert ("gateway_stop", True) in calls
 
 
 def test_gateway_start_preserves_preset_name_for_background_runner(tmp_path, monkeypatch):
