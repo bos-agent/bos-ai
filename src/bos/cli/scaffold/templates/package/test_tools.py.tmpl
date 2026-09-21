@@ -1,7 +1,13 @@
-import asyncio
-
-from ${pkg_name}.tools import word_count
+from importlib.metadata import entry_points
 
 
-def test_word_count():
-    assert asyncio.run(word_count("one two three")) == "3 words"
+def test_bos_exts_entry_point_loads():
+    """The entry point in pyproject.toml must resolve and import.
+
+    It is the only thing standing between this package's extensions and BOS:
+    when it breaks — a renamed module, a typo in pyproject.toml — nothing
+    raises at runtime, the import is swallowed into a log warning, and every
+    tool this package registers is silently absent.
+    """
+    (entry_point,) = [ep for ep in entry_points(group="bos.exts") if ep.name == "${pkg_name}"]
+    entry_point.load()

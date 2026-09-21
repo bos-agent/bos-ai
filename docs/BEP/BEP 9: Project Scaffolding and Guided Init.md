@@ -320,6 +320,8 @@ Decisions from the 2026-06-11 review (details integrated into the sections above
 
 ## Revision History
 
+- 2026-09-21 — The `WordCount` teaching artifact is no longer *registered* by a scaffolded project. It ships commented out in `project_tools.py` / `tools.py` instead, because its teaching value is one-time while a junk tool the agent can call is permanent — every generated project carried one. The entry-point target module still ships (the `bos.exts` entry point resolves to it), and the suggested first prompt moved from "use the WordCount tool …" to "what tools and skills do you have?", which holds for a project that registers nothing of its own.
+
 | Date | Change | Intention |
 |---|---|---|
 | 2026-06-11 | Initial BEP 9 draft | Pivot support for the build-your-own-topology use case: guided `project init`, archetype scaffolds, `project add` generators, `project doctor` |

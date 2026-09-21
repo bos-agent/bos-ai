@@ -260,7 +260,10 @@ def _build_context(
         model_line = f'model = "{model}"'
     else:
         model_line = '# model = ""  # set a litellm model id, or export BOS_MODEL'
-    first_prompt = "use the WordCount tool to count the words in this sentence"
+    # Must hold for a freshly scaffolded project, which registers no tools of
+    # its own: naming an example tool here made the very first prompt a lie
+    # the moment that example stopped shipping.
+    first_prompt = "what tools and skills do you have?"
     return {
         "project_name": project_name,
         "purpose": purpose.strip(),
