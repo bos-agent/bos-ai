@@ -85,6 +85,9 @@ class Gateway:
         self._persistent_channel_configs = runtime.channels
         self._shutdown = asyncio.Event()
         self._stopped = False
+        # Set by a host that owns the socket and knows the externally
+        # reachable URL; None means "derive it from what we bound".
+        self._public_base_url: str | None = None
 
     @property
     def shutdown_requested(self) -> bool:
@@ -102,7 +105,7 @@ class Gateway:
         gateway = {
             "host": self.actual_host,
             "port": self.actual_port,
-            "base_url": f"http://{self.actual_host}:{self.actual_port}",
+            "base_url": self._public_base_url or f"http://{self.actual_host}:{self.actual_port}",
             "auth": {"type": "api_key", "configured": bool(os.environ.get(self.config.api_key_env))},
             # Published so `boscli gateway stop` can size its kill deadline from
             # the grace *this* process resolved at startup, rather than from a
@@ -125,7 +128,7 @@ class Gateway:
     def build_app(self) -> web.Application:
         api_key = resolve_gateway_api_key(self.config)
         return create_gateway_app(
-            config=self.config,
+            config_provider=lambda: self.config,
             api_key=api_key,
             status_provider=self.status_snapshot,
             ws_handler=self.handle_ws,
@@ -203,6 +206,15 @@ class Gateway:
         await self.channel_manager.create_persistent(self._persistent_channel_configs)
         await self.actor_manager.start_all()
         await self.channel_manager.start_all()
+        write_gateway_state(GatewayRunDir(self.bos_dir), self.status_snapshot())
+
+    def set_public_base_url(self, base_url: str) -> None:
+        """Override the URL published in the status snapshot.
+
+        A mounted gateway cannot discover its own URL — the host owns the
+        socket and may add a mount prefix, a proxy or TLS (BEP 17 §3.3.2).
+        """
+        self._public_base_url = base_url
         write_gateway_state(GatewayRunDir(self.bos_dir), self.status_snapshot())
 
     def set_endpoint(self, host: str, port: int) -> None:

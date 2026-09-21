@@ -567,6 +567,8 @@ async def test_runner_serves_only_after_actors_and_channels_are_up(tmp_path, mon
 
     from bos.config import Workspace
     from bos.extensions.chat_stores.in_memory import InMemChatStore as Store
+    from bos.gateway.actors.actor_manager import ActorManager
+    from bos.gateway.channels.channel_manager import ChannelManager
     from bos.runner.runner import start
 
     monkeypatch.setenv("BOS_TEST_GATEWAY_KEY", "secret")
@@ -610,25 +612,32 @@ async def test_runner_serves_only_after_actors_and_channels_are_up(tmp_path, mon
 
     monkeypatch.setattr(web.TCPSite, "start", _serve)
 
+    # Patched on the classes, not on an instance: the GatewayMount builds the
+    # Gateway and brings it up itself, so there is no hook that runs between
+    # construction and start() any more.
+    actor_start = ActorManager.start_all
+    channel_start = ChannelManager.start_all
+
+    async def _actors(self):
+        order.append("actors")
+        await actor_start(self)
+
+    async def _channels(self):
+        order.append("channels")
+        await channel_start(self)
+
+    monkeypatch.setattr(ActorManager, "start_all", _actors)
+    monkeypatch.setattr(ChannelManager, "start_all", _channels)
+
     def _capture(gw):
         nonlocal gateway
         gateway = gw
-        actor_start = gw.actor_manager.start_all
-        channel_start = gw.channel_manager.start_all
-
-        async def _actors():
-            order.append("actors")
-            await actor_start()
-
-        async def _channels():
-            order.append("channels")
-            await channel_start()
-
-        monkeypatch.setattr(gw.actor_manager, "start_all", _actors)
-        monkeypatch.setattr(gw.channel_manager, "start_all", _channels)
 
     run = asyncio.create_task(start(ws, on_ready=_capture))
-    await asyncio.sleep(0.1)
+    for _ in range(200):
+        if gateway is not None and gateway.actual_port != 0:
+            break
+        await asyncio.sleep(0.05)
 
     assert order == ["actors", "channels", "serve"]
     # The published port comes from the listening socket, so it survives the move.

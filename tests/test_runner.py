@@ -1,7 +1,7 @@
-def test_runner_start_bootstraps_gateway(monkeypatch):
+def test_runner_start_bootstraps_gateway(tmp_path, monkeypatch):
     import asyncio
-    from types import SimpleNamespace
 
+    from bos.gateway.config import ResolvedGatewayConfig
     from bos.runner.runner import start
 
     calls: list[tuple[str, object]] = []
@@ -15,6 +15,16 @@ def test_runner_start_bootstraps_gateway(monkeypatch):
             calls.append(("harness_exit", exc_type))
 
     class FakeWorkspace:
+        # The mount takes the singleton lock for this run dir before it builds
+        # anything, and runs the bootstrap the losing instance must skip.
+        bos_dir = tmp_path / ".bos"
+
+        def resolve_agents(self):
+            calls.append(("resolve_agents", None))
+
+        def bootstrap_platform(self):
+            calls.append(("bootstrap_platform", None))
+
         def harness(self):
             return HarnessContext()
 
@@ -22,7 +32,7 @@ def test_runner_start_bootstraps_gateway(monkeypatch):
             return "runtime"
 
     class FakeGateway:
-        config = SimpleNamespace(host="127.0.0.1", port=0)
+        config = ResolvedGatewayConfig(host="127.0.0.1", port=0)
 
         def __init__(self, *, runtime, harness):
             calls.append(("gateway_init", (runtime, harness)))
@@ -65,24 +75,26 @@ def test_runner_start_bootstraps_gateway(monkeypatch):
 
     asyncio.run(start(FakeWorkspace()))
 
-    assert calls[0][0] == "harness_enter"
-    assert calls[1][0] == "gateway_init"
-    assert calls[1][1][1] == "harness"
-    assert calls[-1][0] == "harness_exit"
-    # Actors and channels (gateway_start) come up before the socket serves.
-    assert calls.index(("gateway_start", None)) < calls.index(("site_start", None))
+    names = [name for name, _ in calls]
+    # The mount bootstraps only once it holds the lock, then builds the gateway.
+    assert names[:4] == ["resolve_agents", "bootstrap_platform", "harness_enter", "gateway_init"]
+    assert calls[3][1][1] == "harness"
+    # Actors and channels (gateway_start) come up before the socket serves, and
+    # the socket is the last thing torn down so the drain keeps its consumers.
+    assert names.index("gateway_start") < names.index("site_start")
     assert ("gateway_stop", True) in calls
+    assert names.index("gateway_stop") < names.index("harness_exit") < names.index("runner_cleanup")
 
 
-def test_runner_start_stops_ungracefully_on_cancellation(monkeypatch):
+def test_runner_start_stops_ungracefully_on_cancellation(tmp_path, monkeypatch):
     """A signal that cancels the ``start()`` task (the forceful path — see
     ``__main__._on_sigterm``, which escalates to ``main_task.cancel()``) must
     skip the drain, not just plumb a caller-supplied ``graceful`` flag through.
     Deleting the ``except asyncio.CancelledError`` clause in ``runner.start()``
     must fail this test."""
     import asyncio
-    from types import SimpleNamespace
 
+    from bos.gateway.config import ResolvedGatewayConfig
     from bos.runner.runner import start
 
     calls: list[tuple[str, object]] = []
@@ -96,6 +108,16 @@ def test_runner_start_stops_ungracefully_on_cancellation(monkeypatch):
             calls.append(("harness_exit", exc_type))
 
     class FakeWorkspace:
+        # The mount takes the singleton lock for this run dir before it builds
+        # anything, and runs the bootstrap the losing instance must skip.
+        bos_dir = tmp_path / ".bos"
+
+        def resolve_agents(self):
+            calls.append(("resolve_agents", None))
+
+        def bootstrap_platform(self):
+            calls.append(("bootstrap_platform", None))
+
         def harness(self):
             return HarnessContext()
 
@@ -103,7 +125,7 @@ def test_runner_start_stops_ungracefully_on_cancellation(monkeypatch):
             return "runtime"
 
     class FakeGateway:
-        config = SimpleNamespace(host="127.0.0.1", port=0)
+        config = ResolvedGatewayConfig(host="127.0.0.1", port=0)
 
         def __init__(self, *, runtime, harness):
             calls.append(("gateway_init", (runtime, harness)))
@@ -156,6 +178,56 @@ def test_runner_start_stops_ungracefully_on_cancellation(monkeypatch):
 
     assert ("gateway_stop", False) in calls  # the forceful path skips the drain
     assert ("runner_cleanup", None) in calls  # but the socket is still cleaned up
+
+
+def test_runner_start_refuses_to_serve_when_another_gateway_holds_the_lock(tmp_path, monkeypatch):
+    """The foreground path goes through GatewayMount, so it is now covered by the
+    singleton flock — not just by the weaker pid-file check in ``boscli gateway
+    start``. With the lock held elsewhere, nothing comes up and nothing binds
+    (BEP 17 §3.4.1)."""
+    import asyncio
+
+    import pytest
+
+    from bos.gateway.state import GatewayRunDir, acquire_singleton_lock
+    from bos.runner.runner import start
+
+    calls: list[str] = []
+
+    class FakeWorkspace:
+        bos_dir = tmp_path / ".bos"
+
+        def resolve_agents(self):
+            calls.append("resolve_agents")
+
+        def bootstrap_platform(self):
+            calls.append("bootstrap_platform")
+
+        def harness(self):
+            raise AssertionError("a standby mount must not open a harness")
+
+        def resolve_gateway_runtime(self):
+            raise AssertionError("a standby mount must not build a gateway")
+
+    class RefusingSite:
+        def __init__(self, runner, host, port):
+            raise AssertionError("a standby mount must not bind a socket")
+
+    monkeypatch.setattr("aiohttp.web.TCPSite", RefusingSite)
+
+    rd = GatewayRunDir(tmp_path / ".bos")
+    rd.ensure()
+    holder = acquire_singleton_lock(rd)
+    assert holder is not None
+    try:
+        with pytest.raises(RuntimeError, match="singleton lock"):
+            asyncio.run(start(FakeWorkspace()))
+    finally:
+        holder.close()
+
+    # bootstrap_platform imports extension modules and writes os.environ; the
+    # instance that loses the race must do neither.
+    assert calls == []
 
 
 def test_gateway_start_preserves_preset_name_for_background_runner(tmp_path, monkeypatch):

@@ -21,7 +21,7 @@ async def _start_app(app: web.Application):
 def _app(tmp_path, *, api_key: str = "secret") -> web.Application:
     config = ResolvedGatewayConfig(upload_dir=str(tmp_path / "uploads"))
     return create_gateway_app(
-        config=config,
+        config_provider=lambda: config,
         api_key=api_key,
         status_provider=lambda: {
             "runtime": "process",
