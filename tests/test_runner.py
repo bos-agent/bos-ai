@@ -74,6 +74,90 @@ def test_runner_start_bootstraps_gateway(monkeypatch):
     assert ("gateway_stop", True) in calls
 
 
+def test_runner_start_stops_ungracefully_on_cancellation(monkeypatch):
+    """A signal that cancels the ``start()`` task (the forceful path — see
+    ``__main__._on_sigterm``, which escalates to ``main_task.cancel()``) must
+    skip the drain, not just plumb a caller-supplied ``graceful`` flag through.
+    Deleting the ``except asyncio.CancelledError`` clause in ``runner.start()``
+    must fail this test."""
+    import asyncio
+    from types import SimpleNamespace
+
+    from bos.runner.runner import start
+
+    calls: list[tuple[str, object]] = []
+
+    class HarnessContext:
+        async def __aenter__(self):
+            calls.append(("harness_enter", self))
+            return "harness"
+
+        async def __aexit__(self, exc_type, exc, tb):
+            calls.append(("harness_exit", exc_type))
+
+    class FakeWorkspace:
+        def harness(self):
+            return HarnessContext()
+
+        def resolve_gateway_runtime(self):
+            return "runtime"
+
+    class FakeGateway:
+        config = SimpleNamespace(host="127.0.0.1", port=0)
+
+        def __init__(self, *, runtime, harness):
+            calls.append(("gateway_init", (runtime, harness)))
+
+        async def start(self):
+            calls.append(("gateway_start", None))
+
+        def build_app(self):
+            return object()
+
+        def set_endpoint(self, host, port):
+            calls.append(("gateway_endpoint", (host, port)))
+
+        async def wait_for_shutdown(self):
+            # Never returns on its own — the task gets cancelled while awaiting
+            # this, the same way a SIGTERM's `main_task.cancel()` lands here.
+            await asyncio.Event().wait()
+
+        async def stop(self, *, graceful=True):
+            calls.append(("gateway_stop", graceful))
+
+    class FakeAppRunner:
+        def __init__(self, app, access_log=None):
+            pass
+
+        async def setup(self):
+            pass
+
+        async def cleanup(self):
+            calls.append(("runner_cleanup", None))
+
+    class FakeSite:
+        def __init__(self, runner, host, port):
+            pass
+
+        async def start(self):
+            calls.append(("site_start", None))
+
+    monkeypatch.setattr("bos.gateway.Gateway", FakeGateway)
+    monkeypatch.setattr("aiohttp.web.AppRunner", FakeAppRunner)
+    monkeypatch.setattr("aiohttp.web.TCPSite", FakeSite)
+
+    async def _run():
+        task = asyncio.ensure_future(start(FakeWorkspace()))
+        await asyncio.sleep(0.05)  # let it run up to the wait_for_shutdown suspend
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(_run())
+
+    assert ("gateway_stop", False) in calls  # the forceful path skips the drain
+    assert ("runner_cleanup", None) in calls  # but the socket is still cleaned up
+
+
 def test_gateway_start_preserves_preset_name_for_background_runner(tmp_path, monkeypatch):
     from click.testing import CliRunner
 

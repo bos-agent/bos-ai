@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from typing import TYPE_CHECKING
 
@@ -52,5 +53,16 @@ async def start(workspace: Workspace, *, on_ready: Callable[[Gateway], None] | N
             graceful = False
             raise
         finally:
-            await gateway.stop(graceful=graceful)
-            await runner.cleanup()
+            # Shielded together: an escalating third signal must not leave the
+            # listening socket (runner.cleanup) behind any more than it may
+            # leave the channel sessions and on-disk state behind (gateway.stop
+            # shields those internally). Every step here is bounded, so this
+            # cannot hold the stop open.
+            async def _finish() -> None:
+                await gateway.stop(graceful=graceful)
+                await runner.cleanup()
+
+            finish = asyncio.ensure_future(_finish())
+            while not finish.done():
+                with contextlib.suppress(asyncio.CancelledError):
+                    await asyncio.shield(finish)
