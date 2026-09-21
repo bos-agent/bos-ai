@@ -416,3 +416,66 @@ async def test_escalating_through_serve_gives_up_the_remaining_grace(tmp_path, m
     with socket.socket() as probe:  # the socket went with it
         probe.bind(("127.0.0.1", port))
 
+
+@pytest.mark.asyncio
+async def test_a_failing_demotion_teardown_still_releases_the_socket(tmp_path, monkeypatch):
+    """A raise from the teardown must not kill the watchdog mid-demotion.
+
+    A plugin whose ``close()`` throws is enough. ``_demoted`` is what wakes a
+    driver parked in ``serve()``; withholding it leaves that driver holding the
+    port forever, in front of a half-torn-down runtime whose lock is already
+    gone — and the failure surfaces only as "Task exception was never
+    retrieved" at GC.
+    """
+    mount = GatewayMount(lambda: _workspace(tmp_path), lock_poll_seconds=0.05)
+    await mount.start()
+    assert mount.state == "live"
+    gateway = mount.gateway
+    assert gateway is not None
+
+    async def _boom(**_):
+        raise RuntimeError("a plugin's close() threw")
+
+    monkeypatch.setattr(gateway, "stop", _boom)
+
+    # Another gateway replaced the lock file and took it: ours locks an orphaned
+    # inode, and the path is no longer free, so no self-promotion follows.
+    rd = GatewayRunDir(tmp_path / ".bos")
+    rd.lock_file.unlink()
+    holder = acquire_singleton_lock(rd)
+    assert holder is not None
+    try:
+        await asyncio.wait_for(mount.wait_for_demotion(), timeout=10)
+        assert mount.state == "standby"
+        assert mount.gateway is None
+        assert mount._watchdog is not None and not mount._watchdog.done()  # still watching
+    finally:
+        await mount.stop()
+        holder.close()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_bring_up_leaves_no_lock_and_no_runtime(tmp_path, monkeypatch):
+    """A promotion that raises must roll the whole thing back.
+
+    The lock and the ``Gateway`` are both assigned before the bring-up can
+    fail. A half-built runtime makes the ``_gateway is not None`` guard refuse
+    every later ``acquire()``, and an orphaned flock blocks every other
+    instance on this ``bos_dir`` behind a mount that serves nothing.
+    """
+
+    async def _boom(self):
+        raise RuntimeError("bring-up failed")
+
+    monkeypatch.setattr("bos.gateway.Gateway.start", _boom)
+
+    mount = GatewayMount(lambda: _workspace(tmp_path), lock_poll_seconds=60)
+    with pytest.raises(RuntimeError, match="bring-up failed"):
+        await mount.start()
+
+    assert mount.state == "stopped"  # not stuck in "starting"
+    assert mount.gateway is None
+    assert mount._watchdog is None
+    freed = acquire_singleton_lock(GatewayRunDir(tmp_path / ".bos"))
+    assert freed is not None  # the lock did not outlive the failure
+    freed.close()

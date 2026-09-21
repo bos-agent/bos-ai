@@ -132,7 +132,16 @@ class GatewayMount:
         workspace = self._workspace_factory()
         self._run_dir = GatewayRunDir(workspace.bos_dir)
         self._run_dir.ensure()
-        if not await self._acquire_and_bring_up(workspace):
+        try:
+            live = await self._acquire_and_bring_up(workspace)
+        except BaseException:
+            # _acquire_and_bring_up has already rolled its own partial bring-up
+            # back, so nothing is held and nothing is half-built. Say so rather
+            # than leaving the mount parked in "starting" for good, with a
+            # gateway the caller can see but nothing driving it.
+            self._state = "stopped"
+            raise
+        if not live:
             self._state = "standby"
             logger.warning("Another gateway holds the lock for %s — standing by.", workspace.bos_dir)
         self._watchdog = asyncio.ensure_future(self._watch_lock())
@@ -170,7 +179,22 @@ class GatewayMount:
             # lock as a side effect of failing to take it.
             return False
         self._lock = lock
-        await self._bring_up_runtime(workspace)
+        try:
+            await self._bring_up_runtime(workspace)
+        except BaseException:
+            # Roll the whole promotion back. A half-built runtime left behind
+            # would make the `self._gateway is not None` guard above refuse
+            # every later acquire(), and an orphaned lock would block every
+            # other instance on this bos_dir behind a mount that serves
+            # nothing. Teardown errors are secondary to the failure that got
+            # us here, so they do not replace it.
+            with contextlib.suppress(Exception):
+                await self._tear_down_runtime(graceful=False)
+            self._gateway = None
+            self._stack = None
+            lock.close()
+            self._lock = None
+            raise
         self._state = "live"
         return True
 
@@ -290,23 +314,39 @@ class GatewayMount:
         while True:
             await asyncio.sleep(self._lock_poll_seconds)
             assert self._run_dir is not None
-            if self._state == "live":
-                if not lock_still_owned(self._run_dir, self._lock):
-                    logger.error("Lost singleton lock ownership for %s — standing down.", self._run_dir.bos_dir)
-                    # Off "live" before the teardown, which takes the drain's
-                    # grace to run: a restart() arriving during it must be
-                    # refused outright rather than tear the same runtime down a
-                    # second time alongside us.
-                    self._state = "standby"
-                    await self._tear_down_runtime()
-                    self._lock = None
-                    # After the teardown, never before: _tear_down_runtime has
-                    # already cleared _gateway and _stack, so the stop() a woken
-                    # driver runs finds nothing left to tear down a second time.
-                    self._demoted.set()
-            elif self._state == "standby":
-                if lock_is_free(self._run_dir) and await self._acquire_and_bring_up(self._workspace_factory()):
-                    logger.info("Acquired the singleton lock for %s — going live.", self._run_dir.bos_dir)
+            # One failing poll must not end the watchdog: it is the only thing
+            # that can demote this mount, and a dead one leaves a lost lock
+            # unnoticed for the life of the process. Cancellation is a
+            # BaseException and still ends the loop, which is what stop() wants.
+            try:
+                if self._state == "live":
+                    if not lock_still_owned(self._run_dir, self._lock):
+                        logger.error("Lost singleton lock ownership for %s — standing down.", self._run_dir.bos_dir)
+                        # Off "live" before the teardown, which takes the drain's
+                        # grace to run: a restart() arriving during it must be
+                        # refused outright rather than tear the same runtime down
+                        # a second time alongside us.
+                        self._state = "standby"
+                        try:
+                            await self._tear_down_runtime()
+                        finally:
+                            # Even when the teardown raised — a plugin whose
+                            # close() throws is enough. This signal is what
+                            # releases the socket: withholding it parks the
+                            # driver in serve() forever, holding the port in
+                            # front of a runtime that has already lost its lock.
+                            # After the teardown, never before: _tear_down_runtime
+                            # has cleared _gateway and _stack, so the stop() a
+                            # woken driver runs finds nothing to tear down twice.
+                            self._gateway = None
+                            self._stack = None
+                            self._lock = None
+                            self._demoted.set()
+                elif self._state == "standby":
+                    if lock_is_free(self._run_dir) and await self._acquire_and_bring_up(self._workspace_factory()):
+                        logger.info("Acquired the singleton lock for %s — going live.", self._run_dir.bos_dir)
+            except Exception:
+                logger.exception("Singleton lock watchdog iteration failed for %s.", self._run_dir.bos_dir)
 
     def _current_config(self) -> ResolvedGatewayConfig:
         """Upload settings for the app, from whichever Gateway is current.
