@@ -257,6 +257,44 @@ def test_gateway_start_foreground_refuses_cleanly_when_the_lock_is_held(tmp_path
     assert isinstance(result.exception, SystemExit)
 
 
+def test_losing_the_lock_leaves_the_live_gateways_pid_file_alone(tmp_path, monkeypatch):
+    """A refused start must not clobber gateway.pid — it belongs to the winner.
+
+    This is the race ``proc.start_background`` refuses to risk (see its
+    docstring): a second ``gateway start`` spawned inside the first child's
+    bring-up window, before it has written its pid, so ``is_running`` is still
+    False. If the loser removes that file, ``status`` reports stopped,
+    ``stop``/``restart`` cannot find the live process and ``reap_stale`` clears
+    its state.
+    """
+    import asyncio
+    import signal
+    import sys
+
+    from bos.gateway.state import GatewayRunDir, acquire_singleton_lock
+    from bos.runner.__main__ import main
+
+    monkeypatch.setenv("BOS_HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(sys, "argv", ["bos.runner", "--config", "default"])
+
+    rd = GatewayRunDir(tmp_path / "home" / "presets" / "default")
+    rd.ensure()
+    rd.pid_file.write_text("4242", encoding="utf-8")  # the winner's pid
+    holder = acquire_singleton_lock(rd)  # ... and the winner's flock
+    assert holder is not None
+
+    previous_sigterm = signal.getsignal(signal.SIGTERM)
+    try:
+        main()  # loses the lock, logs "already running", returns
+    finally:
+        signal.signal(signal.SIGTERM, previous_sigterm)
+        asyncio.set_event_loop(asyncio.new_event_loop())
+        holder.close()
+
+    assert rd.pid_file.exists()
+    assert rd.pid_file.read_text(encoding="utf-8") == "4242"
+
+
 def test_gateway_start_preserves_preset_name_for_background_runner(tmp_path, monkeypatch):
     from click.testing import CliRunner
 

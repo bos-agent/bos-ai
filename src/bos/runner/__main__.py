@@ -85,6 +85,12 @@ def main() -> None:
         nonlocal gateway
         logger.info("Gateway process started (PID %d, workspace=%s)", os.getpid(), ws.workspace)
         mount = GatewayMount(_workspace_factory, runtime_label="process")
+        # Only the winner of the lock writes gateway.pid, so only the winner may
+        # remove it. Every other path through the finally below — standby,
+        # demotion, a cancel during bring-up — would otherwise delete a file
+        # that belongs to whichever process actually holds the lock, which is
+        # the clobber proc.start_background refuses to risk.
+        wrote_pid = False
         # mount.start() is *inside* the try: until it returns there is no
         # gateway, so every SIGTERM takes _on_sigterm's escalation branch and
         # cancels this task mid-bring-up — with the lock taken and possibly the
@@ -96,11 +102,13 @@ def main() -> None:
                 # Another live gateway holds the flock for this run dir — however
                 # this one was launched (a duplicate `gateway start`, an `ask`
                 # auto-start racing an existing gateway). Exit rather than become
-                # a second poller; the pid file stays the live process's.
+                # a second poller, leaving gateway.pid as the live process wrote
+                # it: `stop` and `restart` must still find that process.
                 logger.error("Another BOS gateway already running for %s — exiting.", ws.bos_dir)
                 return
             gateway = mount.gateway
             rd.pid_file.write_text(str(os.getpid()), encoding="utf-8")
+            wrote_pid = True
             await serve(mount)
         except asyncio.CancelledError:
             logger.info("Gateway cancelled — exiting cleanly")
@@ -109,7 +117,8 @@ def main() -> None:
             # for the bring-up and standby paths that never reached it. Shielded
             # because the second SIGTERM of an escalating stop lands right here.
             await shielded(mount.stop(graceful=False))
-            rd.pid_file.unlink(missing_ok=True)
+            if wrote_pid:
+                rd.pid_file.unlink(missing_ok=True)
             logger.info("Gateway process stopped")
 
     main_task = loop.create_task(_run())
