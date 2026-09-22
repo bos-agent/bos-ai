@@ -703,3 +703,55 @@ async def test_a_failed_restart_answers_500_and_stays_recoverable(tmp_path):
         assert mount.gateway is not None
     finally:
         await mount.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_stop_during_a_restart_is_serialized_behind_it(tmp_path, monkeypatch):
+    """A restart and a stop must not interleave (BEP 17 §3.4.3).
+
+    ``POST /api/restart`` is wired unconditionally, so a standalone
+    ``python -m bos.runner`` serves it too, and the rebuild runs in a request
+    task while the driver's shutdown path is a different one. In the window
+    where ``_tear_down_runtime`` has nulled ``_gateway`` and
+    ``_bring_up_runtime`` has not yet reassigned it — it spans
+    ``bootstrap_platform()`` and harness construction — a SIGTERM finds no
+    gateway to drain and escalates to cancelling the driver, whose ``finally``
+    then runs ``stop()`` alongside the restart still in flight. Unserialized,
+    ``stop()`` closes the lock and says ``stopped``, and the restart lands on
+    top: a started ``Gateway`` and an open harness that nothing will ever
+    close, with the singleton flock released.
+    """
+    mount = GatewayMount(lambda: _workspace(tmp_path), lock_poll_seconds=60)
+    await mount.start()
+    assert mount.state == "live"
+
+    inside = asyncio.Event()
+    release = asyncio.Event()
+    real_bring_up = mount._bring_up_runtime
+
+    async def _parked_bring_up(workspace):
+        inside.set()
+        await release.wait()
+        return await real_bring_up(workspace)
+
+    monkeypatch.setattr(mount, "_bring_up_runtime", _parked_bring_up)
+
+    restarting = asyncio.ensure_future(mount.restart())
+    await asyncio.wait_for(inside.wait(), timeout=5)
+    assert mount.gateway is None  # the window itself
+
+    stopping = asyncio.ensure_future(mount.stop(graceful=False))
+    await asyncio.sleep(0.05)
+    assert not stopping.done()  # waiting on the mutex, not tearing down half a rebuild
+
+    release.set()
+    await asyncio.wait_for(restarting, timeout=10)
+    await asyncio.wait_for(stopping, timeout=10)
+
+    # The stop is the last word, and it is a whole one.
+    assert mount.state == "stopped"
+    assert mount.gateway is None
+    assert mount._stack is None
+    freed = acquire_singleton_lock(GatewayRunDir(tmp_path / ".bos"))
+    assert freed is not None
+    freed.close()
