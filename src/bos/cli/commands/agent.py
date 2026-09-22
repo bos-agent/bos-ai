@@ -759,7 +759,16 @@ def _restart_embedded_gateway(ws, state: dict) -> None:
     # field `stop` sizes its kill deadline from.
     timeout = _resolved_stop_grace(ws, state) + _RESTART_TIMEOUT_MARGIN
     click.echo(f"Restarting embedded gateway at {base_url}…")
-    response = httpx.post(f"{str(base_url).rstrip('/')}/api/restart", timeout=timeout)
+    try:
+        response = httpx.post(f"{str(base_url).rstrip('/')}/api/restart", timeout=timeout)
+    except httpx.HTTPError as exc:
+        # The ordinary failures of this command, not bugs: the host is down or
+        # moved and the published base_url is stale (ConnectError), or the
+        # rebuild outran the grace this gateway published plus our margin
+        # (ReadTimeout). Either way it is one line and a non-zero exit, the way
+        # the rest of this command reports problems — not a traceback.
+        click.echo(f"Could not reach the embedded gateway at {base_url}: {exc}", err=True)
+        raise SystemExit(1) from exc
     if response.status_code // 100 != 2:
         try:
             detail = response.json().get("error", response.text)

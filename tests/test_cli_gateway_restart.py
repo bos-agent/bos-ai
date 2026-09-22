@@ -2,6 +2,7 @@
 
 import json
 
+import httpx
 import pytest
 from click.testing import CliRunner
 
@@ -53,8 +54,6 @@ def test_restart_of_a_process_gateway_does_not_go_over_http(tmp_path, monkeypatc
 
 
 def test_restart_of_an_embedded_gateway_posts_to_its_base_url(tmp_path, monkeypatch):
-    import httpx
-
     _state(tmp_path, "embedded", base_url="https://app.example.com/bos")
     seen: list[tuple[str, float | None]] = []
 
@@ -142,3 +141,29 @@ def test_start_refuses_rather_than_reaping_a_live_embedded_gateway(tmp_path):
     assert result.exit_code != 0
     assert "already running" in result.output
     assert rd.state_file.exists()
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        pytest.param(httpx.ConnectError("connection refused"), id="stale base_url"),
+        pytest.param(httpx.ReadTimeout("timed out"), id="rebuild outran the budget"),
+    ],
+)
+def test_restart_reports_an_unreachable_embedded_gateway(tmp_path, monkeypatch, exc):
+    """A host that is down or moved, and a rebuild past the grace + margin
+    budget, are ordinary failures of this command — one line and a non-zero
+    exit, not an uncaught httpx error and a traceback."""
+    _state(tmp_path, "embedded", base_url="https://app.example.com/bos")
+
+    def _post(url, **kwargs):
+        raise exc
+
+    monkeypatch.setattr("httpx.post", _post)
+
+    result = _invoke(tmp_path, "restart")
+
+    assert result.exit_code != 0
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+    assert "Could not reach the embedded gateway" in result.output
+    assert "Traceback" not in result.output
