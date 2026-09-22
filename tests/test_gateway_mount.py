@@ -685,16 +685,21 @@ async def test_a_failed_restart_answers_500_and_stays_recoverable(tmp_path):
         async with httpx.AsyncClient(transport=transport, base_url="http://gateway") as client:
             failed = await client.post("/api/restart")
             assert failed.status_code == 500
-            assert failed.json() == {"ok": False, "error": "boom"}
+            # Not str(exc): §3.8 leaves this endpoint unauthenticated and a
+            # config-load failure carries filesystem paths. The detail is logged.
+            assert failed.json() == {"ok": False, "error": "restart_failed"}
             assert mount.state == "standby"
             assert mount.gateway is None
 
-            # Recoverable: the lock was kept, so the retry rebuilds rather than
-            # losing the singleton to whoever asks for it next.
-            assert await mount.acquire() is True
-            assert mount.state == "live"
+            # Recoverable *through the same endpoint*. This is the whole point:
+            # POST /api/restart is the only lifecycle surface an embedded host
+            # exposes, so a retry that only works by calling mount.acquire()
+            # from inside the process is no retry at all — it left one bad
+            # config edit holding the gateway down until the host restarted.
             ok = await client.post("/api/restart")
         assert ok.status_code == 200
         assert ok.json() == {"ok": True, "state": "live"}
+        assert mount.state == "live"
+        assert mount.gateway is not None
     finally:
         await mount.stop()

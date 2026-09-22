@@ -195,16 +195,10 @@ class GatewayMount:
         try:
             await self._bring_up_runtime(workspace)
         except BaseException:
-            # Roll the whole promotion back. A half-built runtime left behind
-            # would make the `self._gateway is not None` guard above refuse
-            # every later acquire(), and an orphaned lock would block every
-            # other instance on this bos_dir behind a mount that serves
-            # nothing. Teardown errors are secondary to the failure that got
-            # us here, so they do not replace it.
-            with contextlib.suppress(Exception):
-                await self._tear_down_runtime(graceful=False)
-            self._gateway = None
-            self._stack = None
+            # Roll the whole promotion back, lock included: an orphaned lock
+            # would block every other instance on this bos_dir behind a mount
+            # that serves nothing.
+            await self._roll_back_runtime()
             if took_lock:
                 # Only what this call acquired. A retry after a failed restart
                 # must keep the lock it already had: releasing it there would
@@ -214,6 +208,24 @@ class GatewayMount:
             raise
         self._state = "live"
         return True
+
+    async def _roll_back_runtime(self) -> None:
+        """Undo a partial bring-up, leaving nothing half-built.
+
+        ``_bring_up_runtime`` assigns ``_stack`` and ``_gateway`` before the
+        calls that can fail, so a failure leaves both set. A leftover gateway
+        makes ``_acquire_and_bring_up``'s re-entry guard refuse every later
+        ``acquire()`` — the only way back for an embedded host — so the nulling
+        is explicit rather than a side effect of the teardown, which may itself
+        fail (a plugin whose ``close()`` throws on half-initialized state is
+        enough). Teardown errors are secondary to the failure that got us here,
+        so they do not replace it. The lock is deliberately untouched: which
+        caller may drop it differs, and this helper does not know.
+        """
+        with contextlib.suppress(Exception):
+            await self._tear_down_runtime(graceful=False)
+        self._gateway = None
+        self._stack = None
 
     async def _bring_up_runtime(self, workspace: Workspace) -> Gateway:
         """Build and start a runtime from *workspace*, under a lock we hold.
@@ -299,18 +311,11 @@ class GatewayMount:
             gateway = await self._bring_up_runtime(self._workspace_factory())
             gateway.set_endpoint(*endpoint)
         except BaseException:
-            # Roll the rebuild back to a clean standby. A half-built runtime
-            # left behind makes _acquire_and_bring_up's re-entry guard refuse
-            # every later acquire(), which is the only way back for an embedded
-            # host. Teardown errors are secondary to the failure that got us
-            # here, so they do not replace it.
-            with contextlib.suppress(Exception):
-                await self._tear_down_runtime(graceful=False)
-            self._gateway = None
-            self._stack = None
+            await self._roll_back_runtime()
             # The lock is kept: this instance is still the singleton, and
             # dropping it would invite another process in while this one is
-            # still wired up. acquire() rebuilds from here.
+            # still wired up. acquire() rebuilds from here, and a second
+            # POST /api/restart is what routes an embedded host to it.
             self._state = "standby"
             raise
         self._state = "live"
@@ -399,13 +404,30 @@ class GatewayMount:
         replaced (BEP 17 §3.3.3). A failure leaves a recoverable standby, so the
         error is reported rather than swallowed and a retry is a second POST.
         """
+        try:
+            if self._state == "live":
+                await self.restart()
+            elif self._state == "standby" and self._lock is not None:
+                # A failed restart parks here still holding *its own* lock, and
+                # nothing promotes it back on its own: the watchdog's standby
+                # branch waits for a lock to come free, and this one never will
+                # because we are the holder. This endpoint is the only lifecycle
+                # surface an embedded host exposes, so the retry has to rebuild
+                # from here — otherwise one bad config edit takes the gateway
+                # down until the host process restarts. A standby whose lock
+                # belongs to *another* holder has nothing to rebuild and falls
+                # through to the 409.
+                await self.acquire()
+            else:
+                return {"ok": False, "error": self._state}, 409
+        except Exception:
+            logger.exception("Restart failed; the mount is in standby and a retry may succeed.")
+            # The detail stays in the log. §3.8 leaves this endpoint
+            # unauthenticated, and a config-load failure — the realistic one,
+            # since a restart re-reads configuration — carries filesystem paths.
+            return {"ok": False, "error": "restart_failed"}, 500
         if self._state != "live":
             return {"ok": False, "error": self._state}, 409
-        try:
-            await self.restart()
-        except Exception as exc:
-            logger.exception("Restart failed; the mount is in standby and a retry may succeed.")
-            return {"ok": False, "error": str(exc)}, 500
         return {"ok": True, "state": self._state}, 200
 
     def build_app(self) -> Starlette:
