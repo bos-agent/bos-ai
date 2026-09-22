@@ -538,3 +538,65 @@ async def test_a_failed_restart_is_recoverable_with_acquire(tmp_path, monkeypatc
         assert mount.gateway is not None
     finally:
         await mount.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_restart_rolls_back_gateway_and_stack(tmp_path, monkeypatch):
+    """A restart failing inside ``gateway.start()`` must null ``_gateway`` and
+    ``_stack`` itself, not rely on its own best-effort teardown to do it.
+
+    ``_bring_up_runtime`` assigns ``self._stack`` and ``self._gateway``
+    *before* awaiting ``gateway.start()`` — the call that fails here. The
+    except block's own ``_tear_down_runtime(graceful=False)`` would null both
+    as a side effect *if that teardown succeeds* — so this test also makes the
+    half-started gateway's own ``stop()`` raise (a plugin's ``close()`` throwing
+    on half-initialized state is enough in practice), which is suppressed and
+    leaves ``_tear_down_runtime`` without having reached its own nulling.
+    Only the except block's explicit ``self._gateway = None`` /
+    ``self._stack = None`` recover from that — which is what makes them worth
+    having instead of leaving the cleanup to ``_tear_down_runtime`` alone, and
+    what a leftover gateway would trip: ``_acquire_and_bring_up``'s re-entry
+    guard, refusing every later ``acquire()``.
+    """
+    mount = GatewayMount(lambda: _workspace(tmp_path), lock_poll_seconds=60)
+    await mount.start()
+    try:
+        assert mount.state == "live"
+        gateway_cls = type(mount.gateway)
+        real_start = gateway_cls.start
+        real_stop = gateway_cls.stop
+
+        start_calls = {"n": 0}
+        failed_gateway: list[object] = []
+
+        async def _failing_start(self):
+            start_calls["n"] += 1
+            if start_calls["n"] == 1:
+                failed_gateway.append(self)
+                raise RuntimeError("start failed")
+            return await real_start(self)
+
+        async def _stop_that_fails_only_for_the_half_started_gateway(self, **kwargs):
+            if failed_gateway and self is failed_gateway[0]:
+                raise RuntimeError("stop also failed")
+            return await real_stop(self, **kwargs)
+
+        monkeypatch.setattr(gateway_cls, "start", _failing_start)
+        monkeypatch.setattr(gateway_cls, "stop", _stop_that_fails_only_for_the_half_started_gateway)
+
+        with pytest.raises(RuntimeError, match="start failed"):
+            await mount.restart()
+
+        # The new gateway and stack were assigned before gateway.start() blew
+        # up, and the rollback's own teardown also failed — rolled back by the
+        # explicit nulling, not left half-built.
+        assert mount.state == "standby"
+        assert mount.gateway is None
+        assert mount._stack is None
+        assert acquire_singleton_lock(GatewayRunDir(tmp_path / ".bos")) is None
+
+        assert await mount.acquire() is True
+        assert mount.state == "live"
+        assert mount.gateway is not None
+    finally:
+        await mount.stop()
