@@ -190,13 +190,29 @@ class GatewayMount:
         instance must not do.
         """
         assert self._run_dir is not None
-        if self._gateway is not None:
-            # A runtime already exists, so whatever state the mount reports, one
-            # is being torn down somewhere else — the demoting watchdog goes to
-            # "standby" before its teardown, which takes the whole drain to run.
-            # Promoting again would build a second runtime over it, and that
-            # teardown would then null the new gateway, close the new harness
-            # and release the lock this call had just taken.
+        if self._gateway is not None or self._stack is not None:
+            # Either half means a runtime exists here, however partially, so
+            # whatever state the mount reports, one is being built or torn down
+            # somewhere else. Building a second over it would start two
+            # Gateways in one process — duplicate channel pollers, which is the
+            # thing the singleton exists to prevent — and the other path's own
+            # cleanup would then null the new gateway, close the new harness and
+            # release the lock this call had just taken.
+            #
+            # ``_stack`` is what closes both windows, and ``_gateway`` alone
+            # closed neither. Promotion: ``_bring_up_runtime`` assigns
+            # ``_stack`` before its first await and ``_gateway`` only several
+            # awaits later, so a watchdog mid-promotion is invisible to a
+            # ``_gateway`` check — and POST /api/restart reaches acquire() from
+            # an unauthenticated request task that the watchdog, deliberately
+            # left outside the mutex, does not exclude. Demotion: the reverse —
+            # ``_tear_down_runtime`` nulls ``_gateway`` *before*
+            # ``await self._stack.aclose()``, and the watchdog's own ``finally``
+            # nulls ``_lock`` after that, so a promotion slipping in there would
+            # have the flock dropped out from under a mount reporting "live".
+            # ``_stack`` is set across both windows with no yield between its
+            # last write and the watchdog's finally, so testing it covers them.
+            # A legitimate retry still passes: _roll_back_runtime nulls both.
             return False
         # A lock already held is this mount's own: a failed restart leaves it in
         # standby still holding it. Re-acquiring would fail — flock binds to an

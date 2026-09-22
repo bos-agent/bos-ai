@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from dataclasses import dataclass
 
 import pytest
@@ -727,13 +728,26 @@ async def test_a_stop_during_a_restart_is_serialized_behind_it(tmp_path, monkeyp
 
     inside = asyncio.Event()
     release = asyncio.Event()
+    # A call-order record, not a stopwatch: the invariant is *where* the stop's
+    # teardown falls relative to the rebuild, and a wall-clock window only says
+    # that it had not got there yet on this machine, this run.
+    order: list[str] = []
     real_bring_up = mount._bring_up_runtime
+    real_tear_down = mount._tear_down_runtime
+
+    async def _recording_tear_down(*, graceful: bool = True):
+        order.append(f"teardown(graceful={graceful})")
+        return await real_tear_down(graceful=graceful)
 
     async def _parked_bring_up(workspace):
+        order.append("bring-up start")
         inside.set()
         await release.wait()
-        return await real_bring_up(workspace)
+        gateway = await real_bring_up(workspace)
+        order.append("bring-up done")
+        return gateway
 
+    monkeypatch.setattr(mount, "_tear_down_runtime", _recording_tear_down)
     monkeypatch.setattr(mount, "_bring_up_runtime", _parked_bring_up)
 
     restarting = asyncio.ensure_future(mount.restart())
@@ -741,12 +755,27 @@ async def test_a_stop_during_a_restart_is_serialized_behind_it(tmp_path, monkeyp
     assert mount.gateway is None  # the window itself
 
     stopping = asyncio.ensure_future(mount.stop(graceful=False))
-    await asyncio.sleep(0.05)
+    # Hand the loop over a fixed number of times rather than sleeping. An
+    # unserialized stop() only has to be *scheduled* to interleave, and turns of
+    # the event loop give it that on any machine; a 50 ms sleep gives it that
+    # only on a fast one, which is the difference between a discriminator and a
+    # coin flip.
+    for _ in range(50):
+        await asyncio.sleep(0)
     assert not stopping.done()  # waiting on the mutex, not tearing down half a rebuild
 
     release.set()
     await asyncio.wait_for(restarting, timeout=10)
     await asyncio.wait_for(stopping, timeout=10)
+
+    # The discriminator: the stop's teardown lands *after* the rebuild
+    # finished, never between its start and its completion.
+    assert order == [
+        "teardown(graceful=True)",  # the restart's own
+        "bring-up start",
+        "bring-up done",
+        "teardown(graceful=False)",  # the stop's — behind the rebuild, not into it
+    ]
 
     # The stop is the last word, and it is a whole one.
     assert mount.state == "stopped"
@@ -755,3 +784,88 @@ async def test_a_stop_during_a_restart_is_serialized_behind_it(tmp_path, monkeyp
     freed = acquire_singleton_lock(GatewayRunDir(tmp_path / ".bos"))
     assert freed is not None
     freed.close()
+
+
+@pytest.mark.asyncio
+async def test_a_restart_post_cannot_build_a_second_runtime_under_the_watchdog(tmp_path, monkeypatch):
+    """One runtime per process, even with the watchdog mid-promotion.
+
+    POST /api/restart reaches ``acquire()`` so a failed restart is recoverable,
+    and the watchdog is deliberately *outside* the mount's mutex (holding it
+    there would deadlock ``stop()``, which cancels the watchdog while holding
+    it). So the two can run at once, and the state machine does not hold them
+    apart — both work on ``"standby"``.
+
+    ``_acquire_and_bring_up``'s re-entry guard is what does, and checking
+    ``_gateway`` alone was not enough: ``_bring_up_runtime`` assigns ``_stack``
+    before its first await and ``_gateway`` only several awaits later, so a
+    promotion in flight was invisible to it. Two ``_bring_up_runtime`` calls
+    means two ``Gateway.start()`` in one process — duplicate channel pollers,
+    the exact thing the singleton exists to prevent — plus the first
+    ``AsyncExitStack`` overwritten and never ``aclose()``d.
+
+    The response code is not the bug; the second bring-up is. Assert on that.
+    """
+    import httpx
+
+    from bos.config import Workspace
+
+    rd = GatewayRunDir(tmp_path / ".bos")
+    rd.ensure()
+    holder = acquire_singleton_lock(rd)
+    assert holder is not None
+
+    inside = asyncio.Event()
+    release = asyncio.Event()
+    harness_entries: list[int] = []
+    real_harness = Workspace.harness
+
+    @contextlib.asynccontextmanager
+    async def _parked_harness(self):
+        # Inside _bring_up_runtime, after `self._stack = AsyncExitStack()` and
+        # long before `self._gateway = gateway`: the window itself. Only the
+        # first caller parks, so a second one is free to run to completion and
+        # be counted — a park that caught it too would hide the bug behind a
+        # hang instead of a failed assertion.
+        harness_entries.append(1)
+        if len(harness_entries) == 1:
+            inside.set()
+            await release.wait()
+        async with real_harness(self) as harness:
+            yield harness
+
+    monkeypatch.setattr(Workspace, "harness", _parked_harness)
+
+    mount = GatewayMount(lambda: _workspace(tmp_path), lock_poll_seconds=0.05)
+    await mount.start()
+    try:
+        assert mount.state == "standby"
+
+        holder.close()  # the holder is gone; the watchdog will promote
+        await asyncio.wait_for(inside.wait(), timeout=10)
+
+        # The window, asserted rather than assumed.
+        assert mount.state == "standby"
+        assert mount.gateway is None
+        assert mount._stack is not None
+        assert mount._lock is not None
+
+        transport = httpx.ASGITransport(app=mount.build_app())
+        async with httpx.AsyncClient(transport=transport, base_url="http://gateway") as client:
+            response = await client.post("/api/restart")
+
+        # The whole finding: refused before it could build anything.
+        assert harness_entries == [1]
+        assert response.status_code == 409
+        assert response.json() == {"ok": False, "error": "standby"}
+
+        release.set()
+        for _ in range(500):
+            if mount.state == "live":
+                break
+            await asyncio.sleep(0.02)
+        assert mount.state == "live"
+        assert harness_entries == [1]  # the promotion built exactly one runtime
+    finally:
+        release.set()
+        await mount.stop()
