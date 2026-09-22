@@ -33,6 +33,7 @@ __all__ = [
     "_pid_alive",
     "_pid_is_gateway",
     "acquire_singleton_lock",
+    "is_live",
     "is_running",
     "kill_process",
     "lock_is_free",
@@ -121,6 +122,23 @@ def is_running(rd: LifecycleRunDir) -> bool:
     return _pid_alive(pid) and _pid_is_gateway(pid)
 
 
+def is_live(rd: LifecycleRunDir) -> bool:
+    """Return True if *any* gateway owns this run dir — standalone or embedded.
+
+    ``is_running`` answers for ``python -m bos.runner`` only: it needs a
+    ``gateway.pid`` and a ``bos.runner`` cmdline, and a mounted gateway has
+    neither — it writes no pid file and its process is the host's (uvicorn,
+    gunicorn, …). What an embedded gateway does leave is ``gateway.state`` with
+    ``runtime = "embedded"`` plus the singleton flock, held for exactly as long
+    as the mount is up. Requiring both keeps this truthful in the other
+    direction too: a state file left by a host that crashed leaves the lock
+    free, so it still reads as not-live and stays reapable (BEP 17 §4.3).
+    """
+    if is_running(rd):
+        return True
+    return read_state(rd).get("runtime") == "embedded" and not lock_is_free(rd)
+
+
 def reap_stale(rd: LifecycleRunDir) -> bool:
     """Remove leftover pid/state files when no live gateway owns them.
 
@@ -128,8 +146,14 @@ def reap_stale(rd: LifecycleRunDir) -> bool:
     cleaning up — a stale ``gateway.pid``/``gateway.state`` must not block a
     fresh start or hand a stale endpoint to ``boscli ask``. No-op (returns
     False) when a gateway is actually running.
+
+    The flock, not the pid file, is what says "owned": an embedded gateway
+    writes no pid, so keying off ``is_running`` alone made this unlink the
+    ``gateway.state`` of a *live* mounted gateway — destroying the only record
+    the CLI has of it, and inviting the caller to spawn a standalone runner
+    that then dies on the host's lock.
     """
-    if is_running(rd):
+    if is_running(rd) or not lock_is_free(rd):
         return False
     cleaned = False
     for path in (rd.pid_file, rd.state_file):

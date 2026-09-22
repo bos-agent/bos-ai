@@ -1,4 +1,4 @@
-"""`boscli gateway restart`/`stop` branching on the runtime label (BEP 17 §4.3)."""
+"""`boscli gateway status`/`restart`/`stop` against an embedded gateway (BEP 17 §4.3)."""
 
 import json
 
@@ -6,7 +6,7 @@ import pytest
 from click.testing import CliRunner
 
 from bos.cli.entry import cli
-from bos.gateway.state import GatewayRunDir
+from bos.gateway.state import GatewayRunDir, acquire_singleton_lock
 
 
 def _state(tmp_path, runtime, *, base_url=None):
@@ -91,3 +91,54 @@ def test_stop_refuses_an_embedded_gateway(tmp_path):
 
     assert result.exit_code != 0
     assert "host" in result.output.lower()
+
+
+def test_status_sees_a_live_embedded_gateway(tmp_path):
+    """BEP 17 §4.3: status "works against both a standalone and an embedded
+    gateway, because both write gateway.state".
+
+    ``is_running`` needs a gateway.pid and a ``bos.runner`` cmdline; a mount has
+    neither, so this read as "stale state" — and the fix it printed,
+    ``gateway start``, reaped the live gateway's state file on the way past.
+    """
+    rd = _state(tmp_path, "embedded", base_url="http://127.0.0.1:8123/bos")
+    holder = acquire_singleton_lock(rd)
+    assert holder is not None
+    try:
+        result = _invoke(tmp_path, "status")
+    finally:
+        holder.close()
+
+    assert result.exit_code == 0, result.output
+    assert "running" in result.output
+    assert "embedded" in result.output
+    assert "stale" not in result.output
+
+
+def test_status_reports_a_stale_embedded_state_as_stopped(tmp_path):
+    """The other direction: a host that crashed without unlinking leaves the
+    flock free, and the state file it left behind describes nothing. Reporting
+    that as running would make the file unreachable by every command."""
+    _state(tmp_path, "embedded", base_url="http://127.0.0.1:8123/bos")
+
+    result = _invoke(tmp_path, "status")
+
+    assert result.exit_code == 0, result.output
+    assert "stopped" in result.output
+
+
+def test_start_refuses_rather_than_reaping_a_live_embedded_gateway(tmp_path):
+    """`gateway start` reaps stale pid/state before spawning. Keyed off the pid
+    file, that unlinked a live mount's gateway.state; keyed off the flock, it
+    refuses outright."""
+    rd = _state(tmp_path, "embedded", base_url="http://127.0.0.1:8123/bos")
+    holder = acquire_singleton_lock(rd)
+    assert holder is not None
+    try:
+        result = _invoke(tmp_path, "start")
+    finally:
+        holder.close()
+
+    assert result.exit_code != 0
+    assert "already running" in result.output
+    assert rd.state_file.exists()

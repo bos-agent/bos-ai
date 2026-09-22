@@ -5,6 +5,7 @@ import sys
 from bos.gateway.state import GatewayRunDir, read_gateway_state, write_gateway_state
 from bos.runner.proc import (
     acquire_singleton_lock,
+    is_live,
     is_running,
     lock_is_free,
     lock_still_owned,
@@ -191,3 +192,28 @@ def test_lock_helpers_live_in_the_gateway_ring(tmp_path):
         assert gateway_state.lock_still_owned(rd, handle) is True
     finally:
         handle.close()
+
+
+def test_reap_stale_refuses_while_the_singleton_lock_is_held(tmp_path):
+    """An embedded gateway writes no pid file, so ``is_running`` reads it as
+    stopped — and ``reap_stale`` would then unlink the ``gateway.state`` of a
+    *live* mounted gateway, which is the CLI's only record of it. The flock is
+    what says "owned" (BEP 17 §4.3)."""
+    rd = GatewayRunDir(tmp_path / ".bos")
+    rd.ensure()
+    rd.state_file.write_text('{"runtime": "embedded", "pid": 4242}')
+
+    holder = acquire_singleton_lock(rd)
+    assert holder is not None
+    try:
+        assert is_live(rd) is True
+        assert reap_stale(rd) is False
+        assert rd.state_file.exists()
+    finally:
+        holder.close()
+
+    # …and a host that died without unlinking leaves the lock free, so the
+    # state file is reapable again rather than unreachable by every command.
+    assert is_live(rd) is False
+    assert reap_stale(rd) is True
+    assert not rd.state_file.exists()

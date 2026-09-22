@@ -51,10 +51,10 @@ def _harness_info(ws, config_arg: str | None) -> dict[str, Any]:
 
 def _gateway_info(ws) -> dict[str, Any]:
     from bos.gateway.state import GatewayRunDir
-    from bos.runner.proc import is_running, read_state
+    from bos.runner.proc import is_live, read_state
 
     rd = GatewayRunDir(ws.bos_dir)
-    running = is_running(rd)
+    running = is_live(rd)  # an embedded gateway writes no pid file (BEP 17 §4.3)
     state = read_state(rd)
     if not running and not state:
         return {"running": False}
