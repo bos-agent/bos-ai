@@ -44,3 +44,28 @@ jobs:
           assert "echo: hello" in response.json()["reply"], response.json()
           print("embed example OK on a base install")
           PY
+
+      # Needs [gateway], unlike the example above: the mounted gateway is the
+      # gateway, not just its ASGI wrapper. A fresh venv is what would catch a
+      # gateway dependency landing in the wrong extra.
+      - name: Embedded gateway example runs against a gateway install
+        run: |
+          uv venv --python 3.13 /tmp/embed-gateway
+          VIRTUAL_ENV=/tmp/embed-gateway uv pip install --quiet '.[gateway]' fastapi httpx
+          VIRTUAL_ENV=/tmp/embed-gateway /tmp/embed-gateway/bin/python - <<'PY'
+          from fastapi.testclient import TestClient
+
+          from examples.embed_gateway_fastapi import make_app
+
+          with TestClient(make_app()) as client:
+              status = client.get("/bos/api/status")
+              assert status.status_code == 200, status.text
+              body = status.json()
+              assert body["runtime"] == "embedded", body
+              assert body["state"] == "live", body
+
+              restart = client.post("/bos/api/restart")
+              assert restart.status_code == 200, restart.text
+              assert restart.json() == {"ok": True, "state": "live"}, restart.json()
+          print("embedded gateway example OK on a gateway install")
+          PY
