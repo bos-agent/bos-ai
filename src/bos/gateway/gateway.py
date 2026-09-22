@@ -17,7 +17,7 @@ from .core.actor_resolver import ActorDescriptor, ActorResolver
 from .core.channel_context import ChannelRuntimeContext
 from .core.chat_coordinator import ChannelConversationRef, ChatCoordinator
 from .core.command_handler import CommandHandler
-from .http import create_gateway_app, resolve_gateway_api_key
+from .http import create_gateway_app
 from .state import GatewayRunDir, write_gateway_state
 
 if TYPE_CHECKING:
@@ -106,7 +106,6 @@ class Gateway:
             "host": self.actual_host,
             "port": self.actual_port,
             "base_url": self._public_base_url or f"http://{self.actual_host}:{self.actual_port}",
-            "auth": {"type": "api_key", "configured": bool(os.environ.get(self.config.api_key_env))},
             # Published so `boscli gateway stop` can size its kill deadline from
             # the grace *this* process resolved at startup, rather than from a
             # config file that may have been edited since.
@@ -126,10 +125,8 @@ class Gateway:
         }
 
     def build_app(self) -> web.Application:
-        api_key = resolve_gateway_api_key(self.config)
         return create_gateway_app(
             config_provider=lambda: self.config,
-            api_key=api_key,
             status_provider=self.status_snapshot,
             ws_handler=self.handle_ws,
         )

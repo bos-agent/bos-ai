@@ -344,7 +344,6 @@ main_actor = "main"            # which actor is the default mention/route target
 [runtime.gateway]
 host = "127.0.0.1"
 port = 0                       # 0 = auto-assign a free port (discover via gateway.state)
-api_key_env = "BOS_GATEWAY_API_KEY"
 # upload_dir = ".bos/uploads/http"
 # max_upload_bytes = 20971520
 
@@ -923,8 +922,8 @@ instantiated, and `PluginServices` is assembled. Agents are built lazily by
   its agent kind), starts each configured `[[runtime.channels]]`, and serves an HTTP
   control plane on `[runtime.gateway].host:port`. `port = 0` auto-assigns; the actual
   port/PID is written to `gateway.state` so clients (TUI, `gateway status`, HTTP) can
-  discover it. The control-plane API is authenticated by the key in the env var named by
-  `api_key_env` (default `BOS_GATEWAY_API_KEY`).
+  discover it. BOS performs no authentication of its own: the default bind is loopback,
+  and an operator who binds elsewhere fronts it with their own auth.
 - **Actors** are long-lived and restartable (`restart_on_error`, `max_restarts`). `main_actor`
   is the default route/mention target. Other actors are reachable by `@name` mentions
   (`actor_resolver.mention_prefix`, default `@`).
@@ -960,7 +959,7 @@ Global options: `-c/--config <path|preset>` (or `BOS_CONFIG`), `-l/--log-level <
 optional credential probe (one LLM call unless `--no-probe`) → optional `git init`.
 
 Useful env vars: `BOS_HOME` (default `~/.bos`), `BOS_CONFIG`, `BOS_MODEL`,
-`BOS_CONSOLIDATOR_MODEL`, `BOS_GATEWAY_API_KEY`, `BOS_CAPABILITY_LIMIT` (max skills/subagents
+`BOS_CONSOLIDATOR_MODEL`, `BOS_CAPABILITY_LIMIT` (max skills/subagents
 listed in the prompt, default 50), `BOS_LOG_LEVEL`, plus provider `*_API_KEY`s.
 
 ---

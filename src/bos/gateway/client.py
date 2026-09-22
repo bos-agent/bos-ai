@@ -70,7 +70,6 @@ class GatewayClient:
         channel_id: str | None = None,
         chat_id: str | None = None,
         endpoint_resolver: EndpointResolver | None = None,
-        api_key: str | None = None,
         workdir: str | None = None,
     ) -> None:
         self._host = host
@@ -79,7 +78,6 @@ class GatewayClient:
         self._rebuild_urls()
         self._address = address
         self._channel_id = (channel_id or address or uuid.uuid4().hex).strip()
-        self._api_key = api_key
         self._workdir = workdir or None
         self._chat_id = chat_id.strip() if isinstance(chat_id, str) and chat_id else None
         self._current_revision = 0
@@ -156,7 +154,7 @@ class GatewayClient:
 
         await self._close_transport()  # drop any previous session
 
-        self._session = aiohttp.ClientSession(headers=self._auth_headers())
+        self._session = aiohttp.ClientSession()
         query: dict[str, str] = {"channel_id": self._channel_id}
         if self._chat_id:
             query["chat_id"] = self._chat_id
@@ -353,9 +351,6 @@ class GatewayClient:
         if response.status >= 400:
             raise RuntimeError(payload.get("error") or f"List actors failed with HTTP {response.status}")
         return payload.get("actors", {})
-
-    def _auth_headers(self) -> dict[str, str]:
-        return {"Authorization": f"Bearer {self._api_key}"} if self._api_key else {}
 
     def _ingest_revision(self, metadata: dict[str, Any]) -> None:
         revision = _coerce_revision(metadata.get("current_revision"))

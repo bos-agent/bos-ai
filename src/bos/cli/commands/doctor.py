@@ -136,10 +136,6 @@ def _check_env(ws: Workspace, env_map: dict[str, str]) -> list[tuple[str, str, s
         results.append(("fail", "env", "unset: " + "; ".join(missing)))
     else:
         results.append(("ok", "env", "all *_env references resolve"))
-
-    api_key_env = runtime.gateway.api_key_env
-    if api_key_env and not env_map.get(api_key_env):
-        results.append(("warn", "gateway auth", f"{api_key_env} unset — gateway runs without an API key"))
     return results
 
 

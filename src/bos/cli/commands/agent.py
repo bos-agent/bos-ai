@@ -744,7 +744,7 @@ def restart(ctx):
 @click.pass_context
 def tui(ctx, host: str | None, port: int | None, channel_id: str | None):
     """Connect the TUI to the gateway, starting one in the background if needed."""
-    ws, rd = _get_ws_and_rd(ctx)
+    _ws, rd = _get_ws_and_rd(ctx)
 
     def _resolve_endpoint() -> tuple[str, int] | None:
         return _read_gateway_endpoint(rd)
@@ -755,9 +755,6 @@ def tui(ctx, host: str | None, port: int | None, channel_id: str | None):
         resolved_host, resolved_port = _ensure_gateway_endpoint(ctx, rd, None)
         host = host or resolved_host
         port = port or resolved_port
-    gateway_config = ws.resolve_gateway_config()
-    api_key = os.environ.get(gateway_config.api_key_env, "").strip() or None
-
     from bos.cli.tui_app import run_chat_tui
     from bos.gateway.client import GatewayClient
 
@@ -769,7 +766,6 @@ def tui(ctx, host: str | None, port: int | None, channel_id: str | None):
             channel_id=channel_id or _default_tui_client_id(),
             chat_id=None,
             endpoint_resolver=_resolve_endpoint,
-            api_key=api_key,
             workdir=os.getcwd(),
         )
         await _connect_tui_client(client)

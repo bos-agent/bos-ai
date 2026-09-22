@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any
 from aiohttp import web
 
 from bos.gateway.config import ResolvedGatewayConfig
-from bos.gateway.http import create_gateway_app, resolve_gateway_api_key
+from bos.gateway.http import create_gateway_app
 from bos.gateway.state import GatewayRunDir, acquire_singleton_lock, lock_is_free, lock_still_owned
 
 if TYPE_CHECKING:
@@ -376,7 +376,6 @@ class GatewayMount:
         if self._app is None:
             self._app = create_gateway_app(
                 config_provider=self._current_config,
-                api_key=resolve_gateway_api_key(self._current_config()),
                 status_provider=self.status,
                 ws_handler=self._dispatch_ws,
             )

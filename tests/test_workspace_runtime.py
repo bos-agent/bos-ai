@@ -15,7 +15,7 @@ def test_gateway_runtime_resolves_final_config_shape():
         "runtime": {
             "location": "process",
             "main_actor": "main",
-            "gateway": {"host": "0.0.0.0", "port": 7000, "api_key_env": "BOS_TEST_KEY"},
+            "gateway": {"host": "0.0.0.0", "port": 7000},
             "actors": {
                 "main": {
                     "agent": "assistant",
@@ -52,7 +52,6 @@ def test_gateway_runtime_resolves_final_config_shape():
 
     assert gateway.host == "0.0.0.0"
     assert gateway.port == 7000
-    assert gateway.api_key_env == "BOS_TEST_KEY"
     assert ws.resolve_default_actor() == "main"
     assert ws.get_main_agent_kind() == "assistant"
     assert actors["main"].address == "agent@main"
@@ -171,3 +170,15 @@ def test_runtime_config_ignores_legacy_location_and_docker_keys():
     from bos.config.schema import RuntimeConfig
 
     assert "location" not in RuntimeConfig.model_fields
+
+
+def test_gateway_config_rejects_removed_api_key_env():
+    """BEP 17 §5.1: the key is gone and GatewayConfig is extra="forbid", so a
+    config that still sets it fails to load. No shim — the fix is to delete the
+    line, and the error has to name the key so an operator can find it."""
+    from bos.config.schema import RootConfig
+
+    with pytest.raises(Exception) as excinfo:
+        RootConfig.model_validate({"runtime": {"gateway": {"api_key_env": "BOS_GATEWAY_API_KEY"}}})
+
+    assert "api_key_env" in str(excinfo.value)

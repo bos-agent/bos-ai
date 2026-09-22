@@ -5,7 +5,7 @@ from aiohttp import FormData, web
 from bos.core import BaseChannel, ep_channel
 from bos.extensions.chat_stores.in_memory import InMemChatStore
 from bos.gateway import Gateway, ResolvedGatewayConfig
-from bos.gateway.http import create_gateway_app, resolve_gateway_api_key
+from bos.gateway.http import create_gateway_app
 from bos.gateway.state import GatewayRunDir, read_gateway_state, write_gateway_state
 
 
@@ -18,14 +18,13 @@ async def _start_app(app: web.Application):
     return runner, f"http://127.0.0.1:{port}"
 
 
-def _app(tmp_path, *, api_key: str = "secret") -> web.Application:
+def _app(tmp_path) -> web.Application:
     config = ResolvedGatewayConfig(upload_dir=str(tmp_path / "uploads"))
     return create_gateway_app(
         config_provider=lambda: config,
-        api_key=api_key,
         status_provider=lambda: {
             "runtime": "process",
-            "gateway": {"auth": {"type": "api_key", "configured": True}},
+            "gateway": {},
             "actors": {"main": {"display_name": "Main"}},
             "channels": {},
             "active_turns": {},
@@ -53,8 +52,7 @@ class _FakeHarness:
 
 
 @pytest.mark.asyncio
-async def test_gateway_status_uses_channel_manager_payload(monkeypatch):
-    monkeypatch.setenv("BOS_GATEWAY_API_KEY", "secret")
+async def test_gateway_status_uses_channel_manager_payload():
     from bos.config import Workspace
 
     ws = Workspace(
@@ -85,53 +83,6 @@ async def test_gateway_status_uses_channel_manager_payload(monkeypatch):
     assert snapshot["channels"]["demo"]["address"] == "channel@demo"
 
 
-def test_resolve_gateway_api_key_returns_none_when_env_missing():
-    config = ResolvedGatewayConfig(api_key_env="MISSING_KEY")
-
-    assert resolve_gateway_api_key(config, environ={}) is None
-    assert resolve_gateway_api_key(config, environ={"MISSING_KEY": "  "}) is None
-
-
-def test_resolve_gateway_api_key_returns_value_when_set():
-    config = ResolvedGatewayConfig(api_key_env="SOME_KEY")
-
-    assert resolve_gateway_api_key(config, environ={"SOME_KEY": "secret"}) == "secret"
-
-
-@pytest.mark.asyncio
-async def test_gateway_allows_unauthenticated_requests_when_key_unset(tmp_path):
-    runner, base_url = await _start_app(_app(tmp_path, api_key=""))
-    try:
-        async with aiohttp.ClientSession() as session:
-            no_auth = await session.get(f"{base_url}/api/status")
-            with_auth = await session.get(f"{base_url}/api/status", headers={"Authorization": "Bearer anything"})
-
-            assert no_auth.status == 200
-            assert with_auth.status == 200
-    finally:
-        await runner.cleanup()
-
-
-@pytest.mark.asyncio
-async def test_gateway_status_requires_bearer_auth(tmp_path):
-    runner, base_url = await _start_app(_app(tmp_path))
-    try:
-        async with aiohttp.ClientSession() as session:
-            missing = await session.get(f"{base_url}/api/status")
-            wrong = await session.get(f"{base_url}/api/status", headers={"Authorization": "Bearer wrong"})
-            ok = await session.get(f"{base_url}/api/status", headers={"Authorization": "Bearer secret"})
-
-            assert missing.status == 401
-            assert await missing.json() == {"ok": False, "error": "unauthorized"}
-            assert wrong.status == 401
-            assert ok.status == 200
-            payload = await ok.json()
-            assert payload["ok"] is True
-            assert payload["actors"]["main"]["display_name"] == "Main"
-    finally:
-        await runner.cleanup()
-
-
 @pytest.mark.asyncio
 async def test_gateway_upload_image_returns_path_part(tmp_path):
     runner, base_url = await _start_app(_app(tmp_path))
@@ -142,7 +93,6 @@ async def test_gateway_upload_image_returns_path_part(tmp_path):
             response = await session.post(
                 f"{base_url}/api/upload-image",
                 data=form,
-                headers={"Authorization": "Bearer secret"},
             )
             payload = await response.json()
 
@@ -164,7 +114,6 @@ async def test_gateway_upload_non_image_returns_file_part(tmp_path):
             response = await session.post(
                 f"{base_url}/api/upload",
                 data=form,
-                headers={"Authorization": "Bearer secret"},
             )
             payload = await response.json()
 
@@ -180,16 +129,14 @@ async def test_gateway_upload_non_image_returns_file_part(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_ws_endpoint_is_authenticated_even_before_ws_channel_slice(tmp_path):
+async def test_ws_endpoint_reports_not_implemented_without_a_handler(tmp_path):
     runner, base_url = await _start_app(_app(tmp_path))
     try:
         async with aiohttp.ClientSession() as session:
-            missing = await session.get(f"{base_url}/ws")
-            authed = await session.get(f"{base_url}/ws", headers={"Authorization": "Bearer secret"})
+            response = await session.get(f"{base_url}/ws")
 
-            assert missing.status == 401
-            assert authed.status == 501
-            assert (await authed.json())["error"] == "ws_not_implemented"
+            assert response.status == 501
+            assert (await response.json())["error"] == "ws_not_implemented"
     finally:
         await runner.cleanup()
 
@@ -198,7 +145,7 @@ def test_gateway_state_round_trips_without_secrets(tmp_path):
     run_dir = GatewayRunDir(tmp_path / ".bos")
     snapshot = {
         "runtime": "process",
-        "gateway": {"auth": {"type": "api_key", "configured": True}},
+        "gateway": {"host": "127.0.0.1", "port": 5920},
         "actors": {},
         "channels": {},
         "active_turns": {},
@@ -206,5 +153,5 @@ def test_gateway_state_round_trips_without_secrets(tmp_path):
 
     write_gateway_state(run_dir, snapshot)
 
-    assert read_gateway_state(run_dir)["gateway"]["auth"] == {"type": "api_key", "configured": True}
+    assert read_gateway_state(run_dir)["gateway"]["port"] == 5920
     assert "secret" not in run_dir.state_file.read_text(encoding="utf-8").lower()

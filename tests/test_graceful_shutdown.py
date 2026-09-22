@@ -571,8 +571,6 @@ async def test_runner_serves_only_after_actors_and_channels_are_up(tmp_path, mon
     from bos.gateway.channels.channel_manager import ChannelManager
     from bos.runner.runner import start
 
-    monkeypatch.setenv("BOS_TEST_GATEWAY_KEY", "secret")
-
     class FakeHarness:
         def __init__(self) -> None:
             InMemMailRoute._queues = {}
@@ -594,7 +592,7 @@ async def test_runner_serves_only_after_actors_and_channels_are_up(tmp_path, mon
         tmp_path / ".bos",
         {
             "runtime": {
-                "gateway": {"port": 0, "api_key_env": "BOS_TEST_GATEWAY_KEY", "shutdown_grace_seconds": 0.1},
+                "gateway": {"port": 0, "shutdown_grace_seconds": 0.1},
                 "main_actor": "main",
                 "actors": {"main": {"agent": "main"}},
             }
@@ -655,8 +653,6 @@ async def test_gateway_stops_actors_before_channels(tmp_path, monkeypatch):
     from bos.extensions.chat_stores.in_memory import InMemChatStore as Store
     from bos.gateway import Gateway
 
-    monkeypatch.setenv("BOS_TEST_GATEWAY_KEY", "secret")
-
     class FakeHarness:
         def __init__(self) -> None:
             InMemMailRoute._queues = {}
@@ -673,7 +669,6 @@ async def test_gateway_stops_actors_before_channels(tmp_path, monkeypatch):
             "runtime": {
                 "gateway": {
                     "port": 0,
-                    "api_key_env": "BOS_TEST_GATEWAY_KEY",
                     "shutdown_grace_seconds": 0.1,
                 },
                 "main_actor": "main",
@@ -723,8 +718,6 @@ async def test_cancelling_the_gateway_skips_the_drain(tmp_path, monkeypatch):
     from bos.extensions.chat_stores.in_memory import InMemChatStore as Store
     from bos.gateway import Gateway
 
-    monkeypatch.setenv("BOS_TEST_GATEWAY_KEY", "secret")
-
     class FakeHarness:
         def __init__(self) -> None:
             InMemMailRoute._queues = {}
@@ -741,7 +734,6 @@ async def test_cancelling_the_gateway_skips_the_drain(tmp_path, monkeypatch):
             "runtime": {
                 "gateway": {
                     "port": 0,
-                    "api_key_env": "BOS_TEST_GATEWAY_KEY",
                     "shutdown_grace_seconds": 30,
                 },
                 "main_actor": "main",
@@ -786,8 +778,6 @@ async def test_escalating_during_the_drain_still_finishes_teardown(tmp_path, mon
     from bos.gateway import Gateway
     from bos.gateway import gateway as gateway_mod
 
-    monkeypatch.setenv("BOS_TEST_GATEWAY_KEY", "secret")
-
     class FakeHarness:
         def __init__(self) -> None:
             InMemMailRoute._queues = {}
@@ -804,7 +794,6 @@ async def test_escalating_during_the_drain_still_finishes_teardown(tmp_path, mon
             "runtime": {
                 "gateway": {
                     "port": 0,
-                    "api_key_env": "BOS_TEST_GATEWAY_KEY",
                     "shutdown_grace_seconds": 30,
                 },
                 "main_actor": "main",
@@ -863,8 +852,6 @@ async def test_ws_connects_are_refused_once_shutting_down(tmp_path, monkeypatch)
     from bos.extensions.chat_stores.in_memory import InMemChatStore as Store
     from bos.gateway import Gateway
 
-    monkeypatch.setenv("BOS_TEST_GATEWAY_KEY", "secret")
-
     class FakeHarness:
         def __init__(self) -> None:
             InMemMailRoute._queues = {}
@@ -879,7 +866,7 @@ async def test_ws_connects_are_refused_once_shutting_down(tmp_path, monkeypatch)
         tmp_path / ".bos",
         {
             "runtime": {
-                "gateway": {"port": 0, "api_key_env": "BOS_TEST_GATEWAY_KEY", "shutdown_grace_seconds": 1},
+                "gateway": {"port": 0, "shutdown_grace_seconds": 1},
                 "main_actor": "main",
                 "actors": {"main": {"agent": "main"}},
             }
@@ -964,8 +951,6 @@ def test_status_snapshot_publishes_the_running_grace(tmp_path, monkeypatch):
     from bos.extensions.chat_stores.in_memory import InMemChatStore as Store
     from bos.gateway import Gateway
 
-    monkeypatch.setenv("BOS_TEST_GATEWAY_KEY", "secret")
-
     class FakeHarness:
         def __init__(self) -> None:
             InMemMailRoute._queues = {}
@@ -980,7 +965,7 @@ def test_status_snapshot_publishes_the_running_grace(tmp_path, monkeypatch):
         tmp_path / ".bos",
         {
             "runtime": {
-                "gateway": {"port": 0, "api_key_env": "BOS_TEST_GATEWAY_KEY", "shutdown_grace_seconds": 7.5},
+                "gateway": {"port": 0, "shutdown_grace_seconds": 7.5},
                 "main_actor": "main",
                 "actors": {"main": {"agent": "main"}},
             }

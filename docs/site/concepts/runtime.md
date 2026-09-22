@@ -19,8 +19,9 @@ keys see [Configuration](../configuration/index.md).
    `config.toml`. Each actor is an addressable mailbox bound to an agent kind.
 3. Starts each configured `[[runtime.channels]]` — persistent loops that bridge
    external clients to actor mailboxes.
-4. Serves an **HTTP control plane** on `[runtime.gateway].host:port`, authenticated
-   by the key in the env var named by `api_key_env` (default `BOS_GATEWAY_API_KEY`).
+4. Serves an **HTTP control plane** on `[runtime.gateway].host:port`. BOS performs
+   no authentication of its own — the default bind is loopback, and an operator who
+   binds elsewhere fronts it with their own auth or a reverse proxy.
 5. Writes a **`gateway.state`** file (in the `bos_dir`) so that `boscli tui`,
    `boscli gateway status`, and HTTP clients can discover the actual port and PID
    without pre-configuration.
@@ -29,7 +30,6 @@ keys see [Configuration](../configuration/index.md).
 [runtime.gateway]
 host        = "127.0.0.1"
 port        = 0                      # 0 = auto-assign; actual port in gateway.state
-api_key_env = "BOS_GATEWAY_API_KEY"
 ```
 
 !!! note "Port zero and discovery"

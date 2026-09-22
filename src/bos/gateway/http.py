@@ -17,44 +17,21 @@ StatusProvider = Callable[[], JsonDict]
 # read the settings of whichever Gateway is current rather than close over one.
 ConfigProvider = Callable[[], ResolvedGatewayConfig]
 WSHandler = Callable[[web.Request], Awaitable[web.StreamResponse]]
-APP_API_KEY = web.AppKey("api_key", str)
 APP_GATEWAY_CONFIG: web.AppKey[ConfigProvider] = web.AppKey("gateway_config")
 APP_STATUS_PROVIDER: web.AppKey[StatusProvider] = web.AppKey("status_provider")
 APP_WS_HANDLER: web.AppKey[WSHandler] = web.AppKey("ws_handler")
 
 
-def resolve_gateway_api_key(config: ResolvedGatewayConfig, environ: dict[str, str] | None = None) -> str | None:
-    """Return the configured gateway API key, or ``None`` when auth is disabled.
-
-    The key is optional: when the environment variable is unset or empty the
-    gateway runs without authentication (a hosting layer may enforce its own).
-    """
-    import os
-
-    env = os.environ if environ is None else environ
-    api_key = env.get(config.api_key_env, "").strip()
-    return api_key or None
-
-
-@web.middleware
-async def api_key_middleware(request: web.Request, handler: Callable[[web.Request], Awaitable[web.StreamResponse]]):
-    api_key: str = request.app[APP_API_KEY]
-    if api_key and request.headers.get("Authorization") != f"Bearer {api_key}":
-        return web.json_response({"ok": False, "error": "unauthorized"}, status=401)
-    return await handler(request)
-
 
 def create_gateway_app(
     *,
     config_provider: ConfigProvider,
-    api_key: str | None,
     status_provider: StatusProvider,
     ws_handler: WSHandler | None = None,
 ) -> web.Application:
     # ``client_max_size`` is fixed at construction by aiohttp, so it is read
     # once here; every per-request setting goes through the provider.
-    app = web.Application(client_max_size=config_provider().max_upload_bytes, middlewares=[api_key_middleware])
-    app[APP_API_KEY] = api_key or ""
+    app = web.Application(client_max_size=config_provider().max_upload_bytes)
     app[APP_GATEWAY_CONFIG] = config_provider
     app[APP_STATUS_PROVIDER] = status_provider
     if ws_handler is not None:

@@ -315,7 +315,6 @@ main_actor = "main"            # the default route/mention target
 [runtime.gateway]
 host = "127.0.0.1"
 port = 0                       # 0 = auto-assign a free port; discover via gateway.state
-api_key_env = "BOS_GATEWAY_API_KEY"
 # upload_dir = ".bos/uploads/http"
 # max_upload_bytes = 20971520
 # shutdown_grace_seconds = 30    # how long a stop gives in-flight turns to close with a handoff
@@ -348,8 +347,8 @@ overrides in the same shape as `[agent.defaults]`.
 
 **`[runtime.gateway]`** configures the gateway's HTTP control plane. `port = 0` lets the OS
 assign a free port; the actual port and PID are written to `gateway.state` so clients (the
-TUI, `boscli gateway status`) can find the running gateway. The control plane is
-authenticated with the key in the environment variable named by `api_key_env`.
+TUI, `boscli gateway status`) can find the running gateway. BOS performs no authentication
+of its own; the default bind is loopback, and an operator who binds elsewhere fronts it.
 
 `shutdown_grace_seconds` bounds a graceful stop. On `boscli gateway stop` (or the first
 `SIGTERM`/`Ctrl-C`), the gateway stops admitting turns and asks in-flight ones to close: each

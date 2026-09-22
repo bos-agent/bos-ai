@@ -61,7 +61,7 @@ config.toml
 ├── [agent.defaults]  base agent settings (model, tools, plugins, …)
 ├── [agents.<name>]   agent-specific overrides (or an external .md / .toml file)
 └── [runtime]
-    ├── [runtime.gateway]          host, port, api_key_env
+    ├── [runtime.gateway]          host, port, upload_dir
     ├── [runtime.actors.<name>]    one actor per entry
     └── [[runtime.channels]]       zero or more persistent channels
 ```
