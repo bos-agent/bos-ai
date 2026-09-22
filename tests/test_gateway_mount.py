@@ -624,3 +624,77 @@ async def test_the_runtime_label_reaches_the_state_file(tmp_path):
         assert read_gateway_state(GatewayRunDir(tmp_path / ".bos"))["runtime"] == "embedded"
     finally:
         await mount.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_standby_mount_refuses_a_restart_over_http(tmp_path):
+    """POST /api/restart at the mount's own app: 409 naming the state.
+
+    Reached through ``build_app()`` rather than by calling ``_dispatch_restart``
+    directly, so the wiring is under test too — a ``build_app()`` that forgot
+    ``restart_handler=`` answers 501 here, and a guard that only refused
+    ``stopped`` would tear down a runtime holding no lock and answer 200.
+    """
+    import httpx
+
+    rd = GatewayRunDir(tmp_path / ".bos")
+    rd.ensure()
+    holder = acquire_singleton_lock(rd)
+    assert holder is not None
+
+    mount = GatewayMount(lambda: _workspace(tmp_path), lock_poll_seconds=60)
+    await mount.start()
+    try:
+        assert mount.state == "standby"
+        transport = httpx.ASGITransport(app=mount.build_app())
+        async with httpx.AsyncClient(transport=transport, base_url="http://gateway") as client:
+            response = await client.post("/api/restart")
+        assert response.status_code == 409
+        assert response.json() == {"ok": False, "error": "standby"}
+        assert mount.state == "standby"  # refused, not attempted
+    finally:
+        await mount.stop()
+        holder.close()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_restart_answers_500_and_stays_recoverable(tmp_path):
+    """The error is reported, not swallowed, and a retry is a second POST.
+
+    A restart re-reads configuration, so a workspace that fails to build is the
+    realistic failure — an edit that broke the config file. Task 1 made that
+    path roll back to a standby that still holds the lock, which is the only way
+    back for an embedded host: it cannot reach stop()/start() from outside its
+    own process.
+    """
+    import httpx
+
+    calls: list[int] = []
+
+    def _factory():
+        calls.append(1)
+        if len(calls) == 2:  # the restart's read, not the first bring-up
+            raise RuntimeError("boom")
+        return _workspace(tmp_path)
+
+    mount = GatewayMount(_factory, lock_poll_seconds=60)
+    await mount.start()
+    try:
+        assert mount.state == "live"
+        transport = httpx.ASGITransport(app=mount.build_app())
+        async with httpx.AsyncClient(transport=transport, base_url="http://gateway") as client:
+            failed = await client.post("/api/restart")
+            assert failed.status_code == 500
+            assert failed.json() == {"ok": False, "error": "boom"}
+            assert mount.state == "standby"
+            assert mount.gateway is None
+
+            # Recoverable: the lock was kept, so the retry rebuilds rather than
+            # losing the singleton to whoever asks for it next.
+            assert await mount.acquire() is True
+            assert mount.state == "live"
+            ok = await client.post("/api/restart")
+        assert ok.status_code == 200
+        assert ok.json() == {"ok": True, "state": "live"}
+    finally:
+        await mount.stop()

@@ -42,8 +42,13 @@ def test_restart_of_a_process_gateway_does_not_go_over_http(tmp_path, monkeypatc
     started: list[bool] = []
     monkeypatch.setattr("bos.cli.commands.agent.start", lambda *a, **k: started.append(True))
 
-    _invoke(tmp_path, "restart")
+    result = _invoke(tmp_path, "restart")
 
+    # All three: `posted == []` alone is also satisfied by an early SystemExit
+    # that never reaches the branch, which would make this test green while the
+    # process path was broken.
+    assert result.exit_code == 0, result.output
+    assert started == [True]
     assert posted == []
 
 
