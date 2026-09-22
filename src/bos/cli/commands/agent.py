@@ -579,6 +579,9 @@ def start(ctx, foreground: bool, workspace_dir: str | None):
 # Headroom over the drain grace before `stop` escalates to SIGKILL: the reply
 # flush, harness teardown, and process exit.
 _STOP_DEADLINE_MARGIN = 5.0
+# `restart` waits on a blocking HTTP call rather than on a process exit, so its
+# budget is the same drain plus room for the rebuild on the other side.
+_RESTART_TIMEOUT_MARGIN = 10.0
 
 
 def _resolved_stop_grace(ws, state: dict) -> float:
@@ -609,11 +612,18 @@ def stop(ctx):
     ws, rd = _get_ws_and_rd(ctx)
     from bos.runner.proc import is_running, read_state, stop_gateway
 
+    state = read_state(rd)
+    if state.get("runtime") == "embedded":
+        # Signalling that pid would kill the host application, not the gateway
+        # (BEP 17 §4.3). There is no HTTP equivalent of stop either: the mount
+        # would tear down the runtime while the host kept serving the app.
+        click.echo("This gateway is embedded in a host process; stop it through that host.", err=True)
+        raise SystemExit(1)
+
     if not is_running(rd):
         click.echo("No gateway is running.", err=True)
         raise SystemExit(1)
 
-    state = read_state(rd)
     click.echo(f"Stopping gateway (process {state.get('pid', '?')})…")
 
     stop_gateway(rd, signal.SIGTERM)
@@ -713,13 +723,53 @@ def status(ctx):
 # ── boscli gateway restart ──────────────────────────────────────
 
 
+def _restart_embedded_gateway(ws, state: dict) -> None:
+    """Restart a mounted gateway through its own ``POST /api/restart``.
+
+    Its process is the host's, so there is nothing to stop and start: the mount
+    rebuilds the ``Gateway`` behind the app it is already serving (BEP 17 §4.3).
+    It does not guess a URL — a gateway that published no ``base_url`` is
+    reported as exactly that.
+    """
+    import httpx
+
+    base_url = state.get("gateway", {}).get("base_url")
+    if not base_url:
+        click.echo(
+            "This gateway is embedded in a host process and published no base_url, "
+            "so there is no endpoint to restart it through; restart it through that host.",
+            err=True,
+        )
+        raise SystemExit(1)
+
+    # The POST blocks for the whole restart — the mount drains in-flight turns
+    # first, bounded by the grace *this* gateway published, which is the same
+    # field `stop` sizes its kill deadline from.
+    timeout = _resolved_stop_grace(ws, state) + _RESTART_TIMEOUT_MARGIN
+    click.echo(f"Restarting embedded gateway at {base_url}…")
+    response = httpx.post(f"{str(base_url).rstrip('/')}/api/restart", timeout=timeout)
+    if response.status_code // 100 != 2:
+        try:
+            detail = response.json().get("error", response.text)
+        except Exception:
+            detail = response.text
+        click.echo(f"Restart failed ({response.status_code}): {detail}", err=True)
+        raise SystemExit(1)
+    click.echo(f"Gateway restarted ({response.json().get('state', '?')}).")
+
+
 @gateway.command()
 @click.pass_context
 def restart(ctx):
     """Restart the gateway (stop then start)."""
     # Re-invoke stop (ignore failure if not running)
-    _, rd = _get_ws_and_rd(ctx)
-    from bos.runner.proc import is_running, lock_is_free
+    ws, rd = _get_ws_and_rd(ctx)
+    from bos.runner.proc import is_running, lock_is_free, read_state
+
+    state = read_state(rd)
+    if state.get("runtime") == "embedded":
+        _restart_embedded_gateway(ws, state)
+        return
 
     if is_running(rd):
         ctx.invoke(stop)

@@ -391,6 +391,23 @@ class GatewayMount:
             return
         await self._gateway.handle_ws(websocket)
 
+    async def _dispatch_restart(self) -> tuple[dict[str, Any], int]:
+        """Answer ``POST /api/restart``.
+
+        The app is the mount's and is built once, so it keeps serving across the
+        restart it is triggering — the ``Gateway`` behind it is what gets
+        replaced (BEP 17 §3.3.3). A failure leaves a recoverable standby, so the
+        error is reported rather than swallowed and a retry is a second POST.
+        """
+        if self._state != "live":
+            return {"ok": False, "error": self._state}, 409
+        try:
+            await self.restart()
+        except Exception as exc:
+            logger.exception("Restart failed; the mount is in standby and a retry may succeed.")
+            return {"ok": False, "error": str(exc)}, 500
+        return {"ok": True, "state": self._state}, 200
+
     def build_app(self) -> Starlette:
         """The application, built once and indirecting through the mount.
 
@@ -403,5 +420,6 @@ class GatewayMount:
                 config_provider=self._current_config,
                 status_provider=self.status,
                 ws_handler=self._dispatch_ws,
+                restart_handler=self._dispatch_restart,
             )
         return self._app

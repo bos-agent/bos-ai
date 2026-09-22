@@ -199,3 +199,37 @@ def test_gateway_state_round_trips_without_secrets(tmp_path):
 
     assert read_gateway_state(run_dir)["gateway"]["port"] == 5920
     assert "secret" not in run_dir.state_file.read_text(encoding="utf-8").lower()
+
+
+@pytest.mark.asyncio
+async def test_restart_endpoint_returns_501_without_a_handler(tmp_path):
+    async with _client(_app(tmp_path)) as client:
+        response = await client.post("/api/restart")
+
+    assert response.status_code == 501
+    assert response.json() == {"ok": False, "error": "restart_not_implemented"}
+
+
+@pytest.mark.asyncio
+async def test_restart_endpoint_reports_the_new_state(tmp_path):
+    async def _restart():
+        return {"ok": True, "state": "live"}, 200
+
+    app = create_gateway_app(
+        config_provider=lambda: ResolvedGatewayConfig(),
+        status_provider=lambda: {},
+        restart_handler=_restart,
+    )
+    async with _client(app) as client:
+        response = await client.post("/api/restart")
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "state": "live"}
+
+
+@pytest.mark.asyncio
+async def test_restart_endpoint_is_post_only(tmp_path):
+    async with _client(_app(tmp_path)) as client:
+        response = await client.get("/api/restart")
+
+    assert response.status_code == 405
