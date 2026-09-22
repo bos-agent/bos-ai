@@ -237,17 +237,20 @@ Routes map one-to-one, plus one addition:
 
 #### 3.6.3 Uploads: the limit must be carried over explicitly
 
-`aiohttp` bounds the whole request body with `web.Application(client_max_size=config.max_upload_bytes)` and returns 413 automatically. Starlette has no equivalent. Its form parser signature (measured, Starlette 1.6.0) is:
+`aiohttp` bounds the whole request body with `web.Application(client_max_size=config.max_upload_bytes)` and returns 413 automatically.
 
-```
-Request.form(*, max_files=1000, max_fields=1000, max_part_size=1048576)
-```
+**Starlette 1.6.0 has the same thing**, contrary to this section's first draft: `starlette.middleware.body_limit.RequestBodyLimitMiddleware` (also reachable as `Starlette(max_body_size=…)` and `Route(max_body_size=…)`). It rejects on `Content-Length` *before* the body is read and also counts the streamed total, answering `413 Content Too Large`. Measured: 500 KB under a 1 MB limit → 200, 2 MB → 413. It passes non-`http` scopes straight through, so `/ws` is untouched and it satisfies §3.6.2's rule for anything added to this app.
 
-`max_part_size` defaults to **1 MiB** while `max_upload_bytes` defaults to **20 MiB**, so a transcription of the handler would silently reject every upload between 1 MB and 20 MB — an image easily lands there.
+**`max_part_size` cannot be that limit.** Its check at `starlette/formparsers.py:184` runs against `self._current_part.data`, which only accumulates for a part *without* a filename; a part carrying one is streamed to a spooled temporary file and never trips it. Measured: a 2 MB file part passes `max_part_size=1_000_000` and returns 200. So the first draft's claim — that a transcribed handler "would silently reject every upload between 1 MB and 20 MB" — is wrong for file uploads, and, worse, relying on `max_part_size` as the enforcement point would have removed `max_upload_bytes` enforcement altogether.
 
-The port therefore passes `max_part_size=config.max_upload_bytes`, and `max_files=1, max_fields=1`, which matches the handler (it reads exactly one field named `file`) and bounds the total body by bounding the part count. A `Content-Length` check in the upload handler itself — not middleware, since §3.6.2 removes the only one — rejects an oversized request with 413 before parsing begins.
+The implementation therefore:
 
-**Named difference, not equivalence:** enforcement moves from "whole request body" to "one part, of bounded size". The configured limit and its default are unchanged.
+- wraps the app in `_LiveBodyLimit`, a pure ASGI callable that instantiates `RequestBodyLimitMiddleware` per request with `config_provider().max_upload_bytes`;
+- still passes `max_files=1, max_fields=1, max_part_size=config.max_upload_bytes` to `Request.form`, which matches the handler (it reads exactly one field named `file`) and bounds a non-file field, while noting that the body limit is what enforces the configured maximum.
+
+**The limit is read per request, not at construction.** Starlette fixes it wherever it is declared, but the app is built once — by an embedder at import time, *before* `start()`, when there is no `Gateway` and therefore no configuration to read (§3.3.3). A limit captured then would be the dataclass default, not the configured value. Per-request reading is also what lets a hot restart change it.
+
+**No named difference from aiohttp.** The bound is the whole request body, as it was, and the configured limit and its default are unchanged.
 
 `store_uploaded_attachment` is already transport-free — it takes `bytes` — and does not change.
 
@@ -270,9 +273,13 @@ The port therefore passes `max_part_size=config.max_upload_bytes`, and `max_file
 
 `python -m bos.runner` builds a `GatewayMount`, starts it, then serves `mount.asgi_app()` with uvicorn driven programmatically (measured, uvicorn 0.53.0):
 
-- `uvicorn.Config(app, host, port)` + `uvicorn.Server(config)`, `await server.serve()`
-- `server.started` marks the socket as listening; `server.servers[0].sockets[0].getsockname()[1]` yields the bound port, which is what `port = 0` needs for the state file
+- `uvicorn.Config(app, host, port)` + `uvicorn.Server(config)`
+- `server.servers[0].sockets[0].getsockname()[1]` yields the bound port, which is what `port = 0` needs for the state file
 - `server.should_exit = True` performs a graceful stop
+
+**`Server.serve()` must not be used.** It is `with self.capture_signals(): await self._serve(sockets)`, and `capture_signals` replaces `SIGINT`/`SIGTERM` with uvicorn's own handler whenever it runs on the main thread. That would displace the handler `runner/__main__.py` installs, and uvicorn's handler takes the socket down *before* the drain — the reverse of §3.2's ordering, where a turn closing during the drain still needs a live consumer for its reply. Signals belong to the process driver, not to the server.
+
+`runner.serve()` therefore runs uvicorn's own startup sequence minus that wrapper: `config.load()`, assign `server.lifespan = config.lifespan_class(config)`, `await server.startup()`, read the port back, then `server.main_loop()` as a task raced against the mount's shutdown and demotion waits, and `should_exit` + `server.shutdown()` under the teardown shield. `lifespan="off"`, because the mount is the lifecycle and an ASGI lifespan would be a competing second one.
 
 The runner hands the resolved port back to the mount so `gateway.base_url` reaches the state file as it does today. The two signal paths in `__main__.py` are unchanged in meaning: the first `SIGTERM` requests the drain, a second cancels.
 
@@ -321,13 +328,17 @@ Removal surface, verified:
 
 | Extra | Before | After | Measured |
 |---|---|---|---|
-| `gateway` | `aiohttp` | `starlette`, `uvicorn`, `python-multipart`, `httpx`, `websockets` | 11 MB → ~6.3 MB |
+| `gateway` | `aiohttp` | `starlette`, `uvicorn`, `python-multipart`, `httpx`, `websockets` | measured on implementation: base install 14 MB, with `[gateway]` 19 MB — the extra adds **5 MB** |
 
 Server and client dependencies stay in one extra. Splitting a `client` extra would save an embedder who mounts only the server about 3.4 MB; at that size the extra knob costs more than it saves.
 
 One consequence for BEP 16 §3.4's `_optional` table: `extensions/channels/telegram.py` needed the `gateway` extra only because `aiohttp` lived there. It still maps to `gateway` after the port because `httpx` is there too, so the table entry is unchanged in text and changed in reason. `extensions/channels/lark.py` continues to need `gateway` for the real reason — it imports `bos.gateway` at module level for `ChannelRuntimeContext`.
 
 `bos/gateway/__init__.py` eagerly imports `GatewayClient`, so `import bos.gateway` currently pulls the client stack. It becomes a lazy re-export via module `__getattr__`, so mounting the server does not import `httpx`/`websockets`.
+
+**`websockets` is pinned to 15.x, not 17.x.** `lark-oapi==1.6.8` requires `websockets>=11,<16`, so a 17.x pin makes the `all` extra unresolvable. Everything this BEP uses — `websockets.asyncio.client.connect`, `InvalidStatus.response` carrying the denial body, `websockets.protocol.State` — is present in 15.
+
+**`aiohttp` still reaches a `[litellm]` or `[all]` install transitively**, because `litellm==1.84.0` depends on it. BOS declares it nowhere, and a `[gateway]`-only install does not have it; §7.5's criterion is about BOS's own imports and its extra, not about the transitive closure of every other extra.
 
 ### 3.10 Look-alikes
 
@@ -414,7 +425,7 @@ Any deployment relying on `BOS_GATEWAY_API_KEY` loses its only protection. A gat
 
 ### 5.3 Breaking: `gateway.state` loses its `auth` block
 
-`status_snapshot()` no longer emits `gateway.auth`. Anything parsing the state file for it breaks; within the repo that is `boscli gateway status` rendering, updated with the change.
+`status_snapshot()` no longer emits `gateway.auth`. Anything parsing the state file for it breaks. Within the repo there is exactly one reader, and it is **not** `boscli gateway status` (which never rendered it) — it is `cli/commands/doctor.py`'s gateway-auth warning, deleted with the change. The shipped `config/template.toml` and both built-in presets set `api_key_env`, so they are updated too or every scaffolded project fails to load.
 
 ### 5.4 Breaking: `bos.gateway` API shapes
 
@@ -454,6 +465,8 @@ Each step rests on one already completed, and each leaves the three gates green.
 
 **Layer 2 — transport.** Layer 1's tests are rewritten here, once.
 
+**Steps 7 and 9 land together.** They are listed separately below for what each covers, but they cannot be sequenced: `runner.serve()` builds an `aiohttp.web.AppRunner` around `mount.build_app()`, so the moment that returns a Starlette app the standalone path is broken and no gate is green between them. Steps 6, 8 and 10 keep their own boundaries.
+
 6. **Remove authentication** (§3.8). Smallest independent slice of the transport work and it deletes the middleware the port would otherwise have to carry.
 7. **Port the server to Starlette**: routes, uploads with the explicit limits (§3.6.3), `WSChannel` and `handle_ws` with denial responses (§3.6.4). Rewrite `tests/test_gateway_http.py` and `tests/test_gateway_ws.py`.
 8. **Port the clients** to `httpx` + `websockets`: `GatewayClient`, then `extensions/channels/telegram.py` (§3.7). Rewrite `tests/test_telegram_channel.py`.
@@ -489,10 +502,11 @@ Each states its preconditions.
 
 1. **Re-executing project-local extension files on restart.** Excluded by §3.5.2 because `ExtensionPoint`'s duplicate-name guard turns a reload into a silent module-load failure. Revisit only with a concrete need; it requires changing `bos.core.registry`.
 2. **Unsetting environment variables on reload** (§3.5.3). Deferred; the workaround is an empty value.
-3. **Denial-response fallback behaviour on non-uvicorn ASGI servers** (§3.6.4). The fallback is a close code; whether `GatewayClient` needs to distinguish the two is an implementation-time finding, and step 7 should record what it observed.
+3. ~~**Denial-response fallback behaviour on non-uvicorn ASGI servers** (§3.6.4).~~ **Closed by step 7.** Observed: uvicorn 0.53.0 advertises the extension and delivers `HTTP 409` with the JSON body intact, readable from `websockets.exceptions.InvalidStatus.response.body`; it logs a cosmetic `ASGI callable returned without completing handshake` alongside it. `send_ws_denial` falls back to close code `4000 + status` (4400/4409/4503/4501 — no collision with `WS_TAKEOVER_CLOSE_CODE` 4001) where the extension is absent. `GatewayClient` does **not** need to distinguish the two: it treats every failed connect as a reconnect trigger, and the one code it does inspect, the takeover code, is emitted after the upgrade rather than as a denial.
 
 ---
 
 ## 9. Revision history
 
 - 2026-09-20 — Draft. Decisions, in the order they were settled: both tracks in one BEP, split before transport, because `run()` is the only place the two changes collide and splitting first keeps the existing aiohttp tests as the guard (§6); `aiohttp` removed completely rather than kept for the clients — measured 11 MB against 6.3 MB for `starlette`+`uvicorn`+`python-multipart`+`httpx`+`websockets` (§3.9); the singleton lock **kept** in the library after initially being scoped for removal, because two gateways on one run dir is a correctness failure, not an operational one (§3.4.1); host-owned storage seams surveyed and rejected as out of scope, with `gateway.state` reclassified as a cross-process concern and kept (§2.2.1, §3.4.4); the mount is **not** an `ep_plugin` (§3.10); hot restart rebuilds the whole `Gateway` because `ChannelManager.stop_all()` does not clear its registry (§3.5.1); `AgentRegistry.clear()` pulled into scope because without it a deleted agent stays callable (§3.5.4); authentication removed entirely with no deprecation shim (§3.8, §5.1); `client` dependencies folded into the `gateway` extra rather than split (§3.9). Measured against starlette 1.6.0 / uvicorn 0.53.0: `Request.form`'s `max_part_size` default of 1 MiB versus `max_upload_bytes`' 20 MiB (§3.6.3); `BaseHTTPMiddleware` skipping non-`http` scopes (§3.6.2); websocket denial responses preserving HTTP 409 and its JSON body (§3.6.4); `server.started` and `server.servers[0].sockets[0].getsockname()` for port read-back (§3.6.5).
+- 2026-09-21 — Layer 2 implemented (steps 6–10); four claims corrected against the packages as installed, rather than left as drafted. `max_part_size` bounds a non-file part only, so it cannot be the upload limit and §3.6.3's premise was wrong in a way that would have removed the limit entirely; starlette 1.6.0's `RequestBodyLimitMiddleware` is the `client_max_size` equivalent §3.6.3 said did not exist, wrapped so the limit is read per request (§3.6.3). `uvicorn.Server.serve()` installs `SIGINT`/`SIGTERM` handlers through `capture_signals()` and cannot be used without inverting §3.2's teardown order; the runner drives `startup`/`main_loop`/`shutdown` itself (§3.6.5). Steps 7 and 9 have no green intermediate and land together (§6). `websockets` is pinned to 15.x because `lark-oapi` requires `<16`, and `aiohttp` still arrives transitively via `litellm` (§3.9). Extra size measured at 5 MB over a 14 MB base, against the ≤ 8 MB budget. Open question 3 closed with what step 7 observed (§8).
