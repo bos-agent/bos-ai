@@ -19,7 +19,17 @@ Homepage = "https://github.com/bos-agent/bos-ai"
 
 [project.optional-dependencies]
 litellm = ["litellm==1.84.0"]
-gateway = ["aiohttp==3.13.5"]
+gateway = [
+    "aiohttp==3.13.5",
+    "starlette==1.6.0",
+    "uvicorn==0.53.0",
+    "python-multipart==0.0.32",
+    "httpx==0.28.1",
+    # 15.x, not 17.x: lark-oapi pins websockets>=11,<16, and the `all` extra has
+    # to resolve. Everything this uses — asyncio.client.connect, InvalidStatus
+    # carrying the denial response body, protocol.State — is present in 15.
+    "websockets==15.0.1",
+]
 search = ["ddgs==9.14.4", "beautifulsoup4==4.14.3"]
 lark = ["lark-oapi==1.6.8"]
 # bos.cli imports bos.gateway.client for the TUI's WebSocket connection.

@@ -112,8 +112,11 @@ async def test_standby_serves_status_without_a_gateway(tmp_path):
     answer /api/status and refuse websockets while holding no runtime."""
     import json
 
-    from aiohttp import web
-    from aiohttp.test_utils import make_mocked_request
+    import httpx
+    from conftest import serve_asgi
+    from starlette.applications import Starlette
+    from websockets.asyncio.client import connect
+    from websockets.exceptions import InvalidStatus
 
     rd = GatewayRunDir(tmp_path / ".bos")
     rd.ensure()
@@ -125,16 +128,26 @@ async def test_standby_serves_status_without_a_gateway(tmp_path):
     try:
         assert mount.state == "standby"
         app = mount.build_app()
-        assert isinstance(app, web.Application)
+        assert isinstance(app, Starlette)
         assert mount.build_app() is app  # built once, kept across restarts
         assert mount.status()["state"] == "standby"
         assert mount.status()["runtime"] == "embedded"
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://gateway") as client:
+            status = await client.get("/api/status")
+        assert status.status_code == 200
+        assert status.json()["state"] == "standby"
+
         # …and refuse websockets. Production reaches /ws through the mount's
         # dispatcher, never Gateway.build_app(), so this gate is the only thing
         # standing between a client and a consumer that does not exist.
-        response = await mount._dispatch_ws(make_mocked_request("GET", "/ws?channel_id=early"))
-        assert response.status == 503
-        assert json.loads(response.text) == {"ok": False, "error": "standby"}
+        async with serve_asgi(app) as addr:
+            with pytest.raises(InvalidStatus) as excinfo:
+                async with connect(f"ws://{addr}/ws?channel_id=early"):
+                    pass
+        assert excinfo.value.response.status_code == 503
+        assert json.loads(excinfo.value.response.body) == {"ok": False, "error": "standby"}
     finally:
         await mount.stop()
         holder.close()

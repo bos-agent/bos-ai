@@ -51,42 +51,61 @@ async def serve(mount: GatewayMount) -> None:
     configured host/port we bind; the bound port is read back off the socket
     because ``port = 0`` means the configured value is not the real one.
     """
-    from aiohttp import web
+    import uvicorn
 
     gateway = mount.gateway
     if gateway is None:
         raise RuntimeError("serve() requires a live GatewayMount — there is no runtime to serve.")
 
-    runner = web.AppRunner(mount.build_app(), access_log=None)
+    config = uvicorn.Config(
+        mount.build_app(),
+        host=gateway.config.host,
+        port=gateway.config.port,
+        access_log=False,
+        # The mount is the lifecycle — started before this call, stopped after
+        # it. An ASGI lifespan would be a second, competing one.
+        lifespan="off",
+    )
+    server = uvicorn.Server(config)
+    serving: asyncio.Task[None] | None = None
     graceful = True
     try:
-        await runner.setup()
-        site = web.TCPSite(runner, gateway.config.host, gateway.config.port)
-        await site.start()
-        server = getattr(site, "_server", None)
-        sockets = server.sockets if server else None
-        port = sockets[0].getsockname()[1] if sockets else gateway.config.port
+        # uvicorn's own startup sequence, minus ``Server.serve()``'s
+        # ``capture_signals()``. That replaces SIGINT/SIGTERM whenever it runs on
+        # the main thread, displacing the handler ``bos.runner.__main__``
+        # installed — and uvicorn's handler takes the socket down *before* the
+        # drain, which is the reverse of the order the drain needs, since a turn
+        # closing during it still requires a live consumer for its reply.
+        # Signals belong to the process driver, not to the server.
+        config.load()
+        server.lifespan = config.lifespan_class(config)
+        await server.startup()
+        port = server.servers[0].sockets[0].getsockname()[1]
         gateway.set_endpoint(gateway.config.host, port)
-        # Two ways to stop serving. Either the gateway was asked to shut down,
-        # or the watchdog demoted this mount to standby after it lost the lock.
-        # A demotion has to end the serving too: the gateway captured above is
-        # gone and will never signal, so waiting only on it would park here
-        # forever holding the port in front of no runtime — and the successor
-        # that won the lock would then die on EADDRINUSE.
-        # Both waits are the mount's, not the gateway's: a hot restart replaces
-        # that object while this call stays parked, and a wait bound to the
-        # instance captured above would go deaf to the live gateway's shutdown.
+        serving = asyncio.ensure_future(server.main_loop())
+        # Three ways to stop serving. The gateway was asked to shut down; the
+        # watchdog demoted this mount to standby after it lost the lock; or the
+        # server itself fell over. A demotion has to end the serving too: the
+        # gateway captured above is gone and will never signal, so waiting only
+        # on it would park here forever holding the port in front of no runtime
+        # — and the successor that won the lock would then die on EADDRINUSE.
+        # Both mount waits are the mount's, not the gateway's: a hot restart
+        # replaces that object while this call stays parked, and a wait bound to
+        # the instance captured above would go deaf to the live gateway's
+        # shutdown.
         waiters = [
             asyncio.ensure_future(mount.wait_for_shutdown()),
             asyncio.ensure_future(mount.wait_for_demotion()),
         ]
         try:
-            done, _ = await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
+            done, _ = await asyncio.wait([*waiters, serving], return_when=asyncio.FIRST_COMPLETED)
         finally:
             for waiter in waiters:
                 waiter.cancel()
         if waiters[1] in done:
             logger.error("Gateway lost the singleton lock — releasing the socket and stopping.")
+        if serving in done:
+            await serving  # re-raise whatever took the server down
     except asyncio.CancelledError:
         graceful = False
         raise
@@ -105,7 +124,21 @@ async def serve(mount: GatewayMount) -> None:
         try:
             await mount.stop(graceful=graceful)
         finally:
-            await shielded(runner.cleanup())
+            await shielded(_close_server(server, serving))
+
+
+async def _close_server(server: Any, serving: asyncio.Task[None] | None) -> None:
+    """Stop uvicorn and release the port. Bounded, and safe to call twice.
+
+    ``main_loop`` polls ``should_exit`` and returns on its own; it is gathered
+    with ``return_exceptions`` because whatever took it down has already been
+    re-raised by ``serve``, and this path only has to free the port.
+    """
+    server.should_exit = True
+    if serving is not None:
+        await asyncio.gather(serving, return_exceptions=True)
+    if server.started:
+        await server.shutdown()
 
 
 async def start(workspace: Workspace, *, on_ready: Callable[[Gateway], None] | None = None) -> None:

@@ -1,6 +1,5 @@
-import aiohttp
+import httpx
 import pytest
-from aiohttp import FormData, web
 
 from bos.core import BaseChannel, ep_channel
 from bos.extensions.chat_stores.in_memory import InMemChatStore
@@ -9,17 +8,8 @@ from bos.gateway.http import create_gateway_app
 from bos.gateway.state import GatewayRunDir, read_gateway_state, write_gateway_state
 
 
-async def _start_app(app: web.Application):
-    runner = web.AppRunner(app, access_log=None)
-    await runner.setup()
-    site = web.TCPSite(runner, "127.0.0.1", 0)
-    await site.start()
-    port = site._server.sockets[0].getsockname()[1]  # type: ignore[union-attr]
-    return runner, f"http://127.0.0.1:{port}"
-
-
-def _app(tmp_path) -> web.Application:
-    config = ResolvedGatewayConfig(upload_dir=str(tmp_path / "uploads"))
+def _app(tmp_path, *, max_upload_bytes: int = 20 * 1024 * 1024):
+    config = ResolvedGatewayConfig(upload_dir=str(tmp_path / "uploads"), max_upload_bytes=max_upload_bytes)
     return create_gateway_app(
         config_provider=lambda: config,
         status_provider=lambda: {
@@ -30,6 +20,12 @@ def _app(tmp_path) -> web.Application:
             "active_turns": {},
         },
     )
+
+
+def _client(app) -> httpx.AsyncClient:
+    """Drive the app in-process. ASGITransport runs the whole stack, middleware
+    included, so the body-limit path is exercised without binding a socket."""
+    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://gateway")
 
 
 @ep_channel(name="GatewayStatusTestChannel")
@@ -75,7 +71,7 @@ async def test_gateway_status_uses_channel_manager_payload():
     )
 
     gateway = Gateway(runtime=ws.resolve_gateway_runtime(), harness=_FakeHarness())
-    # Persistent channels are instantiated by run(); replicate that step only.
+    # Persistent channels are instantiated by start(); replicate that step only.
     await gateway.channel_manager.create_persistent(gateway._persistent_channel_configs)
     snapshot = gateway.status_snapshot()
 
@@ -84,61 +80,109 @@ async def test_gateway_status_uses_channel_manager_payload():
 
 
 @pytest.mark.asyncio
-async def test_gateway_upload_image_returns_path_part(tmp_path):
-    runner, base_url = await _start_app(_app(tmp_path))
-    try:
-        form = FormData()
-        form.add_field("file", b"\x89PNG\r\n\x1a\nfake", filename="cat.png", content_type="image/png")
-        async with aiohttp.ClientSession() as session:
-            response = await session.post(
-                f"{base_url}/api/upload-image",
-                data=form,
-            )
-            payload = await response.json()
+async def test_gateway_status_is_served_without_authentication(tmp_path):
+    async with _client(_app(tmp_path)) as client:
+        response = await client.get("/api/status")
 
-        assert response.status == 201
-        assert payload["ok"] is True
-        assert payload["part"]["type"] == "image"
-        assert payload["part"]["source"]["kind"] == "path"
-    finally:
-        await runner.cleanup()
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+    assert payload["actors"]["main"]["display_name"] == "Main"
+
+
+@pytest.mark.asyncio
+async def test_gateway_actors_route_projects_the_status_payload(tmp_path):
+    async with _client(_app(tmp_path)) as client:
+        response = await client.get("/api/actors")
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "actors": {"main": {"display_name": "Main"}}}
+
+
+@pytest.mark.asyncio
+async def test_gateway_upload_image_returns_path_part(tmp_path):
+    async with _client(_app(tmp_path)) as client:
+        response = await client.post(
+            "/api/upload-image",
+            files={"file": ("cat.png", b"\x89PNG\r\n\x1a\nfake", "image/png")},
+        )
+
+    assert response.status_code == 201
+    payload = response.json()
+    assert payload["ok"] is True
+    assert payload["part"]["type"] == "image"
+    assert payload["part"]["source"]["kind"] == "path"
 
 
 @pytest.mark.asyncio
 async def test_gateway_upload_non_image_returns_file_part(tmp_path):
-    runner, base_url = await _start_app(_app(tmp_path))
-    try:
-        form = FormData()
-        form.add_field("file", b"%PDF-1.4 fake", filename="report.pdf", content_type="application/pdf")
-        async with aiohttp.ClientSession() as session:
-            response = await session.post(
-                f"{base_url}/api/upload",
-                data=form,
-            )
-            payload = await response.json()
+    async with _client(_app(tmp_path)) as client:
+        response = await client.post(
+            "/api/upload",
+            files={"file": ("report.pdf", b"%PDF-1.4 fake", "application/pdf")},
+        )
 
-        assert response.status == 201
-        assert payload["ok"] is True
-        part = payload["part"]
-        assert part["type"] == "file"
-        assert part["mime_type"] == "application/pdf"
-        assert part["source"]["kind"] == "path"
-        assert part["source"]["value"].endswith(".pdf")
-    finally:
-        await runner.cleanup()
+    assert response.status_code == 201
+    part = response.json()["part"]
+    assert part["type"] == "file"
+    assert part["mime_type"] == "application/pdf"
+    assert part["source"]["kind"] == "path"
+    assert part["source"]["value"].endswith(".pdf")
 
 
 @pytest.mark.asyncio
-async def test_ws_endpoint_reports_not_implemented_without_a_handler(tmp_path):
-    runner, base_url = await _start_app(_app(tmp_path))
-    try:
-        async with aiohttp.ClientSession() as session:
-            response = await session.get(f"{base_url}/ws")
+async def test_gateway_upload_rejects_a_field_that_is_not_a_file(tmp_path):
+    async with _client(_app(tmp_path)) as client:
+        response = await client.post("/api/upload", data={"file": "not-a-file"})
 
-            assert response.status == 501
-            assert (await response.json())["error"] == "ws_not_implemented"
-    finally:
-        await runner.cleanup()
+    assert response.status_code == 400
+    assert response.json()["ok"] is False
+
+
+@pytest.mark.asyncio
+async def test_gateway_upload_under_the_limit_succeeds(tmp_path):
+    """15 MB against the 20 MB default (BEP 17 §7.7). The bound is the whole
+    request body, as it was under aiohttp's client_max_size — not the part size,
+    which starlette does not apply to a part carrying a filename."""
+    async with _client(_app(tmp_path)) as client:
+        response = await client.post(
+            "/api/upload",
+            files={"file": ("big.bin", b"\0" * (15 * 1024 * 1024), "application/octet-stream")},
+        )
+
+    assert response.status_code == 201
+
+
+@pytest.mark.asyncio
+async def test_gateway_upload_over_the_limit_is_rejected_with_413(tmp_path):
+    async with _client(_app(tmp_path, max_upload_bytes=1024)) as client:
+        response = await client.post(
+            "/api/upload",
+            files={"file": ("big.bin", b"\0" * 8192, "application/octet-stream")},
+        )
+
+    assert response.status_code == 413
+
+
+@pytest.mark.asyncio
+async def test_gateway_upload_limit_follows_the_config_provider(tmp_path):
+    """The app is built once and outlives every Gateway behind it, so the limit
+    cannot be captured at construction — a restart may change it, and at build
+    time there may be no gateway to read at all (BEP 17 §3.3.3)."""
+    holder = {"config": ResolvedGatewayConfig(upload_dir=str(tmp_path / "uploads"), max_upload_bytes=1024)}
+    app = create_gateway_app(
+        config_provider=lambda: holder["config"],
+        status_provider=lambda: {"actors": {}},
+    )
+    async with _client(app) as client:
+        too_big = await client.post("/api/upload", files={"file": ("a.bin", b"\0" * 8192)})
+        assert too_big.status_code == 413
+
+        holder["config"] = ResolvedGatewayConfig(
+            upload_dir=str(tmp_path / "uploads"), max_upload_bytes=1024 * 1024
+        )
+        now_fine = await client.post("/api/upload", files={"file": ("a.bin", b"\0" * 8192)})
+        assert now_fine.status_code == 201
 
 
 def test_gateway_state_round_trips_without_secrets(tmp_path):

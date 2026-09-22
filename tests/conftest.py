@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 from typing import Any
 
 from bos.core.agent import Agent, TurnContext
@@ -118,3 +120,30 @@ class CloseTrackingConsolidator(RecordingConsolidator):
 def _default_test_consolidator(model=None, llm=None, **kwargs):
     """Default test consolidator factory — returns a MessageOnlyConsolidator."""
     return MessageOnlyConsolidator()
+
+
+@contextlib.asynccontextmanager
+async def serve_asgi(app):
+    """Run *app* on uvicorn at an ephemeral port; yield ``"host:port"``.
+
+    Websocket tests need a real server: pre-accept rejections go out through the
+    ASGI websocket denial-response extension, which uvicorn implements and an
+    in-process transport does not (BEP 17 §3.6.4).
+
+    ``Server.serve()`` is deliberately not used — it installs SIGINT/SIGTERM
+    handlers on the main thread, which under pytest is pytest's own.
+    """
+    import uvicorn
+
+    config = uvicorn.Config(app, host="127.0.0.1", port=0, log_level="warning", access_log=False, lifespan="off")
+    server = uvicorn.Server(config)
+    config.load()
+    server.lifespan = config.lifespan_class(config)
+    await server.startup()
+    serving = asyncio.ensure_future(server.main_loop())
+    try:
+        yield f"127.0.0.1:{server.servers[0].sockets[0].getsockname()[1]}"
+    finally:
+        server.should_exit = True
+        await asyncio.gather(serving, return_exceptions=True)
+        await server.shutdown()

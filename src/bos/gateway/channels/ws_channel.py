@@ -6,7 +6,7 @@ import json
 from datetime import datetime
 from typing import Any
 
-from aiohttp import WSMsgType, web
+from starlette.websockets import WebSocket, WebSocketState
 
 from bos.core import BaseChannel, MailBox
 from bos.core.actor import Envelope, MessageType
@@ -35,7 +35,7 @@ class WSChannel(BaseChannel[dict[str, Any]]):
         display_name: str | None = None,
         settings: dict[str, Any] | None = None,
         runtime: ChannelRuntimeContext,
-        websocket: web.WebSocketResponse,
+        websocket: WebSocket,
         chat_id: str,
         channel_conversation_id: str = "default",
     ) -> None:
@@ -61,7 +61,7 @@ class WSChannel(BaseChannel[dict[str, Any]]):
 
     async def close_for_takeover(self) -> None:
         self._closed_by_takeover = True
-        await self._ws.close(code=WS_TAKEOVER_CLOSE_CODE, message=WS_TAKEOVER_CLOSE_REASON.encode())
+        await self._ws.close(code=WS_TAKEOVER_CLOSE_CODE, reason=WS_TAKEOVER_CLOSE_REASON)
 
     async def run(self, mailbox: MailBox) -> None:
         observed_revision = self._runtime.chat_coordinator.observed_revision(chat_id=self._chat_id, ref=self.ref)
@@ -91,7 +91,10 @@ class WSChannel(BaseChannel[dict[str, Any]]):
             if pending:
                 await asyncio.gather(*pending, return_exceptions=True)
         except asyncio.CancelledError:
-            if not self._closed_by_takeover:
+            # aiohttp's close() was idempotent; starlette's is not — it sends
+            # through WebSocket.send, which raises once the application state is
+            # DISCONNECTED. A takeover has already closed this one.
+            if not self._closed_by_takeover and self._ws.application_state is WebSocketState.CONNECTED:
                 await self._ws.close()
             inbound.cancel()
             outbound.cancel()
@@ -129,18 +132,16 @@ class WSChannel(BaseChannel[dict[str, Any]]):
         )
 
     async def _recv_ws_loop(self, mailbox: MailBox) -> None:
-        async for msg in self._ws:
-            if msg.type == WSMsgType.TEXT:
-                data = msg.json()
-                await self._handle_inbound_payload(mailbox, data)
-            elif msg.type in (WSMsgType.ERROR, WSMsgType.CLOSE, WSMsgType.CLOSED):
-                break
+        # iter_text() swallows WebSocketDisconnect and ends, so a client going
+        # away simply finishes this loop — no message-type dispatch needed.
+        async for text in self._ws.iter_text():
+            await self._handle_inbound_payload(mailbox, json.loads(text))
 
     async def _send_mail_loop(self, mailbox: MailBox) -> None:
         # Carries actor output (replies, turn events, system events) to the
         # client. Chat switching is no longer routed here — that is the control
         # plane's job, handled synchronously in _deliver_command_result.
-        while not self._ws.closed:
+        while self._ws.client_state is WebSocketState.CONNECTED:
             env = await mailbox.receive()
             out_chat_id = env.chat_id or self._chat_id
             current_revision = await self._runtime.chat_coordinator.current_revision(out_chat_id)

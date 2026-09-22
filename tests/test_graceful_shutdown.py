@@ -563,7 +563,7 @@ async def test_runner_serves_only_after_actors_and_channels_are_up(tmp_path, mon
 
     The socket left Gateway in BEP 17 §3.2, so the ordering is now the composition
     root's and this asserts it there."""
-    from aiohttp import web
+    import uvicorn
 
     from bos.config import Workspace
     from bos.extensions.chat_stores.in_memory import InMemChatStore as Store
@@ -601,14 +601,14 @@ async def test_runner_serves_only_after_actors_and_channels_are_up(tmp_path, mon
     monkeypatch.setattr(ws, "harness", lambda: FakeHarnessContext())
 
     order: list[str] = []
-    site_start = web.TCPSite.start
+    server_startup = uvicorn.Server.startup
     gateway = None
 
-    async def _serve(self):
+    async def _serve(self, sockets=None):
         order.append("serve")
-        await site_start(self)
+        await server_startup(self, sockets=sockets)
 
-    monkeypatch.setattr(web.TCPSite, "start", _serve)
+    monkeypatch.setattr(uvicorn.Server, "startup", _serve)
 
     # Patched on the classes, not on an instance: the GatewayMount builds the
     # Gateway and brings it up itself, so there is no hook that runs between
@@ -841,12 +841,13 @@ async def test_escalating_during_the_drain_still_finishes_teardown(tmp_path, mon
 
 
 @pytest.mark.asyncio
-async def test_ws_connects_are_refused_once_shutting_down(tmp_path, monkeypatch):
+async def test_ws_connects_are_refused_once_shutting_down(tmp_path):
     """A channel registered after ``stop_all`` snapshots its tasks would be
     marked stopped while still running, and the client would get a consumer that
     is already going away."""
-    from aiohttp import web
-    from aiohttp.test_utils import make_mocked_request
+    import json
+
+    from starlette.websockets import WebSocket
 
     from bos.config import Workspace
     from bos.extensions.chat_stores.in_memory import InMemChatStore as Store
@@ -875,11 +876,30 @@ async def test_ws_connects_are_refused_once_shutting_down(tmp_path, monkeypatch)
     gateway = Gateway(runtime=ws_cfg.resolve_gateway_runtime(), harness=FakeHarness())
     gateway.request_shutdown()
 
-    request = make_mocked_request("GET", "/ws?channel_id=late")
-    response = await gateway.handle_ws(request)
+    sent: list[dict] = []
+    # ``websocket.http.response`` is what send_denial_response checks for; with
+    # it the rejection keeps its HTTP status and body, which is the shape the
+    # aiohttp handler returned (BEP 17 §3.6.4).
+    scope = {
+        "type": "websocket",
+        "path": "/ws",
+        "query_string": b"channel_id=late",
+        "headers": [],
+        "extensions": {"websocket.http.response": {}},
+    }
 
-    assert isinstance(response, web.Response)
-    assert response.status == 503
+    async def _receive():
+        return {"type": "websocket.connect"}
+
+    async def _send(message):
+        sent.append(message)
+
+    await gateway.handle_ws(WebSocket(scope, _receive, _send))
+
+    start = next(m for m in sent if m["type"] == "websocket.http.response.start")
+    body = b"".join(m.get("body", b"") for m in sent if m["type"] == "websocket.http.response.body")
+    assert start["status"] == 503
+    assert json.loads(body) == {"ok": False, "error": "shutting_down"}
     assert "late" not in gateway.channel_manager.channels
 
 

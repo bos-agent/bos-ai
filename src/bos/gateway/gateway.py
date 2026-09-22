@@ -7,7 +7,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from aiohttp import web
+from starlette.applications import Starlette
+from starlette.websockets import WebSocket
 
 from .actors.actor_manager import ActorManager
 from .channels.channel_manager import ChannelManager
@@ -17,7 +18,7 @@ from .core.actor_resolver import ActorDescriptor, ActorResolver
 from .core.channel_context import ChannelRuntimeContext
 from .core.chat_coordinator import ChannelConversationRef, ChatCoordinator
 from .core.command_handler import CommandHandler
-from .http import create_gateway_app
+from .http import create_gateway_app, send_ws_denial
 from .state import GatewayRunDir, write_gateway_state
 
 if TYPE_CHECKING:
@@ -94,11 +95,11 @@ class Gateway:
         return self._shutdown.is_set()
 
     def request_shutdown(self) -> None:
-        """Ask ``run`` to return and begin the graceful drain (§ ``run``).
+        """Ask the driver to stop serving and begin the graceful drain.
 
         Idempotent, and safe to call from a signal handler via
-        ``loop.call_soon_threadsafe``. Cancelling the task running ``run`` still
-        works and remains the forceful path — it skips the drain."""
+        ``loop.call_soon_threadsafe``. Cancelling the task that drives the
+        gateway still works and remains the forceful path — it skips the drain."""
         self._shutdown.set()
 
     def status_snapshot(self) -> dict[str, Any]:
@@ -124,51 +125,55 @@ class Gateway:
             "active_turns": self.chat_coordinator.active_turns_status(),
         }
 
-    def build_app(self) -> web.Application:
+    def build_app(self) -> Starlette:
         return create_gateway_app(
             config_provider=lambda: self.config,
             status_provider=self.status_snapshot,
             ws_handler=self.handle_ws,
         )
 
-    async def handle_ws(self, request: web.Request) -> web.StreamResponse:
+    async def handle_ws(self, websocket: WebSocket) -> None:
         if self.shutdown_requested:
             # Registering a channel now would race ``ChannelManager.stop_all``,
             # which has already snapshotted the tasks it will cancel — the new
             # channel would be marked stopped with its task still running, and
             # the client would get a consumer that is about to disappear.
-            return web.json_response({"ok": False, "error": "shutting_down"}, status=503)
-        channel_id = (request.query.get("channel_id") or "").strip()
+            await send_ws_denial(websocket, 503, {"ok": False, "error": "shutting_down"})
+            return
+        query = websocket.query_params
+        channel_id = (query.get("channel_id") or "").strip()
         if not channel_id:
-            return web.json_response({"ok": False, "error": "channel_id is required"}, status=400)
-        takeover = request.query.get("takeover") in {"1", "true", "yes"}
+            await send_ws_denial(websocket, 400, {"ok": False, "error": "channel_id is required"})
+            return
+        takeover = query.get("takeover") in {"1", "true", "yes"}
         if channel_id in self.channel_manager.channels and not takeover:
-            return web.json_response({"ok": False, "error": "duplicate_channel_id"}, status=409)
+            await send_ws_denial(websocket, 409, {"ok": False, "error": "duplicate_channel_id"})
+            return
 
         existing = self.channel_manager.channels.get(channel_id)
         if existing is not None and not hasattr(existing.channel, "close_for_takeover"):
-            return web.json_response({"ok": False, "error": "duplicate_channel_id"}, status=409)
+            await send_ws_denial(websocket, 409, {"ok": False, "error": "duplicate_channel_id"})
+            return
         if existing is not None:
             await existing.channel.close_for_takeover()  # pyright: ignore[reportAttributeAccessIssue]
 
-        conversation_id = (request.query.get("channel_conversation_id") or "default").strip() or "default"
+        conversation_id = (query.get("channel_conversation_id") or "default").strip() or "default"
         ref = ChannelConversationRef(channel_id=channel_id, channel_conversation_id=conversation_id)
-        chat_id = (request.query.get("chat_id") or "").strip()
+        chat_id = (query.get("chat_id") or "").strip()
         if chat_id:
             observed_revision = self.chat_coordinator.observed_revision(chat_id=chat_id, ref=ref)
             self.chat_coordinator.set_cursor(ref, chat_id, observed_revision=observed_revision or 0)
         else:
             chat_id = self.chat_coordinator.get_cursor(ref) or self.chat_coordinator.new_chat(ref)
 
-        ws = web.WebSocketResponse()
-        await ws.prepare(request)
+        await websocket.accept()
         channel = WSChannel(
             channel_id=channel_id,
             target_actor=self.default_actor,
             display_name=f"WebSocket {channel_id}",
             settings={},
             runtime=self.channel_manager.runtime,
-            websocket=ws,
+            websocket=websocket,
             chat_id=chat_id,
             channel_conversation_id=conversation_id,
         )
@@ -185,7 +190,6 @@ class Gateway:
                 await managed.task
         finally:
             await self.channel_manager.unregister(channel_id, expected=managed, cancel=False)
-        return ws
 
     async def _write_state(self) -> None:
         write_gateway_state(GatewayRunDir(self.bos_dir), self.status_snapshot())

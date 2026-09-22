@@ -41,7 +41,9 @@ def test_runner_start_bootstraps_gateway(tmp_path, monkeypatch):
             calls.append(("gateway_start", None))
 
         def build_app(self):
-            return object()
+            from starlette.applications import Starlette
+
+            return Starlette()
 
         def set_endpoint(self, host, port):
             calls.append(("gateway_endpoint", (host, port)))
@@ -52,26 +54,41 @@ def test_runner_start_bootstraps_gateway(tmp_path, monkeypatch):
         async def stop(self, *, graceful=True):
             calls.append(("gateway_stop", graceful))
 
-    class FakeAppRunner:
-        def __init__(self, app, access_log=None):
-            pass
+    class FakeSocket:
+        def getsockname(self):
+            return ("127.0.0.1", 12345)
 
-        async def setup(self):
-            pass
+    class FakeSocketServer:
+        sockets = [FakeSocket()]
 
-        async def cleanup(self):
+    class FakeUvicornServer:
+        """Stands in for uvicorn.Server: binds nothing, records the calls.
+
+        ``serve()`` drives startup/main_loop/shutdown itself rather than
+        ``Server.serve()``, which would install signal handlers — so those three
+        are what a fake has to provide.
+        """
+
+        def __init__(self, config):
+            self.config = config
+            self.should_exit = False
+            self.started = False
+            self.lifespan = None
+            self.servers = [FakeSocketServer()]
+
+        async def startup(self, sockets=None):
+            calls.append(("site_start", None))
+            self.started = True
+
+        async def main_loop(self):
+            while not self.should_exit:
+                await asyncio.sleep(0.01)
+
+        async def shutdown(self, sockets=None):
             calls.append(("runner_cleanup", None))
 
-    class FakeSite:
-        def __init__(self, runner, host, port):
-            pass
-
-        async def start(self):
-            calls.append(("site_start", None))
-
     monkeypatch.setattr("bos.gateway.Gateway", FakeGateway)
-    monkeypatch.setattr("aiohttp.web.AppRunner", FakeAppRunner)
-    monkeypatch.setattr("aiohttp.web.TCPSite", FakeSite)
+    monkeypatch.setattr("uvicorn.Server", FakeUvicornServer)
 
     asyncio.run(start(FakeWorkspace()))
 
@@ -134,7 +151,9 @@ def test_runner_start_stops_ungracefully_on_cancellation(tmp_path, monkeypatch):
             calls.append(("gateway_start", None))
 
         def build_app(self):
-            return object()
+            from starlette.applications import Starlette
+
+            return Starlette()
 
         def set_endpoint(self, host, port):
             calls.append(("gateway_endpoint", (host, port)))
@@ -147,26 +166,41 @@ def test_runner_start_stops_ungracefully_on_cancellation(tmp_path, monkeypatch):
         async def stop(self, *, graceful=True):
             calls.append(("gateway_stop", graceful))
 
-    class FakeAppRunner:
-        def __init__(self, app, access_log=None):
-            pass
+    class FakeSocket:
+        def getsockname(self):
+            return ("127.0.0.1", 12345)
 
-        async def setup(self):
-            pass
+    class FakeSocketServer:
+        sockets = [FakeSocket()]
 
-        async def cleanup(self):
+    class FakeUvicornServer:
+        """Stands in for uvicorn.Server: binds nothing, records the calls.
+
+        ``serve()`` drives startup/main_loop/shutdown itself rather than
+        ``Server.serve()``, which would install signal handlers — so those three
+        are what a fake has to provide.
+        """
+
+        def __init__(self, config):
+            self.config = config
+            self.should_exit = False
+            self.started = False
+            self.lifespan = None
+            self.servers = [FakeSocketServer()]
+
+        async def startup(self, sockets=None):
+            calls.append(("site_start", None))
+            self.started = True
+
+        async def main_loop(self):
+            while not self.should_exit:
+                await asyncio.sleep(0.01)
+
+        async def shutdown(self, sockets=None):
             calls.append(("runner_cleanup", None))
 
-    class FakeSite:
-        def __init__(self, runner, host, port):
-            pass
-
-        async def start(self):
-            calls.append(("site_start", None))
-
     monkeypatch.setattr("bos.gateway.Gateway", FakeGateway)
-    monkeypatch.setattr("aiohttp.web.AppRunner", FakeAppRunner)
-    monkeypatch.setattr("aiohttp.web.TCPSite", FakeSite)
+    monkeypatch.setattr("uvicorn.Server", FakeUvicornServer)
 
     async def _run():
         task = asyncio.ensure_future(start(FakeWorkspace()))
@@ -209,11 +243,11 @@ def test_runner_start_refuses_to_serve_when_another_gateway_holds_the_lock(tmp_p
         def resolve_gateway_runtime(self):
             raise AssertionError("a standby mount must not build a gateway")
 
-    class RefusingSite:
-        def __init__(self, runner, host, port):
+    class RefusingServer:
+        def __init__(self, config):
             raise AssertionError("a standby mount must not bind a socket")
 
-    monkeypatch.setattr("aiohttp.web.TCPSite", RefusingSite)
+    monkeypatch.setattr("uvicorn.Server", RefusingServer)
 
     rd = GatewayRunDir(tmp_path / ".bos")
     rd.ensure()
