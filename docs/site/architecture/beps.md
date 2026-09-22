@@ -24,3 +24,4 @@ source file on GitHub.
 - [BEP 15: Built-in Config Agent for BOS Project Configuration](https://github.com/bos-agent/bos-ai/blob/main/docs/BEP/BEP%2015%3A%20Built-in%20Config%20Agent%20for%20BOS%20Project%20Configuration.md)
 - [BEP 16: Embeddable Core — Dependency Extras and CLI Distribution Split](https://github.com/bos-agent/bos-ai/blob/main/docs/BEP/BEP%2016%3A%20Embeddable%20Core%20%E2%80%94%20Dependency%20Extras%20and%20CLI%20Distribution%20Split.md)
 - [BEP 17: ASGI-Mountable Gateway and In-Process Lifecycle](https://github.com/bos-agent/bos-ai/blob/main/docs/BEP/BEP%2017%3A%20ASGI-Mountable%20Gateway%20and%20In-Process%20Lifecycle.md)
+- [BEP 18: The Embedding SDK and Explicit Agent Selection](https://github.com/bos-agent/bos-ai/blob/main/docs/BEP/BEP%2018%3A%20The%20Embedding%20SDK%20and%20Explicit%20Agent%20Selection.md)
