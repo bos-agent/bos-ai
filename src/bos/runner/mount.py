@@ -103,17 +103,16 @@ class GatewayMount:
     def status(self) -> dict[str, Any]:
         """The mount's view of the runtime, served at ``/api/status``.
 
-        The mount's own fields are applied *after* the gateway's snapshot: the
-        snapshot hard-codes ``runtime: "process"`` (it cannot know where it is
-        hosted), and overwriting the mount's label with it would make
-        ``runtime_label`` meaningless for an embedded host.
+        The gateway's own snapshot supplies ``runtime`` — the mount injected
+        ``runtime_label`` into it at construction, so there is nothing left to
+        overlay here. The mount's own fields, applied after, are ``state`` and
+        ``holder_pid``: the two things only the mount (not the gateway) knows.
         """
         payload: dict[str, Any] = {}
         if self._gateway is not None:
             payload.update(self._gateway.status_snapshot())
         payload.update(
             state=self._state,
-            runtime=self._runtime_label,
             holder_pid=None if self._state == "live" else self._holder_pid(),
         )
         return payload
@@ -222,7 +221,9 @@ class GatewayMount:
         workspace.bootstrap_platform()
         self._stack = contextlib.AsyncExitStack()
         harness = await self._stack.enter_async_context(workspace.harness())
-        gateway = Gateway(runtime=workspace.resolve_gateway_runtime(), harness=harness)
+        gateway = Gateway(
+            runtime=workspace.resolve_gateway_runtime(), harness=harness, runtime_label=self._runtime_label
+        )
         self._gateway = gateway
         await gateway.start()
         if self._public_base_url is not None:

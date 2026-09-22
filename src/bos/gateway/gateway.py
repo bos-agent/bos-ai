@@ -30,10 +30,17 @@ _REPLY_FLUSH_SECONDS = 2.0
 
 
 class Gateway:
-    def __init__(self, *, runtime: GatewayRuntimeConfig, harness: AgentHarness) -> None:
+    def __init__(
+        self,
+        *,
+        runtime: GatewayRuntimeConfig,
+        harness: AgentHarness,
+        runtime_label: str = "process",
+    ) -> None:
         self.runtime = runtime
         self.bos_dir = runtime.bos_dir
         self.harness = harness
+        self._runtime_label = runtime_label
         self.config = runtime.gateway
         self.started_at = datetime.now(timezone.utc).isoformat()
         self.actual_port = self.config.port
@@ -115,7 +122,11 @@ class Gateway:
         actors = self.actor_manager.status_payload()
         channels = self.channel_manager.status_payload()
         return {
-            "runtime": "process",
+            # Injected, not inferred: the gateway cannot know whether it is a
+            # standalone process or mounted in a host, and gateway.state is the
+            # only place `boscli gateway status`/`restart` can learn the
+            # difference (BEP 17 §3.4.4).
+            "runtime": self._runtime_label,
             "pid": os.getpid(),
             "started_at": self.started_at,
             "updated_at": datetime.now(timezone.utc).isoformat(),

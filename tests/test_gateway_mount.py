@@ -131,7 +131,9 @@ async def test_standby_serves_status_without_a_gateway(tmp_path):
         assert isinstance(app, Starlette)
         assert mount.build_app() is app  # built once, kept across restarts
         assert mount.status()["state"] == "standby"
-        assert mount.status()["runtime"] == "embedded"
+        # No gateway exists yet to report a runtime label from — the mount
+        # itself no longer overlays one (it now flows from the gateway).
+        assert "runtime" not in mount.status()
 
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://gateway") as client:
@@ -598,5 +600,21 @@ async def test_a_failed_restart_rolls_back_gateway_and_stack(tmp_path, monkeypat
         assert await mount.acquire() is True
         assert mount.state == "live"
         assert mount.gateway is not None
+    finally:
+        await mount.stop()
+
+
+@pytest.mark.asyncio
+async def test_the_runtime_label_reaches_the_state_file(tmp_path):
+    """gateway.state is all `boscli gateway status`/`restart` can see of a
+    gateway in another process, and BEP 17 §3.4.4 keeps the file so an embedded
+    one is visible there. status_snapshot() hard-coded "process", so it lied."""
+    from bos.gateway.state import GatewayRunDir, read_gateway_state
+
+    mount = GatewayMount(lambda: _workspace(tmp_path), lock_poll_seconds=60)
+    await mount.start()
+    try:
+        assert mount.status()["runtime"] == "embedded"
+        assert read_gateway_state(GatewayRunDir(tmp_path / ".bos"))["runtime"] == "embedded"
     finally:
         await mount.stop()
