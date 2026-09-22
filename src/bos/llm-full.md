@@ -191,8 +191,8 @@ Resolution order (`bos.config.workspace`, `_resolve_config` / `find_discovered_c
 
 - An existing **file path** → `bos_dir` is the file's parent.
 - A built-in **preset name** → resolves to the packaged `bos/config/presets/<name>.toml`, with
-  `bos_dir = ~/.bos/presets/<name>` (created on demand). Built-in presets: `default`,
-  `team`. (`resolve_config_source`, `presets_dir`.)
+  `bos_dir = ~/.bos/presets/<name>` (created on demand). The only built-in preset is
+  `default`. (`resolve_config_source`, `presets_dir`.)
 
 ### 4.2 `[platform]` — environment & discovery
 
@@ -973,7 +973,8 @@ listed in the prompt, default 50), `BOS_LOG_LEVEL`, plus provider `*_API_KEY`s.
 - **Direct addressing (many inboxes)**: give a specialist its own actor
   (`[runtime.actors.researcher] agent = "researcher"`); users reach it with `@researcher`.
 - Combine both: a specialist can be both an actor (directly addressable) and an allowed
-  subagent of `main`. See the `team` preset (`presets/team.toml`).
+  subagent of `main` — a `[runtime.actors.<name>]` entry plus a slot in
+  `SubagentPlugin.enabled`.
 
 ---
 

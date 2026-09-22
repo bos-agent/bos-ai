@@ -158,20 +158,6 @@ isolated from `main`.
 
 ---
 
-## The `team` preset
-
-BOS ships a built-in `team` preset that pre-configures a main actor plus a
-researcher and writer, wired together with both patterns above:
-
-```bash
-boscli -c team gateway start
-boscli -c team tui
-```
-
-Use it to explore the multi-agent setup before adapting it to your own project.
-
----
-
 ## What you learned
 
 - Create agent files in `.bos/agents/` as Markdown (frontmatter + body) or

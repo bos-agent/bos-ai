@@ -11,7 +11,7 @@ boscli --help
 
 | Option | Env var | Default | Meaning |
 | --- | --- | --- | --- |
-| `-c`, `--config <path\|preset>` | `BOS_CONFIG` | _discovered_ | A config file path **or** a built-in preset name (e.g. `team`). |
+| `-c`, `--config <path\|preset>` | `BOS_CONFIG` | _discovered_ | A config file path **or** a built-in preset name (e.g. `default`). |
 | `-l`, `--log-level <LEVEL>` | `BOS_LOG_LEVEL` | `ERROR` | One of `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`. Logs go to stderr. |
 
 ## Commands

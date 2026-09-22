@@ -6,7 +6,7 @@ Status: **accepted — implemented** (reconciled 2026-06-11; `package` archetype
 
 ## Core Insight
 
-BOS supports two usage modes: running the out-of-box presets (`boscli ask`, `boscli -c team gateway start`) and building a custom agent topology in a project — own agents, tools, skills, channels, and plugins. The first mode is well served. The second mode begins with `boscli init`, which copies `template.toml` (a ~90%-commented reference file) into the working directory and stops. A new project builder gets:
+BOS supports two usage modes: running the out-of-box preset (`boscli ask`, `boscli -c default gateway start`) and building a custom agent topology in a project — own agents, tools, skills, channels, and plugins. The first mode is well served. The second mode begins with `boscli init`, which copies `template.toml` (a ~90%-commented reference file) into the working directory and stops. A new project builder gets:
 
 1. **No working baseline** — no agents defined, no model configured, no directories (`agents/`, `extensions/`, `skills/`) created. The gateway boots into the Python `_default` agent, and nothing in the project demonstrates how to change that.
 2. **No discovery path** — the extension seams (markdown agent specs, `@ep_tool` registration, multi-actor routing, channels, plugin bindings) are only discoverable by reading template comments or source code.
@@ -36,7 +36,7 @@ The design metric for this BEP: **time from `pip install bos-ai` to a custom too
 ## Non-Goals
 
 1. **LLM-assisted topology generation**: an agent that drafts agents/workflows/config *structure* from a prose description is explicitly deferred. The baseline must work offline and deterministically; templates created here are the substrate a future assisted mode would parameterize. (Bounded *content* generation inside a fixed topology — the `team` archetype's specialist prose, with a deterministic fallback — is in scope; see *Specialist content generation*.)
-2. **Preset changes**: the built-in presets (`default`, `team`) and their `~/.bos/presets/<name>` run-dir mechanics are untouched. Presets serve usage mode one; this BEP serves mode two.
+2. **Preset changes**: the built-in preset (`default`) and its `~/.bos/presets/<name>` run-dir mechanics are untouched. Presets serve usage mode one; this BEP serves mode two.
 3. **Extension marketplace / remote templates**: archetypes and file templates ship inside the `bos-ai` package only. No fetching templates from the network.
 4. **Editing arbitrary existing configs**: generators only append well-defined entries (see TOML mutation rules). There is no general config migration or refactoring tooling. `doctor` is read-only.
 5. **New runtime features**: this BEP is CLI + packaged templates only. No changes to harness, actor, gateway, or config schema semantics (BEP 6/7 stand as-is).
@@ -320,6 +320,7 @@ Decisions from the 2026-06-11 review (details integrated into the sections above
 
 ## Revision History
 
+- 2026-09-22 — The `team` **preset** (`presets/team.toml`) is deleted, so Non-Goal 2 and the Core Insight now name `default` as the only built-in preset. It shipped a `poet`/`forex` pair that no longer matched what the docs claimed it contained, and being the sole shipped config with a `[runtime.actors.*.agent_cfg]` override made it a standing special case for every change to agent/actor resolution. Nothing here changes the `team` **archetype**, which is a scaffold topology and a separate thing.
 - 2026-09-21 — The `WordCount` teaching artifact is no longer *registered* by a scaffolded project. It ships commented out in `project_tools.py` / `tools.py` instead, because its teaching value is one-time while a junk tool the agent can call is permanent — every generated project carried one. The entry-point target module still ships (the `bos.exts` entry point resolves to it), and the suggested first prompt moved from "use the WordCount tool …" to "what tools and skills do you have?", which holds for a project that registers nothing of its own.
 
 | Date | Change | Intention |

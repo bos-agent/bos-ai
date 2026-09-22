@@ -209,9 +209,8 @@ This is the right pattern when:
 ### Combining both
 
 A specialist can simultaneously be an actor (directly addressable) **and** an
-allowed subagent of `main`. The `team` preset (`boscli -c team gateway start`)
-demonstrates this: it configures a `main` actor with `SubagentPlugin` and also
-registers each specialist as its own actor.
+allowed subagent of `main`: give it a `[runtime.actors.<name>]` entry *and*
+list it in the `main` actor's `SubagentPlugin.enabled`.
 
 ```
      user
