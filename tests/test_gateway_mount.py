@@ -131,9 +131,10 @@ async def test_standby_serves_status_without_a_gateway(tmp_path):
         assert isinstance(app, Starlette)
         assert mount.build_app() is app  # built once, kept across restarts
         assert mount.status()["state"] == "standby"
-        # No gateway exists yet to report a runtime label from — the mount
-        # itself no longer overlays one (it now flows from the gateway).
-        assert "runtime" not in mount.status()
+        # No gateway exists yet, so nothing else could source this — it must
+        # come from the mount's own overlay or /api/status goes dark on the
+        # one field that tells an operator standalone from embedded apart.
+        assert mount.status()["runtime"] == "embedded"
 
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://gateway") as client:
@@ -614,7 +615,12 @@ async def test_the_runtime_label_reaches_the_state_file(tmp_path):
     mount = GatewayMount(lambda: _workspace(tmp_path), lock_poll_seconds=60)
     await mount.start()
     try:
-        assert mount.status()["runtime"] == "embedded"
+        assert mount.state == "live"
+        assert mount.gateway is not None
+        # The mount's overlay and the gateway's own snapshot must agree — they
+        # are two sources writing the same field, and nothing else catches it
+        # if they drift apart.
+        assert mount.status()["runtime"] == mount.gateway.status_snapshot()["runtime"] == "embedded"
         assert read_gateway_state(GatewayRunDir(tmp_path / ".bos"))["runtime"] == "embedded"
     finally:
         await mount.stop()

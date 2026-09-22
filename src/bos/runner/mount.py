@@ -103,16 +103,23 @@ class GatewayMount:
     def status(self) -> dict[str, Any]:
         """The mount's view of the runtime, served at ``/api/status``.
 
-        The gateway's own snapshot supplies ``runtime`` — the mount injected
-        ``runtime_label`` into it at construction, so there is nothing left to
-        overlay here. The mount's own fields, applied after, are ``state`` and
-        ``holder_pid``: the two things only the mount (not the gateway) knows.
+        The mount contributes ``state`` and ``holder_pid`` — the two things
+        only the mount (not the gateway) knows. ``runtime`` is set here too,
+        even though the gateway's own snapshot (applied first, below) already
+        carries the identical value the mount injected into it at construction:
+        ``/api/status`` must answer in *every* state (BEP 17 §3.4.3), including
+        ``standby``, where ``self._gateway`` is ``None`` and there is no
+        snapshot to source it from. Without this, the one state where an
+        operator most needs to tell "standalone process" from "embedded host"
+        apart (BEP 17 §3.4.4) would go dark instead. Redundant when a gateway
+        exists, load-bearing when one does not — do not drop it.
         """
         payload: dict[str, Any] = {}
         if self._gateway is not None:
             payload.update(self._gateway.status_snapshot())
         payload.update(
             state=self._state,
+            runtime=self._runtime_label,
             holder_pid=None if self._state == "live" else self._holder_pid(),
         )
         return payload
