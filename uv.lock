@@ -178,7 +178,6 @@ dependencies = [
 
 [package.optional-dependencies]
 all = [
-    { name = "aiohttp" },
     { name = "beautifulsoup4" },
     { name = "click" },
     { name = "ddgs" },
@@ -195,7 +194,6 @@ all = [
     { name = "websockets" },
 ]
 cli = [
-    { name = "aiohttp" },
     { name = "click" },
     { name = "httpx" },
     { name = "prompt-toolkit" },
@@ -208,7 +206,6 @@ cli = [
     { name = "websockets" },
 ]
 gateway = [
-    { name = "aiohttp" },
     { name = "httpx" },
     { name = "python-multipart" },
     { name = "starlette" },
@@ -240,7 +237,6 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "aiohttp", marker = "extra == 'gateway'", specifier = "==3.13.5" },
     { name = "beautifulsoup4", marker = "extra == 'search'", specifier = "==4.14.3" },
     { name = "bos-ai", extras = ["gateway"], marker = "extra == 'cli'" },
     { name = "bos-ai", extras = ["litellm", "gateway", "search", "lark", "cli"], marker = "extra == 'all'" },

@@ -43,3 +43,27 @@ class TestOptionalExtension:
         from bos.core.contract import ep_chat_store
 
         assert ep_chat_store.has("InMemChatStore")
+
+
+def test_no_module_imports_aiohttp() -> None:
+    """aiohttp left the repository (BEP 17 §2.1.4). One HTTP stack, server and
+    client — a second one reintroduced here is 11 MB and two sets of semantics
+    for the same job."""
+    import ast
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    offenders: list[str] = []
+    for py in sorted([*(root / "src").rglob("*.py"), *(root / "tests").rglob("*.py")]):
+        tree = ast.parse(py.read_text(encoding="utf-8"), filename=str(py))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                module = node.module or ""
+            elif isinstance(node, ast.Import):
+                module = node.names[0].name
+            else:
+                continue
+            if module == "aiohttp" or module.startswith("aiohttp."):
+                offenders.append(f"{py.relative_to(root)}:{node.lineno}")
+
+    assert not offenders, "aiohttp is gone; these still import it:\n  " + "\n  ".join(offenders)

@@ -108,7 +108,7 @@ the shim runs the same CLI as `python -m bos.cli`.
 |---|---|
 | `bos-ai` | The library: `bos.core`, `bos.config`, plugins. ~14 MB |
 | `bos-ai[litellm]` | The built-in LLM provider. Without it, calls fail with a message naming this extra; register your own with `@ep_provider` instead (§6.2) |
-| `bos-ai[gateway]` | `aiohttp`: the gateway process and the Telegram/Lark channels |
+| `bos-ai[gateway]` | `starlette`+`uvicorn`+`httpx`+`websockets`: the gateway's ASGI app, the standalone process, and the Telegram/Lark channels |
 | `bos-ai[search]` | `ddgs` + `beautifulsoup4`: the built-in web-search and page-fetch tools. The Tavily provider needs only an API key, not this extra |
 | `bos-ai[lark]` | The Lark/Feishu SDK |
 | `bos-ai[cli]` | The CLI's dependencies (implies `gateway`) |
