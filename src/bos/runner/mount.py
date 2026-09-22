@@ -62,6 +62,24 @@ class GatewayMount:
         self._shutdown = asyncio.Event()
         self._shutdown_bridge: asyncio.Task[None] | None = None
         self._app: Starlette | None = None
+        # One mutator at a time. The state machine alone was enough while
+        # restart() had no caller; POST /api/restart gave it one that runs in a
+        # request task, concurrently with the driver's own stop(). Without this,
+        # a SIGTERM landing in the window where _tear_down_runtime has nulled
+        # _gateway and _bring_up_runtime has not yet reassigned it — a window
+        # spanning bootstrap_platform() and harness construction — escalates to
+        # cancelling the driver, whose finally then runs stop() alongside the
+        # still-running restart(): stop() releases the lock and says "stopped",
+        # the restart lands on top with a started Gateway and an open harness,
+        # and nothing ever closes either.
+        #
+        # Held only by the four public mutators. Every helper they call
+        # (_acquire_and_bring_up, _bring_up_runtime, _tear_down_runtime,
+        # _roll_back_runtime) is private and takes it nowhere, none of the four
+        # calls another, and the watchdog drives those helpers directly — so
+        # there is no path on which this is acquired twice, and stop() cancelling
+        # the watchdog while holding it cannot wait on a task that wants it.
+        self._mutex = asyncio.Lock()
 
     @property
     def state(self) -> str:
@@ -103,10 +121,16 @@ class GatewayMount:
     def status(self) -> dict[str, Any]:
         """The mount's view of the runtime, served at ``/api/status``.
 
-        The mount's own fields are applied *after* the gateway's snapshot: the
-        snapshot hard-codes ``runtime: "process"`` (it cannot know where it is
-        hosted), and overwriting the mount's label with it would make
-        ``runtime_label`` meaningless for an embedded host.
+        The mount contributes ``state`` and ``holder_pid`` — the two things
+        only the mount (not the gateway) knows. ``runtime`` is set here too,
+        even though the gateway's own snapshot (applied first, below) already
+        carries the identical value the mount injected into it at construction:
+        ``/api/status`` must answer in *every* state (BEP 17 §3.4.3), including
+        ``standby``, where ``self._gateway`` is ``None`` and there is no
+        snapshot to source it from. Without this, the one state where an
+        operator most needs to tell "standalone process" from "embedded host"
+        apart (BEP 17 §3.4.4) would go dark instead. Redundant when a gateway
+        exists, load-bearing when one does not — do not drop it.
         """
         payload: dict[str, Any] = {}
         if self._gateway is not None:
@@ -127,33 +151,35 @@ class GatewayMount:
             return None
 
     async def start(self) -> None:
-        if self._state in {"live", "standby"}:
-            return
-        self._state = "starting"
-        workspace = self._workspace_factory()
-        self._run_dir = GatewayRunDir(workspace.bos_dir)
-        self._run_dir.ensure()
-        try:
-            live = await self._acquire_and_bring_up(workspace)
-        except BaseException:
-            # _acquire_and_bring_up has already rolled its own partial bring-up
-            # back, so nothing is held and nothing is half-built. Say so rather
-            # than leaving the mount parked in "starting" for good, with a
-            # gateway the caller can see but nothing driving it.
-            self._state = "stopped"
-            raise
-        if not live:
-            self._state = "standby"
-            logger.warning("Another gateway holds the lock for %s — standing by.", workspace.bos_dir)
-        self._watchdog = asyncio.ensure_future(self._watch_lock())
+        async with self._mutex:
+            if self._state in {"live", "standby"}:
+                return
+            self._state = "starting"
+            workspace = self._workspace_factory()
+            self._run_dir = GatewayRunDir(workspace.bos_dir)
+            self._run_dir.ensure()
+            try:
+                live = await self._acquire_and_bring_up(workspace)
+            except BaseException:
+                # _acquire_and_bring_up has already rolled its own partial bring-up
+                # back, so nothing is held and nothing is half-built. Say so rather
+                # than leaving the mount parked in "starting" for good, with a
+                # gateway the caller can see but nothing driving it.
+                self._state = "stopped"
+                raise
+            if not live:
+                self._state = "standby"
+                logger.warning("Another gateway holds the lock for %s — standing by.", workspace.bos_dir)
+            self._watchdog = asyncio.ensure_future(self._watch_lock())
 
     async def acquire(self) -> bool:
         """Try the lock now. Returns True if the mount is live afterwards."""
-        if self._state == "live":
-            return True
-        if self._state != "standby":
-            return False
-        return await self._acquire_and_bring_up(self._workspace_factory())
+        async with self._mutex:
+            if self._state == "live":
+                return True
+            if self._state != "standby":
+                return False
+            return await self._acquire_and_bring_up(self._workspace_factory())
 
     async def _acquire_and_bring_up(self, workspace: Workspace) -> bool:
         """Take the lock and start the runtime. False (and no side effects
@@ -164,40 +190,78 @@ class GatewayMount:
         instance must not do.
         """
         assert self._run_dir is not None
-        if self._gateway is not None:
-            # A runtime already exists, so whatever state the mount reports, one
-            # is being torn down somewhere else — the demoting watchdog goes to
-            # "standby" before its teardown, which takes the whole drain to run.
-            # Promoting again would build a second runtime over it, and that
-            # teardown would then null the new gateway, close the new harness
-            # and release the lock this call had just taken.
+        if self._gateway is not None or self._stack is not None:
+            # Either half means a runtime exists here, however partially, so
+            # whatever state the mount reports, one is being built or torn down
+            # somewhere else. Building a second over it would start two
+            # Gateways in one process — duplicate channel pollers, which is the
+            # thing the singleton exists to prevent — and the other path's own
+            # cleanup would then null the new gateway, close the new harness and
+            # release the lock this call had just taken.
+            #
+            # ``_stack`` is what closes both windows, and ``_gateway`` alone
+            # closed neither. Promotion: ``_bring_up_runtime`` assigns
+            # ``_stack`` before its first await and ``_gateway`` only several
+            # awaits later, so a watchdog mid-promotion is invisible to a
+            # ``_gateway`` check — and POST /api/restart reaches acquire() from
+            # an unauthenticated request task that the watchdog, deliberately
+            # left outside the mutex, does not exclude. Demotion: the reverse —
+            # ``_tear_down_runtime`` nulls ``_gateway`` *before*
+            # ``await self._stack.aclose()``, and the watchdog's own ``finally``
+            # nulls ``_lock`` after that, so a promotion slipping in there would
+            # have the flock dropped out from under a mount reporting "live".
+            # ``_stack`` is set across both windows with no yield between its
+            # last write and the watchdog's finally, so testing it covers them.
+            # A legitimate retry still passes: _roll_back_runtime nulls both.
             return False
-        lock = acquire_singleton_lock(self._run_dir)
+        # A lock already held is this mount's own: a failed restart leaves it in
+        # standby still holding it. Re-acquiring would fail — flock binds to an
+        # open file description, so a second open() in this process conflicts
+        # with our own handle — and that failure is what made a failed restart
+        # unrecoverable for an embedded host, which cannot reach stop()/start()
+        # from outside its process.
+        took_lock = False
+        lock = self._lock
         if lock is None:
-            # Assigned only on success: a failed restart leaves this mount in
-            # standby still holding the lock, and overwriting the handle there
-            # would drop the last reference to it — releasing the singleton
-            # lock as a side effect of failing to take it.
-            return False
-        self._lock = lock
+            lock = acquire_singleton_lock(self._run_dir)
+            if lock is None:
+                return False
+            self._lock = lock
+            took_lock = True
         try:
             await self._bring_up_runtime(workspace)
         except BaseException:
-            # Roll the whole promotion back. A half-built runtime left behind
-            # would make the `self._gateway is not None` guard above refuse
-            # every later acquire(), and an orphaned lock would block every
-            # other instance on this bos_dir behind a mount that serves
-            # nothing. Teardown errors are secondary to the failure that got
-            # us here, so they do not replace it.
-            with contextlib.suppress(Exception):
-                await self._tear_down_runtime(graceful=False)
-            self._gateway = None
-            self._stack = None
-            lock.close()
-            self._lock = None
+            # Roll the whole promotion back, lock included: an orphaned lock
+            # would block every other instance on this bos_dir behind a mount
+            # that serves nothing.
+            await self._roll_back_runtime()
+            if took_lock:
+                # Only what this call acquired. A retry after a failed restart
+                # must keep the lock it already had: releasing it there would
+                # drop the singleton as a side effect of a failed rebuild.
+                lock.close()
+                self._lock = None
             raise
         self._state = "live"
         return True
+
+    async def _roll_back_runtime(self) -> None:
+        """Undo a partial bring-up, leaving nothing half-built.
+
+        ``_bring_up_runtime`` assigns ``_stack`` and ``_gateway`` before the
+        calls that can fail, so a failure leaves both set. A leftover gateway
+        makes ``_acquire_and_bring_up``'s re-entry guard refuse every later
+        ``acquire()`` — the only way back for an embedded host — so the nulling
+        is explicit rather than a side effect of the teardown, which may itself
+        fail (a plugin whose ``close()`` throws on half-initialized state is
+        enough). Teardown errors are secondary to the failure that got us here,
+        so they do not replace it. The lock is deliberately untouched: which
+        caller may drop it differs, and this helper does not know.
+        """
+        with contextlib.suppress(Exception):
+            await self._tear_down_runtime(graceful=False)
+        self._gateway = None
+        self._stack = None
 
     async def _bring_up_runtime(self, workspace: Workspace) -> Gateway:
         """Build and start a runtime from *workspace*, under a lock we hold.
@@ -212,7 +276,9 @@ class GatewayMount:
         workspace.bootstrap_platform()
         self._stack = contextlib.AsyncExitStack()
         harness = await self._stack.enter_async_context(workspace.harness())
-        gateway = Gateway(runtime=workspace.resolve_gateway_runtime(), harness=harness)
+        gateway = Gateway(
+            runtime=workspace.resolve_gateway_runtime(), harness=harness, runtime_label=self._runtime_label
+        )
         self._gateway = gateway
         await gateway.start()
         if self._public_base_url is not None:
@@ -255,55 +321,57 @@ class GatewayMount:
         ``serve()`` stays parked — it waits on the mount, never on the gateway
         this replaces, and the demotion signal that *does* end a serving is not
         touched here.
+
+        Serialized against ``stop()`` by the mount's mutex, which is what keeps
+        a hot restart safe to expose over HTTP: the rebuild runs in a request
+        task, and the driver's shutdown path is a different one. The watchdog
+        stays outside the mutex and is held off by the state machine instead —
+        ``"restarting"`` matches neither of its branches, so a mid-restart mount
+        is neither demoted nor promoted under us.
         """
-        # ponytail: no mutex — the mount is not re-entrant, and restart() has no
-        # caller yet (Layer 3's POST /api/restart is the first). The state
-        # machine is what keeps it clear of the watchdog: "restarting" matches
-        # neither of its branches, so a mid-restart mount is neither demoted nor
-        # promoted under us, and a demotion that got there first has already
-        # moved the state off "live", which the guard below refuses. Give it a
-        # concurrent caller — a host that can restart while stopping — and this
-        # wants an asyncio.Lock around start/stop/restart/acquire: a
-        # request_shutdown() aimed at the gateway being torn down lands on a
-        # relay that is already cancelled, so the stop is lost until the caller
-        # escalates.
-        if self._state != "live":
-            raise RuntimeError(f"Cannot restart a gateway that is {self._state!r}; it holds no lock.")
-        assert self._gateway is not None
-        # Carried across the swap: the socket is the host's and is not rebound,
-        # so what it bound is still the truth. A fresh Gateway reports the
-        # *configured* endpoint, which with ``port = 0`` is not a port anything
-        # can connect to — and it publishes that to gateway.state on start().
-        endpoint = (self._gateway.actual_host, self._gateway.actual_port)
-        self._state = "restarting"
-        try:
-            await self._tear_down_runtime()
-            gateway = await self._bring_up_runtime(self._workspace_factory())
-            gateway.set_endpoint(*endpoint)
-        except BaseException:
-            # A failed rebuild must not look live. The lock is kept: this
-            # instance is still the singleton, and dropping it here would invite
-            # another process in while this one is still wired up. Nothing
-            # promotes the mount back by itself — the watchdog's standby branch
-            # waits for a lock that *we* hold, and the guard above refuses a
-            # second restart() — so recovery is stop() then start().
-            self._state = "standby"
-            raise
-        self._state = "live"
+        async with self._mutex:
+            if self._state != "live":
+                raise RuntimeError(f"Cannot restart a gateway that is {self._state!r}; it holds no lock.")
+            assert self._gateway is not None
+            # Carried across the swap: the socket is the host's and is not rebound,
+            # so what it bound is still the truth. A fresh Gateway reports the
+            # *configured* endpoint, which with ``port = 0`` is not a port anything
+            # can connect to — and it publishes that to gateway.state on start().
+            endpoint = (self._gateway.actual_host, self._gateway.actual_port)
+            self._state = "restarting"
+            try:
+                await self._tear_down_runtime()
+                gateway = await self._bring_up_runtime(self._workspace_factory())
+                gateway.set_endpoint(*endpoint)
+            except BaseException:
+                await self._roll_back_runtime()
+                # The lock is kept: this instance is still the singleton, and
+                # dropping it would invite another process in while this one is
+                # still wired up. acquire() rebuilds from here, and a second
+                # POST /api/restart is what routes an embedded host to it.
+                self._state = "standby"
+                raise
+            self._state = "live"
 
     async def stop(self, *, graceful: bool = True) -> None:
-        if self._state == "stopped":
-            return
-        if self._watchdog is not None:
-            self._watchdog.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._watchdog
-            self._watchdog = None
-        await self._tear_down_runtime(graceful=graceful)
-        if self._lock is not None:
-            self._lock.close()
-            self._lock = None
-        self._state = "stopped"
+        async with self._mutex:
+            # Behind the mutex, so a stop arriving mid-restart waits for the
+            # rebuild instead of tearing down half of it and letting the restart
+            # reinstate the rest over a released lock. The wait is bounded: a
+            # restart is a drain (capped by the configured grace) plus a
+            # bring-up.
+            if self._state == "stopped":
+                return
+            if self._watchdog is not None:
+                self._watchdog.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self._watchdog
+                self._watchdog = None
+            await self._tear_down_runtime(graceful=graceful)
+            if self._lock is not None:
+                self._lock.close()
+                self._lock = None
+            self._state = "stopped"
 
     async def _watch_lock(self) -> None:
         """Both directions of singleton authority.
@@ -367,6 +435,40 @@ class GatewayMount:
             return
         await self._gateway.handle_ws(websocket)
 
+    async def _dispatch_restart(self) -> tuple[dict[str, Any], int]:
+        """Answer ``POST /api/restart``.
+
+        The app is the mount's and is built once, so it keeps serving across the
+        restart it is triggering — the ``Gateway`` behind it is what gets
+        replaced (BEP 17 §3.3.3). A failure leaves a recoverable standby, so the
+        error is reported rather than swallowed and a retry is a second POST.
+        """
+        try:
+            if self._state == "live":
+                await self.restart()
+            elif self._state == "standby" and self._lock is not None:
+                # A failed restart parks here still holding *its own* lock, and
+                # nothing promotes it back on its own: the watchdog's standby
+                # branch waits for a lock to come free, and this one never will
+                # because we are the holder. This endpoint is the only lifecycle
+                # surface an embedded host exposes, so the retry has to rebuild
+                # from here — otherwise one bad config edit takes the gateway
+                # down until the host process restarts. A standby whose lock
+                # belongs to *another* holder has nothing to rebuild and falls
+                # through to the 409.
+                await self.acquire()
+            else:
+                return {"ok": False, "error": self._state}, 409
+        except Exception:
+            logger.exception("Restart failed; the mount is in standby and a retry may succeed.")
+            # The detail stays in the log. §3.8 leaves this endpoint
+            # unauthenticated, and a config-load failure — the realistic one,
+            # since a restart re-reads configuration — carries filesystem paths.
+            return {"ok": False, "error": "restart_failed"}, 500
+        if self._state != "live":
+            return {"ok": False, "error": self._state}, 409
+        return {"ok": True, "state": self._state}, 200
+
     def build_app(self) -> Starlette:
         """The application, built once and indirecting through the mount.
 
@@ -379,5 +481,6 @@ class GatewayMount:
                 config_provider=self._current_config,
                 status_provider=self.status,
                 ws_handler=self._dispatch_ws,
+                restart_handler=self._dispatch_restart,
             )
         return self._app

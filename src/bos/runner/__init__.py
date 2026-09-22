@@ -4,6 +4,7 @@ from bos.gateway.state import GatewayRunDir
 from bos.runner.mount import GatewayMount
 from bos.runner.proc import (
     acquire_singleton_lock,
+    is_live,
     is_running,
     kill_process,
     lock_still_owned,
@@ -19,6 +20,7 @@ __all__ = [
     "GatewayMount",
     "GatewayRunDir",
     "acquire_singleton_lock",
+    "is_live",
     "is_running",
     "kill_process",
     "lock_still_owned",

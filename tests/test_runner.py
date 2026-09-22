@@ -34,7 +34,7 @@ def test_runner_start_bootstraps_gateway(tmp_path, monkeypatch):
     class FakeGateway:
         config = ResolvedGatewayConfig(host="127.0.0.1", port=0)
 
-        def __init__(self, *, runtime, harness):
+        def __init__(self, *, runtime, harness, runtime_label="process"):
             calls.append(("gateway_init", (runtime, harness)))
 
         async def start(self):
@@ -164,7 +164,7 @@ def test_runner_start_stops_ungracefully_on_cancellation(tmp_path, monkeypatch):
     class FakeGateway:
         config = ResolvedGatewayConfig(host="127.0.0.1", port=0)
 
-        def __init__(self, *, runtime, harness):
+        def __init__(self, *, runtime, harness, runtime_label="process"):
             calls.append(("gateway_init", (runtime, harness)))
 
         async def start(self):

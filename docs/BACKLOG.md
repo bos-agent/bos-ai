@@ -147,23 +147,6 @@ able to run in parallel with any of them.
 
 ---
 
-## 5. BEP 17 Layer 3 prerequisites
-
-**Status:** parked during the Layer 1 review, with rulings. Recorded here because
-they become real defects the moment Layer 3 gives `restart()` a caller.
-
-- **`GatewayMount.restart()`'s failure path wedges the mount.** It leaves
-  `_gateway`/`_stack` non-`None` while reporting `standby`, so the
-  `if self._gateway is not None: return False` re-entry guard refuses every later
-  `acquire()`. This is the same defect that *was* fixed for the promotion path;
-  the restart path kept it because `restart()` has no production caller yet.
-  `POST /api/restart` is that caller. **The Layer 3 plan should open with this.**
-- **`bos/runner/__main__.py` captures `gateway` once.** After a hot restart the
-  first SIGTERM calls `request_shutdown()` on the replaced gateway and does
-  nothing; the second escalates to a non-graceful stop. It must read
-  `mount.gateway` at signal time.
-- **`Gateway.status_snapshot()` hardcodes `"runtime": "process"`.**
-  `GatewayMount` carries a `runtime_label`, but it never reaches `gateway.state`,
-  so BEP 17 §3.4.4's stated reason for keeping that file — an embedded gateway
-  being visible to `boscli gateway status` and `doctor` — is not yet delivered.
-  Harmless in Layer 1, where the runtime genuinely is a process.
+<!-- §5 "BEP 17 Layer 3 prerequisites" removed: all three items (the restart()
+     re-entry wedge, __main__.py's one-shot gateway capture, and
+     status_snapshot's hardcoded runtime label) were fixed by BEP 17 Layer 3. -->

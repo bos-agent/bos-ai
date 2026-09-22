@@ -65,9 +65,15 @@ def main() -> None:
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     main_task: asyncio.Task | None = None
-    gateway: Any = None
+    mount: Any = None
 
     def _on_sigterm(*_) -> None:
+        # Resolved now, not captured at bring-up: a hot restart replaces the
+        # Gateway behind the mount, and a handler holding the old object would
+        # aim request_shutdown() at something nothing is listening to — the
+        # first signal would do nothing and only the second, forceful one would
+        # stop the process.
+        gateway = mount.gateway if mount is not None else None
         # First signal asks for a graceful stop: in-flight turns are told to
         # close with a handoff, within the configured grace. A second signal
         # (an impatient operator, or the CLI escalating) cancels outright.
@@ -82,7 +88,7 @@ def main() -> None:
     signal.signal(signal.SIGTERM, _on_sigterm)
 
     async def _run() -> None:
-        nonlocal gateway
+        nonlocal mount
         logger.info("Gateway process started (PID %d, workspace=%s)", os.getpid(), ws.workspace)
         mount = GatewayMount(_workspace_factory, runtime_label="process")
         # Only the winner of the lock writes gateway.pid, so only the winner may
@@ -106,7 +112,6 @@ def main() -> None:
                 # it: `stop` and `restart` must still find that process.
                 logger.error("Another BOS gateway already running for %s — exiting.", ws.bos_dir)
                 return
-            gateway = mount.gateway
             rd.pid_file.write_text(str(os.getpid()), encoding="utf-8")
             wrote_pid = True
             await serve(mount)

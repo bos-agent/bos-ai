@@ -25,6 +25,10 @@ StatusProvider = Callable[[], JsonDict]
 # read the settings of whichever Gateway is current rather than close over one.
 ConfigProvider = Callable[[], ResolvedGatewayConfig]
 WSHandler = Callable[[WebSocket], Awaitable[None]]
+# Returns the JSON body and the status to answer with, so the mount owns the
+# mapping from its own state to an HTTP response and this module stays a
+# transport.
+RestartHandler = Callable[[], Awaitable[tuple[JsonDict, int]]]
 
 
 class _LiveBodyLimit:
@@ -73,11 +77,13 @@ def create_gateway_app(
     config_provider: ConfigProvider,
     status_provider: StatusProvider,
     ws_handler: WSHandler | None = None,
+    restart_handler: RestartHandler | None = None,
 ) -> Starlette:
     app = Starlette(
         routes=[
             Route("/api/status", _status_handler),
             Route("/api/actors", _actors_handler),
+            Route("/api/restart", _restart_handler, methods=["POST"]),
             Route("/api/upload-image", _upload_attachment_handler, methods=["POST"]),
             Route("/api/upload", _upload_attachment_handler, methods=["POST"]),
             WebSocketRoute("/ws", _ws_handler),
@@ -87,6 +93,7 @@ def create_gateway_app(
     app.state.gateway_config = config_provider
     app.state.status_provider = status_provider
     app.state.ws_handler = ws_handler
+    app.state.restart_handler = restart_handler
     return app
 
 
@@ -98,6 +105,14 @@ async def _status_handler(request: Request) -> JSONResponse:
 async def _actors_handler(request: Request) -> JSONResponse:
     provider: StatusProvider = request.app.state.status_provider
     return JSONResponse({"ok": True, "actors": provider().get("actors", {})})
+
+
+async def _restart_handler(request: Request) -> JSONResponse:
+    handler: RestartHandler | None = request.app.state.restart_handler
+    if handler is None:
+        return JSONResponse({"ok": False, "error": "restart_not_implemented"}, status_code=501)
+    payload, status = await handler()
+    return JSONResponse(payload, status_code=status)
 
 
 async def _upload_attachment_handler(request: Request) -> JSONResponse:

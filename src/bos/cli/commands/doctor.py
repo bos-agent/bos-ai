@@ -159,10 +159,13 @@ def _check_gateway(ws: Workspace) -> tuple[str, str, str]:
     import socket
 
     from bos.gateway.state import GatewayRunDir
-    from bos.runner.proc import is_running, read_state
+    from bos.runner.proc import is_live, read_state
 
     rd = GatewayRunDir(ws.bos_dir)
-    if is_running(rd):
+    # is_live, not is_running: a gateway mounted in a host process writes no pid
+    # file, and reporting it "not running" here would send an operator off to
+    # free a port that a perfectly healthy gateway is behind (BEP 17 §4.3).
+    if is_live(rd):
         state = read_state(rd)
         return ("ok", "gateway", f"running ({state.get('runtime', 'process')} {state.get('pid', '?')})")
 

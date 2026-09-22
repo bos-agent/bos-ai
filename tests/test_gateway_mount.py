@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from dataclasses import dataclass
 
 import pytest
@@ -131,6 +132,9 @@ async def test_standby_serves_status_without_a_gateway(tmp_path):
         assert isinstance(app, Starlette)
         assert mount.build_app() is app  # built once, kept across restarts
         assert mount.status()["state"] == "standby"
+        # No gateway exists yet, so nothing else could source this — it must
+        # come from the mount's own overlay or /api/status goes dark on the
+        # one field that tells an operator standalone from embedded apart.
         assert mount.status()["runtime"] == "embedded"
 
         transport = httpx.ASGITransport(app=app)
@@ -492,3 +496,376 @@ async def test_a_failed_bring_up_leaves_no_lock_and_no_runtime(tmp_path, monkeyp
     freed = acquire_singleton_lock(GatewayRunDir(tmp_path / ".bos"))
     assert freed is not None  # the lock did not outlive the failure
     freed.close()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_restart_is_recoverable_with_acquire(tmp_path, monkeypatch):
+    """A restart that fails must not wedge the mount.
+
+    It leaves standby while still holding the lock — correct, this instance is
+    still the singleton — so nothing promotes it back on its own: the watchdog's
+    standby branch waits for a lock *we* hold. An embedded host cannot reach
+    stop()/start() from outside its process, so acquire() has to be the way
+    back, and it must work with the lock already held (BEP 17 §3.4.3).
+    """
+    mount = GatewayMount(lambda: _workspace(tmp_path), lock_poll_seconds=60)
+    await mount.start()
+    try:
+        assert mount.state == "live"
+
+        boom = RuntimeError("bring-up failed")
+        calls = {"n": 0}
+        real_bring_up = mount._bring_up_runtime
+
+        async def _failing_bring_up(workspace):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise boom
+            return await real_bring_up(workspace)
+
+        monkeypatch.setattr(mount, "_bring_up_runtime", _failing_bring_up)
+
+        with pytest.raises(RuntimeError, match="bring-up failed"):
+            await mount.restart()
+
+        # Rolled back, not half-built: a leftover gateway makes the re-entry
+        # guard in _acquire_and_bring_up refuse every later acquire().
+        assert mount.state == "standby"
+        assert mount.gateway is None
+        assert mount._stack is None
+        # Still the singleton — dropping the lock here would invite a second
+        # gateway in while this one is still wired up.
+        assert acquire_singleton_lock(GatewayRunDir(tmp_path / ".bos")) is None
+
+        assert await mount.acquire() is True
+        assert mount.state == "live"
+        assert mount.gateway is not None
+    finally:
+        await mount.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_restart_rolls_back_gateway_and_stack(tmp_path, monkeypatch):
+    """A restart failing inside ``gateway.start()`` must null ``_gateway`` and
+    ``_stack`` itself, not rely on its own best-effort teardown to do it.
+
+    ``_bring_up_runtime`` assigns ``self._stack`` and ``self._gateway``
+    *before* awaiting ``gateway.start()`` — the call that fails here. The
+    except block's own ``_tear_down_runtime(graceful=False)`` would null both
+    as a side effect *if that teardown succeeds* — so this test also makes the
+    half-started gateway's own ``stop()`` raise (a plugin's ``close()`` throwing
+    on half-initialized state is enough in practice), which is suppressed and
+    leaves ``_tear_down_runtime`` without having reached its own nulling.
+    Only the except block's explicit ``self._gateway = None`` /
+    ``self._stack = None`` recover from that — which is what makes them worth
+    having instead of leaving the cleanup to ``_tear_down_runtime`` alone, and
+    what a leftover gateway would trip: ``_acquire_and_bring_up``'s re-entry
+    guard, refusing every later ``acquire()``.
+    """
+    mount = GatewayMount(lambda: _workspace(tmp_path), lock_poll_seconds=60)
+    await mount.start()
+    try:
+        assert mount.state == "live"
+        gateway_cls = type(mount.gateway)
+        real_start = gateway_cls.start
+        real_stop = gateway_cls.stop
+
+        start_calls = {"n": 0}
+        failed_gateway: list[object] = []
+
+        async def _failing_start(self):
+            start_calls["n"] += 1
+            if start_calls["n"] == 1:
+                failed_gateway.append(self)
+                raise RuntimeError("start failed")
+            return await real_start(self)
+
+        async def _stop_that_fails_only_for_the_half_started_gateway(self, **kwargs):
+            if failed_gateway and self is failed_gateway[0]:
+                raise RuntimeError("stop also failed")
+            return await real_stop(self, **kwargs)
+
+        monkeypatch.setattr(gateway_cls, "start", _failing_start)
+        monkeypatch.setattr(gateway_cls, "stop", _stop_that_fails_only_for_the_half_started_gateway)
+
+        with pytest.raises(RuntimeError, match="start failed"):
+            await mount.restart()
+
+        # The new gateway and stack were assigned before gateway.start() blew
+        # up, and the rollback's own teardown also failed — rolled back by the
+        # explicit nulling, not left half-built.
+        assert mount.state == "standby"
+        assert mount.gateway is None
+        assert mount._stack is None
+        assert acquire_singleton_lock(GatewayRunDir(tmp_path / ".bos")) is None
+
+        assert await mount.acquire() is True
+        assert mount.state == "live"
+        assert mount.gateway is not None
+    finally:
+        await mount.stop()
+
+
+@pytest.mark.asyncio
+async def test_the_runtime_label_reaches_the_state_file(tmp_path):
+    """gateway.state is all `boscli gateway status`/`restart` can see of a
+    gateway in another process, and BEP 17 §3.4.4 keeps the file so an embedded
+    one is visible there. status_snapshot() hard-coded "process", so it lied."""
+    from bos.gateway.state import GatewayRunDir, read_gateway_state
+
+    mount = GatewayMount(lambda: _workspace(tmp_path), lock_poll_seconds=60)
+    await mount.start()
+    try:
+        assert mount.state == "live"
+        assert mount.gateway is not None
+        # The mount's overlay and the gateway's own snapshot must agree — they
+        # are two sources writing the same field, and nothing else catches it
+        # if they drift apart.
+        assert mount.status()["runtime"] == mount.gateway.status_snapshot()["runtime"] == "embedded"
+        assert read_gateway_state(GatewayRunDir(tmp_path / ".bos"))["runtime"] == "embedded"
+    finally:
+        await mount.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_standby_mount_refuses_a_restart_over_http(tmp_path):
+    """POST /api/restart at the mount's own app: 409 naming the state.
+
+    Reached through ``build_app()`` rather than by calling ``_dispatch_restart``
+    directly, so the wiring is under test too — a ``build_app()`` that forgot
+    ``restart_handler=`` answers 501 here, and a guard that only refused
+    ``stopped`` would tear down a runtime holding no lock and answer 200.
+    """
+    import httpx
+
+    rd = GatewayRunDir(tmp_path / ".bos")
+    rd.ensure()
+    holder = acquire_singleton_lock(rd)
+    assert holder is not None
+
+    mount = GatewayMount(lambda: _workspace(tmp_path), lock_poll_seconds=60)
+    await mount.start()
+    try:
+        assert mount.state == "standby"
+        transport = httpx.ASGITransport(app=mount.build_app())
+        async with httpx.AsyncClient(transport=transport, base_url="http://gateway") as client:
+            response = await client.post("/api/restart")
+        assert response.status_code == 409
+        assert response.json() == {"ok": False, "error": "standby"}
+        assert mount.state == "standby"  # refused, not attempted
+    finally:
+        await mount.stop()
+        holder.close()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_restart_answers_500_and_stays_recoverable(tmp_path):
+    """The error is reported, not swallowed, and a retry is a second POST.
+
+    A restart re-reads configuration, so a workspace that fails to build is the
+    realistic failure — an edit that broke the config file. Task 1 made that
+    path roll back to a standby that still holds the lock, which is the only way
+    back for an embedded host: it cannot reach stop()/start() from outside its
+    own process.
+    """
+    import httpx
+
+    calls: list[int] = []
+
+    def _factory():
+        calls.append(1)
+        if len(calls) == 2:  # the restart's read, not the first bring-up
+            raise RuntimeError("boom")
+        return _workspace(tmp_path)
+
+    mount = GatewayMount(_factory, lock_poll_seconds=60)
+    await mount.start()
+    try:
+        assert mount.state == "live"
+        transport = httpx.ASGITransport(app=mount.build_app())
+        async with httpx.AsyncClient(transport=transport, base_url="http://gateway") as client:
+            failed = await client.post("/api/restart")
+            assert failed.status_code == 500
+            # Not str(exc): §3.8 leaves this endpoint unauthenticated and a
+            # config-load failure carries filesystem paths. The detail is logged.
+            assert failed.json() == {"ok": False, "error": "restart_failed"}
+            assert mount.state == "standby"
+            assert mount.gateway is None
+
+            # Recoverable *through the same endpoint*. This is the whole point:
+            # POST /api/restart is the only lifecycle surface an embedded host
+            # exposes, so a retry that only works by calling mount.acquire()
+            # from inside the process is no retry at all — it left one bad
+            # config edit holding the gateway down until the host restarted.
+            ok = await client.post("/api/restart")
+        assert ok.status_code == 200
+        assert ok.json() == {"ok": True, "state": "live"}
+        assert mount.state == "live"
+        assert mount.gateway is not None
+    finally:
+        await mount.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_stop_during_a_restart_is_serialized_behind_it(tmp_path, monkeypatch):
+    """A restart and a stop must not interleave (BEP 17 §3.4.3).
+
+    ``POST /api/restart`` is wired unconditionally, so a standalone
+    ``python -m bos.runner`` serves it too, and the rebuild runs in a request
+    task while the driver's shutdown path is a different one. In the window
+    where ``_tear_down_runtime`` has nulled ``_gateway`` and
+    ``_bring_up_runtime`` has not yet reassigned it — it spans
+    ``bootstrap_platform()`` and harness construction — a SIGTERM finds no
+    gateway to drain and escalates to cancelling the driver, whose ``finally``
+    then runs ``stop()`` alongside the restart still in flight. Unserialized,
+    ``stop()`` closes the lock and says ``stopped``, and the restart lands on
+    top: a started ``Gateway`` and an open harness that nothing will ever
+    close, with the singleton flock released.
+    """
+    mount = GatewayMount(lambda: _workspace(tmp_path), lock_poll_seconds=60)
+    await mount.start()
+    assert mount.state == "live"
+
+    inside = asyncio.Event()
+    release = asyncio.Event()
+    # A call-order record, not a stopwatch: the invariant is *where* the stop's
+    # teardown falls relative to the rebuild, and a wall-clock window only says
+    # that it had not got there yet on this machine, this run.
+    order: list[str] = []
+    real_bring_up = mount._bring_up_runtime
+    real_tear_down = mount._tear_down_runtime
+
+    async def _recording_tear_down(*, graceful: bool = True):
+        order.append(f"teardown(graceful={graceful})")
+        return await real_tear_down(graceful=graceful)
+
+    async def _parked_bring_up(workspace):
+        order.append("bring-up start")
+        inside.set()
+        await release.wait()
+        gateway = await real_bring_up(workspace)
+        order.append("bring-up done")
+        return gateway
+
+    monkeypatch.setattr(mount, "_tear_down_runtime", _recording_tear_down)
+    monkeypatch.setattr(mount, "_bring_up_runtime", _parked_bring_up)
+
+    restarting = asyncio.ensure_future(mount.restart())
+    await asyncio.wait_for(inside.wait(), timeout=5)
+    assert mount.gateway is None  # the window itself
+
+    stopping = asyncio.ensure_future(mount.stop(graceful=False))
+    # Hand the loop over a fixed number of times rather than sleeping. An
+    # unserialized stop() only has to be *scheduled* to interleave, and turns of
+    # the event loop give it that on any machine; a 50 ms sleep gives it that
+    # only on a fast one, which is the difference between a discriminator and a
+    # coin flip.
+    for _ in range(50):
+        await asyncio.sleep(0)
+    assert not stopping.done()  # waiting on the mutex, not tearing down half a rebuild
+
+    release.set()
+    await asyncio.wait_for(restarting, timeout=10)
+    await asyncio.wait_for(stopping, timeout=10)
+
+    # The discriminator: the stop's teardown lands *after* the rebuild
+    # finished, never between its start and its completion.
+    assert order == [
+        "teardown(graceful=True)",  # the restart's own
+        "bring-up start",
+        "bring-up done",
+        "teardown(graceful=False)",  # the stop's — behind the rebuild, not into it
+    ]
+
+    # The stop is the last word, and it is a whole one.
+    assert mount.state == "stopped"
+    assert mount.gateway is None
+    assert mount._stack is None
+    freed = acquire_singleton_lock(GatewayRunDir(tmp_path / ".bos"))
+    assert freed is not None
+    freed.close()
+
+
+@pytest.mark.asyncio
+async def test_a_restart_post_cannot_build_a_second_runtime_under_the_watchdog(tmp_path, monkeypatch):
+    """One runtime per process, even with the watchdog mid-promotion.
+
+    POST /api/restart reaches ``acquire()`` so a failed restart is recoverable,
+    and the watchdog is deliberately *outside* the mount's mutex (holding it
+    there would deadlock ``stop()``, which cancels the watchdog while holding
+    it). So the two can run at once, and the state machine does not hold them
+    apart — both work on ``"standby"``.
+
+    ``_acquire_and_bring_up``'s re-entry guard is what does, and checking
+    ``_gateway`` alone was not enough: ``_bring_up_runtime`` assigns ``_stack``
+    before its first await and ``_gateway`` only several awaits later, so a
+    promotion in flight was invisible to it. Two ``_bring_up_runtime`` calls
+    means two ``Gateway.start()`` in one process — duplicate channel pollers,
+    the exact thing the singleton exists to prevent — plus the first
+    ``AsyncExitStack`` overwritten and never ``aclose()``d.
+
+    The response code is not the bug; the second bring-up is. Assert on that.
+    """
+    import httpx
+
+    from bos.config import Workspace
+
+    rd = GatewayRunDir(tmp_path / ".bos")
+    rd.ensure()
+    holder = acquire_singleton_lock(rd)
+    assert holder is not None
+
+    inside = asyncio.Event()
+    release = asyncio.Event()
+    harness_entries: list[int] = []
+    real_harness = Workspace.harness
+
+    @contextlib.asynccontextmanager
+    async def _parked_harness(self):
+        # Inside _bring_up_runtime, after `self._stack = AsyncExitStack()` and
+        # long before `self._gateway = gateway`: the window itself. Only the
+        # first caller parks, so a second one is free to run to completion and
+        # be counted — a park that caught it too would hide the bug behind a
+        # hang instead of a failed assertion.
+        harness_entries.append(1)
+        if len(harness_entries) == 1:
+            inside.set()
+            await release.wait()
+        async with real_harness(self) as harness:
+            yield harness
+
+    monkeypatch.setattr(Workspace, "harness", _parked_harness)
+
+    mount = GatewayMount(lambda: _workspace(tmp_path), lock_poll_seconds=0.05)
+    await mount.start()
+    try:
+        assert mount.state == "standby"
+
+        holder.close()  # the holder is gone; the watchdog will promote
+        await asyncio.wait_for(inside.wait(), timeout=10)
+
+        # The window, asserted rather than assumed.
+        assert mount.state == "standby"
+        assert mount.gateway is None
+        assert mount._stack is not None
+        assert mount._lock is not None
+
+        transport = httpx.ASGITransport(app=mount.build_app())
+        async with httpx.AsyncClient(transport=transport, base_url="http://gateway") as client:
+            response = await client.post("/api/restart")
+
+        # The whole finding: refused before it could build anything.
+        assert harness_entries == [1]
+        assert response.status_code == 409
+        assert response.json() == {"ok": False, "error": "standby"}
+
+        release.set()
+        for _ in range(500):
+            if mount.state == "live":
+                break
+            await asyncio.sleep(0.02)
+        assert mount.state == "live"
+        assert harness_entries == [1]  # the promotion built exactly one runtime
+    finally:
+        release.set()
+        await mount.stop()

@@ -207,15 +207,18 @@ def _ensure_gateway_endpoint(ctx, rd: GatewayRunDir, workspace_dir: str | None) 
 
     A gateway started here is left running after the command finishes.
     """
-    from bos.runner.proc import is_running
+    from bos.runner.proc import is_live
 
-    if not is_running(rd):
+    # is_live, not is_running: an embedded gateway writes no pid file, and
+    # starting a standalone one in front of it only spawns a process that dies
+    # on the host's singleton lock (BEP 17 §4.3).
+    if not is_live(rd):
         click.echo("No gateway running — starting one in the background (it stays running).", err=True)
         try:
             ctx.invoke(start, foreground=False, workspace_dir=workspace_dir)
         except SystemExit:
             # Lost a start race to another process — fine as long as a gateway is up now.
-            if not is_running(rd):
+            if not is_live(rd):
                 raise
 
     deadline = time.monotonic() + 15
@@ -515,7 +518,7 @@ def start(ctx, foreground: bool, workspace_dir: str | None):
     from bos.runner.proc import (
         _pid_alive,
         _pid_is_gateway,
-        is_running,
+        is_live,
         read_state,
         reap_stale,
         start_background,
@@ -523,7 +526,10 @@ def start(ctx, foreground: bool, workspace_dir: str | None):
     from bos.runner.runner import GatewayAlreadyRunningError
     from bos.runner.runner import start as start_gateway
 
-    if is_running(rd):
+    # is_live: an embedded gateway is already the singleton for this run dir
+    # even though it wrote no pid file, and spawning past it produces a process
+    # that dies on the host's lock with nothing but a log line to show for it.
+    if is_live(rd):
         state = read_state(rd)
         click.echo(f"Gateway is already running (process {state.get('pid')}).", err=True)
         raise SystemExit(1)
@@ -539,10 +545,11 @@ def start(ctx, foreground: bool, workspace_dir: str | None):
         try:
             asyncio.run(_run_foreground_gateway(start_gateway, ws))
         except GatewayAlreadyRunningError as exc:
-            # A foreground gateway writes no pid file, so the is_running check
-            # above can never see one — the mount's singleton flock is the only
-            # thing standing between this and a second poller on the same
-            # workspace. Report it the way the background path does.
+            # A foreground gateway writes no pid file and labels itself
+            # "process", so neither half of the is_live check above can see
+            # one — the mount's singleton flock is the only thing standing
+            # between this and a second poller on the same workspace. Report
+            # it the way the background path does.
             click.echo(str(exc), err=True)
             raise SystemExit(1) from exc
         return
@@ -579,6 +586,9 @@ def start(ctx, foreground: bool, workspace_dir: str | None):
 # Headroom over the drain grace before `stop` escalates to SIGKILL: the reply
 # flush, harness teardown, and process exit.
 _STOP_DEADLINE_MARGIN = 5.0
+# `restart` waits on a blocking HTTP call rather than on a process exit, so its
+# budget is the same drain plus room for the rebuild on the other side.
+_RESTART_TIMEOUT_MARGIN = 10.0
 
 
 def _resolved_stop_grace(ws, state: dict) -> float:
@@ -609,11 +619,18 @@ def stop(ctx):
     ws, rd = _get_ws_and_rd(ctx)
     from bos.runner.proc import is_running, read_state, stop_gateway
 
+    state = read_state(rd)
+    if state.get("runtime") == "embedded":
+        # Signalling that pid would kill the host application, not the gateway
+        # (BEP 17 §4.3). There is no HTTP equivalent of stop either: the mount
+        # would tear down the runtime while the host kept serving the app.
+        click.echo("This gateway is embedded in a host process; stop it through that host.", err=True)
+        raise SystemExit(1)
+
     if not is_running(rd):
         click.echo("No gateway is running.", err=True)
         raise SystemExit(1)
 
-    state = read_state(rd)
     click.echo(f"Stopping gateway (process {state.get('pid', '?')})…")
 
     stop_gateway(rd, signal.SIGTERM)
@@ -648,10 +665,15 @@ def stop(ctx):
 def status(ctx):
     """Show gateway running status."""
     _, rd = _get_ws_and_rd(ctx)
-    from bos.runner.proc import is_running, read_state
+    from bos.runner.proc import is_live, read_state
 
     state = read_state(rd)
-    running = is_running(rd)
+    # is_live: this command must work against a standalone *and* an embedded
+    # gateway, because both write gateway.state (BEP 17 §4.3). is_running needs
+    # a pid file and a bos.runner cmdline, neither of which a mount has, so it
+    # reported every live embedded gateway as stale — and the "run `boscli
+    # gateway start` to clear it" advice below then destroyed its state file.
+    running = is_live(rd)
 
     if not state and not running:
         click.echo("Gateway is not running.")
@@ -713,13 +735,62 @@ def status(ctx):
 # ── boscli gateway restart ──────────────────────────────────────
 
 
+def _restart_embedded_gateway(ws, state: dict) -> None:
+    """Restart a mounted gateway through its own ``POST /api/restart``.
+
+    Its process is the host's, so there is nothing to stop and start: the mount
+    rebuilds the ``Gateway`` behind the app it is already serving (BEP 17 §4.3).
+    It does not guess a URL — a gateway that published no ``base_url`` is
+    reported as exactly that.
+    """
+    import httpx
+
+    base_url = state.get("gateway", {}).get("base_url")
+    if not base_url:
+        click.echo(
+            "This gateway is embedded in a host process and published no base_url, "
+            "so there is no endpoint to restart it through; restart it through that host.",
+            err=True,
+        )
+        raise SystemExit(1)
+
+    # The POST blocks for the whole restart — the mount drains in-flight turns
+    # first, bounded by the grace *this* gateway published, which is the same
+    # field `stop` sizes its kill deadline from.
+    timeout = _resolved_stop_grace(ws, state) + _RESTART_TIMEOUT_MARGIN
+    click.echo(f"Restarting embedded gateway at {base_url}…")
+    try:
+        response = httpx.post(f"{str(base_url).rstrip('/')}/api/restart", timeout=timeout)
+    except httpx.HTTPError as exc:
+        # The ordinary failures of this command, not bugs: the host is down or
+        # moved and the published base_url is stale (ConnectError), or the
+        # rebuild outran the grace this gateway published plus our margin
+        # (ReadTimeout). Either way it is one line and a non-zero exit, the way
+        # the rest of this command reports problems — not a traceback.
+        click.echo(f"Could not reach the embedded gateway at {base_url}: {exc}", err=True)
+        raise SystemExit(1) from exc
+    if response.status_code // 100 != 2:
+        try:
+            detail = response.json().get("error", response.text)
+        except Exception:
+            detail = response.text
+        click.echo(f"Restart failed ({response.status_code}): {detail}", err=True)
+        raise SystemExit(1)
+    click.echo(f"Gateway restarted ({response.json().get('state', '?')}).")
+
+
 @gateway.command()
 @click.pass_context
 def restart(ctx):
     """Restart the gateway (stop then start)."""
     # Re-invoke stop (ignore failure if not running)
-    _, rd = _get_ws_and_rd(ctx)
-    from bos.runner.proc import is_running, lock_is_free
+    ws, rd = _get_ws_and_rd(ctx)
+    from bos.runner.proc import is_running, lock_is_free, read_state
+
+    state = read_state(rd)
+    if state.get("runtime") == "embedded":
+        _restart_embedded_gateway(ws, state)
+        return
 
     if is_running(rd):
         ctx.invoke(stop)
