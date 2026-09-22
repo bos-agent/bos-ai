@@ -12,9 +12,13 @@ from .config import ResolvedGatewayConfig
 
 JsonDict = dict[str, Any]
 StatusProvider = Callable[[], JsonDict]
+# A provider, not a value: a mounted gateway is replaced wholesale on restart
+# while the app it serves through is built once (BEP 17 §3.3.3), so the app must
+# read the settings of whichever Gateway is current rather than close over one.
+ConfigProvider = Callable[[], ResolvedGatewayConfig]
 WSHandler = Callable[[web.Request], Awaitable[web.StreamResponse]]
 APP_API_KEY = web.AppKey("api_key", str)
-APP_GATEWAY_CONFIG = web.AppKey("gateway_config", ResolvedGatewayConfig)
+APP_GATEWAY_CONFIG: web.AppKey[ConfigProvider] = web.AppKey("gateway_config")
 APP_STATUS_PROVIDER: web.AppKey[StatusProvider] = web.AppKey("status_provider")
 APP_WS_HANDLER: web.AppKey[WSHandler] = web.AppKey("ws_handler")
 
@@ -42,14 +46,16 @@ async def api_key_middleware(request: web.Request, handler: Callable[[web.Reques
 
 def create_gateway_app(
     *,
-    config: ResolvedGatewayConfig,
+    config_provider: ConfigProvider,
     api_key: str | None,
     status_provider: StatusProvider,
     ws_handler: WSHandler | None = None,
 ) -> web.Application:
-    app = web.Application(client_max_size=config.max_upload_bytes, middlewares=[api_key_middleware])
+    # ``client_max_size`` is fixed at construction by aiohttp, so it is read
+    # once here; every per-request setting goes through the provider.
+    app = web.Application(client_max_size=config_provider().max_upload_bytes, middlewares=[api_key_middleware])
     app[APP_API_KEY] = api_key or ""
-    app[APP_GATEWAY_CONFIG] = config
+    app[APP_GATEWAY_CONFIG] = config_provider
     app[APP_STATUS_PROVIDER] = status_provider
     if ws_handler is not None:
         app[APP_WS_HANDLER] = ws_handler
@@ -73,7 +79,7 @@ async def _actors_handler(request: web.Request) -> web.Response:
 
 
 async def _upload_attachment_handler(request: web.Request) -> web.Response:
-    config: ResolvedGatewayConfig = request.app[APP_GATEWAY_CONFIG]
+    config = request.app[APP_GATEWAY_CONFIG]()
     reader = await request.multipart()
     file_field = await reader.next()
     if not isinstance(file_field, BodyPartReader) or file_field.name != "file":

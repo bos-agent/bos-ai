@@ -72,8 +72,13 @@ def test_package_scaffold_layout_and_tool_registration(tmp_path, monkeypatch):
     from bos.core import ep_tool
 
     monkeypatch.syspath_prepend(str(tmp_path / "src"))
+    # The entry-point target must import — that is what makes a package's
+    # extensions reachable at all — while registering nothing by default. The
+    # example tool ships commented out so a scaffolded project is not born with
+    # a tool its agent can call but nobody asked for.
+    before = set(ep_tool.describe())
     importlib.import_module(target)
-    assert ep_tool.has("WordCount")
+    assert set(ep_tool.describe()) == before
 
     # The bos.skills entry-point target resolves to the packaged skills dir.
     skills_pkg = importlib.import_module(skills_target)

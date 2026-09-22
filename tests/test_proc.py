@@ -171,3 +171,23 @@ def test_gateway_state_merge_preserves_container_metadata(tmp_path):
     )
 
     assert read_gateway_state(rd)["container_id"] == "abc123"
+
+
+def test_lock_helpers_live_in_the_gateway_ring(tmp_path):
+    """bos.gateway owns the lock, because it reports lock ownership as part of
+    its own state and may not import bos.runner (BEP 17 §3.4.2). bos.runner.proc
+    re-exports them so boscli's call sites are untouched."""
+    from bos.gateway import state as gateway_state
+    from bos.runner import proc
+
+    for name in ("acquire_singleton_lock", "lock_still_owned", "lock_is_free"):
+        assert hasattr(gateway_state, name), name
+        assert getattr(proc, name) is getattr(gateway_state, name), name
+
+    rd = GatewayRunDir(tmp_path / ".bos")
+    handle = gateway_state.acquire_singleton_lock(rd)
+    assert handle is not None
+    try:
+        assert gateway_state.lock_still_owned(rd, handle) is True
+    finally:
+        handle.close()

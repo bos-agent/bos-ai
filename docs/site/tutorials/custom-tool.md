@@ -10,9 +10,11 @@ This tutorial assumes you have the `my-agent/` project from
 
 ---
 
-## The generated starter tool
+## The commented-out starter tool
 
-`boscli init` already placed an example tool in `.bos/extensions/project_tools.py`:
+`boscli init` leaves `.bos/extensions/project_tools.py` in place with an example
+tool **commented out**, so a new project starts with no tools of its own. Open the
+file and uncomment it:
 
 ```python
 from bos.core import ep_tool
@@ -30,7 +32,7 @@ async def word_count(text: str) -> str:
     return f"{len(text.split())} words"
 ```
 
-Ask the agent to use it:
+Restart the gateway so the file is picked up, then ask the agent to use it:
 
 ```bash
 boscli ask "How many words are in 'the quick brown fox'? Use the WordCount tool." \

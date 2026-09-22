@@ -496,8 +496,21 @@ def start(ctx, foreground: bool, workspace_dir: str | None):
     """Start the BOS gateway."""
     ws, rd = _get_ws_and_rd(ctx, workspace_dir)
 
-    ws.resolve_agents()
-    ws.bootstrap_platform()
+    # Background only. The foreground path hands this same Workspace to
+    # runner.start(), whose mount bootstraps it once it holds the singleton
+    # lock; doing it here as well re-executes every ./extensions/*.py, because
+    # _load_ext_paths uses spec.loader.exec_module rather than the module cache.
+    # A file that constructs its own ExtensionPoint raises on the second pass,
+    # _load_ext_paths swallows that into a warning, and every tool, plugin and
+    # channel it registered is then silently missing from the gateway
+    # (BEP 17 §3.5.2). Nothing between here and _run_foreground_gateway reads
+    # the registry, so the foreground path loses nothing by skipping it; the
+    # background path keeps it as its pre-flight, since the work happens in a
+    # child process there and a bad agent file should fail in front of the
+    # operator rather than in the daemon log.
+    if not foreground:
+        ws.resolve_agents()
+        ws.bootstrap_platform()
 
     from bos.runner.proc import (
         _pid_alive,
@@ -507,6 +520,7 @@ def start(ctx, foreground: bool, workspace_dir: str | None):
         reap_stale,
         start_background,
     )
+    from bos.runner.runner import GatewayAlreadyRunningError
     from bos.runner.runner import start as start_gateway
 
     if is_running(rd):
@@ -522,7 +536,15 @@ def start(ctx, foreground: bool, workspace_dir: str | None):
 
     if foreground:
         click.echo("Starting gateway in foreground…")
-        asyncio.run(_run_foreground_gateway(start_gateway, ws))
+        try:
+            asyncio.run(_run_foreground_gateway(start_gateway, ws))
+        except GatewayAlreadyRunningError as exc:
+            # A foreground gateway writes no pid file, so the is_running check
+            # above can never see one — the mount's singleton flock is the only
+            # thing standing between this and a second poller on the same
+            # workspace. Report it the way the background path does.
+            click.echo(str(exc), err=True)
+            raise SystemExit(1) from exc
         return
 
     argv = [sys.executable, "-m", "bos.runner", "--config", runner_config_arg]

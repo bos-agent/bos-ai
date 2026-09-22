@@ -554,17 +554,22 @@ async def test_aclose_is_bounded_when_a_turn_will_not_unwind(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_gateway_serves_only_after_actors_and_channels_are_up(tmp_path, monkeypatch):
+async def test_runner_serves_only_after_actors_and_channels_are_up(tmp_path, monkeypatch):
     """The socket must not accept before there is anything to consume the work.
 
     Serving first let a request in while no actor or channel was running, and a
     mailbox pins its receive offset when its owner binds — so an envelope written
-    before that bind is skipped for good, not merely delayed."""
+    before that bind is skipped for good, not merely delayed.
+
+    The socket left Gateway in BEP 17 §3.2, so the ordering is now the composition
+    root's and this asserts it there."""
     from aiohttp import web
 
     from bos.config import Workspace
     from bos.extensions.chat_stores.in_memory import InMemChatStore as Store
-    from bos.gateway import Gateway
+    from bos.gateway.actors.actor_manager import ActorManager
+    from bos.gateway.channels.channel_manager import ChannelManager
+    from bos.runner.runner import start
 
     monkeypatch.setenv("BOS_TEST_GATEWAY_KEY", "secret")
 
@@ -577,6 +582,13 @@ async def test_gateway_serves_only_after_actors_and_channels_are_up(tmp_path, mo
         async def create_agent(self, kind=None, agent_cfg=None):
             return StopAwareAgent()
 
+    class FakeHarnessContext:
+        async def __aenter__(self):
+            return FakeHarness()
+
+        async def __aexit__(self, *exc):
+            return False
+
     ws = Workspace(
         tmp_path,
         tmp_path / ".bos",
@@ -588,35 +600,48 @@ async def test_gateway_serves_only_after_actors_and_channels_are_up(tmp_path, mo
             }
         },
     )
-    gateway = Gateway(runtime=ws.resolve_gateway_runtime(), harness=FakeHarness())
+    monkeypatch.setattr(ws, "harness", lambda: FakeHarnessContext())
 
     order: list[str] = []
-    actor_start = gateway.actor_manager.start_all
-    channel_start = gateway.channel_manager.start_all
     site_start = web.TCPSite.start
-
-    async def _actors():
-        order.append("actors")
-        await actor_start()
-
-    async def _channels():
-        order.append("channels")
-        await channel_start()
+    gateway = None
 
     async def _serve(self):
         order.append("serve")
         await site_start(self)
 
-    monkeypatch.setattr(gateway.actor_manager, "start_all", _actors)
-    monkeypatch.setattr(gateway.channel_manager, "start_all", _channels)
     monkeypatch.setattr(web.TCPSite, "start", _serve)
 
-    run = asyncio.create_task(gateway.run())
-    await asyncio.sleep(0.1)
+    # Patched on the classes, not on an instance: the GatewayMount builds the
+    # Gateway and brings it up itself, so there is no hook that runs between
+    # construction and start() any more.
+    actor_start = ActorManager.start_all
+    channel_start = ChannelManager.start_all
+
+    async def _actors(self):
+        order.append("actors")
+        await actor_start(self)
+
+    async def _channels(self):
+        order.append("channels")
+        await channel_start(self)
+
+    monkeypatch.setattr(ActorManager, "start_all", _actors)
+    monkeypatch.setattr(ChannelManager, "start_all", _channels)
+
+    def _capture(gw):
+        nonlocal gateway
+        gateway = gw
+
+    run = asyncio.create_task(start(ws, on_ready=_capture))
+    for _ in range(200):
+        if gateway is not None and gateway.actual_port != 0:
+            break
+        await asyncio.sleep(0.05)
 
     assert order == ["actors", "channels", "serve"]
     # The published port comes from the listening socket, so it survives the move.
-    assert gateway.actual_port != 0
+    assert gateway is not None and gateway.actual_port != 0
 
     gateway.request_shutdown()
     await asyncio.wait_for(run, timeout=5)
@@ -678,12 +703,14 @@ async def test_gateway_stops_actors_before_channels(tmp_path, monkeypatch):
     monkeypatch.setattr(gateway.actor_manager, "stop_all", _actors)
     monkeypatch.setattr(gateway.channel_manager, "stop_all", _channels)
 
-    run = asyncio.create_task(gateway.run())
+    await gateway.start()
+    run = asyncio.create_task(gateway.wait_for_shutdown())
     await asyncio.sleep(0.1)
     assert not gateway.shutdown_requested
 
     gateway.request_shutdown()
     await asyncio.wait_for(run, timeout=5)
+    await gateway.stop()
 
     assert order == ["drain(grace=0.1)", "actors", "channels"]
 
@@ -738,10 +765,12 @@ async def test_cancelling_the_gateway_skips_the_drain(tmp_path, monkeypatch):
     monkeypatch.setattr(gateway.actor_manager, "drain_all", _drain)
     monkeypatch.setattr(gateway.actor_manager, "stop_all", _actors)
 
-    run = asyncio.create_task(gateway.run())
+    await gateway.start()
+    run = asyncio.create_task(gateway.wait_for_shutdown())
     await asyncio.sleep(0.1)
     run.cancel()
     await asyncio.gather(run, return_exceptions=True)
+    await gateway.stop(graceful=False)
 
     assert drained == []  # the forceful path never drains
     assert stopped == [True]  # but it always stops the actors
@@ -808,12 +837,15 @@ async def test_escalating_during_the_drain_still_finishes_teardown(tmp_path, mon
     monkeypatch.setattr(gateway.channel_manager, "stop_all", _channels)
     monkeypatch.setattr(gateway_mod, "write_gateway_state", _write)
 
-    run = asyncio.create_task(gateway.run())
+    await gateway.start()
+    run = asyncio.create_task(gateway.wait_for_shutdown())
     await asyncio.sleep(0.1)
     gateway.request_shutdown()
+    await asyncio.wait_for(run, timeout=5)
+    stop = asyncio.create_task(gateway.stop())
     await asyncio.wait_for(in_drain.wait(), timeout=2)
-    run.cancel()  # the escalating second signal
-    await asyncio.wait_for(asyncio.gather(run, return_exceptions=True), timeout=5)
+    stop.cancel()  # the escalating second signal
+    await asyncio.wait_for(asyncio.gather(stop, return_exceptions=True), timeout=5)
 
     assert order == ["drain", "channels", "state:stopped"]
     assert read_gateway_state(GatewayRunDir(tmp_path / ".bos")).get("status") == "stopped"
