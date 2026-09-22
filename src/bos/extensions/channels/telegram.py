@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from aiohttp import ClientSession, ClientTimeout, FormData
+import httpx
 
 from bos.core import BaseChannel, MailBox, ep_channel
 from bos.core.actor import Envelope, MessageType
@@ -296,7 +296,7 @@ class TelegramChannel(BaseChannel[TelegramSettings]):
         self._album_buffers: dict[str, dict[str, Any]] = {}
         self._album_debounce = settings.album_debounce_seconds
 
-        self._session: ClientSession | None = None
+        self._session: httpx.AsyncClient | None = None
         self._chat_to_telegram_chat: dict[str, str] = {}
         self._conversation_to_telegram_chat: dict[str, str] = {}
         self._chat_to_status_message_id: dict[str, int] = {}
@@ -312,7 +312,21 @@ class TelegramChannel(BaseChannel[TelegramSettings]):
         if not self._token:
             raise ValueError("Telegram bot token is required; set settings.token or settings.token_env.")
 
-        async with ClientSession(base_url=f"{self._api_base}/bot{self._token}/", raise_for_status=True) as session:
+        async def _raise_for_status(response: httpx.Response) -> None:
+            # aiohttp's ClientSession(raise_for_status=True) has no httpx
+            # equivalent; this hook is it. httpx streams by default, so the body
+            # has to be read before the status can be raised against it.
+            if response.status_code >= 400:
+                await response.aread()
+                response.raise_for_status()
+
+        # The trailing slash is load-bearing: httpx resolves a relative path
+        # against base_url by URL rules, so without it "getUpdates" would replace
+        # the /bot<token>/ segment instead of extending it.
+        async with httpx.AsyncClient(
+            base_url=f"{self._api_base}/bot{self._token}/",
+            event_hooks={"response": [_raise_for_status]},
+        ) as session:
             self._session = session
             self._bot_username = await self._get_bot_username()
             logger.info("TelegramChannel polling started for channel_id=%r", self.channel_id)
@@ -336,9 +350,8 @@ class TelegramChannel(BaseChannel[TelegramSettings]):
     async def _api_call(self, method: str, payload: dict[str, Any]) -> dict[str, Any]:
         if self._session is None:
             raise RuntimeError("Telegram session is not initialized.")
-        timeout = ClientTimeout(total=self._poll_timeout + 10)
-        async with self._session.post(method, json=payload, timeout=timeout) as resp:
-            data = await resp.json()
+        resp = await self._session.post(method, json=payload, timeout=httpx.Timeout(self._poll_timeout + 10))
+        data = resp.json()
         if not data.get("ok"):
             raise RuntimeError(f"Telegram API {method} failed: {data}")
         return data
@@ -351,18 +364,14 @@ class TelegramChannel(BaseChannel[TelegramSettings]):
         """
         if self._session is None:
             raise RuntimeError("Telegram session is not initialized.")
-        form = FormData()
-        form.add_field("chat_id", str(telegram_chat_id))
-        form.add_field(
-            "document",
-            content.encode("utf-8"),
-            filename="response.md",
-            content_type="text/markdown",
-        )
         try:
-            timeout = ClientTimeout(total=self._poll_timeout + 10)
-            async with self._session.post("sendDocument", data=form, timeout=timeout) as resp:
-                data = await resp.json()
+            resp = await self._session.post(
+                "sendDocument",
+                data={"chat_id": str(telegram_chat_id)},
+                files={"document": ("response.md", content.encode("utf-8"), "text/markdown")},
+                timeout=httpx.Timeout(self._poll_timeout + 10),
+            )
+            data = resp.json()
             if not data.get("ok"):
                 raise RuntimeError(f"Telegram API sendDocument failed: {data}")
         except asyncio.CancelledError:
@@ -557,11 +566,12 @@ class TelegramChannel(BaseChannel[TelegramSettings]):
     async def _download_telegram_file(self, file_path: str) -> bytes:
         if self._session is None:
             raise RuntimeError("Telegram session is not initialized.")
+        # An absolute URL, which httpx uses as-is regardless of base_url: the
+        # file endpoint sits beside /bot<token>/, not under it.
         url = f"{self._api_base}/file/bot{self._token}/{file_path}"
-        timeout = ClientTimeout(total=60)
-        async with self._session.get(url, timeout=timeout) as resp:
-            resp.raise_for_status()
-            return await resp.read()
+        resp = await self._session.get(url, timeout=httpx.Timeout(60))
+        resp.raise_for_status()
+        return resp.content
 
     async def _download_attachment_parts(self, descriptors: list[dict[str, Any]]) -> list[dict[str, Any]]:
         parts: list[dict[str, Any]] = []

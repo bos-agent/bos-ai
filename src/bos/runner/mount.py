@@ -14,10 +14,11 @@ import logging
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
-from aiohttp import web
+from starlette.applications import Starlette
+from starlette.websockets import WebSocket
 
 from bos.gateway.config import ResolvedGatewayConfig
-from bos.gateway.http import create_gateway_app, resolve_gateway_api_key
+from bos.gateway.http import create_gateway_app, send_ws_denial
 from bos.gateway.state import GatewayRunDir, acquire_singleton_lock, lock_is_free, lock_still_owned
 
 if TYPE_CHECKING:
@@ -60,7 +61,7 @@ class GatewayMount:
         self._demoted = asyncio.Event()
         self._shutdown = asyncio.Event()
         self._shutdown_bridge: asyncio.Task[None] | None = None
-        self._app: web.Application | None = None
+        self._app: Starlette | None = None
 
     @property
     def state(self) -> str:
@@ -356,27 +357,26 @@ class GatewayMount:
         """
         return self._gateway.config if self._gateway is not None else ResolvedGatewayConfig()
 
-    async def _dispatch_ws(self, request: web.Request) -> web.StreamResponse:
+    async def _dispatch_ws(self, websocket: WebSocket) -> None:
         # Live only (BEP 17 §3.4.3). The state, not just the presence of a
         # gateway: a restart installs the new instance before its actors and
         # channels are up, and a websocket accepted in that window would get a
         # consumer that does not exist yet.
         if self._state != "live" or self._gateway is None:
-            return web.json_response({"ok": False, "error": self._state}, status=503)
-        return await self._gateway.handle_ws(request)
+            await send_ws_denial(websocket, 503, {"ok": False, "error": self._state})
+            return
+        await self._gateway.handle_ws(websocket)
 
-    def build_app(self) -> web.Application:
+    def build_app(self) -> Starlette:
         """The application, built once and indirecting through the mount.
 
         The host mounts this before ``start()`` and keeps it across restarts, so
         it cannot hold a ``Gateway`` — that object is replaced wholesale
-        (BEP 17 §3.3.3). Layer 2 swaps the body for a Starlette app; the
-        indirection is what makes that swap local.
+        (BEP 17 §3.3.3).
         """
         if self._app is None:
             self._app = create_gateway_app(
                 config_provider=self._current_config,
-                api_key=resolve_gateway_api_key(self._current_config()),
                 status_provider=self.status,
                 ws_handler=self._dispatch_ws,
             )

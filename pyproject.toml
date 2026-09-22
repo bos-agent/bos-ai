@@ -19,7 +19,16 @@ Homepage = "https://github.com/bos-agent/bos-ai"
 
 [project.optional-dependencies]
 litellm = ["litellm==1.84.0"]
-gateway = ["aiohttp==3.13.5"]
+gateway = [
+    "starlette==1.6.0",
+    "uvicorn==0.53.0",
+    "python-multipart==0.0.32",
+    "httpx==0.28.1",
+    # 15.x, not 17.x: lark-oapi pins websockets>=11,<16, and the `all` extra has
+    # to resolve. Everything this uses — asyncio.client.connect, InvalidStatus
+    # carrying the denial response body, protocol.State — is present in 15.
+    "websockets==15.0.1",
+]
 search = ["ddgs==9.14.4", "beautifulsoup4==4.14.3"]
 lark = ["lark-oapi==1.6.8"]
 # bos.cli imports bos.gateway.client for the TUI's WebSocket connection.
@@ -44,7 +53,7 @@ packages = ["src/bos"]
 dev = [
     # Every extra, so a plain `uv sync` still yields a runnable CLI and a
     # collectable test suite. Without it the extras split (BEP 16) leaves the
-    # dev venv without click/aiohttp/litellm and 16 test modules fail to import.
+    # dev venv without click/starlette/litellm and 16 test modules fail to import.
     "bos-ai[all]",
     "ipdb==0.13.13",
     "pre-commit==4.6.0",

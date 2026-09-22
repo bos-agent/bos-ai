@@ -563,15 +563,13 @@ async def test_runner_serves_only_after_actors_and_channels_are_up(tmp_path, mon
 
     The socket left Gateway in BEP 17 §3.2, so the ordering is now the composition
     root's and this asserts it there."""
-    from aiohttp import web
+    import uvicorn
 
     from bos.config import Workspace
     from bos.extensions.chat_stores.in_memory import InMemChatStore as Store
     from bos.gateway.actors.actor_manager import ActorManager
     from bos.gateway.channels.channel_manager import ChannelManager
     from bos.runner.runner import start
-
-    monkeypatch.setenv("BOS_TEST_GATEWAY_KEY", "secret")
 
     class FakeHarness:
         def __init__(self) -> None:
@@ -594,7 +592,7 @@ async def test_runner_serves_only_after_actors_and_channels_are_up(tmp_path, mon
         tmp_path / ".bos",
         {
             "runtime": {
-                "gateway": {"port": 0, "api_key_env": "BOS_TEST_GATEWAY_KEY", "shutdown_grace_seconds": 0.1},
+                "gateway": {"port": 0, "shutdown_grace_seconds": 0.1},
                 "main_actor": "main",
                 "actors": {"main": {"agent": "main"}},
             }
@@ -603,14 +601,14 @@ async def test_runner_serves_only_after_actors_and_channels_are_up(tmp_path, mon
     monkeypatch.setattr(ws, "harness", lambda: FakeHarnessContext())
 
     order: list[str] = []
-    site_start = web.TCPSite.start
+    server_startup = uvicorn.Server.startup
     gateway = None
 
-    async def _serve(self):
+    async def _serve(self, sockets=None):
         order.append("serve")
-        await site_start(self)
+        await server_startup(self, sockets=sockets)
 
-    monkeypatch.setattr(web.TCPSite, "start", _serve)
+    monkeypatch.setattr(uvicorn.Server, "startup", _serve)
 
     # Patched on the classes, not on an instance: the GatewayMount builds the
     # Gateway and brings it up itself, so there is no hook that runs between
@@ -655,8 +653,6 @@ async def test_gateway_stops_actors_before_channels(tmp_path, monkeypatch):
     from bos.extensions.chat_stores.in_memory import InMemChatStore as Store
     from bos.gateway import Gateway
 
-    monkeypatch.setenv("BOS_TEST_GATEWAY_KEY", "secret")
-
     class FakeHarness:
         def __init__(self) -> None:
             InMemMailRoute._queues = {}
@@ -673,7 +669,6 @@ async def test_gateway_stops_actors_before_channels(tmp_path, monkeypatch):
             "runtime": {
                 "gateway": {
                     "port": 0,
-                    "api_key_env": "BOS_TEST_GATEWAY_KEY",
                     "shutdown_grace_seconds": 0.1,
                 },
                 "main_actor": "main",
@@ -723,8 +718,6 @@ async def test_cancelling_the_gateway_skips_the_drain(tmp_path, monkeypatch):
     from bos.extensions.chat_stores.in_memory import InMemChatStore as Store
     from bos.gateway import Gateway
 
-    monkeypatch.setenv("BOS_TEST_GATEWAY_KEY", "secret")
-
     class FakeHarness:
         def __init__(self) -> None:
             InMemMailRoute._queues = {}
@@ -741,7 +734,6 @@ async def test_cancelling_the_gateway_skips_the_drain(tmp_path, monkeypatch):
             "runtime": {
                 "gateway": {
                     "port": 0,
-                    "api_key_env": "BOS_TEST_GATEWAY_KEY",
                     "shutdown_grace_seconds": 30,
                 },
                 "main_actor": "main",
@@ -786,8 +778,6 @@ async def test_escalating_during_the_drain_still_finishes_teardown(tmp_path, mon
     from bos.gateway import Gateway
     from bos.gateway import gateway as gateway_mod
 
-    monkeypatch.setenv("BOS_TEST_GATEWAY_KEY", "secret")
-
     class FakeHarness:
         def __init__(self) -> None:
             InMemMailRoute._queues = {}
@@ -804,7 +794,6 @@ async def test_escalating_during_the_drain_still_finishes_teardown(tmp_path, mon
             "runtime": {
                 "gateway": {
                     "port": 0,
-                    "api_key_env": "BOS_TEST_GATEWAY_KEY",
                     "shutdown_grace_seconds": 30,
                 },
                 "main_actor": "main",
@@ -852,18 +841,17 @@ async def test_escalating_during_the_drain_still_finishes_teardown(tmp_path, mon
 
 
 @pytest.mark.asyncio
-async def test_ws_connects_are_refused_once_shutting_down(tmp_path, monkeypatch):
+async def test_ws_connects_are_refused_once_shutting_down(tmp_path):
     """A channel registered after ``stop_all`` snapshots its tasks would be
     marked stopped while still running, and the client would get a consumer that
     is already going away."""
-    from aiohttp import web
-    from aiohttp.test_utils import make_mocked_request
+    import json
+
+    from starlette.websockets import WebSocket
 
     from bos.config import Workspace
     from bos.extensions.chat_stores.in_memory import InMemChatStore as Store
     from bos.gateway import Gateway
-
-    monkeypatch.setenv("BOS_TEST_GATEWAY_KEY", "secret")
 
     class FakeHarness:
         def __init__(self) -> None:
@@ -879,7 +867,7 @@ async def test_ws_connects_are_refused_once_shutting_down(tmp_path, monkeypatch)
         tmp_path / ".bos",
         {
             "runtime": {
-                "gateway": {"port": 0, "api_key_env": "BOS_TEST_GATEWAY_KEY", "shutdown_grace_seconds": 1},
+                "gateway": {"port": 0, "shutdown_grace_seconds": 1},
                 "main_actor": "main",
                 "actors": {"main": {"agent": "main"}},
             }
@@ -888,11 +876,30 @@ async def test_ws_connects_are_refused_once_shutting_down(tmp_path, monkeypatch)
     gateway = Gateway(runtime=ws_cfg.resolve_gateway_runtime(), harness=FakeHarness())
     gateway.request_shutdown()
 
-    request = make_mocked_request("GET", "/ws?channel_id=late")
-    response = await gateway.handle_ws(request)
+    sent: list[dict] = []
+    # ``websocket.http.response`` is what send_denial_response checks for; with
+    # it the rejection keeps its HTTP status and body, which is the shape the
+    # aiohttp handler returned (BEP 17 §3.6.4).
+    scope = {
+        "type": "websocket",
+        "path": "/ws",
+        "query_string": b"channel_id=late",
+        "headers": [],
+        "extensions": {"websocket.http.response": {}},
+    }
 
-    assert isinstance(response, web.Response)
-    assert response.status == 503
+    async def _receive():
+        return {"type": "websocket.connect"}
+
+    async def _send(message):
+        sent.append(message)
+
+    await gateway.handle_ws(WebSocket(scope, _receive, _send))
+
+    start = next(m for m in sent if m["type"] == "websocket.http.response.start")
+    body = b"".join(m.get("body", b"") for m in sent if m["type"] == "websocket.http.response.body")
+    assert start["status"] == 503
+    assert json.loads(body) == {"ok": False, "error": "shutting_down"}
     assert "late" not in gateway.channel_manager.channels
 
 
@@ -964,8 +971,6 @@ def test_status_snapshot_publishes_the_running_grace(tmp_path, monkeypatch):
     from bos.extensions.chat_stores.in_memory import InMemChatStore as Store
     from bos.gateway import Gateway
 
-    monkeypatch.setenv("BOS_TEST_GATEWAY_KEY", "secret")
-
     class FakeHarness:
         def __init__(self) -> None:
             InMemMailRoute._queues = {}
@@ -980,7 +985,7 @@ def test_status_snapshot_publishes_the_running_grace(tmp_path, monkeypatch):
         tmp_path / ".bos",
         {
             "runtime": {
-                "gateway": {"port": 0, "api_key_env": "BOS_TEST_GATEWAY_KEY", "shutdown_grace_seconds": 7.5},
+                "gateway": {"port": 0, "shutdown_grace_seconds": 7.5},
                 "main_actor": "main",
                 "actors": {"main": {"agent": "main"}},
             }

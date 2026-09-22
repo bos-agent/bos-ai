@@ -16,12 +16,10 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
 
-from aiohttp import WSMsgType
-
 from bos.core.actor import Envelope, MessageType
 from bos.core.agent import MessageContent
 
-from .channels.ws_channel import WS_TAKEOVER_CLOSE_CODE, WS_TAKEOVER_CLOSE_REASON
+from .channels.ws_channel import WS_MAX_MESSAGE_BYTES, WS_TAKEOVER_CLOSE_CODE, WS_TAKEOVER_CLOSE_REASON
 
 # Type alias for the optional endpoint resolver callback.
 # Returns (host, port) or None if the endpoint cannot be determined.
@@ -44,7 +42,7 @@ def _envelope_to_dict(env: Envelope) -> dict[str, Any]:
 
 
 class GatewayClient:
-    """aiohttp WebSocket client for connecting to a running BOS gateway.
+    """WebSocket client for connecting to a running BOS gateway.
 
     Used by ``boscli tui`` to send/receive envelopes over WebSocket without
     direct mailbox access or any server-side imports.
@@ -70,7 +68,6 @@ class GatewayClient:
         channel_id: str | None = None,
         chat_id: str | None = None,
         endpoint_resolver: EndpointResolver | None = None,
-        api_key: str | None = None,
         workdir: str | None = None,
     ) -> None:
         self._host = host
@@ -79,7 +76,6 @@ class GatewayClient:
         self._rebuild_urls()
         self._address = address
         self._channel_id = (channel_id or address or uuid.uuid4().hex).strip()
-        self._api_key = api_key
         self._workdir = workdir or None
         self._chat_id = chat_id.strip() if isinstance(chat_id, str) and chat_id else None
         self._current_revision = 0
@@ -110,7 +106,9 @@ class GatewayClient:
 
     @property
     def connected(self) -> bool:
-        return self._ws is not None and not self._ws.closed
+        from websockets.protocol import State
+
+        return self._ws is not None and self._ws.state is State.OPEN
 
     @property
     def client_id(self) -> str:
@@ -151,12 +149,16 @@ class GatewayClient:
         logger.debug("GatewayClient connected to %s (address=%r)", self._url, self._address)
 
     async def _do_connect(self, *, takeover: bool = False) -> None:
-        """Low-level connect (or reconnect). Creates session + WS."""
-        import aiohttp
+        """Low-level connect (or reconnect). Creates the HTTP client + WS."""
+        import httpx
+        from websockets.asyncio.client import connect
 
-        await self._close_transport()  # drop any previous session
+        await self._close_transport()  # drop any previous transport
 
-        self._session = aiohttp.ClientSession(headers=self._auth_headers())
+        # The trailing slash is load-bearing: httpx resolves a relative path
+        # against base_url by URL rules, so a base without it has its last
+        # segment replaced rather than extended — not how aiohttp behaved.
+        self._session = httpx.AsyncClient(base_url=f"{self._http_base_url}/")
         query: dict[str, str] = {"channel_id": self._channel_id}
         if self._chat_id:
             query["chat_id"] = self._chat_id
@@ -164,21 +166,22 @@ class GatewayClient:
             query["takeover"] = "1"
         url = f"{self._url}?{urlencode(query)}"
         try:
-            self._ws = await self._session.ws_connect(url)
+            self._ws = await connect(url, max_size=WS_MAX_MESSAGE_BYTES)
             await self._receive_session_ack()
         except BaseException:
-            # A failed connect owns the session it just opened — close it here so
-            # callers don't have to know aclose() is needed after connect() raised.
-            # BaseException, not Exception: a cancelled connect leaks just the same.
+            # A failed connect owns the transport it just opened — close it here
+            # so callers don't have to know aclose() is needed after connect()
+            # raised. BaseException, not Exception: a cancelled connect leaks
+            # just the same.
             await self._close_transport()
             raise
         self._connected.set()
 
     async def _receive_session_ack(self) -> None:
-        msg = await self._ws.receive(timeout=5)
-        if msg.type != WSMsgType.TEXT:
+        raw = await asyncio.wait_for(self._ws.recv(), 5)
+        if not isinstance(raw, str):
             raise RuntimeError("Gateway did not send session acknowledgement.")
-        data = json.loads(msg.data)
+        data = json.loads(raw)
         metadata = data.get("metadata") or {}
         if data.get("content_type") != MessageType.SYSTEM or metadata.get("event") != "session":
             raise RuntimeError("Gateway sent an invalid session acknowledgement.")
@@ -232,41 +235,50 @@ class GatewayClient:
             )
         )
 
+    def _takeover_closed(self) -> bool:
+        """True when the gateway closed this session for a newer channel.
+
+        ``websockets`` reports the close code on the connection rather than as a
+        message, so both the normal end of the iterator and a ConnectionClosed
+        land here.
+        """
+        return getattr(self._ws, "close_code", None) == WS_TAKEOVER_CLOSE_CODE
+
     async def _reader_loop(self) -> None:
         """Background reader: reads WS messages and reconnects on drop."""
+        from websockets.exceptions import ConnectionClosed
+
         while not self._closed:
             should_reconnect = True
             try:
                 await self._connected.wait()
-                async for msg in self._ws:
-                    if msg.type == WSMsgType.TEXT:
-                        try:
-                            data = json.loads(msg.data)
-                            ts_raw = data.get("timestamp")
-                            ts = datetime.fromisoformat(ts_raw) if isinstance(ts_raw, str) else datetime.now()
-                            env = Envelope(
-                                sender=data.get("sender", ""),
-                                recipient=data.get("recipient", self._address),
-                                content=data.get("content", ""),
-                                content_type=data.get("content_type", MessageType.MESSAGE),
-                                chat_id=data.get("chat_id"),
-                                timestamp=ts,
-                                metadata=data.get("metadata", {}),
-                            )
-                            self._ingest_revision(env.metadata)
-                            await self._recv_queue.put(env)
-                        except Exception as exc:
-                            logger.debug("Client reader error: %s", exc)
-                    elif msg.type in (WSMsgType.ERROR, WSMsgType.CLOSE):
-                        if getattr(self._ws, "close_code", None) == WS_TAKEOVER_CLOSE_CODE:
-                            should_reconnect = False
-                            await self._emit_takeover_system_event()
-                        break
-                if not self._closed and getattr(self._ws, "close_code", None) == WS_TAKEOVER_CLOSE_CODE:
+                async for raw in self._ws:
+                    try:
+                        data = json.loads(raw)
+                        ts_raw = data.get("timestamp")
+                        ts = datetime.fromisoformat(ts_raw) if isinstance(ts_raw, str) else datetime.now()
+                        env = Envelope(
+                            sender=data.get("sender", ""),
+                            recipient=data.get("recipient", self._address),
+                            content=data.get("content", ""),
+                            content_type=data.get("content_type", MessageType.MESSAGE),
+                            chat_id=data.get("chat_id"),
+                            timestamp=ts,
+                            metadata=data.get("metadata", {}),
+                        )
+                        self._ingest_revision(env.metadata)
+                        await self._recv_queue.put(env)
+                    except Exception as exc:
+                        logger.debug("Client reader error: %s", exc)
+                if not self._closed and self._takeover_closed():
                     should_reconnect = False
                     await self._emit_takeover_system_event()
             except asyncio.CancelledError:
                 break
+            except ConnectionClosed:
+                if not self._closed and self._takeover_closed():
+                    should_reconnect = False
+                    await self._emit_takeover_system_event()
             except Exception as exc:
                 logger.debug("Reader loop error: %s", exc)
 
@@ -299,16 +311,19 @@ class GatewayClient:
             # The client's working directory; the gateway keeps it if present,
             # otherwise it stamps its own workspace as the fallback.
             out_metadata.setdefault("workdir", self._workdir)
-        await self._ws.send_json(
-            _envelope_to_dict(
-                Envelope(
-                    sender=self._address,
-                    recipient="",
-                    content=content,
-                    content_type=content_type,
-                    chat_id=chat_id or self._chat_id,
-                    metadata=out_metadata,
-                )
+        await self._ws.send(
+            json.dumps(
+                _envelope_to_dict(
+                    Envelope(
+                        sender=self._address,
+                        recipient="",
+                        content=content,
+                        content_type=content_type,
+                        chat_id=chat_id or self._chat_id,
+                        metadata=out_metadata,
+                    )
+                ),
+                default=str,
             )
         )
 
@@ -324,38 +339,33 @@ class GatewayClient:
             return None
 
     async def upload_attachment(self, path: str | Path) -> dict[str, Any]:
-        if self._session is None or self._session.closed:
+        if self._session is None or self._session.is_closed:
             raise RuntimeError("Not connected — connect the gateway client before uploading attachments.")
 
         upload_path = Path(path).expanduser().resolve()
         if not upload_path.is_file():
             raise FileNotFoundError(upload_path)
 
-        import aiohttp
-
-        form = aiohttp.FormData()
         with upload_path.open("rb") as handle:
-            form.add_field("file", handle, filename=upload_path.name)
-            async with self._session.post(f"{self._http_base_url}/api/upload", data=form) as response:
-                payload = await response.json()
+            # No leading slash: httpx resolves against base_url by URL rules, and
+            # "/api/upload" would discard whatever path the base carries.
+            response = await self._session.post("api/upload", files={"file": (upload_path.name, handle)})
+        payload = response.json()
 
-        if response.status >= 400 or not payload.get("ok"):
-            raise RuntimeError(payload.get("error") or f"Upload failed with HTTP {response.status}")
+        if response.status_code >= 400 or not payload.get("ok"):
+            raise RuntimeError(payload.get("error") or f"Upload failed with HTTP {response.status_code}")
 
         return payload["part"]
 
     async def list_actors(self) -> dict[str, dict[str, Any]]:
         """Fetch the list of available actors from the gateway."""
-        if self._session is None or self._session.closed:
+        if self._session is None or self._session.is_closed:
             raise RuntimeError("Not connected — connect the gateway client before listing actors.")
-        async with self._session.get(f"{self._http_base_url}/api/actors") as response:
-            payload = await response.json()
-        if response.status >= 400:
-            raise RuntimeError(payload.get("error") or f"List actors failed with HTTP {response.status}")
+        response = await self._session.get("api/actors")
+        payload = response.json()
+        if response.status_code >= 400:
+            raise RuntimeError(payload.get("error") or f"List actors failed with HTTP {response.status_code}")
         return payload.get("actors", {})
-
-    def _auth_headers(self) -> dict[str, str]:
-        return {"Authorization": f"Bearer {self._api_key}"} if self._api_key else {}
 
     def _ingest_revision(self, metadata: dict[str, Any]) -> None:
         revision = _coerce_revision(metadata.get("current_revision"))
@@ -377,11 +387,14 @@ class GatewayClient:
         logger.debug("GatewayClient disconnected")
 
     async def _close_transport(self) -> None:
-        """Close the WS and the session if open, and drop both references."""
-        if self._ws and not self._ws.closed:
+        """Close the WS and the HTTP client if open, and drop both references.
+
+        ``websockets``' close() is idempotent, unlike starlette's server-side
+        one, so no state guard is needed here."""
+        if self._ws is not None:
             await self._ws.close()
-        if self._session and not self._session.closed:
-            await self._session.close()
+        if self._session is not None and not self._session.is_closed:
+            await self._session.aclose()
         self._ws = None
         self._session = None
 

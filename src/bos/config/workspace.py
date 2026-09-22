@@ -28,7 +28,7 @@ if TYPE_CHECKING:
     # The gateway owns these config *shapes* (BEP 13 §3.3); the loader (this ring)
     # imports them only to produce them. Constructed via lazy imports inside the
     # resolve_* methods so ``import bos.config`` stays light (the gateway package
-    # pulls aiohttp); annotations are strings via ``from __future__ import annotations``.
+    # pulls starlette); annotations are strings via ``from __future__ import annotations``.
     from bos.gateway.config import (
         GatewayRuntimeConfig,
         ResolvedActorConfig,
@@ -697,7 +697,6 @@ class Workspace:
             port=gateway.port,
             upload_dir=gateway.upload_dir,
             max_upload_bytes=gateway.max_upload_bytes,
-            api_key_env=gateway.api_key_env,
             shutdown_grace_seconds=gateway.shutdown_grace_seconds,
         )
 

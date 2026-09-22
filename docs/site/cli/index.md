@@ -155,7 +155,6 @@ boscli memory --help
 | `BOS_CONFIG` | Config file path or preset name. |
 | `BOS_MODEL` | Default model id (`provider/model`). |
 | `BOS_CONSOLIDATOR_MODEL` | Model for off-turn memory consolidation. |
-| `BOS_GATEWAY_API_KEY` | Default env var name for the gateway control-plane key. |
 | `BOS_CAPABILITY_LIMIT` | Max skills/sub-agents listed in the system prompt (default 50). |
 | `BOS_LOG_LEVEL` | Default log level. |
 | `<PROVIDER>_API_KEY` | Provider credentials (e.g. `OPENAI_API_KEY`, `GEMINI_API_KEY`). |

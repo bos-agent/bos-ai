@@ -1,10 +1,16 @@
 """Gateway runtime components for BEP 7."""
 
+from typing import TYPE_CHECKING, Any
+
 from .actors.actor_manager import ActorManager, ManagedActor
 from .actors.agent_actor import AgentActor
 from .channels.channel_manager import ChannelFactoryError, ChannelManager, ChannelStatus, ManagedChannel
-from .channels.ws_channel import WS_TAKEOVER_CLOSE_CODE, WS_TAKEOVER_CLOSE_REASON, WSChannel
-from .client import GatewayClient
+from .channels.ws_channel import (
+    WS_MAX_MESSAGE_BYTES,
+    WS_TAKEOVER_CLOSE_CODE,
+    WS_TAKEOVER_CLOSE_REASON,
+    WSChannel,
+)
 from .config import (
     GatewayRuntimeConfig,
     ResolvedActorConfig,
@@ -21,6 +27,9 @@ from .core.chat_coordinator import (
     PrepareSendResult,
 )
 from .gateway import Gateway
+
+if TYPE_CHECKING:
+    from .client import GatewayClient
 
 __all__ = [
     "ActiveTurn",
@@ -47,6 +56,24 @@ __all__ = [
     "ResolvedGatewayChannelConfig",
     "ResolvedGatewayConfig",
     "WSChannel",
+    "WS_MAX_MESSAGE_BYTES",
     "WS_TAKEOVER_CLOSE_CODE",
     "WS_TAKEOVER_CLOSE_REASON",
 ]
+
+
+def __getattr__(name: str) -> Any:
+    """Import the wire client lazily, so mounting the server does not pull it in.
+
+    ``bos.gateway`` is the server surface; ``GatewayClient`` is what the TUI uses
+    to talk *to* a gateway. Importing it eagerly made every mounted gateway
+    import httpx and websockets for nothing (BEP 17 §3.9). Both
+    ``from bos.gateway import GatewayClient`` and
+    ``from bos.gateway.client import GatewayClient`` keep working, and
+    ``__all__`` is unchanged.
+    """
+    if name == "GatewayClient":
+        from .client import GatewayClient
+
+        return GatewayClient
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

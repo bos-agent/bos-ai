@@ -920,3 +920,35 @@ async def test_single_photo_no_caption_assembles_image_only(monkeypatch, tmp_pat
     assert len(sent["content"]) == 1
     assert sent["content"][0]["type"] == "image"
     assert sent["content"][0]["source"]["kind"] == "path"
+
+
+@pytest.mark.asyncio
+async def test_api_call_preserves_the_bot_path_segment(tmp_path):
+    """httpx resolves a relative path against base_url by URL rules: without the
+    trailing slash on the base (or with a leading slash on the method) the
+    /bot<token>/ segment is replaced and every call 404s. aiohttp concatenated
+    instead, so a transcription would have been silently wrong (BEP 17 §3.7).
+
+    Every other test here monkeypatches _api_call, so this is the only cover the
+    URL join has."""
+    import httpx
+
+    seen: list[str] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        seen.append(str(request.url))
+        return httpx.Response(200, json={"ok": True, "result": {}})
+
+    channel = _make_channel(tmp_path)
+    channel._api_base = "https://api.telegram.org"
+    channel._token = "TOKEN"
+    channel._session = httpx.AsyncClient(
+        base_url=f"{channel._api_base}/bot{channel._token}/",
+        transport=httpx.MockTransport(_handler),
+    )
+    try:
+        await channel._api_call("getUpdates", {})
+    finally:
+        await channel._session.aclose()
+
+    assert seen == ["https://api.telegram.org/botTOKEN/getUpdates"]

@@ -146,7 +146,6 @@ class GatewayConfig(BaseModel):
     port: int = 5920
     upload_dir: str = ".bos/uploads/http"
     max_upload_bytes: int = 20 * 1024 * 1024
-    api_key_env: str = "BOS_GATEWAY_API_KEY"
     # How long shutdown gives in-flight turns to close with a handoff before
     # they are cancelled outright. It bounds the stop, so it must cover one
     # consolidator call — not the turn's remaining work. 0 disables the drain
