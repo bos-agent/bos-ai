@@ -2,12 +2,11 @@ import asyncio
 import contextlib
 import json
 
-import aiohttp
 import pytest
-from aiohttp import web
 from conftest import serve_asgi
 from websockets.asyncio.client import connect
 from websockets.exceptions import InvalidStatus
+from websockets.protocol import State
 
 from bos.config import Workspace
 from bos.core import Message
@@ -358,27 +357,21 @@ async def test_gateway_ws_interrupt_targets_the_mention_routed_actor(tmp_path):
 async def test_gateway_client_forwards_session_ack_envelope():
     client = GatewayClient("127.0.0.1", 1, channel_id="tui-a")
 
-    class _FakeMsg:
-        type = aiohttp.WSMsgType.TEXT
-        data = json.dumps({
-            "sender": "agent@main",
-            "content": "connected",
-            "content_type": "system",
-            "chat_id": "chat-9",
-            "metadata": {
-                "event": "session",
-                "channel_id": "tui-a",
-                "chat_id": "chat-9",
-                "current_revision": 4,
-                "missing_messages": [{"llm_message": {"role": "user", "content": "hi"}}],
-            },
-        })
-
     class _FakeWS:
-        closed = False
-
-        async def receive(self, timeout=None):
-            return _FakeMsg()
+        async def recv(self):
+            return json.dumps({
+                "sender": "agent@main",
+                "content": "connected",
+                "content_type": "system",
+                "chat_id": "chat-9",
+                "metadata": {
+                    "event": "session",
+                    "channel_id": "tui-a",
+                    "chat_id": "chat-9",
+                    "current_revision": 4,
+                    "missing_messages": [{"llm_message": {"role": "user", "content": "hi"}}],
+                },
+            })
 
     client._ws = _FakeWS()
     await client._receive_session_ack()
@@ -392,18 +385,24 @@ async def test_gateway_client_forwards_session_ack_envelope():
     assert client.chat_id == "chat-9"
 
 
+class _RecordingWS:
+    """Captures what send() put on the wire. ``state`` is what ``connected``
+    reads, and websockets frames text, so every payload arrives as a string."""
+
+    state = State.OPEN
+
+    def __init__(self, sent: list[dict]) -> None:
+        self._sent = sent
+
+    async def send(self, payload):
+        self._sent.append(json.loads(payload))
+
+
 @pytest.mark.asyncio
 async def test_gateway_client_send_stamps_workdir():
     client = GatewayClient("127.0.0.1", 1, channel_id="ask-1", workdir="/home/user/proj")
     sent: list[dict] = []
-
-    class _FakeWS:
-        closed = False
-
-        async def send_json(self, payload):
-            sent.append(payload)
-
-    client._ws = _FakeWS()
+    client._ws = _RecordingWS(sent)
     client._connected.set()
 
     await client.send("hello")
@@ -417,14 +416,7 @@ async def test_gateway_client_send_stamps_workdir():
 async def test_gateway_client_send_omits_workdir_when_unset():
     client = GatewayClient("127.0.0.1", 1, channel_id="ask-1")
     sent: list[dict] = []
-
-    class _FakeWS:
-        closed = False
-
-        async def send_json(self, payload):
-            sent.append(payload)
-
-    client._ws = _FakeWS()
+    client._ws = _RecordingWS(sent)
     client._connected.set()
 
     await client.send("hello")
@@ -433,40 +425,34 @@ async def test_gateway_client_send_omits_workdir_when_unset():
 
 
 @pytest.mark.asyncio
-async def test_gateway_client_connect_failure_closes_session():
-    """A refused connect must not leave an unclosed aiohttp session behind."""
+async def test_gateway_client_connect_failure_closes_transport():
+    """A refused connect must not leave an unclosed httpx client behind."""
     client = GatewayClient("127.0.0.1", 1, channel_id="probe")
 
-    with pytest.raises(aiohttp.ClientError):
+    with pytest.raises(OSError):
         await client.connect()
 
     assert client._session is None
+    assert client._ws is None
 
 
 @pytest.mark.asyncio
 async def test_gateway_client_bad_session_ack_closes_transport():
-    """A socket that opens but never acks must not leak the ws or the session."""
+    """A socket that opens but never acks must not leak the ws or the client."""
+    from starlette.applications import Starlette
+    from starlette.routing import WebSocketRoute
+    from starlette.websockets import WebSocket
 
-    async def _handler(request):
-        ws = web.WebSocketResponse()
-        await ws.prepare(request)
-        await ws.send_json({"content": "not an ack", "content_type": MessageType.MESSAGE})
-        return ws
+    async def _handler(websocket: WebSocket) -> None:
+        await websocket.accept()
+        await websocket.send_json({"content": "not an ack", "content_type": MessageType.MESSAGE})
 
-    app = web.Application()
-    app.router.add_get("/ws", _handler)
-    runner = web.AppRunner(app, access_log=None)
-    await runner.setup()
-    site = web.TCPSite(runner, "127.0.0.1", 0)
-    await site.start()
-    port = site._server.sockets[0].getsockname()[1]  # type: ignore[union-attr]
-
-    client = GatewayClient("127.0.0.1", port, channel_id="probe")
-    try:
+    app = Starlette(routes=[WebSocketRoute("/ws", _handler)])
+    async with serve_asgi(app) as addr:
+        host, port = addr.split(":")
+        client = GatewayClient(host, int(port), channel_id="probe")
         with pytest.raises(RuntimeError):
             await client.connect()
 
         assert client._ws is None
         assert client._session is None
-    finally:
-        await runner.cleanup()
