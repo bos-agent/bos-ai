@@ -492,3 +492,49 @@ async def test_a_failed_bring_up_leaves_no_lock_and_no_runtime(tmp_path, monkeyp
     freed = acquire_singleton_lock(GatewayRunDir(tmp_path / ".bos"))
     assert freed is not None  # the lock did not outlive the failure
     freed.close()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_restart_is_recoverable_with_acquire(tmp_path, monkeypatch):
+    """A restart that fails must not wedge the mount.
+
+    It leaves standby while still holding the lock — correct, this instance is
+    still the singleton — so nothing promotes it back on its own: the watchdog's
+    standby branch waits for a lock *we* hold. An embedded host cannot reach
+    stop()/start() from outside its process, so acquire() has to be the way
+    back, and it must work with the lock already held (BEP 17 §3.4.3).
+    """
+    mount = GatewayMount(lambda: _workspace(tmp_path), lock_poll_seconds=60)
+    await mount.start()
+    try:
+        assert mount.state == "live"
+
+        boom = RuntimeError("bring-up failed")
+        calls = {"n": 0}
+        real_bring_up = mount._bring_up_runtime
+
+        async def _failing_bring_up(workspace):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise boom
+            return await real_bring_up(workspace)
+
+        monkeypatch.setattr(mount, "_bring_up_runtime", _failing_bring_up)
+
+        with pytest.raises(RuntimeError, match="bring-up failed"):
+            await mount.restart()
+
+        # Rolled back, not half-built: a leftover gateway makes the re-entry
+        # guard in _acquire_and_bring_up refuse every later acquire().
+        assert mount.state == "standby"
+        assert mount.gateway is None
+        assert mount._stack is None
+        # Still the singleton — dropping the lock here would invite a second
+        # gateway in while this one is still wired up.
+        assert acquire_singleton_lock(GatewayRunDir(tmp_path / ".bos")) is None
+
+        assert await mount.acquire() is True
+        assert mount.state == "live"
+        assert mount.gateway is not None
+    finally:
+        await mount.stop()

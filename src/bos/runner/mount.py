@@ -172,14 +172,20 @@ class GatewayMount:
             # teardown would then null the new gateway, close the new harness
             # and release the lock this call had just taken.
             return False
-        lock = acquire_singleton_lock(self._run_dir)
+        # A lock already held is this mount's own: a failed restart leaves it in
+        # standby still holding it. Re-acquiring would fail — flock binds to an
+        # open file description, so a second open() in this process conflicts
+        # with our own handle — and that failure is what made a failed restart
+        # unrecoverable for an embedded host, which cannot reach stop()/start()
+        # from outside its process.
+        took_lock = False
+        lock = self._lock
         if lock is None:
-            # Assigned only on success: a failed restart leaves this mount in
-            # standby still holding the lock, and overwriting the handle there
-            # would drop the last reference to it — releasing the singleton
-            # lock as a side effect of failing to take it.
-            return False
-        self._lock = lock
+            lock = acquire_singleton_lock(self._run_dir)
+            if lock is None:
+                return False
+            self._lock = lock
+            took_lock = True
         try:
             await self._bring_up_runtime(workspace)
         except BaseException:
@@ -193,8 +199,12 @@ class GatewayMount:
                 await self._tear_down_runtime(graceful=False)
             self._gateway = None
             self._stack = None
-            lock.close()
-            self._lock = None
+            if took_lock:
+                # Only what this call acquired. A retry after a failed restart
+                # must keep the lock it already had: releasing it there would
+                # drop the singleton as a side effect of a failed rebuild.
+                lock.close()
+                self._lock = None
             raise
         self._state = "live"
         return True
@@ -281,12 +291,18 @@ class GatewayMount:
             gateway = await self._bring_up_runtime(self._workspace_factory())
             gateway.set_endpoint(*endpoint)
         except BaseException:
-            # A failed rebuild must not look live. The lock is kept: this
-            # instance is still the singleton, and dropping it here would invite
-            # another process in while this one is still wired up. Nothing
-            # promotes the mount back by itself — the watchdog's standby branch
-            # waits for a lock that *we* hold, and the guard above refuses a
-            # second restart() — so recovery is stop() then start().
+            # Roll the rebuild back to a clean standby. A half-built runtime
+            # left behind makes _acquire_and_bring_up's re-entry guard refuse
+            # every later acquire(), which is the only way back for an embedded
+            # host. Teardown errors are secondary to the failure that got us
+            # here, so they do not replace it.
+            with contextlib.suppress(Exception):
+                await self._tear_down_runtime(graceful=False)
+            self._gateway = None
+            self._stack = None
+            # The lock is kept: this instance is still the singleton, and
+            # dropping it would invite another process in while this one is
+            # still wired up. acquire() rebuilds from here.
             self._state = "standby"
             raise
         self._state = "live"
