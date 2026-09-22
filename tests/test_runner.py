@@ -87,12 +87,32 @@ def test_runner_start_bootstraps_gateway(tmp_path, monkeypatch):
         async def shutdown(self, sockets=None):
             calls.append(("runner_cleanup", None))
 
+    import uvicorn
+
+    from bos.gateway.channels.ws_channel import WS_MAX_MESSAGE_BYTES
+
+    # Capture what serve() *passes*, not what the Config ends up holding:
+    # uvicorn's ws_max_size default is currently the same 16 MiB, so asserting
+    # the resulting value cannot tell a stated limit from a coincidental one —
+    # and the coincidence is precisely the thing that must not be relied on.
+    real_config = uvicorn.Config
+    passed: dict = {}
+
+    def _capturing_config(*args, **kwargs):
+        passed.update(kwargs)
+        return real_config(*args, **kwargs)
+
     monkeypatch.setattr("bos.gateway.Gateway", FakeGateway)
+    monkeypatch.setattr("uvicorn.Config", _capturing_config)
     monkeypatch.setattr("uvicorn.Server", FakeUvicornServer)
 
     asyncio.run(start(FakeWorkspace()))
 
     names = [name for name, _ in calls]
+    # Both ends of the websocket state the same ceiling. GatewayClient raises the
+    # websockets client off its 1 MiB default to WS_MAX_MESSAGE_BYTES; a session
+    # ack carrying a full transcript is what falls over if the two ever drift.
+    assert passed["ws_max_size"] == WS_MAX_MESSAGE_BYTES
     # The mount bootstraps only once it holds the lock, then builds the gateway.
     assert names[:4] == ["resolve_agents", "bootstrap_platform", "harness_enter", "gateway_init"]
     assert calls[3][1][1] == "harness"

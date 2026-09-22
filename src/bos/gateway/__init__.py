@@ -5,7 +5,12 @@ from typing import TYPE_CHECKING, Any
 from .actors.actor_manager import ActorManager, ManagedActor
 from .actors.agent_actor import AgentActor
 from .channels.channel_manager import ChannelFactoryError, ChannelManager, ChannelStatus, ManagedChannel
-from .channels.ws_channel import WS_TAKEOVER_CLOSE_CODE, WS_TAKEOVER_CLOSE_REASON, WSChannel
+from .channels.ws_channel import (
+    WS_MAX_MESSAGE_BYTES,
+    WS_TAKEOVER_CLOSE_CODE,
+    WS_TAKEOVER_CLOSE_REASON,
+    WSChannel,
+)
 from .config import (
     GatewayRuntimeConfig,
     ResolvedActorConfig,
@@ -51,6 +56,7 @@ __all__ = [
     "ResolvedGatewayChannelConfig",
     "ResolvedGatewayConfig",
     "WSChannel",
+    "WS_MAX_MESSAGE_BYTES",
     "WS_TAKEOVER_CLOSE_CODE",
     "WS_TAKEOVER_CLOSE_REASON",
 ]

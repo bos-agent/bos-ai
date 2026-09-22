@@ -7,6 +7,7 @@ import contextlib
 import logging
 from typing import TYPE_CHECKING
 
+from bos.gateway.channels.ws_channel import WS_MAX_MESSAGE_BYTES
 from bos.runner.mount import GatewayMount
 
 if TYPE_CHECKING:
@@ -62,6 +63,10 @@ async def serve(mount: GatewayMount) -> None:
         host=gateway.config.host,
         port=gateway.config.port,
         access_log=False,
+        # Explicit, not uvicorn's default: GatewayClient raises the websockets
+        # client off its 1 MiB default to this, and the two agreeing by way of a
+        # library default neither side states is a coincidence, not a contract.
+        ws_max_size=WS_MAX_MESSAGE_BYTES,
         # The mount is the lifecycle — started before this call, stopped after
         # it. An ASGI lifespan would be a second, competing one.
         lifespan="off",

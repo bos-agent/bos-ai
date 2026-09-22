@@ -12,9 +12,10 @@ from bos.runner.proc import (
     start_background,
     write_state,
 )
-from bos.runner.runner import serve, start
+from bos.runner.runner import GatewayAlreadyRunningError, serve, shielded, start
 
 __all__ = [
+    "GatewayAlreadyRunningError",
     "GatewayMount",
     "GatewayRunDir",
     "acquire_singleton_lock",
@@ -24,6 +25,7 @@ __all__ = [
     "read_state",
     "reap_stale",
     "serve",
+    "shielded",
     "start",
     "start_background",
     "write_state",

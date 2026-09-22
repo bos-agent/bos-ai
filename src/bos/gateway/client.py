@@ -19,7 +19,7 @@ from urllib.parse import urlencode
 from bos.core.actor import Envelope, MessageType
 from bos.core.agent import MessageContent
 
-from .channels.ws_channel import WS_TAKEOVER_CLOSE_CODE, WS_TAKEOVER_CLOSE_REASON
+from .channels.ws_channel import WS_MAX_MESSAGE_BYTES, WS_TAKEOVER_CLOSE_CODE, WS_TAKEOVER_CLOSE_REASON
 
 # Type alias for the optional endpoint resolver callback.
 # Returns (host, port) or None if the endpoint cannot be determined.
@@ -31,9 +31,6 @@ logger = logging.getLogger(__name__)
 _RECONNECT_BASE_DELAY = 0.5  # seconds
 _RECONNECT_MAX_DELAY = 10.0  # seconds
 _RECONNECT_BACKOFF = 2.0  # multiplier
-# Matches uvicorn's server-side ws_max_size. The websockets default is 1 MiB,
-# below aiohttp's old 4 MiB and below what a full-transcript session ack reaches.
-_WS_MAX_MESSAGE_BYTES = 16 * 1024 * 1024
 
 
 def _envelope_to_dict(env: Envelope) -> dict[str, Any]:
@@ -169,7 +166,7 @@ class GatewayClient:
             query["takeover"] = "1"
         url = f"{self._url}?{urlencode(query)}"
         try:
-            self._ws = await connect(url, max_size=_WS_MAX_MESSAGE_BYTES)
+            self._ws = await connect(url, max_size=WS_MAX_MESSAGE_BYTES)
             await self._receive_session_ack()
         except BaseException:
             # A failed connect owns the transport it just opened — close it here

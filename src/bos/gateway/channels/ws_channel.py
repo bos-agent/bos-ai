@@ -23,6 +23,13 @@ from ..core.command_handler import CommandResult
 WS_TAKEOVER_CLOSE_CODE = 4001
 WS_TAKEOVER_CLOSE_REASON = "Another interactive channel took over this WebSocket session."
 
+# Largest websocket message either side will accept. It must be set on BOTH: the
+# ``websockets`` client defaults to 1 MiB — under aiohttp's old 4 MiB, and under
+# what a session ack carrying a full transcript reaches — while uvicorn defaults
+# to this value. Leaving the server on its default made the two agree only by
+# coincidence, so the runner passes this explicitly and a change here moves both.
+WS_MAX_MESSAGE_BYTES = 16 * 1024 * 1024
+
 
 class WSChannel(BaseChannel[dict[str, Any]]):
     """Dynamic one-WebSocket channel managed by the gateway."""
