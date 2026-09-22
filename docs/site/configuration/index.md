@@ -49,13 +49,13 @@ You can also point any command at a specific source with `-c/--config`:
 
 ```bash
 boscli -c ./path/to/config.toml gateway start   # an explicit file
-boscli -c team tui                               # a built-in preset name
+boscli -c default tui                            # a built-in preset name
 ```
 
 A `-c` value that is an existing file path uses that file (its parent becomes `bos_dir`).
 Otherwise it is treated as a built-in **preset** name, resolving to
-`src/bos/config/presets/<name>.toml` with `bos_dir = ~/.bos/presets/<name>`. Built-in
-presets: `default`, `team`.
+`src/bos/config/presets/<name>.toml` with `bos_dir = ~/.bos/presets/<name>`. The only
+built-in preset is `default`.
 
 ## Sections at a glance
 
