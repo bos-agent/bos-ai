@@ -1,3 +1,6 @@
+# The agent a bare `boscli ask` runs when it names none.
+#default_agent = "main"
+
 [platform]
 # env file that will be loaded on startup. if a relative path is provided it would be
 # resolved basing on <bos_dir>, which is the folder that this toml file is in.

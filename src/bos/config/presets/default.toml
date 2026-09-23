@@ -2,6 +2,10 @@
 # ep_agent extension in bos.extensions.agents.bos, loaded via bos.exts).
 # Agent persistent storage is at ~/.bos/agents/default.
 
+# The agent a bare `boscli ask` runs. The actor below answers the gateway's
+# separate question; this one is not derived from it (BEP 18 §3.5).
+default_agent = "BOS"
+
 [harness]
 consolidator = "LLMConsolidator"
 chat_store = "JsonlChatStore"

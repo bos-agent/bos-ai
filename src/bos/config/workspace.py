@@ -723,6 +723,33 @@ class Workspace:
             )
         return actors
 
+    def resolve_default_agent(self) -> str:
+        """The agent kind to use when the caller names none.
+
+        Never consults ``[runtime].actors``. That table answers a different
+        question — which addressable runtime instances the gateway should run —
+        and routing through it is what made a project with no gateway read an
+        error about one (BEP 18 §3.5).
+        """
+        from bos.core import AgentRegistry
+
+        agents = self.config.agents or {}
+        configured = self.config.default_agent
+        if configured:
+            if configured not in agents and not AgentRegistry.has_registered(configured):
+                known = ", ".join(sorted(set(agents) | set(AgentRegistry.describe()))) or "none"
+                raise ValueError(f"default_agent {configured!r} is not a known agent. Available: {known}.")
+            return configured
+        if len(agents) == 1:
+            return next(iter(agents))
+        if "main" in agents:
+            return "main"
+        known = ", ".join(sorted(agents)) or "none"
+        raise ValueError(
+            f"Cannot tell which agent to use. Available: {known}. "
+            "Set default_agent, or name one explicitly."
+        )
+
     def resolve_default_actor(self) -> str:
         runtime = self.config.runtime
         main_actor = runtime.main_actor if runtime else "main"

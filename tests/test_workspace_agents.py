@@ -767,3 +767,56 @@ def test_rebootstrap_drops_an_agent_that_left_the_config(tmp_path):
     assert AgentRegistry.has_registered("writer")
     assert not AgentRegistry.has_registered("researcher")
     assert "researcher" not in AgentRegistry.describe()
+
+
+def test_default_agent_key_wins(tmp_path):
+    ws = Workspace(tmp_path, tmp_path / ".bos", {
+        "default_agent": "writer",
+        "agents": {"writer": {"system_prompt": "w"}, "researcher": {"system_prompt": "r"}},
+    })
+    assert ws.resolve_default_agent() == "writer"
+
+
+def test_a_single_agent_needs_no_key(tmp_path):
+    ws = Workspace(tmp_path, tmp_path / ".bos", {"agents": {"solo": {"system_prompt": "s"}}})
+    assert ws.resolve_default_agent() == "solo"
+
+
+def test_main_wins_among_several(tmp_path):
+    ws = Workspace(tmp_path, tmp_path / ".bos", {
+        "agents": {"main": {"system_prompt": "m"}, "researcher": {"system_prompt": "r"}},
+    })
+    assert ws.resolve_default_agent() == "main"
+
+
+def test_ambiguous_names_the_candidates_and_no_gateway(tmp_path):
+    """The error a mode-1 project sees must not mention a concept it does not use.
+
+    The old path raised "runtime.actors must define at least one actor for the
+    gateway runtime." at a project that deliberately has no gateway (BEP 18 §1).
+    """
+    ws = Workspace(tmp_path, tmp_path / ".bos", {
+        "agents": {"writer": {"system_prompt": "w"}, "researcher": {"system_prompt": "r"}},
+    })
+    with pytest.raises(ValueError) as excinfo:
+        ws.resolve_default_agent()
+
+    message = str(excinfo.value)
+    assert "writer" in message and "researcher" in message
+    assert "default_agent" in message
+    for gateway_word in ("actor", "gateway", "runtime"):
+        assert gateway_word not in message.lower()
+
+
+def test_default_agent_naming_an_unknown_kind_says_so(tmp_path):
+    """Review Focus 2: a typo must name the candidates, not fail later inside
+    create_agent with a KeyError."""
+    ws = Workspace(tmp_path, tmp_path / ".bos", {
+        "default_agent": "typoo",
+        "agents": {"writer": {"system_prompt": "w"}},
+    })
+    with pytest.raises(ValueError) as excinfo:
+        ws.resolve_default_agent()
+
+    assert "typoo" in str(excinfo.value)
+    assert "writer" in str(excinfo.value)

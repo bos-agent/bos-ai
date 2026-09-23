@@ -206,6 +206,11 @@ class RootConfig(BaseModel):
     exts: ExtensionsConfig | None = None
     agent: AgentSection | None = None
     agents: dict[str, AgentConfig] = Field(default_factory=dict)
+    # Which agent a caller gets when it names none — the in-process question,
+    # kept away from [runtime].actors, which answers the gateway's different one
+    # (BEP 18 §3.5). Not `[agent] default`: that would sit one letter from
+    # `[agent.defaults]`, which means the config merged into *every* agent.
+    default_agent: str | None = None
     runtime: RuntimeConfig | None = None
 
 
