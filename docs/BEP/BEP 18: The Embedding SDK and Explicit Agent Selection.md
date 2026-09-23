@@ -1,6 +1,6 @@
 # BEP 18: The Embedding SDK and Explicit Agent Selection
 
-- **Status:** Draft
+- **Status:** **Implemented** — all seven plan tasks shipped 2026-09-23. See §9.
 - **Depends on:** BEP 13 (concentric rings — `bos.sdk` becomes a ring and needs its own guard), BEP 16 (the embeddable-library direction and the embed contract this BEP makes real), BEP 6 (configuration architecture), BEP 7 (actors — this BEP stops the in-process paths from reaching into them)
 - **Blocked by:** nothing.
 
@@ -293,6 +293,8 @@ None outstanding.
 ---
 
 ## 9. Revision history
+
+- 2026-09-23 — Closed. All seven tasks shipped: `default_agent` and `resolve_default_agent()`, `bos.sdk` with the single bootstrap sequence and an eighth ring guard, `ask`'s three explicit paths, `BosApp`, the 34-name contract with a drift test that enforces it, the mailbox `mkdir` moved to first delivery, and the Embedding page. Two things grew during execution. The contract was widened 26 → 34 names after the worked example turned out not to be writable using only promised names: seven types cross a promised port's own method signatures (`ChatCommit`, `ChatMeta`, `ContextResult`, `TokenEstimate`, `LLMResponse`, `ToolAttributes`, `TurnEvent`), plus `ToolCallRequest`, which `LLMResponse.tool_calls` cannot be built without. The rule — a promised port is implementable from promised names alone — is now enforced by a test rather than a list, and `ToolCallRequest` is the one name it cannot see, labelled as hand-kept. And the shared bootstrap reached five call sites, not the three §3.3 anticipated: `inspect._collect` and `scaffolding._bootstrapped_workspace` held the same pair in the same order, with the same latent hazard. `doctor.py` calls `resolve_agents()` alone, deliberately, and is not one.
 
 - 2026-09-23 — Corrections after the whole-branch review. §3.1 and §3.3 described `boscli ask` and the gateway-start pre-flight as calling `open_harness`; they call `bootstrap`, as do `inspect._collect` and `scaffolding._bootstrapped_workspace` — four callers against `open_harness`'s one outside `BosApp` (`GatewayMount._bring_up_runtime`). `bootstrap` was named in neither section and now is, with its own row in §3.1. Acceptance criterion 3 asked for a single fixture asserting both halves of the actor split; the behaviour shipped correct but the coverage is two tests, one per half, so the criterion now describes them by name. §3.4's "every kind in `config.agents` plus the resolved default" was the spec and the implementation only built `config.agents` — fixed in the code, not here: on the shipped `default` preset (`default_agent = "BOS"`, empty `[agents]`) `app.agent()` raised, which is the line §4.1 and the docs teach. The default is now built at entry when it resolves. Resolution failing is tolerated only where it is *inference*: with `default_agent` unset, the ambiguous only-agent/`main` case is swallowed so a project that always names its agent still starts; with the key written, it propagates, because `default_agent = "typoo"` is a config error and startup is where it belongs rather than the first `agent()` inside a request handler.
 

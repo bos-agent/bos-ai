@@ -70,7 +70,7 @@ that has none today. That choice is the design question, along with whether the
 answer is a refusal at all or a single owned bootstrap both modes go through.
 
 Documented meanwhile in `docs/site/embedding/index.md` and `src/bos/llm-full.md`
-§2.2: mount a gateway *or* hold a `BosApp`, never both.
+§3: mount a gateway *or* hold a `BosApp`, never both.
 
 ---
 

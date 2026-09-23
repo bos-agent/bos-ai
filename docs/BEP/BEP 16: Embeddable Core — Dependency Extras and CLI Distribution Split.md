@@ -1,6 +1,6 @@
 # BEP 16: Embeddable Core — Dependency Extras and CLI Distribution Split
 
-- **Status:** **Track A complete** — shipped in `bos-ai` 2.0.0 and `boscli` 2.0.0 (#92, #93, #94, #95, #97). **Track B** is no longer part of this BEP; it is designed in BEP 17 (§8).
+- **Status:** **Track A complete** — shipped in `bos-ai` 2.0.0 and `boscli` 2.0.0 (#92, #93, #94, #95, #97). **Track B** left this BEP and shipped as BEP 17 (§8), which is itself now complete.
 - **Depends on:** BEP 13 (concentric rings — this BEP packages the import graph BEP 13 already built and guards), BEP 4 (extension points / `bos.exts`), BEP 9 (scaffolding, `llm-full.md`), BEP 6 (configuration architecture)
 - **Amended by:** BEP 17 — it replaces the contents of the `gateway` extra (§3.2) and changes the reason, though not the text, of one `_optional` mapping (§3.4).
 
