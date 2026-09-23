@@ -58,6 +58,34 @@ async def test_bosapp_caches_agents_and_resolves_the_default(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_a_registry_only_default_is_built_at_entry(tmp_path):
+    """The shipped `default` preset's shape: `default_agent` names a kind an
+    ``@ep_agent`` factory registers, and `[agents]` is empty. `agent()` is sync
+    and cached, so the resolved default is built during `__aenter__` too, not
+    only the kinds the config names (BEP 18 §3.4)."""
+    from bos.core import Agent
+    from bos.sdk import BosApp
+
+    config = _config() | {"default_agent": "BOS", "agents": {}}
+    async with BosApp(config, bos_dir=tmp_path / ".bos") as app:
+        assert isinstance(app.agent(), Agent)
+
+
+@pytest.mark.asyncio
+async def test_an_ambiguous_default_does_not_prevent_entry(tmp_path):
+    """Building the default is tried, not required: two agents and no
+    `default_agent` is unresolvable, and a project that always names its agent
+    must still start. Only `agent()` with no argument fails."""
+    from bos.sdk import BosApp
+
+    config = _config() | {"agents": {"a": {"system_prompt": "a"}, "b": {"system_prompt": "b"}}}
+    async with BosApp(config, bos_dir=tmp_path / ".bos") as app:
+        assert app.agent("a") is not None
+        with pytest.raises(ValueError):
+            app.agent()
+
+
+@pytest.mark.asyncio
 async def test_agent_before_entering_says_so(tmp_path):
     """Review Focus 3: no harness yet — a message, not AttributeError on None."""
     from bos.sdk import BosApp

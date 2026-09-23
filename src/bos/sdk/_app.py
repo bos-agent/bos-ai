@@ -12,6 +12,7 @@ from bos.config import Workspace
 from ._bootstrap import open_harness
 
 if TYPE_CHECKING:
+    from bos.config import RootConfig
     from bos.core import Agent, AgentHarness
 
 logger = logging.getLogger(__name__)
@@ -31,7 +32,9 @@ class BosApp:
     ``harness`` and ``workspace`` are for.
     """
 
-    def __init__(self, config: Any, *, bos_dir: str | Path | None = None) -> None:
+    def __init__(
+        self, config: dict[str, Any] | RootConfig | Workspace, *, bos_dir: str | Path | None = None
+    ) -> None:
         if isinstance(config, Workspace):
             self._workspace = config
         elif bos_dir is None:
@@ -57,12 +60,26 @@ class BosApp:
         stack = contextlib.AsyncExitStack()
         try:
             self._harness = await stack.enter_async_context(open_harness(self._workspace))
-            # Every kind the config names, so agent() can stay synchronous. The
-            # default is resolved lazily in agent(), not here: a project that
-            # always names its agent should not fail to start just because the
-            # default would be ambiguous.
+            # Every kind the config names, plus the resolved default, so agent()
+            # can stay synchronous. The default needs building separately because
+            # it often is not in `config.agents` at all — the shipped `default`
+            # preset sets `default_agent = "BOS"` with an empty [agents] and lets
+            # an @ep_agent factory supply it, which is the shape `app.agent()` in
+            # the docs has to work on.
+            #
+            # Tried, not required: a project that always names its agent should
+            # not fail to start just because its default would be ambiguous, so
+            # the ValueError from resolution is swallowed. Only that one — a kind
+            # that resolves but cannot be built still fails entry.
             for kind in self._workspace.config.agents or {}:
                 self._agents[kind] = await self._harness.create_agent(kind=kind)
+            try:
+                default_kind = self._workspace.resolve_default_agent()
+            except ValueError:
+                pass
+            else:
+                if default_kind not in self._agents:
+                    self._agents[default_kind] = await self._harness.create_agent(kind=default_kind)
         except BaseException:
             # _aclose() (bos/core/_utils.py) already catches and logs an ordinary
             # Exception from a resource's own close, so this rarely fires. It stays
