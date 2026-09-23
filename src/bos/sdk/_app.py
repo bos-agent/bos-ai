@@ -64,17 +64,19 @@ class BosApp:
             for kind in self._workspace.config.agents or {}:
                 self._agents[kind] = await self._harness.create_agent(kind=kind)
         except BaseException:
-            # Teardown must not mask the entry failure the caller needs to see, and the
-            # guard/cached state must clear even if teardown itself raises: AgentHarness's
-            # own __aexit__ awaits _aclose() on the interceptor and every owned resource
-            # unguarded (only plugin teardown there is wrapped), so a chat store, mail
-            # route or LLM session that errors on close propagates straight out of
-            # stack.aclose(). So a teardown error is logged, not raised, and the reset
-            # below runs in `finally` regardless of how aclose() goes; the bare `raise`
-            # then re-raises the original entry failure, not the teardown one.
+            # _aclose() (bos/core/_utils.py) already catches and logs an ordinary
+            # Exception from a resource's own close, so this rarely fires. It stays
+            # defensive because a BaseException from a close, or a failure in the
+            # exit-stack machinery itself, could still escape — and a leaked _ACTIVE
+            # bricks every later BosApp in the process, which is bad enough to guard
+            # against even on a low-probability path. `except Exception`, not
+            # BaseException: a CancelledError landing here must keep propagating, not
+            # get logged and dropped. Either way, the `finally` below is what
+            # guarantees the reset — not this except — and the bare `raise` after it
+            # re-raises the original entry failure, not a teardown error masking it.
             try:
                 await stack.aclose()
-            except BaseException:
+            except Exception:
                 logger.error("Error tearing down BosApp after a failed __aenter__", exc_info=True)
             finally:
                 _ACTIVE = None
