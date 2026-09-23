@@ -67,19 +67,24 @@ class BosApp:
             # an @ep_agent factory supply it, which is the shape `app.agent()` in
             # the docs has to work on.
             #
-            # Tried, not required: a project that always names its agent should
-            # not fail to start just because its default would be ambiguous, so
-            # the ValueError from resolution is swallowed. Only that one — a kind
-            # that resolves but cannot be built still fails entry.
+            # Tried, not required — but only where resolution is *inference*. A
+            # project that never wrote `default_agent` should not fail to start
+            # just because the only-agent/`main` guesses are ambiguous, so that
+            # ValueError is swallowed. A project that did write the key meant it:
+            # `default_agent = "typoo"` is a config error, and startup is what it
+            # should surface at, not the first agent() deep in a request handler.
+            # Everything else propagates either way, including a kind that
+            # resolves but cannot be built.
             for kind in self._workspace.config.agents or {}:
                 self._agents[kind] = await self._harness.create_agent(kind=kind)
             try:
-                default_kind = self._workspace.resolve_default_agent()
+                default_kind: str | None = self._workspace.resolve_default_agent()
             except ValueError:
-                pass
-            else:
-                if default_kind not in self._agents:
-                    self._agents[default_kind] = await self._harness.create_agent(kind=default_kind)
+                if self._workspace.config.default_agent:
+                    raise
+                default_kind = None
+            if default_kind is not None and default_kind not in self._agents:
+                self._agents[default_kind] = await self._harness.create_agent(kind=default_kind)
         except BaseException:
             # _aclose() (bos/core/_utils.py) already catches and logs an ordinary
             # Exception from a resource's own close, so this rarely fires. It stays

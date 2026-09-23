@@ -72,6 +72,22 @@ async def test_a_registry_only_default_is_built_at_entry(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_a_typo_in_default_agent_fails_at_entry(tmp_path):
+    """The other side of the swallow. A written `default_agent` was meant, so a
+    name that resolves to nothing is a config error the block must refuse — not
+    one deferred to the first `agent()` call, possibly inside a request handler
+    (BEP 18 §3.4)."""
+    from bos.sdk import BosApp
+
+    config = _config() | {"default_agent": "typoo"}
+    with pytest.raises(ValueError) as excinfo:
+        async with BosApp(config, bos_dir=tmp_path / ".bos"):
+            pass
+    assert "typoo" in str(excinfo.value)
+    assert "solo" in str(excinfo.value), "the message must name what is available"
+
+
+@pytest.mark.asyncio
 async def test_an_ambiguous_default_does_not_prevent_entry(tmp_path):
     """Building the default is tried, not required: two agents and no
     `default_agent` is unresolvable, and a project that always names its agent
