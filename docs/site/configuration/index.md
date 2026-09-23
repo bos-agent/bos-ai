@@ -61,12 +61,36 @@ built-in preset is `default`.
 
 | Section | Purpose |
 | --- | --- |
+| `default_agent` | Top-level key: which agent runs when the caller names none. |
 | `[platform]` | Environment loading and where to discover extensions & agents. |
 | `[harness]` | Selects which implementation backs each shared service. |
 | `[exts.<ep>.<impl>]` | Configures any registered extension (tools, providers, stores…). |
 | `[agent.defaults]` | Defaults merged into every agent. |
 | `[agents.<name>]` | A named agent definition. |
 | `[runtime]` | The runtime: actors, gateway, channels. |
+
+---
+
+## `default_agent` — which agent runs when none is named
+
+A top-level key (not a section), so it sits above `[platform]`:
+
+```toml
+default_agent = "main"
+```
+
+It selects the agent kind used whenever a caller names none — a bare `boscli ask`,
+and `app.agent()` in [`bos.sdk`](../embedding/index.md). The name must be a key in
+`[agents]` or a kind some extension registers (`@ep_agent`); anything else is an
+error naming the kinds that are available.
+
+With the key unset, BOS falls back to the only entry in `[agents]`, then to one
+named `main`. If neither applies — two or more agents and no `default_agent` —
+naming one becomes mandatory, via this key, `boscli ask --agent <kind>`, or
+`app.agent("<kind>")`.
+
+It is deliberately unrelated to `[runtime].main_actor`, which answers the
+gateway's separate question of which *actor* to address (BEP 18 §3.5).
 
 ---
 

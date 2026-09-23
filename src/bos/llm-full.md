@@ -154,6 +154,13 @@ async with BosApp(config_dict, bos_dir="/var/lib/myapp/.bos") as app:
 - Chat continuity is one `chat_id`, not a session object.
 - **One live `BosApp` per process.** A second raises: `bootstrap_platform()`
   writes `os.environ` and rebuilds `AgentRegistry`, both process-global.
+- **The two modes do not co-exist in one process** — mount a gateway *or* hold a
+  `BosApp`, not both. Unlike the rule above this one **is not enforced**: nothing
+  raises, because `GatewayMount` never touches `BosApp`'s guard. It bootstraps
+  the same process-global registry on mount and on every `POST /api/restart`, so
+  each side silently rebuilds the other's agents; already-built `Agent`s keep
+  working, but any later `create_agent` — a restart, a new actor,
+  `build_agent()` — resolves against the wrong workspace (`docs/BACKLOG.md` §4).
 - `open_harness(workspace)` is the same bootstrap with nothing on top. Its order
   is the contract — `resolve_agents()` **then** `bootstrap_platform()`; reversed,
   every agent file is dropped with no error.

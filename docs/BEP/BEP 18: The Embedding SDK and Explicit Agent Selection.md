@@ -64,7 +64,8 @@ The SDK is thin, and mostly extraction rather than invention. The raw API is alr
 
 | Artifact | Runtime form | Lifecycle | Who invokes it |
 |---|---|---|---|
-| `bos.sdk.open_harness(workspace)` | Async context manager | Per harness | `BosApp`, `boscli ask`, `GatewayMount` |
+| `bos.sdk.bootstrap(workspace)` | Plain function | Once per process | `open_harness`, `boscli ask`, the gateway-start pre-flight, `inspect._collect`, `scaffolding._bootstrapped_workspace` |
+| `bos.sdk.open_harness(workspace)` | Async context manager | Per harness | `BosApp`, `GatewayMount._bring_up_runtime` |
 | `bos.sdk.BosApp` | Plain object held by the embedder | `async with`; caches agents for its lifetime | An embedding application |
 | `Workspace.resolve_default_agent()` | Method, pure | Once per resolution | `BosApp`, `boscli ask` |
 | The eighth ring guard | pytest test | Per CI run | CI |
@@ -96,7 +97,16 @@ async def open_harness(workspace: Workspace) -> AsyncIterator[AgentHarness]:
 
 It performs, in this order: `workspace.resolve_agents()`, `workspace.bootstrap_platform()`, then yields from `workspace.harness()`. The order is the point — `bootstrap_platform` registers the agents `resolve_agents` loaded, and reversing them silently drops every agent file.
 
-All three existing copies become calls to it: `cli/commands/agent.py`'s `ask` and gateway-start pre-flight, and `GatewayMount._bring_up_runtime`. `GatewayMount` keeps its own `AsyncExitStack` — it needs the harness to outlive a function scope — and enters this context manager into it.
+The two steps before the harness are also a public function, `bos.sdk.bootstrap(workspace)`, because most callers want exactly them:
+
+```python
+def bootstrap(workspace: Workspace) -> None:
+    """Load the agent files, then register everything the platform declares."""
+```
+
+Of the three existing copies, only `GatewayMount._bring_up_runtime` calls `open_harness`; it keeps its own `AsyncExitStack` — it needs the harness to outlive a function scope — and enters this context manager into it. `cli/commands/agent.py`'s `ask` and its gateway-start pre-flight call `bootstrap` instead: the pre-flight wants no harness at all, and `ask` must resolve the agent kind against the registry `bootstrap` fills *before* it opens `ws.harness()` itself. Two further sites that were never copies of the sequence adopt `bootstrap` for the same reason — `inspect._collect` and `scaffolding._bootstrapped_workspace` — giving `bootstrap` four callers and `open_harness` one outside `BosApp`.
+
+`bootstrap` is not in `bos.sdk.__all__` (§3.8): it is importable and used across rings, but the promised surface is `open_harness` and `BosApp`.
 
 ### 3.4 `BosApp` — the object layer
 
@@ -262,7 +272,7 @@ None known. `bos.sdk` is additive.
 
 1. Given a config with `[agents.assistant]` and no `[runtime]` section at all: `BosApp(config).agent()` returns an `Agent`, and nothing in the call imports `bos.gateway`.
 2. Given the same config: `boscli ask "…"` succeeds, and the failure message for an ambiguous case mentions no actor, no gateway and no runtime.
-3. Given a config whose `[runtime.actors.main]` carries an `agent_cfg` override: a bare `ask` runs the agent **without** the override, and `ask --actor main` runs it **with** the override. Both halves are asserted against the same fixture, so neither can pass by accident.
+3. Both halves of the actor split are pinned by their own test in `tests/test_cli_ask.py`, each asserting the `agent_cfg` that reaches `create_agent`: a bare `ask` passes `agent_cfg=None` (`test_ask_runs_in_process_and_prints_reply`), and `ask --actor main` passes the actor's converted overrides — `{"max_iterations": 5, "tools": None}` for an actor whose `agent_cfg` sets them (`test_ask_converts_explicit_actor_overrides_to_core_kwargs`). Reverting `ask`'s default branch to the actor table fails the first, plus `test_cli_ask_selection.py::test_bare_ask_with_no_default_agent_reports_one_line`; the `--actor` half keeps passing, because that path is the one the revert does not touch.
 4. `--agent` and `--actor` together exit non-zero with a message naming both.
 5. `grep -rn "resolve_agents()\|bootstrap_platform()" src/bos/cli src/bos/runner` returns only `doctor.py`'s lone `resolve_agents()` and a comment in `mount.py`. The *sequence* exists once, in `bos/sdk/`, and every former copy of it calls `bootstrap()` or `open_harness()` — `ask`, the gateway-start pre-flight, `GatewayMount._bring_up_runtime`, `inspect._collect`, and `scaffolding._bootstrapped_workspace`. `doctor.py` is not a copy: `_check_agents` verifies that agent specs load and deliberately leaves extension loading to a separate check, so it calls `resolve_agents()` alone.
 6. `tests/test_sdk_ring_isolation.py` passes, and the seven existing ring guards pass **unmodified**.
@@ -283,6 +293,8 @@ None outstanding.
 ---
 
 ## 9. Revision history
+
+- 2026-09-23 — Corrections after the whole-branch review. §3.1 and §3.3 described `boscli ask` and the gateway-start pre-flight as calling `open_harness`; they call `bootstrap`, as do `inspect._collect` and `scaffolding._bootstrapped_workspace` — four callers against `open_harness`'s one outside `BosApp` (`GatewayMount._bring_up_runtime`). `bootstrap` was named in neither section and now is, with its own row in §3.1. Acceptance criterion 3 asked for a single fixture asserting both halves of the actor split; the behaviour shipped correct but the coverage is two tests, one per half, so the criterion now describes them by name. §3.4's "every kind in `config.agents` plus the resolved default" was the spec and the implementation only built `config.agents` — fixed in the code, not here: on the shipped `default` preset (`default_agent = "BOS"`, empty `[agents]`) `app.agent()` raised, which is the line §4.1 and the docs teach. The default is now built at entry when it resolves, and a `ValueError` from resolution is still swallowed so an ambiguous default does not block entry.
 
 - 2026-09-22 — Draft. Decisions: `bos.sdk` is a function layer plus a deliberately small object, not an object model — `BosApp` returns `Agent` and has no `ask()` (§2.2.1); agent selection never consults actors, and the actor path becomes the explicit `--actor` flag rather than a hidden default (§3.5, §3.6); `default_agent` is top-level to avoid the `[agent.defaults]` look-alike (§3.5); `bos.sdk` is a ring with its own guard, and the tempting `core → sdk → gateway` layering is recorded as impossible under BEP 13's rules (§3.2, §3.9). Grounded findings: the bootstrap sequence is written three times, not two (`mount.py:275-278`, `agent.py:391-392`+`:416`, `agent.py:515-516`); `presets/default.toml` has an empty `config.agents`, so the actor table is today the *only* thing naming an agent there, which is why §5.2 is a real break and why step 2 precedes step 4; no shipped config carries an actor override, because the one that did — the `team` preset — was deleted the same day (BEP 9 revision, 2026-09-22), so §5.1's breaking change is real but its worked example is a user project setting `[runtime.actors.<name>.agent_cfg]`, a shape `config/template.toml:139-141` teaches.
 - 2026-09-22 — Correction after implementation (§3.5 rule 4, §5.2). As drafted, rule 4 demanded that the raised error name `default_agent`, `--agent` and `--actor`, which contradicted the same section's own principle: `resolve_default_agent` lives in `bos.config`, has embedder callers with no command line, and its message must carry no CLI or gateway vocabulary — a rule `tests/test_cli_ask_selection.py` enforces by asserting "actor" is absent. The implementation is correct and the spec was not; both passages now describe the message that exists and record that enumerating the flags is the CLI's and the release note's job.

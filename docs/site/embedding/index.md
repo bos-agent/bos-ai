@@ -91,6 +91,13 @@ agent registry, both process-global, so opening a second while the first is live
 raises rather than quietly corrupting it. Share the one app: `agent()` and
 `run()` are safe to call concurrently across *different* `chat_id`s.
 
+**And one mode per process: mount a gateway or hold a `BosApp`, never both.**
+That exclusion is real but unguarded — nothing raises. Mounting a gateway runs
+the same bootstrap (on mount, and again on every `POST /api/restart`), which
+rebuilds the shared `AgentRegistry` out from under the `BosApp`, and vice versa;
+agents already built keep working, but every later `build_agent()`, actor start
+or restart resolves against the other side's workspace (`docs/BACKLOG.md` §4).
+
 **Turns on one `chat_id` are yours to serialize.** In mode 1 nothing serializes
 them for you. Two turns running at once on the same `chat_id` each assemble
 context before the other has committed, so neither sees the other's message and
