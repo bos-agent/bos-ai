@@ -271,11 +271,10 @@ class GatewayMount:
         (BEP 17 §3.5.1).
         """
         from bos.gateway import Gateway
+        from bos.sdk import open_harness
 
-        workspace.resolve_agents()
-        workspace.bootstrap_platform()
         self._stack = contextlib.AsyncExitStack()
-        harness = await self._stack.enter_async_context(workspace.harness())
+        harness = await self._stack.enter_async_context(open_harness(workspace))
         gateway = Gateway(
             runtime=workspace.resolve_gateway_runtime(), harness=harness, runtime_label=self._runtime_label
         )

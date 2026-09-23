@@ -388,10 +388,11 @@ def ask(
         raise click.UsageError("Provide a task message or use --stdin.")
 
     ws, _ = _get_ws_and_rd(ctx, workspace_dir)
-    ws.resolve_agents()
-    ws.bootstrap_platform()
 
     from bos.core import AgentRegistry
+    from bos.sdk import bootstrap
+
+    bootstrap(ws)
 
     # --agent names an agent kind directly; otherwise the main actor locates it.
     if agent_name:
@@ -512,8 +513,9 @@ def start(ctx, foreground: bool, workspace_dir: str | None):
     # child process there and a bad agent file should fail in front of the
     # operator rather than in the daemon log.
     if not foreground:
-        ws.resolve_agents()
-        ws.bootstrap_platform()
+        from bos.sdk import bootstrap
+
+        bootstrap(ws)
 
     from bos.runner.proc import (
         _pid_alive,
