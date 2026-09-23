@@ -118,28 +118,63 @@ Built-in adapters whose extra is absent are **skipped with a warning naming the
 extra**, not an import error — so `import bos.exts` succeeds on any install. A
 config that then names a tool from a skipped module fails at resolution.
 
-### 2.2 Embedding (no CLI, no gateway, no TOML)
+### 2.2 Embedding: two modes (BEP 18)
 
 `Workspace` accepts a plain dict, so configuration can come from anywhere; the
-file-discovery constructor is the CLI's convenience, not the only entry point:
+file-discovery constructor is the CLI's convenience, not the only entry point.
+There are **two** embedding shapes, and they are a choice made up front — not a
+simple version and an advanced one:
+
+| | Mode 1 — call the agent | Mode 2 — mount the gateway |
+|---|---|---|
+| Entry point | `bos.sdk`: `BosApp`, `open_harness` | `bos.runner.GatewayMount` |
+| Per turn | your code calls `agent.run(chat_id, text)` | the gateway's actors/channels drive it |
+| Gives you | an `Agent` object | actors, channels, chat coordination, WS protocol |
+| Install | base `bos-ai` | `bos-ai[gateway]` |
+| Writable `bos_dir` | only for file-backed stores | always (`<bos_dir>/run/`: lock, state, cursors) |
+| Example | `examples/embed_sdk.py` | `examples/embed_gateway_fastapi.py` |
+
+**Mode 1** — `bos.sdk` holds the bootstrap sequence and the object over it:
 
 ```python
-from bos.config import Workspace
+from bos.sdk import BosApp
 
-ws = Workspace(workspace=".", bos_dir="/var/lib/myapp", config=config_dict)
-ws.bootstrap_platform()
-
-async with ws.harness() as harness:
-    agent = await harness.create_agent(kind="assistant")
-    result = await agent.run(chat_id, "hello")   # result.output
+async with BosApp(config_dict, bos_dir="/var/lib/myapp/.bos") as app:
+    agent = app.agent()                      # cached; no arg → resolve_default_agent()
+    result = await agent.run("chat-42", "hello")   # result.output
 ```
 
+- `agent(kind=None)` is **sync** and returns a cached `Agent`; every kind in
+  `config.agents` is built during `__aenter__`. A kind only an `@ep_agent`
+  factory registers needs `await app.build_agent(kind)`.
+- There is **no `BosApp.ask()`** and no wrapper over `Agent.run()` (BEP 18
+  §2.2.1): `run()` has ten parameters, so a façade would either mirror them
+  forever or push callers down a layer. `app.harness` / `app.workspace` expose
+  that lower layer as the *same* objects.
+- Chat continuity is one `chat_id`, not a session object.
+- **One live `BosApp` per process.** A second raises: `bootstrap_platform()`
+  writes `os.environ` and rebuilds `AgentRegistry`, both process-global.
+- `open_harness(workspace)` is the same bootstrap with nothing on top. Its order
+  is the contract — `resolve_agents()` **then** `bootstrap_platform()`; reversed,
+  every agent file is dropped with no error.
+
+**Mode 2** — `GatewayMount(workspace_factory, *, public_base_url=None)`: the host
+calls `mount.start()`/`mount.stop()` in its own lifespan and mounts
+`mount.build_app()` (a Starlette app) once, before `start()`. The factory is a
+callable because a restart re-reads config. Routes under the mount path:
+`GET /api/status`, `GET /api/actors`, `POST /api/restart`, the upload endpoints,
+`WS /ws`. BOS performs no authentication (BEP 17 §3.8); the host fronts it.
+
 Set `[platform] extensions = []` and import only the adapters you want, instead
-of `bos.exts` which loads every built-in. The supported surface is `bos.core`
-(`AgentHarness`, `Agent`, `AgentResult`, the `ep_*` points, the port protocols)
-and `bos.config` (`Workspace`, `RootConfig`, `validate_config`); `_`-prefixed
-re-exports are for extensions and are not stable. See `examples/embed_fastapi.py`
-in the repository for a runnable version.
+of `bos.exts` which loads every built-in. The contract is **`bos.sdk.__all__`**
+(34 names): `BosApp`, `open_harness`, the agent surface, the ports plus every
+type their own method signatures use, the nine `ep_*` points, and `Workspace` /
+`RootConfig` / `validate_config`. A test enforces that every promised port is
+implementable from promised names alone. `bos.sdk` re-exports rather than
+redefines, so `bos.sdk.Agent is bos.core.Agent`. Everything else — including the
+`_`-prefixed re-exports for extension authors, and `GatewayMount` itself, which
+needs the `[gateway]` extra `bos.sdk` must not require — stays importable and is
+explicitly unstable.
 
 ---
 
@@ -932,7 +967,13 @@ instantiated, and `PluginServices` is assembled. Agents are built lazily by
   is delivered back through the mailbox/`MailRoute` → the channel pushes it to the client.
 - **`boscli ask`** bypasses the gateway: it builds the workspace + harness and runs one agent
   turn **in-process**, printing the final reply to stdout (progress streams to stderr on a
-  TTY). It honors `--model` / `BOS_MODEL` per invocation.
+  TTY). It honors `--model` / `BOS_MODEL` per invocation. Agent selection has three explicit
+  paths (BEP 18 §3.6) and a bare `ask` **never** consults the actor table: bare →
+  `Workspace.resolve_default_agent()` (top-level `default_agent`, else the only agent, else
+  one named `main`, else an error naming the available kinds); `--agent <kind>` → that kind,
+  plain; `--actor <name>` → `actors[name].agent` **with** `actors[name].agent_cfg` applied,
+  which is the only in-process path that reads the actor table. `--agent` and `--actor` are
+  mutually exclusive.
 
 ---
 
@@ -944,7 +985,7 @@ Global options: `-c/--config <path|preset>` (or `BOS_CONFIG`), `-l/--log-level <
 
 | Command | Purpose | Notable options |
 | --- | --- | --- |
-| `ask "<prompt>"` | One-shot, in-process agent turn. | `--stdin`, `--model`, `--agent <kind>`, `-w/--workspace` |
+| `ask "<prompt>"` | One-shot, in-process agent turn. | `--stdin`, `--model`, `--agent <kind>`, `--actor <name>`, `--no-steps`, `-w/--workspace` |
 | `init` | Guided project scaffolding. | `--minimal` (emit commented template), `--name`, archetype (workspace/package), `--no-probe` |
 | `gateway start` | Start the runtime. | (subgroup) |
 | `gateway stop` / `status` / `restart` | Control a running gateway. | uses `gateway.state` |

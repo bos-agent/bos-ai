@@ -45,9 +45,9 @@ answers — hence a BEP rather than a patch.
 
 ## 4. Sequencing
 
-BEP 17 shipped in full (Layers 1–3), except its documentation step 13, which was
-deliberately deferred: the *Embedding the gateway* page waits on BEP 18, or it
-gets written before the two-mode framing exists and has to be rewritten. BEP 18
-§6 step 8 owns that page now.
+BEP 17 and BEP 18 have both shipped in full. BEP 17's documentation step 13 was
+deliberately deferred so the page could be written after the two-mode framing
+existed rather than before it; BEP 18 §6 step 8 discharged it as
+`docs/site/embedding/index.md`, which covers both modes together.
 
 §3 is orthogonal to both and can run in parallel with either.

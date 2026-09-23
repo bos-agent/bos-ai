@@ -72,6 +72,7 @@ nav:
       - Channels: extending/channels.md
       - Stores & providers: extending/stores-and-providers.md
       - Packaging & entry points: extending/entry-points.md
+  - Embedding BOS: embedding/index.md
   - CLI: cli/index.md
   - Architecture:
       - Overview: architecture/index.md

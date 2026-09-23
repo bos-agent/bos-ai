@@ -40,14 +40,23 @@ streams to stderr when attached to a TTY. The model is honored on every invocati
 OPENAI_API_KEY=<key> boscli ask "summarize README.md" --model openai/gpt-4o
 cat data.txt | boscli ask "extract the action items" --stdin
 boscli ask "research the auth flow" --agent researcher
+boscli ask "reproduce what the gateway's main actor runs" --actor main
 ```
 
 | Option | Meaning |
 | --- | --- |
 | `--stdin` | Read additional input from standard input. |
 | `--model <provider/model>` | Override the model for this run (else `BOS_MODEL` / config). |
-| `--agent <kind>` | Run a specific registered agent kind instead of the main one. |
+| `--agent <kind>` | Run a specific registered agent kind. |
+| `--actor <name>` | Run the agent a named actor configures, applying that actor's `agent_cfg` overrides. |
+| `--no-steps` | Print only the final reply, with no step-by-step progress. |
 | `-w`, `--workspace <dir>` | Use a specific workspace directory. |
+
+Which agent runs is one of three explicit choices. With neither flag, `ask` runs the
+project's default agent: the top-level `default_agent` key, or the only entry in
+`[agents]`, or one named `main`. It does **not** consult `[runtime.actors]` — that
+table answers a different question, and `--actor <name>` is how you ask for it by
+name. The two flags are mutually exclusive.
 
 `ask` works even without a project: with no workspace found it can run against a preset/model
 directly, which is what the one-line quick start does.
