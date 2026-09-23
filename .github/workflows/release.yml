@@ -1,6 +1,16 @@
 name: Release
 on:
   workflow_dispatch:
+    inputs:
+      force:
+        description: >-
+          Bump level. "auto" lets the commit history decide. Pick an explicit
+          level to override it — e.g. when a `!` reached main in a PR title and
+          a major bump is out of proportion to what actually broke.
+        required: false
+        default: auto
+        type: choice
+        options: [auto, patch, minor, major]
 
 env:
   REGISTRY: ghcr.io
@@ -33,6 +43,9 @@ jobs:
         uses: python-semantic-release/python-semantic-release@v10.5.3
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
+          # Empty means "compute from commits" — the action skips the flag on an
+          # empty value (src/gh_action/action.sh: `if [ -z "$INPUT_FORCE" ]`).
+          force: ${{ inputs.force == 'auto' && '' || inputs.force }}
           verbosity: 1
 
       # Publish to PyPI ONLY IF a new release was actually generated
