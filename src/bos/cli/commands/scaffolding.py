@@ -14,6 +14,7 @@ import click
 from bos.cli import prompts
 from bos.cli.scaffold import ARCHETYPES, scaffold_workspace, toml_multiline_text
 from bos.config import ConfigNotFoundError, Workspace, WorkspaceResolutionError, initialize_workspace
+from bos.sdk import bootstrap
 
 _DEFAULT_PURPOSE = "A general-purpose personal agent."
 
@@ -319,8 +320,7 @@ def _git_init(workspace: Path) -> None:
 
 def _bootstrapped_workspace(workspace_path: Path) -> Workspace:
     ws = Workspace.from_discovery(workspace_path)
-    ws.resolve_agents()
-    ws.bootstrap_platform()
+    bootstrap(ws)
     return ws
 
 

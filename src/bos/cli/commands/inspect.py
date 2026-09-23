@@ -19,6 +19,7 @@ from typing import Any
 import click
 
 from bos.config.schema import AgentSection, HarnessConfig, RuntimeConfig
+from bos.sdk import bootstrap
 
 
 def _harness_info(ws, config_arg: str | None) -> dict[str, Any]:
@@ -252,8 +253,7 @@ def _collect(ctx, workspace_dir: str | None, agent_kind: str | None, actor_name:
     # capability sections read from. Best-effort: a broken extension should not
     # blank out the paths/gateway info already gathered.
     try:
-        ws.resolve_agents()
-        ws.bootstrap_platform()
+        bootstrap(ws)
     except Exception as exc:
         if scoped:
             report["agent"] = {"kind": agent_kind, "error": str(exc)}
