@@ -33,38 +33,35 @@ conventional directories.
 
 ---
 
-## 1. Mental model
+## 1. What BOS is, and the two shapes it runs in
 
-A running BOS deployment is a **gateway process** that hosts one or more **actors**.
-Each actor is a long-lived, addressable mailbox bound to an **agent** (an LLM-driven
-loop). **Channels** bridge the outside world (TUI, Telegram, Lark, HTTP) to an
-actor's mailbox. Cross-cutting services — chat persistence, memory consolidation,
-background jobs, message routing — are owned by the **harness** and selected by name.
+An **agent** is an LLM-driven turn loop: a system prompt, a model, a set of
+**tools**, a set of **plugins** (which contribute more tools + prompt sections +
+interceptors), and config knobs. That is the same object in both shapes below.
+Everything pluggable is a named **extension** registered at an **extension
+point**. Cross-cutting services — chat persistence, memory consolidation,
+background jobs, message routing — are owned by the **harness** and selected by
+name. Configuration is one TOML file (`.bos/config.toml`) plus optional Python
+extensions and Markdown/TOML agent files.
 
-```
-                 ┌─────────────────────────── gateway process ───────────────────────────┐
- external client │   channel ──▶ mailbox ──▶ actor ──▶ agent (LLM loop) ──▶ tools/plugins  │
- (TUI/Telegram)  │     ▲                        │              │                           │
-                 │     └──────── reply ─────────┘        harness services:                 │
-                 │                                       chat_store, consolidator,         │
-                 │                                       mail_route, events                │
-                 └────────────────────────────────────────────────────────────────────────┘
-```
+How that agent is *run* is a choice between two shapes:
 
-Everything pluggable is a named **extension** registered at an **extension point**.
-The agent itself is assembled from: a system prompt, a model, a set of **tools**, a
-set of **plugins** (which contribute more tools + prompt sections + interceptors),
-and config knobs. Configuration is one TOML file (`.bos/config.toml`) plus optional
-Python extensions and Markdown/TOML agent files.
+**A — your code calls the agent.** Nothing long-lived: the agent is built in the
+calling process and driven one turn at a time. From Python that is `bos.sdk`
+(§3), which needs only the base `bos-ai` install; from a shell it is
+`boscli ask` (§13).
 
-Key vocabulary:
+**B — a gateway process hosts actors.** A long-lived process holds one or more
+**actors** — named, addressable, restartable mailboxes, each bound to an agent
+kind — and the **channels** that bridge external clients (TUI, Telegram, Lark,
+HTTP) to them. Started with `boscli gateway start`, or mounted inside your own
+ASGI app with `GatewayMount` (§12). Needs `bos-ai[gateway]`.
+
+Vocabulary that applies in both shapes:
 
 | Term | What it is | Defined in |
 | --- | --- | --- |
 | **Agent** | An LLM-driven turn loop with tools, plugins, a system prompt, a model | `bos.core.agent` |
-| **Actor** | A named, addressable, restartable runtime instance bound to one agent kind | `[runtime.actors.<name>]` |
-| **Gateway** | The process that hosts actors + channels + an HTTP control plane | `bos.gateway`, `boscli gateway` |
-| **Channel** | Bridges an external client to an actor's mailbox | `ep_channel`, `[[runtime.channels]]` |
 | **Harness** | Lifecycle owner of shared services (chat store, consolidator, jobs, mail) | `bos.core.harness.AgentHarness` |
 | **Extension Point** | A named registry of interchangeable implementations | `bos.core.registry.ExtensionPoint` |
 | **Extension** | One registered implementation at an extension point | `@ep_tool`, `@ep_channel`, … |
@@ -72,29 +69,22 @@ Key vocabulary:
 | **Skill** | A Markdown playbook the agent can load on demand | `SKILL.md`, `SkillsPlugin` |
 | **Tool** | An async function the LLM can call | `@ep_tool` |
 
+Vocabulary that exists only in shape B (§12):
+
+| Term | What it is | Defined in |
+| --- | --- | --- |
+| **Actor** | A named, addressable, restartable runtime instance bound to one agent kind | `[runtime.actors.<name>]` |
+| **Gateway** | The process that hosts actors + channels + an HTTP control plane | `bos.gateway`, `boscli gateway` |
+| **Channel** | Bridges an external client to an actor's mailbox | `ep_channel`, `[[runtime.channels]]` |
+
 ---
 
-## 2. Install & quick start
+## 2. Install & extras
 
 ```bash
 uvx boscli ...                # the CLI; `pip install bos-ai` is the LIBRARY and
                               # provides no `boscli` command (see §2.1)
-
-# One-shot, no project:
-OPENAI_API_KEY=<key> boscli ask "how are you" --model openai/gpt-4o
-
-# A real project:
-mkdir my-agent && cd my-agent
-boscli init            # guided setup: purpose, archetype, provider/model
-boscli gateway start   # start the runtime (hosts actors + channels)
-boscli tui             # connect the terminal UI
 ```
-
-The model string is LiteLLM-style `provider/model` (e.g. `openai/gpt-4o`,
-`gemini/gemini-2.5-flash`, `anthropic/claude-...`, `deepseek/deepseek-...`). The
-provider prefix also selects a custom `@ep_provider` if one is registered under that
-name (see §6.2); otherwise it falls back to LiteLLM, which reads the matching
-`*_API_KEY` env var.
 
 ### 2.1 Two distributions, and the extras
 
@@ -107,7 +97,7 @@ the shim runs the same CLI as `python -m bos.cli`.
 | Install | Adds |
 |---|---|
 | `bos-ai` | The library: `bos.core`, `bos.config`, plugins. ~14 MB |
-| `bos-ai[litellm]` | The built-in LLM provider. Without it, calls fail with a message naming this extra; register your own with `@ep_provider` instead (§6.2) |
+| `bos-ai[litellm]` | The built-in LLM provider. Without it, calls fail with a message naming this extra; register your own with `@ep_provider` instead (§7.2) |
 | `bos-ai[gateway]` | `starlette`+`uvicorn`+`httpx`+`websockets`: the gateway's ASGI app, the standalone process, and the Telegram/Lark channels |
 | `bos-ai[search]` | `ddgs` + `beautifulsoup4`: the built-in web-search and page-fetch tools. The Tavily provider needs only an API key, not this extra |
 | `bos-ai[lark]` | The Lark/Feishu SDK |
@@ -118,55 +108,97 @@ Built-in adapters whose extra is absent are **skipped with a warning naming the
 extra**, not an import error — so `import bos.exts` succeeds on any install. A
 config that then names a tool from a skipped module fails at resolution.
 
-### 2.2 Embedding (no CLI, no gateway, no TOML)
+### 2.2 Quick start
 
-`Workspace` accepts a plain dict, so configuration can come from anywhere; the
-file-discovery constructor is the CLI's convenience, not the only entry point:
+**Shape A — call the agent.** No project, no process:
 
-```python
-from bos.config import Workspace
-
-ws = Workspace(workspace=".", bos_dir="/var/lib/myapp", config=config_dict)
-ws.bootstrap_platform()
-
-async with ws.harness() as harness:
-    agent = await harness.create_agent(kind="assistant")
-    result = await agent.run(chat_id, "hello")   # result.output
+```bash
+OPENAI_API_KEY=<key> boscli ask "how are you" --model openai/gpt-4o
 ```
 
-Set `[platform] extensions = []` and import only the adapters you want, instead
-of `bos.exts` which loads every built-in. The supported surface is `bos.core`
-(`AgentHarness`, `Agent`, `AgentResult`, the `ep_*` points, the port protocols)
-and `bos.config` (`Workspace`, `RootConfig`, `validate_config`); `_`-prefixed
-re-exports are for extensions and are not stable. See `examples/embed_fastapi.py`
-in the repository for a runnable version.
+From Python the same shape is `bos.sdk` — see §3.
+
+**Shape B — run a gateway.** A real project:
+
+```bash
+mkdir my-agent && cd my-agent
+boscli init            # guided setup: purpose, archetype, provider/model
+boscli gateway start   # start the runtime (hosts actors + channels)
+boscli tui             # connect the terminal UI
+```
+
+The model string is LiteLLM-style `provider/model` (e.g. `openai/gpt-4o`,
+`gemini/gemini-2.5-flash`, `anthropic/claude-...`, `deepseek/deepseek-...`). The
+provider prefix also selects a custom `@ep_provider` if one is registered under that
+name (see §7.2); otherwise it falls back to LiteLLM, which reads the matching
+`*_API_KEY` env var.
 
 ---
 
-## 3. Project layout & home directories
+## 3. Calling an agent from your code
 
-A **workspace** is any directory tree containing `.bos/config.toml`. Commands walk
-up from the current directory to find it (see §4.1).
+`Workspace` accepts a plain dict, so configuration can come from anywhere; the
+file-discovery constructor is the CLI's convenience, not the only entry point.
+There are **two** embedding shapes, and they are a choice made up front — not a
+simple version and an advanced one:
 
+| | Mode 1 — call the agent | Mode 2 — mount the gateway |
+|---|---|---|
+| Entry point | `bos.sdk`: `BosApp`, `open_harness` | `bos.runner.GatewayMount` |
+| Per turn | your code calls `agent.run(chat_id, text)` | the gateway's actors/channels drive it |
+| Gives you | an `Agent` object | actors, channels, chat coordination, WS protocol |
+| Install | base `bos-ai` | `bos-ai[gateway]` |
+| Writable `bos_dir` | only for file-backed stores | always (`<bos_dir>/run/`: lock, state, cursors) |
+| Example | `examples/embed_sdk.py` | `examples/embed_gateway_fastapi.py` |
+
+**Mode 1** — `bos.sdk` holds the bootstrap sequence and the object over it:
+
+```python
+from bos.sdk import BosApp
+
+async with BosApp(config_dict, bos_dir="/var/lib/myapp/.bos") as app:
+    agent = app.agent()                      # cached; no arg → resolve_default_agent()
+    result = await agent.run("chat-42", "hello")   # result.output
 ```
-my-agent/
-├── .bos/
-│   ├── config.toml        # the one config file (the "bos_dir" is .bos/)
-│   ├── .env               # secrets, if [platform].envfile = ".env"
-│   ├── agents/            # external agent definitions (*.md / *.toml)  [agent_dirs]
-│   ├── extensions/        # project-local Python extensions             [extensions]
-│   ├── skills/            # project-local skills (dirs with SKILL.md)
-│   ├── messages/          # JsonlChatStore persistence (default)
-│   ├── mailboxes/         # JsonlMailRoute persistence (default)
-│   └── gateway.state      # runtime port/PID discovery file
-└── (your project files)
-```
 
-- **`bos_dir`** = the directory containing `config.toml` (i.e. `.bos/`). All relative
-  paths in config (`envfile`, `extensions`, `agent_dirs`, store dirs) resolve against
-  `bos_dir`. (`bos.config.workspace`.)
-- **`BOS_HOME`** (default `~/.bos`) holds global state: `~/.bos/agents/<name>` for the
-  default preset, `~/.bos/presets/<name>` when running a built-in preset. (`_get_bos_home`.)
+- `agent(kind=None)` is **sync** and returns a cached `Agent`; every kind in
+  `config.agents` is built during `__aenter__`. A kind only an `@ep_agent`
+  factory registers needs `await app.build_agent(kind)`.
+- There is **no `BosApp.ask()`** and no wrapper over `Agent.run()` (BEP 18
+  §2.2.1): `run()` has ten parameters, so a façade would either mirror them
+  forever or push callers down a layer. `app.harness` / `app.workspace` expose
+  that lower layer as the *same* objects.
+- Chat continuity is one `chat_id`, not a session object.
+- **One live `BosApp` per process.** A second raises: `bootstrap_platform()`
+  writes `os.environ` and rebuilds `AgentRegistry`, both process-global.
+- **The two modes do not co-exist in one process** — mount a gateway *or* hold a
+  `BosApp`, not both. Unlike the rule above this one **is not enforced**: nothing
+  raises, because `GatewayMount` never touches `BosApp`'s guard. It bootstraps
+  the same process-global registry on mount and on every `POST /api/restart`, so
+  each side silently rebuilds the other's agents; already-built `Agent`s keep
+  working, but any later `create_agent` — a restart, a new actor,
+  `build_agent()` — resolves against the wrong workspace (`docs/BACKLOG.md` §4).
+- `open_harness(workspace)` is the same bootstrap with nothing on top. Its order
+  is the contract — `resolve_agents()` **then** `bootstrap_platform()`; reversed,
+  every agent file is dropped with no error.
+
+**Mode 2** — `GatewayMount(workspace_factory, *, public_base_url=None)`: the host
+calls `mount.start()`/`mount.stop()` in its own lifespan and mounts
+`mount.build_app()` (a Starlette app) once, before `start()`. The factory is a
+callable because a restart re-reads config. Routes under the mount path:
+`GET /api/status`, `GET /api/actors`, `POST /api/restart`, the upload endpoints,
+`WS /ws`. BOS performs no authentication (BEP 17 §3.8); the host fronts it.
+
+Set `[platform] extensions = []` and import only the adapters you want, instead
+of `bos.exts` which loads every built-in. The contract is **`bos.sdk.__all__`**
+(34 names): `BosApp`, `open_harness`, the agent surface, the ports plus every
+type their own method signatures use, the nine `ep_*` points, and `Workspace` /
+`RootConfig` / `validate_config`. A test enforces that every promised port is
+implementable from promised names alone. `bos.sdk` re-exports rather than
+redefines, so `bos.sdk.Agent is bos.core.Agent`. Everything else — including the
+`_`-prefixed re-exports for extension authors, and `GatewayMount` itself, which
+needs the `[gateway]` extra `bos.sdk` must not require — stays importable and is
+explicitly unstable.
 
 ---
 
@@ -174,7 +206,7 @@ my-agent/
 
 All configuration is validated by Pydantic models in `bos.config.schema`.
 The root is `RootConfig` with top-level sections `[platform]`, `[harness]`, `[exts]`,
-`[agent]`, `[agents.*]`, `[runtime]`. The canonical, fully-commented template is
+`[agent]`, `[agents.*]`, `default_agent`, `[runtime]`. The canonical, fully-commented template is
 the repo's `bos/config/template.toml` (what `boscli init --minimal` emits).
 
 ### 4.1 Config discovery & selection
@@ -194,7 +226,36 @@ Resolution order (`bos.config.workspace`, `_resolve_config` / `find_discovered_c
   `bos_dir = ~/.bos/presets/<name>` (created on demand). The only built-in preset is
   `default`. (`resolve_config_source`, `presets_dir`.)
 
-### 4.2 `[platform]` — environment & discovery
+### 4.2 `default_agent` — which agent runs when none is named
+
+A top-level key, not a section:
+
+```toml
+default_agent = "main"
+```
+
+It selects the agent kind a caller gets when it names none: a bare `boscli ask`
+(§13) and `app.agent()` in `bos.sdk` (§3) both resolve through it. The chain
+(`bos.config.workspace.Workspace.resolve_default_agent`):
+
+1. **The key, if set.** It must name an `[agents.<name>]` entry or a kind some
+   extension registered (`@ep_agent`); anything else raises, listing the agent
+   kinds that are available.
+2. Otherwise **the only `[agents.*]` entry**, if there is exactly one.
+3. Otherwise **one named `main`**, if `[agents.main]` exists.
+4. Otherwise an error listing the `[agents.*]` names it found, telling the caller
+   to set `default_agent` or name an agent explicitly.
+
+Steps 2–4 read only `[agents.*]` (inline or loaded from `agent_dirs`, §4.7), not
+the registry — so a workspace whose only agent comes from an `@ep_agent` factory
+has to name it, via this key or per call.
+
+The chain deliberately never consults `[runtime].actors`. That table answers the
+gateway's different question — which addressable runtime instances to run — and
+routing through it is what made a project with no gateway read an error about
+one (BEP 18 §3.5).
+
+### 4.3 `[platform]` — environment & discovery
 
 ```toml
 [platform]
@@ -215,11 +276,11 @@ BOS_CAPABILITY_LIMIT = "50"
   `bos_dir`, it is loaded as a **directory/file path** (Python files scanned & imported);
   otherwise it is imported as a **module name**. (`bos.config.workspace.bootstrap_platform`;
   loaders `_load_ext_paths` / `_load_ext_modules`.) `"bos.exts"` is the module that imports all
-  built-ins + discovers entry points (§9).
+  built-ins + discovers entry points (§10).
 - **`agent_dirs`** entries are scanned for `*.toml` and `*.md` files; each becomes a named
   agent (§4.7).
 
-### 4.3 `[harness]` — select service implementations
+### 4.4 `[harness]` — select service implementations
 
 Each key names a registered extension by name (`extra='forbid'` — unknown keys error).
 
@@ -237,9 +298,9 @@ registered by `bos.core.defaults` (imported at harness open time), so
 these names resolve even without `bos.exts`.
 
 There is **no provider key in `[harness]`** — provider selection happens per-model-string
-via `ep_provider` (§6.2).
+via `ep_provider` (§7.2).
 
-### 4.4 `[exts.<ep_name>.<impl_name>]` — configure extensions
+### 4.5 `[exts.<ep_name>.<impl_name>]` — configure extensions
 
 This is the universal mechanism for passing config/defaults into any registered
 extension. `<ep_name>` is an extension-point name (`ep_*` for core, `pep_*` for
@@ -272,7 +333,7 @@ api_key_env = "TAVILY_API_KEY"
 skill_dirs = ["skills"]
 ```
 
-### 4.5 `[agent.defaults]` and `[agents.<name>]` — agents
+### 4.6 `[agent.defaults]` and `[agents.<name>]` — agents
 
 `[agent.defaults]` provides defaults merged into every agent. `[agents.<name>]` defines a
 named agent (its `AgentConfig`). Both use the same `AgentConfig` schema (`extra='allow'`).
@@ -334,53 +395,6 @@ global ep_tool registry]` (local wins on name clash). `enabled` is an include li
 `ResolvedToolSet` / `create_agent`.) An explicit `enabled = []` is an *empty* include list —
 no tools at all, and likewise no plugins under `[…plugins]`. That is not the same as omitting
 the key, which inherits `[agent.defaults]`; see §4.8.
-
-### 4.6 `[runtime]` — actors, gateway, channels
-
-```toml
-[runtime]
-main_actor = "main"            # which actor is the default mention/route target
-
-[runtime.gateway]
-host = "127.0.0.1"
-port = 0                       # 0 = auto-assign a free port (discover via gateway.state)
-# upload_dir = ".bos/uploads/http"
-# max_upload_bytes = 20971520
-
-[runtime.actor_resolver]
-mention_prefix = "@"           # how channels resolve @actor mentions
-
-[runtime.actors.main]
-agent = "main"                 # which registered agent kind this actor runs
-display_name = "Main"
-# restart_on_error = true
-# max_restarts = 5
-[runtime.actors.main.agent_cfg]      # per-actor overrides (same shape as [agent.defaults])
-# model = "openai/gpt-4o"
-[runtime.actors.main.agent_cfg.plugin-bindings.SubagentPlugin]
-enabled = ["researcher"]
-
-[[runtime.channels]]           # array-of-tables: zero or more persistent channels
-type = "TelegramChannel"       # registered ep_channel name
-channel_id = "telegram+main"   # unique id
-display_name = "Telegram"
-target_actor = "main"          # must exist in [runtime.actors]; defaults to main_actor
-settings = { token_env = "TELEGRAM_BOT_TOKEN" }
-```
-
-Rules (validated in `bos.config.workspace`, the `resolve_gateway_*` methods):
-
-- Actor names must match `[A-Za-z_][A-Za-z0-9_-]*` (mention-safe). The TOML key **is** the
-  actor's identity and memory scope.
-- `runtime.main_actor` must exist in `runtime.actors`.
-- Each channel needs a unique `channel_id`; `target_actor` must be a defined actor;
-  `type` must be a registered `ep_channel` (and may not be `HttpChannel`, which is gateway
-  infrastructure).
-- An actor address is `agent@<name>`; a channel address is `channel@<channel_id>`.
-
-> Migration note: `[main]` was removed; use `[runtime]` + `[runtime.actors]`.
-> `runtime.agent` / `runtime.default_actor` are removed (use `runtime.actors` /
-> `runtime.main_actor`). (`bos.config.schema.validate_config`.)
 
 ### 4.7 External agent files (`agent_dirs`)
 
@@ -454,9 +468,43 @@ resolves through the normal chain above — `[agents.BOS]` composes over it, or 
 via `_parent = "BOS"`. There is no implicit default-agent fallback beyond the conventional
 `"BOS"` name presets reference; drop `bos.exts` and you must define your own agent.
 
+### 4.9 `[runtime]` — the gateway
+
+`[runtime]`, with `[runtime.gateway]`, `[runtime.actor_resolver]`,
+`[runtime.actors.<name>]` and `[[runtime.channels]]`, configures shape B only.
+It is documented in full in §12.1. The one in-process path that reads it is
+`boscli ask --actor <name>` (§13).
+
 ---
 
-## 5. Extension points (the registry model)
+## 5. Project layout & home directories
+
+A **workspace** is any directory tree containing `.bos/config.toml`. Commands walk
+up from the current directory to find it (see §4.1).
+
+```
+my-agent/
+├── .bos/
+│   ├── config.toml        # the one config file (the "bos_dir" is .bos/)
+│   ├── .env               # secrets, if [platform].envfile = ".env"
+│   ├── agents/            # external agent definitions (*.md / *.toml)  [agent_dirs]
+│   ├── extensions/        # project-local Python extensions             [extensions]
+│   ├── skills/            # project-local skills (dirs with SKILL.md)
+│   ├── messages/          # JsonlChatStore persistence (default)
+│   ├── mailboxes/         # JsonlMailRoute persistence (default)
+│   └── gateway.state      # runtime port/PID discovery file
+└── (your project files)
+```
+
+- **`bos_dir`** = the directory containing `config.toml` (i.e. `.bos/`). All relative
+  paths in config (`envfile`, `extensions`, `agent_dirs`, store dirs) resolve against
+  `bos_dir`. (`bos.config.workspace`.)
+- **`BOS_HOME`** (default `~/.bos`) holds global state: `~/.bos/agents/<name>` for the
+  default preset, `~/.bos/presets/<name>` when running a built-in preset. (`_get_bos_home`.)
+
+---
+
+## 6. Extension points (the registry model)
 
 Everything pluggable is a named **extension** at an **extension point**. The machinery is
 in `bos.core.registry`.
@@ -485,7 +533,7 @@ in `bos.core.registry`.
   `result_serializer ∈ {auto, json, str}`. It serializes results and builds OpenAI tool
   schemas (`to_openai_schema`, `build_openai_schema`).
 
-### 5.1 The core extension points (`bos.core.contract`)
+### 6.1 The core extension points (`bos.core.contract`)
 
 | Extension point | Kind | Contract / returns |
 | --- | --- | --- |
@@ -503,13 +551,13 @@ Plugin-defined example: `pep_skills_loader` (in `bos.plugins.skills.plugin`).
 
 ---
 
-## 6. Writing extensions
+## 7. Writing extensions
 
 All extension authoring is "import a decorator from `bos.core`, decorate a function or
 class." Discovery happens because the module is imported — via `[platform].extensions`
-(a path dir scanned, or a module name imported) or via the `bos.exts` entry point (§9).
+(a path dir scanned, or a module name imported) or via the `bos.exts` entry point (§10).
 
-### 6.1 Tools — `@ep_tool`
+### 7.1 Tools — `@ep_tool`
 
 ```python
 from bos.core import ep_tool
@@ -552,7 +600,7 @@ Anatomy & rules (`bos.core.registry`, `bos.extensions.tools.filesystem`):
 Built-in tool families: filesystem (`ReadFile`, `WriteFile`, `EditFile`, `GlobSearch`,
 `GrepSearch`), system, knowledge/web search.
 
-### 6.2 Providers — `@ep_provider`
+### 7.2 Providers — `@ep_provider`
 
 A provider is `async (messages, **kwargs) -> LLMResponse`. The LLM client
 (`bos.core.llm.LLMClient`) **dispatches by model prefix**:
@@ -573,7 +621,7 @@ the built-in `litellm` provider with the full model string. Provider defaults co
 default fallback (registered by `bos.core.defaults`); it reaches every provider LiteLLM
 supports, so a custom `@ep_provider` is only needed for non-LiteLLM backends.
 
-### 6.3 Chat stores — `@ep_chat_store`
+### 7.3 Chat stores — `@ep_chat_store`
 
 A chat store owns conversation persistence **and** context assembly (token estimation,
 summary handling, tool-noise filtering). Register a class; its `__init__` receives
@@ -597,7 +645,7 @@ list_chats() -> dict[str, ChatMeta]
 Built-ins: `JsonlChatStore` (default, persistent under `bos_dir`), `InMemChatStore`.
 Select via `[harness].chat_store`.
 
-### 6.4 Consolidators, mail routes, job runners, interceptors
+### 7.4 Consolidators, mail routes, job runners, interceptors
 
 - **`@ep_consolidator`** → a `Consolidator` (summarizes history / drives memory). The
   harness builds it with `{model: BOS_CONSOLIDATOR_MODEL, llm}`. Default `LLMConsolidator`;
@@ -609,7 +657,7 @@ Select via `[harness].chat_store`.
   tables). Plugin interceptors run best-effort first, then the configured chain
   (`_CompositePluginInterceptor`). Raise `AbortTurn` to stop a turn.
 
-### 6.5 Channels — `@ep_channel`
+### 7.5 Channels — `@ep_channel`
 
 A channel bridges an external client to an actor's mailbox. The `Channel` protocol
 (`bos.core.contract`):
@@ -640,7 +688,7 @@ class Channel(Protocol):
 Built-in channels: `TelegramChannel`, `LarkChannel` (needs `bos-ai[lark]`). `HttpChannel`
 is gateway infrastructure (the control-plane API), not a user channel.
 
-### 6.6 Agent factories — `@ep_agent`
+### 7.6 Agent factories — `@ep_agent`
 
 A code-defined alternative to `[agents.<name>]`. A sync/async function returns an agent-spec
 dict (validatable as `AgentConfig`); it is invoked **once per bootstrap** and receives its
@@ -690,7 +738,7 @@ Both are overridable via `[agents.BOS]` / `[agents.bos_config]` and inheritable 
 
 ---
 
-## 7. Plugins
+## 8. Plugins
 
 A **plugin** bundles tools + system-prompt sections + interceptors and attaches them to an
 agent. There are two cooperating roles (`bos.core.contract`):
@@ -712,7 +760,7 @@ agent. There are two cooperating roles (`bos.core.contract`):
     turn (often XML listing capabilities).
   - `get_interceptors() -> Sequence[TurnInterceptor]`.
 
-### 7.1 Lifecycle (who calls what, when)
+### 8.1 Lifecycle (who calls what, when)
 
 From `bos.core.harness` (`_bind_plugins_for_agent` / `_instantiate_and_setup_plugin` /
 `create_agent`):
@@ -730,7 +778,7 @@ From `bos.core.harness` (`_bind_plugins_for_agent` / `_instantiate_and_setup_plu
    interceptors run best-effort ahead of the configured chain.
 6. At harness shutdown, `teardown()` runs in reverse setup order.
 
-### 7.2 Minimal plugin template
+### 8.2 Minimal plugin template
 
 `SubagentPlugin` (`bos.plugins.subagent`) is a compact, complete reference. The smallest
 shape:
@@ -779,7 +827,7 @@ enabled = ["MyPlugin"]
 greeting = "hello"
 ```
 
-### 7.3 Plugins can define their own extension points (`pep_`)
+### 8.3 Plugins can define their own extension points (`pep_`)
 
 A plugin may expose its own pluggable sub-implementations. `SkillsPlugin` does this:
 
@@ -796,7 +844,7 @@ class FileSystemSkillsLoader: ...
 
 Users then select/configure via `[exts.pep_skills_loader.<Impl>]`, exactly like core EPs.
 
-### 7.4 Built-in plugins
+### 8.4 Built-in plugins
 
 Registered when `bos.exts` is loaded; the default agent enables
 `MemoryPlugin, PlanPlugin, TaskPlugin, SkillsPlugin, SubagentPlugin`.
@@ -806,7 +854,7 @@ Registered when `bos.exts` is loaded; the default agent enables
 | `MemoryPlugin` | Persistent memory + recall tools; consolidation via `boscli memory consolidate` | `maxims` (categories, default `["user","self","rules"]`), `consolidation.model`. No `scope` key — memory is isolated per agent identity (passing `scope` raises). |
 | `PlanPlugin` | Planning tool(s) and prompt section | — |
 | `TaskPlugin` | In-conversation task list: `TaskCreate`/`TaskUpdate`/`TaskList`/`TaskGet` | — |
-| `SkillsPlugin` | `LoadSkill` tool + skill discovery (§8) | `skill_dirs`, `allow`, `exclude`, `loader`, `preload` |
+| `SkillsPlugin` | `LoadSkill` tool + skill discovery (§9) | `skill_dirs`, `allow`, `exclude`, `loader`, `preload` |
 | `SubagentPlugin` | `AskSubagent` tool to delegate to named agents | `enabled` (list/`"*"`), `disabled`, `task_template` |
 
 `SubagentPlugin.enabled` is the allow-list of agent kinds the agent may delegate to; `"*"`
@@ -819,7 +867,7 @@ is required. The built-in `BOS` agent ships `plugin-bindings.SubagentPlugin.enab
 
 ---
 
-## 8. Skills
+## 9. Skills
 
 A **skill** is a Markdown playbook the agent loads on demand (progressive disclosure): the
 system prompt lists only `name + description`; the `LoadSkill` tool returns the full body.
@@ -847,11 +895,11 @@ system prompt lists only `name + description`; the `LoadSkill` tool returns the 
 - **`preload`**: skill names to inline fully into the system prompt at startup (skip the
   `LoadSkill` round-trip). **`allow` / `exclude`**: filter which skills are visible/loadable.
 - Built-in skills: `coding-discipline`, `python`, `skill-creator`.
-- Ship skills from a package via the `bos.skills` entry point (§9).
+- Ship skills from a package via the `bos.skills` entry point (§10).
 
 ---
 
-## 9. Python packaging & entry points
+## 10. Python packaging & entry points
 
 BOS reads three entry-point groups. Declare them in your package's `pyproject.toml`. They
 are discovered when `bos.exts` is imported (the config default), so an **installed** package
@@ -881,7 +929,7 @@ Mechanics:
   `entry_points(group="bos.exts")` and calls `ep.load()` on each; a failing one is logged
   and skipped. The loaded module's import side effects (decorators) do the registration.
 - **`bos.skills`** — `fs_skill_loader._contributed_skill_dirs()` loads each entry point and
-  collects its package directory; these slot in at the `__builtin__` position (§8).
+  collects its package directory; these slot in at the `__builtin__` position (§9).
 - **`boscli.commands`** — `bos.cli.entry` (`_LazyGroup`) loads each entry point; the value
   must be a `click.Command`/`click.Group`. Group-vs-group collisions **merge** subcommands
   (built-in wins on inner collisions); a plugin colliding with a built-in non-group command
@@ -893,7 +941,7 @@ through the project venv (`uv run boscli ...`) so the package is importable.
 
 ---
 
-## 10. Bootstrap & discovery order
+## 11. Bootstrap & discovery order
 
 `Workspace.bootstrap_platform()` runs this exact sequence (`bos.config.workspace`):
 
@@ -915,7 +963,23 @@ instantiated, and `PluginServices` is assembled. Agents are built lazily by
 
 ---
 
-## 11. The runtime: gateway, actors, channels, message flow
+## 12. The gateway: actors, channels, message flow
+
+Shape B. The gateway is a process that hosts one or more **actors**; each actor
+is a long-lived, addressable mailbox bound to an **agent**. **Channels** bridge
+the outside world (TUI, Telegram, Lark, HTTP) to an actor's mailbox. Run it with
+`boscli gateway start`, or mount it in your own ASGI app with `GatewayMount`
+(§3).
+
+```
+                 ┌─────────────────────────── gateway process ───────────────────────────┐
+ external client │   channel ──▶ mailbox ──▶ actor ──▶ agent (LLM loop) ──▶ tools/plugins  │
+ (TUI/Telegram)  │     ▲                        │              │                           │
+                 │     └──────── reply ─────────┘        harness services:                 │
+                 │                                       chat_store, consolidator,         │
+                 │                                       mail_route, events                │
+                 └────────────────────────────────────────────────────────────────────────┘
+```
 
 - **`boscli gateway start`** boots the gateway process: it builds the harness, registers an
   actor per `[runtime.actors.<name>]` (each an addressable `agent@<name>` mailbox bound to
@@ -930,41 +994,59 @@ instantiated, and `PluginServices` is assembled. Agents are built lazily by
 - **End-to-end flow**: external client → channel `run(mailbox)` posts an `Envelope` into the
   target actor's mailbox → the actor runs its agent turn (tools, plugins, LLM) → the reply
   is delivered back through the mailbox/`MailRoute` → the channel pushes it to the client.
-- **`boscli ask`** bypasses the gateway: it builds the workspace + harness and runs one agent
-  turn **in-process**, printing the final reply to stdout (progress streams to stderr on a
-  TTY). It honors `--model` / `BOS_MODEL` per invocation.
 
----
+### 12.1 `[runtime]` — actors, gateway, channels
 
-## 12. CLI reference (`boscli`)
+```toml
+[runtime]
+main_actor = "main"            # which actor is the default mention/route target
 
-Global options: `-c/--config <path|preset>` (or `BOS_CONFIG`), `-l/--log-level <LEVEL>`
-(or `BOS_LOG_LEVEL`, default `ERROR`). Commands are lazy-loaded; third parties add more via
-`boscli.commands` (§9).
+[runtime.gateway]
+host = "127.0.0.1"
+port = 0                       # 0 = auto-assign a free port (discover via gateway.state)
+# upload_dir = ".bos/uploads/http"
+# max_upload_bytes = 20971520
 
-| Command | Purpose | Notable options |
-| --- | --- | --- |
-| `ask "<prompt>"` | One-shot, in-process agent turn. | `--stdin`, `--model`, `--agent <kind>`, `-w/--workspace` |
-| `init` | Guided project scaffolding. | `--minimal` (emit commented template), `--name`, archetype (workspace/package), `--no-probe` |
-| `gateway start` | Start the runtime. | (subgroup) |
-| `gateway stop` / `status` / `restart` | Control a running gateway. | uses `gateway.state` |
-| `tui` | Connect the terminal UI to a gateway. | |
-| `doctor` | Health checks (config, paths, env, credentials). | |
-| `inspect` | Introspect harness/config/runtime state. | (subcommands) |
-| `memory` | Memory backend admin (list/show/etc.). | (subcommands) |
+[runtime.actor_resolver]
+mention_prefix = "@"           # how channels resolve @actor mentions
 
-`boscli init` flow: prompt for purpose → pick **archetype** (`workspace` = plain project with
-`./extensions`; `package` = installable `src/<pkg>/` whose extensions register via the
-`bos.exts` entry point) → choose provider/model (detects API keys) → scaffold files →
-optional credential probe (one LLM call unless `--no-probe`) → optional `git init`.
+[runtime.actors.main]
+agent = "main"                 # which registered agent kind this actor runs
+display_name = "Main"
+# restart_on_error = true
+# max_restarts = 5
+[runtime.actors.main.agent_cfg]      # per-actor overrides (same shape as [agent.defaults])
+# model = "openai/gpt-4o"
+[runtime.actors.main.agent_cfg.plugin-bindings.SubagentPlugin]
+enabled = ["researcher"]
 
-Useful env vars: `BOS_HOME` (default `~/.bos`), `BOS_CONFIG`, `BOS_MODEL`,
-`BOS_CONSOLIDATOR_MODEL`, `BOS_CAPABILITY_LIMIT` (max skills/subagents
-listed in the prompt, default 50), `BOS_LOG_LEVEL`, plus provider `*_API_KEY`s.
+[[runtime.channels]]           # array-of-tables: zero or more persistent channels
+type = "TelegramChannel"       # registered ep_channel name
+channel_id = "telegram+main"   # unique id
+display_name = "Telegram"
+target_actor = "main"          # must exist in [runtime.actors]; defaults to main_actor
+settings = { token_env = "TELEGRAM_BOT_TOKEN" }
+```
 
----
+Rules validated at config resolution (`bos.config.workspace`, the `resolve_gateway_*`
+methods):
 
-## 13. Multi-agent patterns
+- Actor names must match `[A-Za-z_][A-Za-z0-9_-]*` (mention-safe). The TOML key **is** the
+  actor's identity and memory scope.
+- `runtime.main_actor` must exist in `runtime.actors`.
+- Each channel needs a unique `channel_id`; `target_actor` must be a defined actor; `type`
+  may not be `HttpChannel`, which is gateway infrastructure.
+- An actor address is `agent@<name>`; a channel address is `channel@<channel_id>`.
+
+That `type` names a **registered** `ep_channel` is checked later and elsewhere — at channel
+start, by `ep_channel.get(cfg.type)` in `bos.gateway.channels.channel_manager`. A typo in
+`type` therefore survives config validation and fails when the gateway starts the channel.
+
+> Migration note: `[main]` was removed; use `[runtime]` + `[runtime.actors]`.
+> `runtime.agent` / `runtime.default_actor` are removed (use `runtime.actors` /
+> `runtime.main_actor`). (`bos.config.schema.validate_config`.)
+
+### 12.2 Multi-agent patterns
 
 - **Delegation (one inbox)**: keep a single `main` actor; bind `SubagentPlugin` with
   `enabled = ["researcher", "writer"]`. The main agent calls the `AskSubagent` tool to run a
@@ -978,9 +1060,47 @@ listed in the prompt, default 50), `BOS_LOG_LEVEL`, plus provider `*_API_KEY`s.
 
 ---
 
+## 13. CLI reference (`boscli`)
+
+Global options: `-c/--config <path|preset>` (or `BOS_CONFIG`), `-l/--log-level <LEVEL>`
+(or `BOS_LOG_LEVEL`, default `ERROR`). Commands are lazy-loaded; third parties add more via
+`boscli.commands` (§10).
+
+| Command | Purpose | Notable options |
+| --- | --- | --- |
+| `ask "<prompt>"` | One-shot, in-process agent turn. | `--stdin`, `--model`, `--agent <kind>`, `--actor <name>`, `--no-steps`, `-w/--workspace` |
+| `init` | Guided project scaffolding. | `--minimal` (emit commented template), `--name`, archetype (workspace/package), `--no-probe` |
+| `gateway start` | Start the runtime. | (subgroup) |
+| `gateway stop` / `status` / `restart` | Control a running gateway. | uses `gateway.state` |
+| `tui` | Connect the terminal UI to a gateway. | |
+| `doctor` | Health checks (config, paths, env, credentials). | |
+| `inspect` | Introspect harness/config/runtime state. | (subcommands) |
+| `memory` | Memory backend admin (list/show/etc.). | (subcommands) |
+
+`boscli ask` bypasses the gateway: it builds the workspace + harness and runs one agent
+turn **in-process**, printing the final reply to stdout (progress streams to stderr on a
+TTY). It honors `--model` / `BOS_MODEL` per invocation. Agent selection has three explicit
+paths (BEP 18 §3.6) and a bare `ask` **never** consults the actor table: bare →
+`Workspace.resolve_default_agent()` (top-level `default_agent` — §4.2 — else the only agent,
+else one named `main`, else an error naming the available kinds); `--agent <kind>` → that
+kind, plain; `--actor <name>` → `actors[name].agent` **with** `actors[name].agent_cfg`
+applied, which is the only in-process path that reads the actor table. `--agent` and
+`--actor` are mutually exclusive.
+
+`boscli init` flow: prompt for purpose → pick **archetype** (`workspace` = plain project with
+`./extensions`; `package` = installable `src/<pkg>/` whose extensions register via the
+`bos.exts` entry point) → choose provider/model (detects API keys) → scaffold files →
+optional credential probe (one LLM call unless `--no-probe`) → optional `git init`.
+
+Useful env vars: `BOS_HOME` (default `~/.bos`), `BOS_CONFIG`, `BOS_MODEL`,
+`BOS_CONSOLIDATOR_MODEL`, `BOS_CAPABILITY_LIMIT` (max skills/subagents
+listed in the prompt, default 50), `BOS_LOG_LEVEL`, plus provider `*_API_KEY`s.
+
+---
+
 ## 14. Quick reference
 
-**Config sections**: `[platform]` (env/discovery) · `[harness]` (service impls) ·
+**Config sections**: `default_agent` (top-level key) · `[platform]` (env/discovery) · `[harness]` (service impls) ·
 `[exts.<ep>.<impl>]` (extension config) · `[agent.defaults]` + `[agents.<name>]` (agents) ·
 `[runtime]` / `[runtime.gateway]` / `[runtime.actors.<name>]` / `[[runtime.channels]]` (runtime).
 
@@ -993,7 +1113,14 @@ listed in the prompt, default 50), `BOS_LOG_LEVEL`, plus provider `*_API_KEY`s.
 
 **Default harness impls**: `LLMConsolidator`, `JsonlChatStore`, `JsonlMailRoute`.
 **Default plugins**: `MemoryPlugin`, `PlanPlugin`, `TaskPlugin`,
-`SkillsPlugin`, `SubagentPlugin`. **Default agent kind**: `BOS`.
+`SkillsPlugin`, `SubagentPlugin`.
+
+**Which agent runs by default** depends on the path, and there is no single answer:
+`resolve_default_agent()` (§4.2 — `default_agent`, else the only agent, else `main`, else an
+error) answers it for `boscli ask` and `bos.sdk`, and never falls back to a hard-coded name.
+The literal `"BOS"` is a fallback in exactly one place — `get_main_agent_kind()`, for a
+gateway config with no `[runtime.actors]` at all. `BOS` is otherwise just the conventional
+name of the built-in `@ep_agent` assistant that the shipped preset points `default_agent` at.
 
 **Where to read the BOS source** (browse on GitHub at
 `https://github.com/bos-agent/bos-ai/tree/main/<path>`, or open the installed package

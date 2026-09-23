@@ -27,7 +27,7 @@ uv tool install boscli      # or: pipx install boscli
 
 `pip install bos-ai` installs the **library** and provides no `boscli` command.
 That is the install to use when you are embedding BOS rather than running it —
-see [below](#embedding-bos-in-your-own-application).
+see [Embedding BOS](embedding/index.md).
 
 | Install | Adds |
 |---|---|
@@ -98,31 +98,13 @@ boscli inspect       # show the resolved harness, config, agents, and actors
 
 `pip install bos-ai` is a library install — no console script, no terminal UI, no
 gateway process. Configuration is a plain dict, so it can come from a database,
-your environment, or a control plane rather than a TOML file on disk:
+your environment, or a control plane rather than a TOML file on disk.
 
-```python
-from bos.config import Workspace
-
-workspace = Workspace(workspace=".", bos_dir="/var/lib/myapp", config=my_config_dict)
-workspace.bootstrap_platform()
-
-async with workspace.harness() as harness:
-    agent = await harness.create_agent(kind="assistant")
-    result = await agent.run(chat_id, "hello")
-    print(result.output)
-```
-
-Set `[platform] extensions = []` in that dict and import only the adapters you
-want, rather than `bos.exts`, which loads every built-in. With your own
-`@ep_provider` registered you need no extras at all — the base install is enough.
-
-The supported surface is `bos.core` (`AgentHarness`, `Agent`, `AgentResult`, the
-`ep_*` extension points, and the port protocols) plus `bos.config` (`Workspace`,
-`RootConfig`, `validate_config`). Names prefixed with `_` are re-exported for
-extensions and are **not stable**.
-
-`examples/embed_fastapi.py` in the repository is a runnable version that serves
-turns from a FastAPI route and writes nothing to disk.
+There are two ways to embed, and which one you want is a decision to make before
+you write code: **call the agent** from your own process (`bos.sdk`, `BosApp`), or
+**mount the gateway's whole runtime** inside your own web application
+(`GatewayMount`). **[Embedding BOS](embedding/index.md)** covers the choice, both
+modes, and the supported API surface.
 
 ## Where to go next
 

@@ -449,6 +449,16 @@ metadata = {
 
 ## Gateway Authentication
 
+> **Superseded by BEP 17 §3.8.** This section is kept as the record of what BEP 7
+> specified; **none of it is implemented any more.** BEP 17 removed API-key
+> authentication outright: `[runtime.gateway].api_key_env` is gone from the schema
+> (a config that still sets it fails to load, since `GatewayConfig` is
+> `extra="forbid"`), `gateway.state` no longer carries an `auth` block, and
+> `GatewayClient` lost its `api_key` parameter. **BOS performs no authentication.**
+> A mounted gateway sits behind the host application's own auth; a standalone
+> gateway binds `127.0.0.1` by default and an operator who binds elsewhere fronts
+> it themselves. See BEP 17 §3.8 and §5.1–5.3.
+
 Gateway HTTP/WS access starts with a simple API-key model.
 
 Rules:
@@ -1190,6 +1200,7 @@ No BEP 7 design blockers remain in this draft. REST agent-send/event-stream APIs
 
 | Date | Change | Intention |
 |------|--------|-----------|
+| 2026-09-22 | *Gateway Authentication* superseded | Mark the API-key section as removed by BEP 17 §3.8 rather than deleting it, so the record of what was specified — and that it no longer exists — is both preserved |
 | 2026-06-02 | Channel runtime context | Add narrow `ChannelRuntimeContext` so channels can perform preflight and actor resolution without making gateway a message proxy |
 | 2026-06-02 | Gateway state/status | Replace `agent.state` channel discovery with compact `.bos/run/gateway.state`; future REST/streaming items remain out of scope |
 | 2026-06-02 | Active turn policy | Choose one active turn per chat, no chat owner, normal-message rejection, and interrupts/aborts from any attached up-to-date channel conversation |

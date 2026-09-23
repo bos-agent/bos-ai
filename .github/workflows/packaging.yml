@@ -45,6 +45,30 @@ jobs:
           print("embed example OK on a base install")
           PY
 
+      # No extras on purpose: bos.sdk's contract stays base-install only, which
+      # is the whole point of examples/embed_sdk.py. A fresh venv with no
+      # extras is what would catch bos.sdk acquiring a dependency.
+      - name: Embedding SDK example runs against a base install
+        run: |
+          uv venv --python 3.13 /tmp/embed-sdk
+          VIRTUAL_ENV=/tmp/embed-sdk uv pip install --quiet .
+          VIRTUAL_ENV=/tmp/embed-sdk /tmp/embed-sdk/bin/python - <<'PY'
+          import subprocess
+
+          result = subprocess.run(
+              ["/tmp/embed-sdk/bin/python", "examples/embed_sdk.py"],
+              capture_output=True,
+              text=True,
+          )
+          print(result.stdout)
+          assert result.returncode == 0, result.stderr
+          # The message count rising from turn 1 to turn 2 is the first turn
+          # showing up in the second turn's history — same chat_id, no API.
+          assert "history: 2 messages" in result.stdout, result.stdout
+          assert "history: 4 messages" in result.stdout, result.stdout
+          print("embed sdk example OK on a base install")
+          PY
+
       # Needs [gateway], unlike the example above: the mounted gateway is the
       # gateway, not just its ASGI wrapper. A fresh venv is what would catch a
       # gateway dependency landing in the wrong extra.

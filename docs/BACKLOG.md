@@ -9,95 +9,13 @@ with a reason. Nothing here is a commitment.
 
 ---
 
-## 1. `bos.sdk` and the two embedding modes
+<!-- §1 "bos.sdk and the two embedding modes" and §2 "Mode 1 still has to declare
+     gateway concepts" left this file by becoming a BEP, which is one of the two
+     exits described above. They are now:
 
-**Status:** idea, vetted against the code, not designed.
-**Blocks:** nothing. **Blocked by:** nothing. See §4 for a sequencing note.
+       docs/BEP/BEP 18: The Embedding SDK and Explicit Agent Selection.md
 
-BOS is becoming an embeddable agent framework with two distinct shapes, and they
-should be stated as a product promise rather than left as an implementation detail:
-
-1. **No-gateway mode** — everything in one process. The target is "build a
-   Claude Code-like command-line agent on BOS."
-2. **Gateway mode** — the BEP 7 runtime with actors and channels. The target is
-   "build an OpenClaw/Hermes-like agent application on BOS."
-
-### They already coexist
-
-This is not a new architecture. `boscli ask` is mode 1 today — its own docstring
-says "Runs the agent in this process (not via the gateway) … no gateway is left
-running" — and it is roughly ten lines: `workspace → harness() → create_agent()
-→ agent.run(event_sink=…)`. `boscli gateway start` + `boscli tui` is mode 2.
-Both read one config, one set of agents, one set of tools/plugins/skills.
-
-BEP 13's rings already encode the split and CI enforces it: `bos.core` (+
-`bos.config`) is mode 1; `bos.gateway` is mode 2's addition, one-directional.
-
-### The proposed layering, with one correction
-
-The natural sketch is `core → sdk → {cli, gateway}`. **The `sdk → gateway` arrow
-cannot hold.** `bos.gateway` may not import `bos.config` (ring guard, stated in
-`gateway/config.py`'s own module docstring), and an SDK needs `Workspace`. The
-gateway is pure runtime policy handed a resolved config by a composition root.
-
-The shape that holds:
-
-```
-bos.core
-  ├── bos.config ── bos.sdk ──────────┐
-  └── bos.gateway ── bos.runner ──────┤     (bos.runner may import bos.sdk)
-                                      └── bos.cli
-```
-
-Two siblings on core, joined at the CLI — not a chain.
-
-### What would actually be in it
-
-Thin, and mostly extraction rather than invention:
-
-1. **The `workspace → bootstrapped harness → agent` boilerplate.** It exists
-   twice today: in `boscli ask`, and in `GatewayMount._bring_up_runtime`, whose
-   docstring already calls itself "the one place that knows how a `Gateway` is
-   assembled." `bos.runner` importing `bos.sdk` is permitted by its ring guard
-   and would leave one copy.
-2. **Default-agent resolution without gateway concepts** — fixes §2 below.
-3. **A named public surface.** BEP 16 §3.6 currently documents the embed contract
-   as a prose list of `bos.core` names. Note BEP 16 §2.2.4 explicitly declined to
-   narrow `bos.core.__init__` because "there is no external embedder yet"; two
-   named use cases change that premise. The SDK should be a *new* surface, not a
-   narrowing of `bos.core`'s exports.
-
-It needs no dependency extra — `bos.core` + `bos.config` is the base install, so
-mode 1 costs the base 14 MB and nothing more.
-
-### What this is not
-
-**Do not rewire `boscli tui` to skip the gateway.** `tui` is the only CLI command
-that uses `GatewayClient` (`cli/commands/agent.py:762`), and its gateway
-dependency is load-bearing: a TUI attached to a running gateway shares one chat
-with Telegram/Lark users and gets BEP 7's shared chat resume, stale-client
-protection and takeover. Mode 1 wants a *new* in-process interactive loop —
-`ask` is already its single-turn form — not a rewiring of `tui`.
-
----
-
-## 2. Mode 1 still has to declare gateway concepts
-
-**Status:** two small, verified defects. Natural to fix alongside §1.
-
-- **`ask` without `--agent` routes through gateway config.**
-  `resolve_default_actor()` → `resolve_gateway_actors()` (`config/workspace.py:704`),
-  which raises `ValueError("runtime.actors must define at least one actor for the
-  gateway runtime.")` when `[runtime].actors` is absent, and imports
-  `ResolvedActorConfig` from `bos.gateway.config`. A project that deliberately has
-  no gateway is required to configure an actor, and is told off about a "gateway
-  runtime" it never asked for.
-- **Every project grows an unused `mailboxes/` directory.** `AgentHarness` always
-  builds a `mail_route`, and `JsonlMailRoute.__init__` eagerly `mkdir`s
-  (`core/defaults/jsonl_mailbox.py:84`). Mode 1 never delivers an envelope. Same
-  category as the scaffolded `WordCount` tool that was removed for the same reason.
-
----
+     §3 keeps its number so BEP 18 §2.2.4's reference to it stays valid. -->
 
 ## 3. No interception point before a tool runs
 
@@ -125,28 +43,42 @@ answers — hence a BEP rather than a patch.
 
 ---
 
-## 4. Sequencing against BEP 17
+## 4. Nothing stops a `BosApp` and a mounted gateway sharing one process
 
-§1–§3 do not conflict with BEP 17 Layer 2 (ASGI transport, dropping aiohttp):
-Layer 2 lives entirely in `bos.gateway`, the transport and the extras, while §1
-lives on `bos.core` + `bos.config`. Neither design depends on the other.
+**Status:** known hazard, documented but unguarded. Wants a BEP because the
+obvious fix crosses a ring boundary.
 
-Two notes:
+`bos.sdk._app._ACTIVE` refuses a second `BosApp` while one is live, because
+`bootstrap_platform()` writes `os.environ` and clears `AgentRegistry` — both
+process-global. It guards `BosApp` against `BosApp` only. `open_harness` and
+`bootstrap` never touch `_ACTIVE`, so `GatewayMount._bring_up_runtime` brings a
+whole second runtime up beside a live `BosApp` without a word, and the reverse
+holds too.
 
-- **One file-level overlap, not a design conflict.** Layer 2 step 9 rewrites
-  `runner.serve()` for uvicorn; §1 would change `GatewayMount._bring_up_runtime`
-  to call the SDK. Different functions in one package — sequence them, do not
-  interleave them.
-- **Do §1 before BEP 17 Layer 3's documentation step (13).** That step writes an
-  "Embedding the gateway" page. Written before the two-mode framing exists, it
-  would have to be rewritten afterwards. Layer 3's code steps (11 and 12) are
-  unaffected.
+What breaks is quiet: agents already built keep working, but the registry now
+describes the other side's workspace, so the next `create_agent` — a new actor,
+`BosApp.build_agent()` — resolves against it. `POST /api/restart` re-triggers
+`_bring_up_runtime`, so a long-lived host hits this on every restart, not only
+at mount.
 
-Suggested order: **BEP 17 Layer 2 → §1 (+§2) → BEP 17 Layer 3 → §3**, with §3
-able to run in parallel with any of them.
+The obvious fix — one shared guard — is not obvious. `_ACTIVE` lives in
+`bos.sdk`, which under BEP 13's rings imports only `bos.core` and `bos.config`;
+`bos.runner` may import `bos.sdk` but not the other way round, so the guard
+cannot simply be read from both sides where it is. Moving it inward to
+`bos.core` or `bos.config` makes a process-lifecycle concern part of a layer
+that has none today. That choice is the design question, along with whether the
+answer is a refusal at all or a single owned bootstrap both modes go through.
+
+Documented meanwhile in `docs/site/embedding/index.md` and `src/bos/llm-full.md`
+§3: mount a gateway *or* hold a `BosApp`, never both.
 
 ---
 
-<!-- §5 "BEP 17 Layer 3 prerequisites" removed: all three items (the restart()
-     re-entry wedge, __main__.py's one-shot gateway capture, and
-     status_snapshot's hardcoded runtime label) were fixed by BEP 17 Layer 3. -->
+## 5. Sequencing
+
+BEP 17 and BEP 18 have both shipped in full. BEP 17's documentation step 13 was
+deliberately deferred so the page could be written after the two-mode framing
+existed rather than before it; BEP 18 §6 step 8 discharged it as
+`docs/site/embedding/index.md`, which covers both modes together.
+
+§3 and §4 are orthogonal to both and can run in parallel with either.

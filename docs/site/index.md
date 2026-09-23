@@ -13,7 +13,7 @@ OPENAI_API_KEY=<api-key> uvx boscli ask "how are you" --model openai/gpt-4o
 
 The CLI ships as the `boscli` distribution. `pip install bos-ai` installs the
 **library** and provides no `boscli` command — see
-[Embedding BOS](getting-started.md#embedding-bos-in-your-own-application).
+[Embedding BOS](embedding/index.md).
 
 Prefer to set the credentials and model once instead of repeating them on every
 call? Export them into your environment — `boscli ask` reads `BOS_MODEL` when
@@ -53,6 +53,8 @@ boscli ask "how are you"
   together.
 - **[Configuration](configuration/index.md)** — the complete `config.toml` reference.
 - **[Extending BOS](extending/index.md)** — write tools, plugins, channels, and providers.
+- **[Embedding BOS](embedding/index.md)** — put the agent inside your own application:
+  call it directly, or mount the whole gateway runtime.
 - **[CLI](cli/index.md)** — the `boscli` commands you'll use day to day.
 - **[Architecture](architecture/index.md)** — the design and principles behind BOS,
   plus an index of the enhancement proposals (BEPs) that record deeper design decisions.

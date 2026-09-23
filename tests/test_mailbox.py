@@ -206,3 +206,19 @@ class TestJsonlMailRoute:
         assert result is not None
         assert result.sender == "relay@system"
         assert result.content == "admin"
+
+    def test_no_directory_until_something_is_delivered(self, tmp_path):
+        """A no-gateway project never delivers an envelope, so it must not grow a
+        mailboxes/ dir it never writes to (BEP 18 §3.7)."""
+        route = JsonlMailRoute(bos_dir=tmp_path)
+        assert not (tmp_path / "mailboxes").exists()
+
+        # Binding and polling an empty inbox must also not create it.
+        route.bind("agent@main")
+        assert not (tmp_path / "mailboxes").exists()
+
+    @pytest.mark.asyncio
+    async def test_delivering_creates_the_directory(self, tmp_path):
+        route = JsonlMailRoute(bos_dir=tmp_path)
+        await route.deliver(Envelope(sender="a", recipient="agent@main", content="hi"))
+        assert (tmp_path / "mailboxes" / "agent@main.jsonl").exists()
