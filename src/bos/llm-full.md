@@ -1028,15 +1028,19 @@ target_actor = "main"          # must exist in [runtime.actors]; defaults to mai
 settings = { token_env = "TELEGRAM_BOT_TOKEN" }
 ```
 
-Rules (validated in `bos.config.workspace`, the `resolve_gateway_*` methods):
+Rules validated at config resolution (`bos.config.workspace`, the `resolve_gateway_*`
+methods):
 
 - Actor names must match `[A-Za-z_][A-Za-z0-9_-]*` (mention-safe). The TOML key **is** the
   actor's identity and memory scope.
 - `runtime.main_actor` must exist in `runtime.actors`.
-- Each channel needs a unique `channel_id`; `target_actor` must be a defined actor;
-  `type` must be a registered `ep_channel` (and may not be `HttpChannel`, which is gateway
-  infrastructure).
+- Each channel needs a unique `channel_id`; `target_actor` must be a defined actor; `type`
+  may not be `HttpChannel`, which is gateway infrastructure.
 - An actor address is `agent@<name>`; a channel address is `channel@<channel_id>`.
+
+That `type` names a **registered** `ep_channel` is checked later and elsewhere — at channel
+start, by `ep_channel.get(cfg.type)` in `bos.gateway.channels.channel_manager`. A typo in
+`type` therefore survives config validation and fails when the gateway starts the channel.
 
 > Migration note: `[main]` was removed; use `[runtime]` + `[runtime.actors]`.
 > `runtime.agent` / `runtime.default_actor` are removed (use `runtime.actors` /
@@ -1109,7 +1113,14 @@ listed in the prompt, default 50), `BOS_LOG_LEVEL`, plus provider `*_API_KEY`s.
 
 **Default harness impls**: `LLMConsolidator`, `JsonlChatStore`, `JsonlMailRoute`.
 **Default plugins**: `MemoryPlugin`, `PlanPlugin`, `TaskPlugin`,
-`SkillsPlugin`, `SubagentPlugin`. **Default agent kind**: `BOS`.
+`SkillsPlugin`, `SubagentPlugin`.
+
+**Which agent runs by default** depends on the path, and there is no single answer:
+`resolve_default_agent()` (§4.2 — `default_agent`, else the only agent, else `main`, else an
+error) answers it for `boscli ask` and `bos.sdk`, and never falls back to a hard-coded name.
+The literal `"BOS"` is a fallback in exactly one place — `get_main_agent_kind()`, for a
+gateway config with no `[runtime.actors]` at all. `BOS` is otherwise just the conventional
+name of the built-in `@ep_agent` assistant that the shipped preset points `default_agent` at.
 
 **Where to read the BOS source** (browse on GitHub at
 `https://github.com/bos-agent/bos-ai/tree/main/<path>`, or open the installed package
