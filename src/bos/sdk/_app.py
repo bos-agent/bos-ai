@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -12,6 +13,8 @@ from ._bootstrap import open_harness
 
 if TYPE_CHECKING:
     from bos.core import Agent, AgentHarness
+
+logger = logging.getLogger(__name__)
 
 # bootstrap_platform() writes os.environ and clears AgentRegistry, both process
 # global, so a second live BosApp would wipe the first's agents while it is still
@@ -61,8 +64,22 @@ class BosApp:
             for kind in self._workspace.config.agents or {}:
                 self._agents[kind] = await self._harness.create_agent(kind=kind)
         except BaseException:
-            await stack.aclose()
-            _ACTIVE = None
+            # Teardown must not mask the entry failure the caller needs to see, and the
+            # guard/cached state must clear even if teardown itself raises: AgentHarness's
+            # own __aexit__ awaits _aclose() on the interceptor and every owned resource
+            # unguarded (only plugin teardown there is wrapped), so a chat store, mail
+            # route or LLM session that errors on close propagates straight out of
+            # stack.aclose(). So a teardown error is logged, not raised, and the reset
+            # below runs in `finally` regardless of how aclose() goes; the bare `raise`
+            # then re-raises the original entry failure, not the teardown one.
+            try:
+                await stack.aclose()
+            except BaseException:
+                logger.error("Error tearing down BosApp after a failed __aenter__", exc_info=True)
+            finally:
+                _ACTIVE = None
+                self._harness = None
+                self._agents.clear()
             raise
         self._stack = stack
         return self

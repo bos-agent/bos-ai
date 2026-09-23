@@ -54,7 +54,6 @@ async def test_bosapp_caches_agents_and_resolves_the_default(tmp_path):
     async with BosApp(_config(), bos_dir=tmp_path / ".bos") as app:
         first = app.agent()
         assert first is app.agent("solo"), "agent() must cache, not rebuild per call"
-        assert app.harness is not None
         assert app.workspace.resolve_default_agent() == "solo"
 
 
@@ -77,8 +76,12 @@ async def test_agent_after_exit_says_so(tmp_path):
 
     async with BosApp(_config(), bos_dir=tmp_path / ".bos") as app:
         pass
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError) as excinfo:
         app.agent()
+    assert "async with" in str(excinfo.value)
+    with pytest.raises(RuntimeError) as excinfo:
+        app.harness
+    assert "async with" in str(excinfo.value)
 
 
 @pytest.mark.asyncio
