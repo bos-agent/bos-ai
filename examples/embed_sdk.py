@@ -10,10 +10,13 @@ only HTTP on top of the same calls.
 
 What it demonstrates, and what it deliberately does not need:
 
-* **Everything BOS promises an embedder comes from one place.** ``BosApp`` and
-  ``ep_provider`` here are both ``bos.sdk`` exports — ``bos.sdk.__all__`` *is*
-  the contract (BEP 18 §3.8). Nothing in this file imports ``bos.gateway`` or
-  ``bos.cli``.
+* **Everything BOS promises an embedder comes from one place.** Every BOS name
+  below — ``BosApp``, ``ep_provider``, ``LLMResponse``, ``TurnEvent``,
+  ``TurnEventSink`` — is a ``bos.sdk`` export; ``bos.sdk.__all__`` *is* the
+  contract (BEP 18 §3.8), and a promised port's own signature types are
+  promised too, so this file never reaches into ``bos.core`` to write a
+  provider or an event sink. Nothing here imports ``bos.gateway`` or
+  ``bos.cli`` either.
 * **Configuration is a dict**, with a stub ``@ep_provider`` registered before
   ``BosApp`` opens, so this runs offline and needs no ``[litellm]`` extra — no
   dependency beyond the base ``bos-ai`` install. CI asserts exactly that.
@@ -34,8 +37,7 @@ from typing import Any
 # which loads every built-in.
 import bos.extensions.chat_stores.in_memory  # noqa: F401  registers "InMemChatStore"
 import bos.extensions.mailboxes.in_memory  # noqa: F401  registers "InMemMailRoute"
-from bos.core import LLMResponse, TurnEvent
-from bos.sdk import BosApp, TurnEventSink, ep_provider
+from bos.sdk import BosApp, LLMResponse, TurnEvent, TurnEventSink, ep_provider
 
 
 @ep_provider(name="echo")

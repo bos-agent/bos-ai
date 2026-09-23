@@ -126,8 +126,10 @@ def test_the_contract_surface_is_importable_and_identical():
     expected = {
         "BosApp", "open_harness",
         "Agent", "AgentHarness", "AgentResult", "Message", "TurnContext",
-        "LLM", "ChatStore", "Consolidator", "ToolSet", "TurnInterceptor",
-        "PromptProvider", "TurnEventSink",
+        "LLM", "LLMResponse", "ChatStore", "ChatCommit", "ChatMeta",
+        "ContextResult", "TokenEstimate", "Consolidator", "ToolSet",
+        "ToolAttributes", "ToolCallRequest", "TurnInterceptor",
+        "PromptProvider", "TurnEventSink", "TurnEvent",
         "ep_tool", "ep_provider", "ep_agent", "ep_chat_store", "ep_mail_route",
         "ep_consolidator", "ep_turn_interceptor", "ep_channel", "ep_plugin",
         "Workspace", "RootConfig", "validate_config",
@@ -139,7 +141,7 @@ def test_the_contract_surface_is_importable_and_identical():
         source = (
             getattr(bos.core, name, None)
             or getattr(bos.config, name, None)
-            or getattr(bos.core.contract, name, None)  # ToolSet, PromptProvider
+            or getattr(bos.core.contract, name, None)  # ToolSet, PromptProvider, ToolAttributes
         )
         if source is not None:
             assert exported is source, f"{name} is re-exported, not redefined"
@@ -149,3 +151,63 @@ def test_nothing_underscored_is_promised():
     import bos.sdk
 
     assert not [name for name in bos.sdk.__all__ if name.startswith("_")]
+
+
+def _bos_leaf_types(hint: object) -> set[type]:
+    """Recursively unwrap a type hint (unions, generics, containers) down to
+    the leaf classes it references that are defined somewhere under
+    ``bos.core`` — the types BOS itself owns, as opposed to stdlib/typing
+    machinery (``str``, ``Any``, ``Literal``, ``None``, ``Sequence``, ...),
+    which this silently drops."""
+    import typing
+
+    origin = typing.get_origin(hint)
+    if origin is not None:
+        leaves: set[type] = set()
+        for arg in typing.get_args(hint):
+            leaves |= _bos_leaf_types(arg)
+        return leaves
+    if not isinstance(hint, type):
+        return set()
+    if not (hint.__module__ or "").startswith("bos.core"):
+        return set()
+    return {hint}
+
+
+def test_promised_ports_are_implementable_from_the_contract_alone():
+    """Every Protocol bos.sdk promises (a port an embedder *implements* —
+    ChatStore, LLM, etc.) must be implementable using only names bos.sdk also
+    promises. If a port's own method needs a type that isn't in __all__, an
+    embedder can satisfy the Protocol's shape but cannot type or construct the
+    values its methods pass and return without reaching past the contract
+    (BEP 18 §3.8).
+
+    Scoped to Protocols, not every promised name: Agent and AgentHarness are
+    concrete classes an embedder *uses*, not a shape they implement, so their
+    constructor/method types (e.g. AgentPlugin, HarnessPlugin) are exempt —
+    reachable-through is not the same claim as promised-port-is-implementable.
+    """
+    import typing
+
+    import bos.sdk
+
+    promised = set(bos.sdk.__all__)
+    missing: list[str] = []
+
+    for name in sorted(promised):
+        cls = getattr(bos.sdk, name)
+        if not (isinstance(cls, type) and getattr(cls, "_is_protocol", False)):
+            continue  # not a port an embedder implements (e.g. Agent, AgentHarness)
+        for attr_name, member in vars(cls).items():
+            if attr_name.startswith("_") or not callable(member):
+                continue
+            hints = typing.get_type_hints(member)
+            for hint_name, hint in hints.items():
+                for leaf in _bos_leaf_types(hint):
+                    if leaf.__name__ not in promised:
+                        missing.append(
+                            f"{name}.{attr_name}({hint_name}) needs {leaf.__module__}.{leaf.__name__}, "
+                            "which bos.sdk does not promise"
+                        )
+
+    assert not missing, "\n".join(missing)

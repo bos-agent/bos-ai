@@ -160,8 +160,11 @@ In order:
 - `BosApp`, `open_harness`
 - `Agent`, `AgentHarness`, `AgentResult`, `Message`, `TurnContext`
 - the ports: `LLM`, `ChatStore`, `Consolidator`, `ToolSet`, `TurnInterceptor`, `PromptProvider`, `TurnEventSink`
+- the types those ports' own methods pass and return: `LLMResponse`, `ChatCommit`, `ChatMeta`, `ContextResult`, `TokenEstimate`, `ToolAttributes`, `ToolCallRequest`, `TurnEvent`
 - the extension points: `ep_tool`, `ep_provider`, `ep_agent`, `ep_chat_store`, `ep_mail_route`, `ep_consolidator`, `ep_turn_interceptor`, `ep_channel`, `ep_plugin`
 - `Workspace`, `RootConfig`, `validate_config`
+
+A promised port's signature types are themselves promised, so every port is implementable from the contract alone — an embedder implementing `ChatStore`, say, never has to reach past `bos.sdk` for `ChatCommit` or `TokenEstimate` to do it. `tests/test_sdk.py::test_promised_ports_are_implementable_from_the_contract_alone` enforces this mechanically, for every Protocol in `__all__`, rather than leaving it to be re-derived by hand the next time a port grows a method.
 
 Everything else — including every `_`-prefixed helper `bos.core` re-exports — is available and explicitly unstable. `bos.sdk` re-exports; it does not redefine, so there is one class and one `isinstance` answer per name.
 

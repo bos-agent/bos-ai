@@ -13,10 +13,17 @@ from bos.core import (
     Agent,
     AgentHarness,
     AgentResult,
+    ChatCommit,
+    ChatMeta,
     ChatStore,
     Consolidator,
+    ContextResult,
+    LLMResponse,
     Message,
+    TokenEstimate,
+    ToolCallRequest,
     TurnContext,
+    TurnEvent,
     TurnEventSink,
     TurnInterceptor,
     ep_agent,
@@ -32,8 +39,8 @@ from bos.core import (
 
 # Not re-exported by bos.core/__init__.py — importing straight from bos.core.contract
 # is the idiom bos.plugins already uses (subagent.py, task.py). Widening bos.core's
-# public surface for these two is an API change BEP 18 does not make.
-from bos.core.contract import PromptProvider, ToolSet
+# public surface for these three is an API change BEP 18 does not make.
+from bos.core.contract import PromptProvider, ToolAttributes, ToolSet
 
 from ._app import BosApp
 from ._bootstrap import bootstrap as bootstrap
@@ -50,12 +57,20 @@ __all__ = [
     "Message",
     "TurnContext",
     "LLM",
+    "LLMResponse",
     "ChatStore",
+    "ChatCommit",
+    "ChatMeta",
+    "ContextResult",
+    "TokenEstimate",
     "Consolidator",
     "ToolSet",
+    "ToolAttributes",
+    "ToolCallRequest",
     "TurnInterceptor",
     "PromptProvider",
     "TurnEventSink",
+    "TurnEvent",
     "ep_tool",
     "ep_provider",
     "ep_agent",
