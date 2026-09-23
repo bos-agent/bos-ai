@@ -45,3 +45,68 @@ async def test_open_harness_resolves_agent_files_before_registering(tmp_path):
     ws = Workspace(tmp_path, tmp_path / ".bos", _config())
     async with open_harness(ws):
         assert AgentRegistry.has_registered("fromfile")
+
+
+@pytest.mark.asyncio
+async def test_bosapp_caches_agents_and_resolves_the_default(tmp_path):
+    from bos.sdk import BosApp
+
+    async with BosApp(_config(), bos_dir=tmp_path / ".bos") as app:
+        first = app.agent()
+        assert first is app.agent("solo"), "agent() must cache, not rebuild per call"
+        assert app.harness is not None
+        assert app.workspace.resolve_default_agent() == "solo"
+
+
+@pytest.mark.asyncio
+async def test_agent_before_entering_says_so(tmp_path):
+    """Review Focus 3: no harness yet — a message, not AttributeError on None."""
+    from bos.sdk import BosApp
+
+    app = BosApp(_config(), bos_dir=tmp_path / ".bos")
+    with pytest.raises(RuntimeError) as excinfo:
+        app.agent()
+    assert "async with" in str(excinfo.value)
+
+
+@pytest.mark.asyncio
+async def test_agent_after_exit_says_so(tmp_path):
+    """Review Focus 3, the other half: a closed app must not hand out an Agent
+    whose harness is gone."""
+    from bos.sdk import BosApp
+
+    async with BosApp(_config(), bos_dir=tmp_path / ".bos") as app:
+        pass
+    with pytest.raises(RuntimeError):
+        app.agent()
+
+
+@pytest.mark.asyncio
+async def test_an_unbuilt_kind_names_build_agent(tmp_path):
+    """agent() is sync and create_agent is not, so kinds that exist only in
+    AgentRegistry are built on request — with an await, through a method that
+    says so rather than a second return shape from agent() (BEP 18 §3.4)."""
+    from bos.sdk import BosApp
+
+    async with BosApp(_config(), bos_dir=tmp_path / ".bos") as app:
+        with pytest.raises(RuntimeError) as excinfo:
+            app.agent("BOS")
+        assert "build_agent" in str(excinfo.value)
+
+
+@pytest.mark.asyncio
+async def test_a_second_bosapp_in_one_process_is_refused(tmp_path):
+    """Review Focus 1: bootstrap_platform writes os.environ and clears
+    AgentRegistry, so a second live BosApp would wipe the first's agents while
+    it is still running. Refusing beats corrupting."""
+    from bos.sdk import BosApp
+
+    async with BosApp(_config(), bos_dir=tmp_path / ".bos"):
+        with pytest.raises(RuntimeError) as excinfo:
+            async with BosApp(_config(), bos_dir=tmp_path / ".bos2"):
+                pass
+    assert "already" in str(excinfo.value).lower()
+
+    # And the guard releases, so a later app still works.
+    async with BosApp(_config(), bos_dir=tmp_path / ".bos3") as app:
+        assert app.agent() is not None
