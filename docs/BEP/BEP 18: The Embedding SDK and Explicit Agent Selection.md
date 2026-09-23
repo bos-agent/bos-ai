@@ -258,7 +258,7 @@ None known. `bos.sdk` is additive.
 2. Given the same config: `boscli ask "…"` succeeds, and the failure message for an ambiguous case mentions no actor, no gateway and no runtime.
 3. Given a config whose `[runtime.actors.main]` carries an `agent_cfg` override: a bare `ask` runs the agent **without** the override, and `ask --actor main` runs it **with** the override. Both halves are asserted against the same fixture, so neither can pass by accident.
 4. `--agent` and `--actor` together exit non-zero with a message naming both.
-5. `grep -rn "resolve_agents()\|bootstrap_platform()" src/bos/cli src/bos/runner` returns nothing: the sequence exists once, in `bos/sdk/`, and every former copy calls it.
+5. `grep -rn "resolve_agents()\|bootstrap_platform()" src/bos/cli src/bos/runner` returns only `doctor.py`'s lone `resolve_agents()` and a comment in `mount.py`. The *sequence* exists once, in `bos/sdk/`, and every former copy of it calls `bootstrap()` or `open_harness()` — `ask`, the gateway-start pre-flight, `GatewayMount._bring_up_runtime`, `inspect._collect`, and `scaffolding._bootstrapped_workspace`. `doctor.py` is not a copy: `_check_agents` verifies that agent specs load and deliberately leaves extension loading to a separate check, so it calls `resolve_agents()` alone.
 6. `tests/test_sdk_ring_isolation.py` passes, and the seven existing ring guards pass **unmodified**.
 7. Given a mode-1 project run to completion: no `mailboxes/` directory exists under its `bos_dir`.
 8. `import bos.sdk` on a base install (no extras) succeeds.
