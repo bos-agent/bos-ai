@@ -113,3 +113,39 @@ async def test_a_second_bosapp_in_one_process_is_refused(tmp_path):
     # And the guard releases, so a later app still works.
     async with BosApp(_config(), bos_dir=tmp_path / ".bos3") as app:
         assert app.agent() is not None
+
+
+def test_the_contract_surface_is_importable_and_identical():
+    """__all__ is the promise. Re-exports must be the same objects, so there is
+    one class and one isinstance answer per name (BEP 18 §3.8)."""
+    import bos.config
+    import bos.core
+    import bos.core.contract
+    import bos.sdk
+
+    expected = {
+        "BosApp", "open_harness",
+        "Agent", "AgentHarness", "AgentResult", "Message", "TurnContext",
+        "LLM", "ChatStore", "Consolidator", "ToolSet", "TurnInterceptor",
+        "PromptProvider", "TurnEventSink",
+        "ep_tool", "ep_provider", "ep_agent", "ep_chat_store", "ep_mail_route",
+        "ep_consolidator", "ep_turn_interceptor", "ep_channel", "ep_plugin",
+        "Workspace", "RootConfig", "validate_config",
+    }
+    assert set(bos.sdk.__all__) == expected
+
+    for name in bos.sdk.__all__:
+        exported = getattr(bos.sdk, name)
+        source = (
+            getattr(bos.core, name, None)
+            or getattr(bos.config, name, None)
+            or getattr(bos.core.contract, name, None)  # ToolSet, PromptProvider
+        )
+        if source is not None:
+            assert exported is source, f"{name} is re-exported, not redefined"
+
+
+def test_nothing_underscored_is_promised():
+    import bos.sdk
+
+    assert not [name for name in bos.sdk.__all__ if name.startswith("_")]
