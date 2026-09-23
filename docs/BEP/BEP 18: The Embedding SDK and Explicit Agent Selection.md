@@ -131,7 +131,9 @@ In order:
 1. `default_agent`, if the config sets it
 2. exactly one entry in `config.agents` → that one
 3. `"main"` in `config.agents` → `"main"`
-4. otherwise raise, listing the available kinds and naming the three ways out: `default_agent`, `--agent`, `--actor`
+4. otherwise raise, listing the available kinds and pointing at `default_agent` or naming an agent explicitly
+
+Rule 4 names **no flag**. `resolve_default_agent` lives in `bos.config` and is called by embedders who have no command line, so its message must stay free of CLI and gateway vocabulary — the same discipline as the rest of this section, and `tests/test_cli_ask_selection.py::test_bare_ask_with_no_default_agent_reports_one_line` asserts the words "actor", "gateway" and "runtime" are absent from it. Enumerating `--agent` and `--actor` belongs to the CLI and to the release note, not to the raised error.
 
 `default_agent` is a **top-level** key, not `[agent] default`. `[agent.defaults]` already exists and means something entirely different — the defaults merged into *every* agent. `agent.default` beside `agent.defaults` is one letter apart with unrelated meanings, which is the look-alike collision this repo's process exists to avoid. `RootConfig` is `extra="allow"` ([`schema.py:202`](../../src/bos/config/schema.py)), so adding the field is additive and older configs are unaffected.
 
@@ -227,7 +229,7 @@ No shipped config demonstrates this — the `team` preset did and was deleted (B
 
 ### 5.2 Breaking: a project with actors but no agents and no `default_agent` errors on a bare `ask`
 
-`presets/default.toml` is exactly this shape — its `config.agents` is empty and the agent comes from `@ep_agent` through the actor table, so today the actor table is the *only* thing naming an agent there. It gains `default_agent = "BOS"`, so the shipped path keeps working. A user project shaped the same way gets §3.5's rule-4 error, which names the three ways out.
+`presets/default.toml` is exactly this shape — its `config.agents` is empty and the agent comes from `@ep_agent` through the actor table, so today the actor table is the *only* thing naming an agent there. It gains `default_agent = "BOS"`, so the shipped path keeps working. A user project shaped the same way gets §3.5's rule-4 error, which lists the available kinds and points at `default_agent`. The release note is where the three ways out are enumerated by name, since two of them are CLI flags the error deliberately does not mention.
 
 ### 5.3 Not breaking
 
@@ -283,3 +285,4 @@ None outstanding.
 ## 9. Revision history
 
 - 2026-09-22 — Draft. Decisions: `bos.sdk` is a function layer plus a deliberately small object, not an object model — `BosApp` returns `Agent` and has no `ask()` (§2.2.1); agent selection never consults actors, and the actor path becomes the explicit `--actor` flag rather than a hidden default (§3.5, §3.6); `default_agent` is top-level to avoid the `[agent.defaults]` look-alike (§3.5); `bos.sdk` is a ring with its own guard, and the tempting `core → sdk → gateway` layering is recorded as impossible under BEP 13's rules (§3.2, §3.9). Grounded findings: the bootstrap sequence is written three times, not two (`mount.py:275-278`, `agent.py:391-392`+`:416`, `agent.py:515-516`); `presets/default.toml` has an empty `config.agents`, so the actor table is today the *only* thing naming an agent there, which is why §5.2 is a real break and why step 2 precedes step 4; no shipped config carries an actor override, because the one that did — the `team` preset — was deleted the same day (BEP 9 revision, 2026-09-22), so §5.1's breaking change is real but its worked example is a user project setting `[runtime.actors.<name>.agent_cfg]`, a shape `config/template.toml:139-141` teaches.
+- 2026-09-22 — Correction after implementation (§3.5 rule 4, §5.2). As drafted, rule 4 demanded that the raised error name `default_agent`, `--agent` and `--actor`, which contradicted the same section's own principle: `resolve_default_agent` lives in `bos.config`, has embedder callers with no command line, and its message must carry no CLI or gateway vocabulary — a rule `tests/test_cli_ask_selection.py` enforces by asserting "actor" is absent. The implementation is correct and the spec was not; both passages now describe the message that exists and record that enumerating the flags is the CLI's and the release note's job.

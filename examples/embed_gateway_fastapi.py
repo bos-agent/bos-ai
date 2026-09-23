@@ -1,8 +1,10 @@
 """Mount the BOS gateway inside a FastAPI host (BEP 17 §4.1).
 
-The other embedding shape is examples/embed_fastapi.py, which calls agent.run()
-directly. This one takes the whole BEP 7 runtime — actors, channels, chat
-coordination, the WebSocket protocol — into the host's own process.
+The other embedding shape is examples/embed_sdk.py, which calls agent.run()
+directly (and embed_fastapi.py, which puts that behind an HTTP route). This one
+takes the whole BEP 7 runtime — actors, channels, chat coordination, the
+WebSocket protocol — into the host's own process. docs/site/embedding/index.md
+covers the choice between the two.
 
 Run it::
 

@@ -88,8 +88,16 @@ with `await app.build_agent("kind")`.
 
 **One `BosApp` per process.** Bootstrap writes `os.environ` and rebuilds the
 agent registry, both process-global, so opening a second while the first is live
-raises rather than quietly corrupting it. Share the one app; it is safe to call
-`agent()` and `run()` concurrently from it.
+raises rather than quietly corrupting it. Share the one app: `agent()` and
+`run()` are safe to call concurrently across *different* `chat_id`s.
+
+**Turns on one `chat_id` are yours to serialize.** In mode 1 nothing serializes
+them for you. Two turns running at once on the same `chat_id` each assemble
+context before the other has committed, so neither sees the other's message and
+their writes interleave — with no error and no warning. Queue per conversation,
+or reject the second turn, the way your application already handles two requests
+for one resource. (Mode 2 does this for you: the gateway's chat coordinator
+refuses a second turn on a busy chat with `active_turn`.)
 
 ### No extras required
 
@@ -155,6 +163,8 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from bos.config import Workspace
 from bos.runner import GatewayMount
+
+CONFIG = {...}   # the same dict shape as mode 1, plus [runtime] actors/channels
 
 def make_app() -> FastAPI:
     mount = GatewayMount(

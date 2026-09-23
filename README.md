@@ -49,20 +49,21 @@ boscli tui           # connect the terminal UI
 
 ## Embedding
 
-`pip install bos-ai` is a library install: about 14 MB, no console script, no terminal UI, no gateway. Drive an agent from your own application:
+`pip install bos-ai` is a library install: about 14 MB, no console script, no terminal UI, no gateway. There are two ways to embed, and which one you want is a decision to make before you write code.
+
+**Call the agent** from your own process — `bos.sdk` is the contract:
 
 ```python
-from bos.config import Workspace
+from bos.sdk import BosApp
 
-workspace = Workspace(workspace=".", bos_dir="/var/lib/myapp", config=my_config_dict)
-workspace.bootstrap_platform()
-
-async with workspace.harness() as harness:
-    agent = await harness.create_agent(kind="assistant")
+async with BosApp(my_config_dict, bos_dir="/var/lib/myapp/.bos") as app:
+    agent = app.agent()
     result = await agent.run(chat_id, "hello")
 ```
 
-Configuration is a plain dict — load it from a database, environment, or a control plane; nothing requires a TOML file on disk. [`examples/embed_fastapi.py`](examples/embed_fastapi.py) is a runnable version that serves turns from a FastAPI route, registers its own LLM provider, and touches no file.
+**Or mount the whole gateway runtime** — actors, channels, chat coordination, the WebSocket protocol — inside your own web application with `GatewayMount` (needs `bos-ai[gateway]`).
+
+Configuration is a plain dict in both — load it from a database, environment, or a control plane; nothing requires a TOML file on disk. **[Embedding BOS](docs/site/embedding/index.md)** covers the choice, both modes, and the supported API surface; [`examples/embed_sdk.py`](examples/embed_sdk.py) and [`examples/embed_gateway_fastapi.py`](examples/embed_gateway_fastapi.py) are the runnable versions.
 
 ### Install extras
 
