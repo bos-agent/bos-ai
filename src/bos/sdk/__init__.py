@@ -66,6 +66,11 @@ __all__ = [
     "Consolidator",
     "ToolSet",
     "ToolAttributes",
+    # ToolCallRequest is a *field* type of LLMResponse (LLMResponse.tool_calls), not a
+    # signature type of any promised port's own methods, so
+    # test_promised_ports_are_implementable_from_the_contract_alone does not see it —
+    # drop it here and that test stays green. It is promised anyway, by hand: no
+    # LLMResponse can be constructed without it.
     "ToolCallRequest",
     "TurnInterceptor",
     "PromptProvider",

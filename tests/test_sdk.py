@@ -187,6 +187,7 @@ def test_promised_ports_are_implementable_from_the_contract_alone():
     constructor/method types (e.g. AgentPlugin, HarnessPlugin) are exempt —
     reachable-through is not the same claim as promised-port-is-implementable.
     """
+    import inspect
     import typing
 
     import bos.sdk
@@ -198,8 +199,18 @@ def test_promised_ports_are_implementable_from_the_contract_alone():
         cls = getattr(bos.sdk, name)
         if not (isinstance(cls, type) and getattr(cls, "_is_protocol", False)):
             continue  # not a port an embedder implements (e.g. Agent, AgentHarness)
-        for attr_name, member in vars(cls).items():
-            if attr_name.startswith("_") or not callable(member):
+        # inspect.getmembers walks the full MRO (via dir()), not just cls.__dict__ —
+        # a method a Protocol inherits from a base is still part of the shape an
+        # embedder must implement. A `@property` is not `callable`, so it is
+        # unwrapped to its getter explicitly rather than skipped.
+        for attr_name, member in inspect.getmembers(cls):
+            if attr_name.startswith("_"):
+                continue
+            if isinstance(member, property):
+                if member.fget is None:
+                    continue
+                member = member.fget
+            elif not callable(member):
                 continue
             hints = typing.get_type_hints(member)
             for hint_name, hint in hints.items():

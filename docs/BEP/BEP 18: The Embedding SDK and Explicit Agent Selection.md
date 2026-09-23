@@ -160,7 +160,8 @@ In order:
 - `BosApp`, `open_harness`
 - `Agent`, `AgentHarness`, `AgentResult`, `Message`, `TurnContext`
 - the ports: `LLM`, `ChatStore`, `Consolidator`, `ToolSet`, `TurnInterceptor`, `PromptProvider`, `TurnEventSink`
-- the types those ports' own methods pass and return: `LLMResponse`, `ChatCommit`, `ChatMeta`, `ContextResult`, `TokenEstimate`, `ToolAttributes`, `ToolCallRequest`, `TurnEvent`
+- the types those ports' own methods pass and return: `LLMResponse`, `ChatCommit`, `ChatMeta`, `ContextResult`, `TokenEstimate`, `ToolAttributes`, `TurnEvent`
+- `ToolCallRequest` — not a port-method signature type but a field of `LLMResponse` (`LLMResponse.tool_calls`), so no port can hand back an `LLMResponse` without it; promised by hand, since it is the one name the drift test below does not reach
 - the extension points: `ep_tool`, `ep_provider`, `ep_agent`, `ep_chat_store`, `ep_mail_route`, `ep_consolidator`, `ep_turn_interceptor`, `ep_channel`, `ep_plugin`
 - `Workspace`, `RootConfig`, `validate_config`
 
