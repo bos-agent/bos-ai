@@ -81,7 +81,11 @@ class JsonlMailRoute:
     def __init__(self, store_dir: str | Path | None = None, bos_dir: str | Path | None = None) -> None:
         store_dir = Path(store_dir).expanduser() if store_dir else "mailboxes"
         self._dir = Path(bos_dir or ".").expanduser().resolve() / store_dir
-        self._dir.mkdir(parents=True, exist_ok=True)
+        # No eager mkdir: a project that never delivers an envelope (no gateway)
+        # must not grow this directory. `deliver` creates it lazily by wrapping
+        # its write in `_flock(target)`, which mkdirs the lock file's parent
+        # (bos/core/_utils.py:119). The read path already tolerates it being
+        # absent — `_init_offset` and `receive_nowait` both check `inbox.exists()`.
         self._byte_offsets: dict[str, int] = {}
 
     def _inbox_path(self, address: str) -> Path:
