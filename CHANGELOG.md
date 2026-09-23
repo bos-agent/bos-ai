@@ -2,6 +2,56 @@
 
 <!-- version list -->
 
+## v2.1.0 (2026-09-23)
+
+### Bug Fixes
+
+- Repair the scaffolded-project CLI, the dev venv extras, and the gateway PID guard
+  ([#97](https://github.com/bos-agent/bos-ai/pull/97),
+  [`cbdf109`](https://github.com/bos-agent/bos-ai/commit/cbdf109c4ce31053636424960607ef4f16e700e0))
+
+### Chores
+
+- **config**: Remove the team preset ([#103](https://github.com/bos-agent/bos-ai/pull/103),
+  [`ebaf1c8`](https://github.com/bos-agent/bos-ai/commit/ebaf1c836b8ec8514de9c806a9531cb9d509630c))
+
+### Continuous Integration
+
+- **release**: Let a dispatch override the computed bump level
+  ([#105](https://github.com/bos-agent/bos-ai/pull/105),
+  [`ea36413`](https://github.com/bos-agent/bos-ai/commit/ea364139185e50cd2f1254ed367da8a95f6ebd15))
+
+### Documentation
+
+- **bep**: Close out BEP 16 Track A and add BEP 17 for the ASGI-mountable gateway
+  ([#98](https://github.com/bos-agent/bos-ai/pull/98),
+  [`f750d37`](https://github.com/bos-agent/bos-ai/commit/f750d378e463e9846587a6d9f4aa96a1ad3b65df))
+
+### Features
+
+- **gateway**: Restart an embedded gateway over HTTP, and let the CLI see one
+  ([#102](https://github.com/bos-agent/bos-ai/pull/102),
+  [`64e181a`](https://github.com/bos-agent/bos-ai/commit/64e181a63396c2ff8951ae9e41fdabb544dda65c))
+
+- **gateway**: Serve over ASGI and drop aiohttp
+  ([#101](https://github.com/bos-agent/bos-ai/pull/101),
+  [`15e0e28`](https://github.com/bos-agent/bos-ai/commit/15e0e28552fe3fb2ddb6acf933fc65b4630b66f3))
+
+- **runner**: Add GatewayMount and take the listening socket out of Gateway
+  ([#100](https://github.com/bos-agent/bos-ai/pull/100),
+  [`91f4086`](https://github.com/bos-agent/bos-ai/commit/91f408648be8c8df51848e2457c408ea16e124e7))
+
+- **sdk**: Add bos.sdk, the embedding contract, and explicit agent selection
+  ([#104](https://github.com/bos-agent/bos-ai/pull/104),
+  [`8cae977`](https://github.com/bos-agent/bos-ai/commit/8cae977009a0aa590511af00e502a22b11a6cfc2))
+
+### Refactoring
+
+- **core**: Remove the JobRunner and auto memory consolidation
+  ([#96](https://github.com/bos-agent/bos-ai/pull/96),
+  [`71f586a`](https://github.com/bos-agent/bos-ai/commit/71f586a827b1079beba5a7a5d55a873b828a1715))
+
+
 ## v2.0.0 (2026-09-19)
 
 ### Bug Fixes
