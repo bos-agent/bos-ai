@@ -28,9 +28,14 @@ class _StubAgent:
 
 
 def _project(tmp_path, monkeypatch):
-    """Write a minimal project config with one actor and chdir in."""
+    """Write a minimal project config: a default agent (the new bare-`ask` path,
+    BEP 18 §3.6) plus one actor (for the tests that still ask for it by name via
+    --actor) and chdir in.
+    """
     (tmp_path / ".bos").mkdir()
     (tmp_path / ".bos" / "config.toml").write_text(
+        'default_agent = "react"\n'
+        "[agents.react]\n"
         '[runtime]\nmain_actor = "main"\n[runtime.actors.main]\nagent = "react"\n'
     )
     monkeypatch.chdir(tmp_path)
@@ -69,10 +74,10 @@ def test_ask_runs_in_process_and_prints_reply(tmp_path, monkeypatch):
     result = CliRunner().invoke(ask, ["hello"], obj={})
     assert result.exit_code == 0, result.output
     assert "echo: hello" in result.output
-    # Default path: the main actor ("main") locates its agent kind ("react"),
-    # passing the actor's agent_cfg.
+    # Default path (BEP 18 §3.6): the project's default_agent ("react") is used
+    # directly. No actor is consulted, so no actor overrides apply.
     assert _StubAgent.last_kind == "react"
-    assert isinstance(_StubAgent.last_agent_cfg, dict)
+    assert _StubAgent.last_agent_cfg is None
 
 
 def test_ask_agent_flag_selects_agent_kind(tmp_path, monkeypatch):
@@ -143,18 +148,24 @@ def test_ask_passes_only_explicit_actor_overrides(tmp_path, monkeypatch):
     tools.enabled=[], system_prompt=None, ...) which _deep_merge treats as
     explicit overrides, wiping the agent kind's registry defaults — the agent
     ends up with no plugins, no tools, and no system prompt.
+
+    This is exercised via --actor now (BEP 18 §3.6): a bare `ask` no longer
+    consults the actor table at all, so this actor-config-conversion behavior
+    only applies on the explicit --actor path.
     """
     _project(tmp_path, monkeypatch)
     _patch_harness(monkeypatch)
     monkeypatch.setattr("bos.config.workspace.Workspace.resolve_agents", lambda self: None)
     monkeypatch.setattr("bos.config.workspace.Workspace.bootstrap_platform", lambda self: None)
 
-    result = CliRunner().invoke(ask, ["hello"], obj={})
+    result = CliRunner().invoke(ask, ["--actor", "main", "hello"], obj={})
     assert result.exit_code == 0, result.output
     assert _StubAgent.last_agent_cfg == {}
 
 
 def test_ask_converts_explicit_actor_overrides_to_core_kwargs(tmp_path, monkeypatch):
+    """Actor overrides only apply via --actor now (BEP 18 §3.6); bare `ask`
+    no longer reaches into runtime.actors."""
     (tmp_path / ".bos").mkdir()
     (tmp_path / ".bos" / "config.toml").write_text(
         '[runtime]\nmain_actor = "main"\n'
@@ -167,7 +178,7 @@ def test_ask_converts_explicit_actor_overrides_to_core_kwargs(tmp_path, monkeypa
     monkeypatch.setattr("bos.config.workspace.Workspace.resolve_agents", lambda self: None)
     monkeypatch.setattr("bos.config.workspace.Workspace.bootstrap_platform", lambda self: None)
 
-    result = CliRunner().invoke(ask, ["hello"], obj={})
+    result = CliRunner().invoke(ask, ["--actor", "main", "hello"], obj={})
     assert result.exit_code == 0, result.output
     # Core-kwargs shape: tools.enabled == ["*"] becomes tools=None (no filter).
     assert _StubAgent.last_agent_cfg == {"max_iterations": 5, "tools": None}

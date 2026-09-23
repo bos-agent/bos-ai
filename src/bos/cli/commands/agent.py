@@ -342,7 +342,13 @@ class _TaskProgressDisplay:
     help="Read task content from stdin (appended after MESSAGE if both given).",
 )
 @click.option("--model", "model", default=None, help="Model id to use for this run (overrides BOS_MODEL).")
-@click.option("--agent", "agent_name", default=None, help="Agent to run (defaults to the main actor's agent).")
+@click.option("--agent", "agent_name", default=None, help="Agent kind to run (validated against the registry).")
+@click.option(
+    "--actor",
+    "actor_name",
+    default=None,
+    help="Run the agent as a named actor configures it, applying that actor's overrides.",
+)
 @click.option(
     "--no-steps",
     "no_steps",
@@ -364,6 +370,7 @@ def ask(
     use_stdin: bool,
     model: str | None,
     agent_name: str | None,
+    actor_name: str | None,
     no_steps: bool,
     workspace_dir: str | None,
 ):
@@ -377,9 +384,13 @@ def ask(
         boscli ask "refactor the auth module"
         boscli -c coding ask "explain this"
         boscli ask --agent researcher "summarize the spec"
+        boscli ask --actor main "reproduce what the gateway's main actor runs"
         boscli ask --no-steps "explain this" > answer.md
         cat spec.md | boscli ask --stdin
     """
+    if agent_name and actor_name:
+        raise click.UsageError("Pass --agent or --actor, not both: they name different things.")
+
     if use_stdin and not sys.stdin.isatty():
         stdin_content = sys.stdin.read()
         message = ((message or "") + "\n" + stdin_content).strip() if message else stdin_content.strip()
@@ -394,24 +405,36 @@ def ask(
 
     bootstrap(ws)
 
-    # --agent names an agent kind directly; otherwise the main actor locates it.
-    if agent_name:
+    if actor_name:
+        # The one place the in-process CLI consults the actor table, and it was
+        # asked for by name. An actor can override its agent's whole config
+        # (ActorConfig.agent_cfg), which is what an operator reproducing what the
+        # gateway runs actually wants (BEP 18 §3.6).
+        from bos.config.schema import _agent_config_to_core_kwargs
+
+        actors = (ws.config.runtime.actors if ws.config.runtime else None) or {}
+        if not actors:
+            raise click.ClickException(
+                f"No actor {actor_name!r}: this project defines no actors. "
+                "Use --agent to name an agent, or omit both for the default."
+            )
+        if actor_name not in actors:
+            known = ", ".join(sorted(actors))
+            raise click.ClickException(f"Unknown actor {actor_name!r}. Available actors: {known}.")
+        agent_kind = actors[actor_name].agent
+        agent_cfg: dict[str, Any] | None = _agent_config_to_core_kwargs(actors[actor_name].agent_cfg)
+    elif agent_name:
         if not AgentRegistry.has_registered(agent_name):
             known = ", ".join(sorted(AgentRegistry.describe())) or "none"
             raise click.ClickException(f"Unknown agent {agent_name!r}. Available agents: {known}")
         agent_kind = agent_name
-        agent_cfg: dict[str, Any] | None = None
+        agent_cfg = None
     else:
-        from bos.config.schema import _agent_config_to_core_kwargs
-
-        runtime = ws.config.runtime
-        actors = runtime.actors if runtime else {}
-        actor_cfg = actors[ws.resolve_default_actor()]
-        agent_kind = actor_cfg.agent
-        # Only explicitly-set overrides, in core-kwargs shape — a raw
-        # model_dump() would materialize defaults (plugins.enabled=[], ...)
-        # that wipe the agent kind's registry defaults on merge.
-        agent_cfg = _agent_config_to_core_kwargs(actor_cfg.agent_cfg)
+        try:
+            agent_kind = ws.resolve_default_agent()
+        except ValueError as exc:
+            raise click.ClickException(str(exc)) from exc
+        agent_cfg = None
 
     async def _run() -> str:
         async with ws.harness() as harness:
