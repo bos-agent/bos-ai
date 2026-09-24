@@ -148,7 +148,11 @@ async def read_native_session_id(store: ChatStore, chat_id: str, *, runtime: str
     to all three is to start a new native session.
     """
     try:
-        messages = await store.get_messages(chat_id)
+        # active_only=False: a summary written over this chat must not make a
+        # live vendor session unrecoverable. Returning None here means
+        # abandoning that session, not merely re-reading trimmed history, so
+        # the full log is scanned rather than risking a false "no session".
+        messages = await store.get_messages(chat_id, active_only=False)
     except Exception:
         logger.debug("No chat %r to recover a %s session from", chat_id, runtime, exc_info=True)
         return None
@@ -157,7 +161,12 @@ async def read_native_session_id(store: ChatStore, chat_id: str, *, runtime: str
         if metadata.get("external_runtime") != runtime:
             continue
         session_id = metadata.get("native_session_id")
-        return session_id if isinstance(session_id, str) and session_id else None
+        if not isinstance(session_id, str):
+            return None
+        # A blank or whitespace-only value is as good as absent: it can never
+        # be a real vendor session id, and returning it verbatim would hand a
+        # non-id back to a runtime instead of starting fresh.
+        return session_id.strip() or None
     return None
 
 

@@ -162,6 +162,61 @@ async def test_a_non_string_session_id_is_treated_as_malformed(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_an_empty_session_id_is_treated_as_malformed(tmp_path):
+    """Fix round 1, item 1: the guard's two halves are independently
+    falsifiable. test_a_non_string_session_id_is_treated_as_malformed proves
+    the isinstance(str) half; this proves the truthiness half. Dropping
+    `and session_id` (old code) / the `.strip() or None` (current code) would
+    let "" read back as a session id instead of None — exactly the
+    silent-failure shape this function exists to prevent."""
+    from bos.extensions.runtimes._shared import commit_external_turn, read_native_session_id
+
+    store = await _make_store(tmp_path)
+    await commit_external_turn(
+        store, "chat-1", turn_id="t1", user_content="a", response="b",
+        runtime="codex", native_session_id="",
+    )
+    assert await read_native_session_id(store, "chat-1", runtime="codex") is None
+
+
+@pytest.mark.asyncio
+async def test_a_whitespace_only_session_id_is_treated_as_malformed(tmp_path):
+    """Fix round 1, item 3: a whitespace-only value can never be a real
+    vendor session id and must be treated as absent, same as "" — proves the
+    `.strip()` is load-bearing and not just cosmetic."""
+    from bos.extensions.runtimes._shared import commit_external_turn, read_native_session_id
+
+    store = await _make_store(tmp_path)
+    await commit_external_turn(
+        store, "chat-1", turn_id="t1", user_content="a", response="b",
+        runtime="codex", native_session_id="   ",
+    )
+    assert await read_native_session_id(store, "chat-1", runtime="codex") is None
+
+
+@pytest.mark.asyncio
+async def test_the_session_id_survives_a_summary_written_after_the_turn(tmp_path):
+    """Fix round 1, item 2: get_messages(active_only=True) (the old default)
+    trims to the latest is_summary boundary. JsonlChatStore.save_summary
+    appends a new, newest message with is_summary=True and no
+    external_runtime metadata, so under the old default a single save_summary
+    call anywhere after the turn made the assistant message carrying
+    native_session_id fall outside the active window — read_native_session_id
+    would wrongly return None and the caller would abandon a live vendor
+    session. active_only=False keeps it recoverable."""
+    from bos.extensions.runtimes._shared import commit_external_turn, read_native_session_id
+
+    store = await _make_store(tmp_path)
+    await commit_external_turn(
+        store, "chat-1", turn_id="t1", user_content="a", response="b",
+        runtime="codex", native_session_id="thread_abc",
+    )
+    await store.save_summary("chat-1", "summary of the conversation so far")
+
+    assert await read_native_session_id(store, "chat-1", runtime="codex") == "thread_abc"
+
+
+@pytest.mark.asyncio
 async def test_omitted_native_turn_id_and_usage_are_not_recorded(tmp_path):
     """commit_external_turn's two `if` guards must withhold the keys entirely
     when the caller supplies nothing — the brief's own tests never assert
