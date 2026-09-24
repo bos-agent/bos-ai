@@ -161,12 +161,14 @@ async def read_native_session_id(store: ChatStore, chat_id: str, *, runtime: str
         if metadata.get("external_runtime") != runtime:
             continue
         session_id = metadata.get("native_session_id")
-        if not isinstance(session_id, str):
-            return None
         # A blank or whitespace-only value is as good as absent: it can never
-        # be a real vendor session id, and returning it verbatim would hand a
-        # non-id back to a runtime instead of starting fresh.
-        return session_id.strip() or None
+        # be a real vendor session id. `.strip()` here only tests for
+        # blankness — the value returned is exactly what was stored, never
+        # edited, so a real id is never handed back to the vendor changed
+        # from what it issued.
+        if not isinstance(session_id, str) or not session_id.strip():
+            return None
+        return session_id
     return None
 
 

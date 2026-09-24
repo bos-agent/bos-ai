@@ -195,6 +195,28 @@ async def test_a_whitespace_only_session_id_is_treated_as_malformed(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_a_session_id_with_surrounding_whitespace_is_returned_unchanged(tmp_path):
+    """Fix round 2: `.strip()` in the guard must test for blankness only,
+    never mutate what is returned. The round-1 fix (`return
+    session_id.strip() or None`) passed both blank-value tests above because
+    they use strings that are entirely whitespace, where the stripped and
+    unstripped results are identical — neither one could catch that the fix
+    was also editing a non-blank id. Handing a runtime a session id we
+    quietly altered from what it issued (and what we stored) is the same
+    silent-failure shape this function exists to prevent: it would surface
+    as an unexplained "unknown session" from the vendor with nothing in
+    BOS's own logs to point at."""
+    from bos.extensions.runtimes._shared import commit_external_turn, read_native_session_id
+
+    store = await _make_store(tmp_path)
+    await commit_external_turn(
+        store, "chat-1", turn_id="t1", user_content="a", response="b",
+        runtime="codex", native_session_id="  thread_abc  ",
+    )
+    assert await read_native_session_id(store, "chat-1", runtime="codex") == "  thread_abc  "
+
+
+@pytest.mark.asyncio
 async def test_the_session_id_survives_a_summary_written_after_the_turn(tmp_path):
     """Fix round 1, item 2: get_messages(active_only=True) (the old default)
     trims to the latest is_summary boundary. JsonlChatStore.save_summary
