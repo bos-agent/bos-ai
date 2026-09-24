@@ -156,6 +156,44 @@ async def test_a_broken_import_inside_the_runtime_module_is_not_relabelled(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_a_missing_symbol_in_an_installed_vendor_module_is_not_relabelled(tmp_path, monkeypatch):
+    """Fix round 1: a renamed/removed symbol in an *installed* vendor package
+    raises a plain ImportError whose `.name` is just the package
+    ("openai_codex") — the same `.name` a genuinely-missing package would set.
+    Only `ModuleNotFoundError` means "not found"; a plain `ImportError` here
+    means the package was found and something inside it wasn't, which must
+    report itself and not be relabelled as a missing extra.
+
+    Uses the real, installed `openai_codex` (no BlockImport) via a throwaway
+    module on `sys.path` that does what codex.py (Task 3) will do — `from
+    openai_codex import <symbol>` — with a symbol that doesn't exist, standing
+    in for a vendor rename or version skew.
+    """
+    import sys
+
+    from bos.core import harness as harness_mod
+    from bos.core.harness import AgentHarness
+
+    probe_dir = tmp_path / "probe"
+    probe_dir.mkdir()
+    (probe_dir / "bos_task2_symbol_probe.py").write_text(
+        "from openai_codex import _totally_bogus_attr_or_submodule\n"
+    )
+    monkeypatch.syspath_prepend(str(probe_dir))
+    monkeypatch.delitem(sys.modules, "bos_task2_symbol_probe", raising=False)
+    monkeypatch.setitem(harness_mod.EXTERNAL_AGENT_KINDS, "codex", "bos_task2_symbol_probe:CodexAgent")
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    async with AgentHarness(bos_dir=workspace, workspace=workspace) as harness:
+        with pytest.raises(RuntimeError) as excinfo:
+            await harness.create_agent("codex", agent_cfg={"permission": "read-only"})
+    message = str(excinfo.value)
+    assert "_totally_bogus_attr_or_submodule" in message, "the real cause must be visible"
+    assert "bos-ai[codex]" not in message, "a symbol missing from an installed package is not a missing extra"
+
+
+@pytest.mark.asyncio
 async def test_a_normal_kind_is_untouched(tmp_path, fake_runtimes):
     from bos.core.agent import Agent
     from bos.core.harness import AgentHarness

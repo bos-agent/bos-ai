@@ -81,9 +81,10 @@ def _load_external_runtime(runtime: str) -> type[ExternalRuntime]:
 
     The failure isn't necessarily a missing extra — it could be an import
     failing inside a runtime module that *is* installed (a typo'd import, a
-    broken transitive dependency). Only point at `pip install` when the
-    module that actually failed to import is the vendor's own; otherwise
-    report the real cause.
+    broken transitive dependency, a renamed symbol after a vendor version
+    bump). Only point at `pip install` when the module or submodule that
+    actually failed to import is the vendor's own; otherwise report the
+    real cause.
     """
     import importlib
 
@@ -93,7 +94,18 @@ def _load_external_runtime(runtime: str) -> type[ExternalRuntime]:
     except ImportError as exc:
         vendor = EXTERNAL_RUNTIME_VENDOR_MODULES.get(runtime)
         missing = getattr(exc, "name", "") or ""
-        if vendor is not None and (missing == vendor or missing.startswith(f"{vendor}.")):
+        # ModuleNotFoundError means the module/submodule itself could not be
+        # found — that's "the extra isn't installed". A plain ImportError
+        # (e.g. `from openai_codex import Renamed` after a vendor rename)
+        # can carry the same .name — the *package* — even though the package
+        # was found and imported fine; only something *inside* it is wrong,
+        # which is a real bug, not a missing extra.
+        vendor_missing = (
+            isinstance(exc, ModuleNotFoundError)
+            and vendor is not None
+            and (missing == vendor or missing.startswith(f"{vendor}."))
+        )
+        if vendor_missing:
             extra = EXTERNAL_RUNTIME_EXTRAS.get(runtime, runtime)
             raise RuntimeError(
                 f"The {runtime!r} agent runtime needs its optional dependency. "
