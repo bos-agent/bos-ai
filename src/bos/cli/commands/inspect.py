@@ -189,13 +189,22 @@ async def _agent_capabilities(ws, agent_kind: str, agent_cfg: dict[str, Any] | N
             # ToolSet and no prompt provider; the lines below read exactly those.
             # Report what it does have, from the config it was built with.
             cfg = getattr(agent, "cfg", {}) or {}
+            mcp_tools_raw = cfg.get("mcp_tools", [])
+            if isinstance(mcp_tools_raw, (list, tuple)):
+                mcp_tools: Any = sorted(mcp_tools_raw)
+            else:
+                # An ordinary config typo (e.g. `mcp_tools = 7`) must be reported,
+                # not crash `boscli inspect` with an unhandled TypeError out of
+                # sorted() — strict validation of this shape is parse_external_config's
+                # job (BEP 19 §3.4), which nothing wires into this path yet.
+                mcp_tools = [f"<malformed: expected a list, got {type(mcp_tools_raw).__name__} {mcp_tools_raw!r}>"]
             return {
                 "kind": agent_kind,
                 "name": agent.name,
                 "runtime": cfg.get("external_runtime") or agent_kind,
                 "cwd": str(cfg.get("cwd", ".")),
                 "permission": cfg.get("permission"),
-                "mcp_tools": sorted(cfg.get("mcp_tools", [])),
+                "mcp_tools": mcp_tools,
                 "plugins": [],
                 "tools": {},
                 "skills": {},

@@ -51,13 +51,17 @@ def test_agent_port_rejects_an_object_missing_run():
 
 @pytest.mark.asyncio
 async def test_a_reserved_kind_builds_the_runtime_not_an_agent(tmp_path, fake_runtimes):
-    from bos.core.agent import Agent
+    from bos.core.agent import Agent, AgentPort
     from bos.core.harness import AgentHarness
 
     async with AgentHarness(bos_dir=tmp_path, workspace=tmp_path) as harness:
         agent = await harness.create_agent("codex", agent_cfg={"permission": "read-only"})
         assert isinstance(agent, _FakeRuntime)
         assert not isinstance(agent, Agent)
+        # AgentPort is the whole point of the seam (BEP 19 §3.3): create_agent's
+        # dispatch must return something a host can actually use through it, not
+        # merely something that happens to be a _FakeRuntime and not an Agent.
+        assert isinstance(agent, AgentPort)
         assert agent.name == "codex"
 
 
@@ -271,6 +275,27 @@ async def test_inspect_reports_an_external_agent_without_touching_agent_internal
     assert info["permission"] == "read-only"
     assert info["plugins"] == []
     assert info["skills"] == {}
+
+
+@pytest.mark.asyncio
+async def test_inspect_reports_a_malformed_mcp_tools_instead_of_crashing(tmp_path, fake_runtimes):
+    """Final review, item 2: `mcp_tools = 7` is an ordinary config typo — extra="allow"
+    on AgentConfig lets it reach here unchanged, and `sorted(7)` raises an unhandled
+    TypeError. `boscli inspect agent` must report the malformed value, not crash."""
+    from bos.cli.commands.inspect import _agent_capabilities
+
+    ws = _write_workspace(
+        tmp_path,
+        '[agents.george]\n_parent = "codex"\ncwd = "."\npermission = "read-only"\nmcp_tools = 7\n',
+    )
+    ws.resolve_agents()
+    ws.bootstrap_platform()
+
+    info = await _agent_capabilities(ws, "george")
+
+    assert info["name"] == "george"
+    assert info["mcp_tools"] != []
+    assert "7" in str(info["mcp_tools"])
 
 
 @pytest.mark.asyncio
