@@ -68,14 +68,22 @@ EXTERNAL_AGENT_KINDS: dict[str, str] = {
 
 EXTERNAL_RUNTIME_EXTRAS: dict[str, str] = {"claude-code": "claude-code", "codex": "codex"}
 
+# The vendor package each runtime module imports. Used to tell "the extra is not
+# installed" from "the runtime module itself is broken" — both arrive as
+# ImportError, and only the first should point at `pip install`. `claude-code`
+# has no entry yet: until its runtime module exists, any ImportError under that
+# kind reports its real cause rather than guessing.
+EXTERNAL_RUNTIME_VENDOR_MODULES: dict[str, str] = {"codex": "openai_codex"}
+
 
 def _load_external_runtime(runtime: str) -> type[ExternalRuntime]:
     """Import a runtime class by dotted path, reporting what failed on ImportError.
 
     The failure isn't necessarily a missing extra — it could be an import
     failing inside a runtime module that *is* installed (a typo'd import, a
-    broken transitive dependency). Report the actual error and offer the
-    extra as the likely fix rather than asserting it's the cause.
+    broken transitive dependency). Only point at `pip install` when the
+    module that actually failed to import is the vendor's own; otherwise
+    report the real cause.
     """
     import importlib
 
@@ -83,11 +91,15 @@ def _load_external_runtime(runtime: str) -> type[ExternalRuntime]:
     try:
         module = importlib.import_module(module_path)
     except ImportError as exc:
-        extra = EXTERNAL_RUNTIME_EXTRAS.get(runtime, runtime)
-        raise RuntimeError(
-            f"Could not load the {runtime!r} agent runtime: {exc}. "
-            f"If its optional dependency is missing, install it with: pip install 'bos-ai[{extra}]'"
-        ) from exc
+        vendor = EXTERNAL_RUNTIME_VENDOR_MODULES.get(runtime)
+        missing = getattr(exc, "name", "") or ""
+        if vendor is not None and (missing == vendor or missing.startswith(f"{vendor}.")):
+            extra = EXTERNAL_RUNTIME_EXTRAS.get(runtime, runtime)
+            raise RuntimeError(
+                f"The {runtime!r} agent runtime needs its optional dependency. "
+                f"Install it with: pip install 'bos-ai[{extra}]'"
+            ) from exc
+        raise RuntimeError(f"Could not load the {runtime!r} agent runtime: {exc}") from exc
     return getattr(module, class_name)
 
 

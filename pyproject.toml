@@ -40,6 +40,13 @@ cli = [
     "prompt_toolkit==3.0.52",
     "textual-autocomplete==4.0.6",
 ]
+# Ships the codex binary via openai-codex-cli-bin. `mcp` is pinned to 2.x
+# deliberately: the MCP egress (bos.extensions.runtimes.mcp_egress) is built on
+# mcp.server.lowlevel, and 1.x's API differs. starlette and uvicorn come along
+# with the gateway extra, which the egress needs — not re-pinned here.
+codex = ["openai-codex==0.156.1", "mcp>=2,<3", "bos-ai[gateway]"]
+# Convenience aggregate — intentionally excludes `codex`, which ships a vendor
+# CLI binary (openai-codex-cli-bin) that `all` must not pull in.
 all = ["bos-ai[litellm,gateway,search,lark,cli]"]
 
 [build-system]
@@ -57,6 +64,9 @@ dev = [
     "bos-ai[all]",
     "ipdb==0.13.13",
     "mcp>=2,<3",
+    # Not part of `all` (ships a vendor CLI binary) but needed here so CI
+    # type-checks the codex adapter (Task 3) against real vendor types.
+    "openai-codex==0.156.1",
     "pre-commit==4.6.0",
     "pytest==9.0.3",
     "pytest-asyncio==1.3.0",

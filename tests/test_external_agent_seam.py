@@ -87,16 +87,72 @@ async def test_the_runtime_is_closed_with_the_harness(tmp_path, fake_runtimes):
 
 @pytest.mark.asyncio
 async def test_a_missing_extra_names_the_extra_to_install(tmp_path, monkeypatch):
+    """A failure inside the vendor package's own namespace is still the vendor's
+    problem to install (the `missing.startswith(f"{vendor}.")` half of the
+    classification) — `openai_codex` is a real dependency in this dev venv, so a
+    genuinely absent *submodule* of it, not the package itself, is what's faked
+    here. test_a_missing_vendor_module_names_the_extra below covers the other
+    half: the package itself missing.
+    """
     from bos.core import harness as harness_mod
     from bos.core.harness import AgentHarness
 
-    monkeypatch.setitem(harness_mod.EXTERNAL_AGENT_KINDS, "codex", "bos_nonexistent_module:CodexAgent")
+    fake_target = "openai_codex.bos_nonexistent_submodule:CodexAgent"
+    monkeypatch.setitem(harness_mod.EXTERNAL_AGENT_KINDS, "codex", fake_target)
     async with AgentHarness(bos_dir=tmp_path, workspace=tmp_path) as harness:
         with pytest.raises(RuntimeError) as excinfo:
             await harness.create_agent("codex")
     message = str(excinfo.value)
     assert "bos-ai[codex]" in message
     assert "codex" in message
+
+
+@pytest.mark.asyncio
+async def test_a_missing_vendor_module_names_the_extra(tmp_path, monkeypatch):
+    """The friendly message is for a missing VENDOR module, and only that.
+
+    `bos.extensions.runtimes.codex` doesn't exist yet (Task 3 adds it), so
+    there is no real module whose own `import openai_codex` can fail here.
+    Standing in with a dotted path that *is* the vendor module makes
+    `_load_external_runtime` see the same `exc.name == "openai_codex"` that a
+    real codex.py's failed import would produce once that module exists.
+    """
+    import sys
+
+    from conftest import BlockImport
+
+    from bos.core import harness as harness_mod
+    from bos.core.harness import AgentHarness
+
+    monkeypatch.setattr(sys, "meta_path", [BlockImport("openai_codex"), *sys.meta_path])
+    monkeypatch.delitem(sys.modules, "openai_codex", raising=False)
+    monkeypatch.setitem(harness_mod.EXTERNAL_AGENT_KINDS, "codex", "openai_codex:CodexAgent")
+
+    async with AgentHarness(bos_dir=tmp_path, workspace=tmp_path) as harness:
+        with pytest.raises(RuntimeError) as excinfo:
+            await harness.create_agent("codex", agent_cfg={"permission": "read-only"})
+    assert "bos-ai[codex]" in str(excinfo.value)
+
+
+@pytest.mark.asyncio
+async def test_a_broken_import_inside_the_runtime_module_is_not_relabelled(tmp_path, monkeypatch):
+    """A typo'd import inside codex.py must report itself, not 'install the extra'.
+
+    No BlockImport needed: `bos_totally_absent_helper` names no real package
+    anywhere, so `importlib.import_module` fails on its own — this is exactly
+    the shape of a typo'd `import` statement inside an installed runtime module.
+    """
+    from bos.core import harness as harness_mod
+    from bos.core.harness import AgentHarness
+
+    monkeypatch.setitem(harness_mod.EXTERNAL_AGENT_KINDS, "codex", "bos_totally_absent_helper:CodexAgent")
+
+    async with AgentHarness(bos_dir=tmp_path, workspace=tmp_path) as harness:
+        with pytest.raises(RuntimeError) as excinfo:
+            await harness.create_agent("codex", agent_cfg={"permission": "read-only"})
+    message = str(excinfo.value)
+    assert "bos_totally_absent_helper" in message, "the real cause must be visible"
+    assert "bos-ai[codex]" not in message, "an unrelated import failure must not be relabelled as the missing extra"
 
 
 @pytest.mark.asyncio
