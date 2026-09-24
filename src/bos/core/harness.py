@@ -603,5 +603,21 @@ class AgentHarness:
         return self._compaction_locks[chat_id]
 
     def _ensure_tool_mcp_server(self) -> Any:
-        """The loopback MCP tool server, started on first use (BEP 19 §3.8)."""
+        """The loopback MCP tool server, started on first use (BEP 19 §3.8).
+
+        Lazy: a harness whose agents expose no tools never builds one, and never
+        binds a port. Registered in ``_owned`` so it closes with the harness.
+        The accessor is sync and ``start()`` is async, so the runtime awaits
+        ``start()`` itself on first use; ``start()`` is idempotent.
+        """
+        if self._tool_mcp_server is None:
+            # Resolved by dotted path, like EXTERNAL_AGENT_KINDS above and for the
+            # same two reasons: the assembly ring never names an outer ring at
+            # import time (BEP 13 §3.1), and this module is imported on a base
+            # install that has neither mcp nor uvicorn.
+            import importlib
+
+            module = importlib.import_module("bos.extensions.runtimes.mcp_egress")
+            self._tool_mcp_server = module.BosToolMcpServer()
+            self._owned.append(self._tool_mcp_server)
         return self._tool_mcp_server
