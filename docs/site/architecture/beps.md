@@ -25,3 +25,4 @@ source file on GitHub.
 - [BEP 16: Embeddable Core — Dependency Extras and CLI Distribution Split](https://github.com/bos-agent/bos-ai/blob/main/docs/BEP/BEP%2016%3A%20Embeddable%20Core%20%E2%80%94%20Dependency%20Extras%20and%20CLI%20Distribution%20Split.md)
 - [BEP 17: ASGI-Mountable Gateway and In-Process Lifecycle](https://github.com/bos-agent/bos-ai/blob/main/docs/BEP/BEP%2017%3A%20ASGI-Mountable%20Gateway%20and%20In-Process%20Lifecycle.md)
 - [BEP 18: The Embedding SDK and Explicit Agent Selection](https://github.com/bos-agent/bos-ai/blob/main/docs/BEP/BEP%2018%3A%20The%20Embedding%20SDK%20and%20Explicit%20Agent%20Selection.md)
+- [BEP 19: External Agent Runtimes — Claude Code and Codex](https://github.com/bos-agent/bos-ai/blob/main/docs/BEP/BEP%2019%3A%20External%20Agent%20Runtimes%20%E2%80%94%20Claude%20Code%20and%20Codex.md)
