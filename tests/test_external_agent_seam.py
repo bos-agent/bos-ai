@@ -329,3 +329,38 @@ async def test_inspect_text_render_shows_external_fields_and_hides_the_model_hin
     assert "read-only" in output, "the permission level must be shown"
     assert "search" in output, "the resolved mcp_tools must be shown"
     assert "BOS_MODEL" not in output, "no such setting exists for an external runtime"
+
+
+def test_external_runtime_requires_aclose_and_resolved_config():
+    """BEP 19 §8.2: a runtime without aclose() is silently skipped by _aclose and
+    leaks its child process. The protocol is what makes pyright catch that."""
+    from conftest import _FakeRuntime
+
+    from bos.core.agent import ExternalRuntime
+
+    assert isinstance(_FakeRuntime(kind="k", cfg={}, chat_store=None, workspace=".", mcp=None), ExternalRuntime)
+
+
+def test_external_runtime_rejects_a_runtime_without_aclose():
+    from bos.core.agent import AgentPort, AgentResult, ExternalRuntime
+
+    class NoClose:
+        @property
+        def name(self) -> str:
+            return "x"
+
+        @property
+        def resolved_config(self):
+            return {}
+
+        def request_stop(self) -> None: ...
+
+        async def ask(self, chat_id, content, **kwargs) -> str:
+            return ""
+
+        async def run(self, chat_id, content, **kwargs) -> AgentResult:
+            return AgentResult(output="")
+
+    instance = NoClose()
+    assert isinstance(instance, AgentPort), "still a valid host-facing agent"
+    assert not isinstance(instance, ExternalRuntime), "but not a valid external runtime"

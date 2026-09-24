@@ -135,6 +135,10 @@ class _FakeRuntime:
     def name(self) -> str:
         return self._kind
 
+    @property
+    def resolved_config(self):
+        return self.cfg
+
     def request_stop(self) -> None:
         pass
 

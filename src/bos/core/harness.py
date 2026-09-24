@@ -15,7 +15,7 @@ from ._utils import (
     _deep_merge,
     _pick_collection,
 )
-from .agent import AbortTurn, Agent, AgentPort, TurnContext
+from .agent import AbortTurn, Agent, AgentPort, ExternalRuntime, TurnContext
 from .contract import (
     AgentPlugin,
     AgentResult,
@@ -69,7 +69,7 @@ EXTERNAL_AGENT_KINDS: dict[str, str] = {
 EXTERNAL_RUNTIME_EXTRAS: dict[str, str] = {"claude-code": "claude-code", "codex": "codex"}
 
 
-def _load_external_runtime(runtime: str) -> type:
+def _load_external_runtime(runtime: str) -> type[ExternalRuntime]:
     """Import a runtime class by dotted path, reporting what failed on ImportError.
 
     The failure isn't necessarily a missing extra — it could be an import
