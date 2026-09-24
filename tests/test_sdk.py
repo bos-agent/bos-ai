@@ -267,3 +267,62 @@ def test_promised_ports_are_implementable_from_the_contract_alone():
                         )
 
     assert not missing, "\n".join(missing)
+
+
+@pytest.mark.asyncio
+async def test_build_agent_applies_agent_cfg(tmp_path):
+    """BEP 19 §3.4: the programmatic route for per-agent options.
+
+    The kind must be one the config does not name: `__aenter__` eagerly builds
+    (and caches) every kind in `[agents]` plus the resolved default, before
+    `build_agent` ever runs — so naming "assistant" there would prime the cache
+    first and make the `agent_cfg` override below a silent no-op.
+    """
+    from bos.sdk import BosApp
+
+    config = {}
+    async with BosApp(config, bos_dir=tmp_path) as app:
+        agent = await app.build_agent("assistant", agent_cfg={"system_prompt": "override"})
+        assert agent._system_prompt == "override"
+
+
+@pytest.mark.asyncio
+async def test_build_agent_caches_per_kind_not_per_cfg(tmp_path):
+    """A second call with a different cfg returns the cached agent — documented, not silent."""
+    from bos.sdk import BosApp
+
+    config = {}
+    async with BosApp(config, bos_dir=tmp_path) as app:
+        first = await app.build_agent("assistant", agent_cfg={"system_prompt": "a"})
+        second = await app.build_agent("assistant", agent_cfg={"system_prompt": "b"})
+        assert first is second
+
+
+@pytest.mark.asyncio
+async def test_get_messages_reads_the_bos_chat_store(tmp_path):
+    from bos.core.agent import Message
+    from bos.sdk import BosApp
+
+    config = {"agents": {"assistant": {"system_prompt": "hi"}}, "default_agent": "assistant"}
+    async with BosApp(config, bos_dir=tmp_path) as app:
+        store = app.harness.chat_store
+        await store.commit_turn(
+            "chat-1",
+            [
+                Message(llm_message={"role": "user", "content": "q"}, turn_id="t1"),
+                Message(llm_message={"role": "assistant", "content": "a"}, turn_id="t1"),
+            ],
+            turn_id="t1",
+        )
+        messages = await app.get_messages("chat-1", source="bos")
+        assert [m.llm_message["content"] for m in messages] == ["q", "a"]
+
+
+@pytest.mark.asyncio
+async def test_get_messages_native_is_not_implemented_yet(tmp_path):
+    from bos.sdk import BosApp
+
+    config = {"agents": {"assistant": {"system_prompt": "hi"}}, "default_agent": "assistant"}
+    async with BosApp(config, bos_dir=tmp_path) as app:
+        with pytest.raises(NotImplementedError):
+            await app.get_messages("chat-1", source="native")

@@ -5,7 +5,7 @@ from __future__ import annotations
 import contextlib
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from bos.config import Workspace
 
@@ -13,7 +13,7 @@ from ._bootstrap import open_harness
 
 if TYPE_CHECKING:
     from bos.config import RootConfig
-    from bos.core import AgentHarness, AgentPort
+    from bos.core import AgentHarness, AgentPort, Message
 
 logger = logging.getLogger(__name__)
 
@@ -137,12 +137,48 @@ class BosApp:
         known = ", ".join(sorted(set(self._agents) | set(AgentRegistry.describe()))) or "none"
         raise RuntimeError(f"Unknown agent {kind!r}. Available: {known}.")
 
-    async def build_agent(self, kind: str) -> AgentPort:
-        """Build, cache and return an agent the config does not name."""
+    async def build_agent(self, kind: str, agent_cfg: dict[str, Any] | None = None) -> AgentPort:
+        """Build, cache and return an agent the config does not name.
+
+        *agent_cfg* is the highest-precedence config layer (BEP 19 §3.4.1.1) —
+        it is how an embedder supplies per-agent options, including an external
+        runtime's `cwd`, `permission`, `system_prompt` and `mcp_tools`, without
+        writing TOML. Caching is **per kind**: a second call with a different
+        *agent_cfg* returns the first agent, unchanged. Build distinct agents
+        under distinct kinds rather than expecting the cache to key on config.
+        """
         harness = self._require_open()
         if kind not in self._agents:
-            self._agents[kind] = await harness.create_agent(kind=kind)
+            self._agents[kind] = await harness.create_agent(kind=kind, agent_cfg=agent_cfg)
         return self._agents[kind]
+
+    async def get_messages(
+        self, chat_id: str, *, source: Literal["auto", "bos", "native"] = "auto"
+    ) -> list[Message]:
+        """A chat's messages, from BOS or from the runtime that owns the session.
+
+        ``"bos"`` is the record BOS persists and guarantees. ``"native"`` reads the
+        external runtime's own transcript, which BOS does not own — it can be
+        compacted or deleted by that runtime (BEP 19 §3.7). ``"auto"`` picks
+        ``"native"`` when the stored turn metadata names an external runtime.
+        """
+        harness = self._require_open()
+        store = harness.chat_store
+        if store is None:
+            raise RuntimeError("BosApp requires an active AgentHarness with a chat_store service.")
+        messages = await store.get_messages(chat_id)
+        if source == "bos":
+            return messages
+        runtime = next(
+            (m.metadata["external_runtime"] for m in reversed(messages) if m.metadata.get("external_runtime")),
+            None,
+        )
+        if source == "auto" and runtime is None:
+            return messages
+        raise NotImplementedError(
+            "Reading a native transcript needs the runtime adapters (BEP 19 §6 Layer 4). "
+            'Use source="bos" for the record BOS persists.'
+        )
 
     @property
     def harness(self) -> AgentHarness:
