@@ -78,8 +78,15 @@ def parse_external_config(
             f"external runtime may do to the filesystem is never inferred."
         )
 
+    cwd_raw = cfg.get("cwd", ".")
+    if not isinstance(cwd_raw, str):
+        raise ValueError(
+            f"`cwd` must be a string path; got {cwd_raw!r} ({type(cwd_raw).__name__}). "
+            f"A non-string value is silently joined into a directory named after its "
+            f"str() (e.g. `['a', 'b']`) instead of being rejected as the wrong shape."
+        )
     root = Path(workspace).resolve()
-    cwd = (root / str(cfg.get("cwd", "."))).resolve()
+    cwd = (root / cwd_raw).resolve()
     if cwd != root and root not in cwd.parents:
         raise ValueError(
             f"`cwd` resolves to {cwd}, which is outside the workspace {root}. "
@@ -87,7 +94,16 @@ def parse_external_config(
         )
 
     system_prompt = cfg.get("system_prompt")
+    if system_prompt is not None and not isinstance(system_prompt, str):
+        raise ValueError(
+            f"`system_prompt` must be a string; got {system_prompt!r} ({type(system_prompt).__name__})."
+        )
     base_instructions = cfg.get("base_instructions")
+    if base_instructions is not None and not isinstance(base_instructions, str):
+        raise ValueError(
+            f"`base_instructions` must be a string; got {base_instructions!r} "
+            f"({type(base_instructions).__name__})."
+        )
     if system_prompt is not None and base_instructions is not None:
         raise ValueError(
             "Set `system_prompt` (appended to the runtime's own prompt) or "
@@ -113,6 +129,17 @@ def parse_external_config(
     if auth not in ("subscription", "api_key"):
         raise ValueError(f'`auth` must be "subscription" or "api_key"; got {auth!r}.')
 
+    model = cfg.get("model")
+    if model is not None and not isinstance(model, str):
+        raise ValueError(f"`model` must be a string; got {model!r} ({type(model).__name__}).")
+
+    timeout_seconds = cfg.get("timeout_seconds")
+    if timeout_seconds is not None and not isinstance(timeout_seconds, (int, float)):
+        raise ValueError(
+            f"`timeout_seconds` must be a number; got {timeout_seconds!r} "
+            f"({type(timeout_seconds).__name__})."
+        )
+
     # Same shape as `mcp_tools` above: a bare value where a table belongs must fail
     # here, not surface as an uncontrolled TypeError from dict() (or a silently wrong
     # native_options) once a runtime actually reads it.
@@ -130,9 +157,9 @@ def parse_external_config(
         permission=permission,
         system_prompt=system_prompt,
         base_instructions=base_instructions,
-        model=cfg.get("model"),
+        model=model,
         auth=auth,
-        timeout_seconds=cfg.get("timeout_seconds"),
+        timeout_seconds=timeout_seconds,
         mcp_tools=mcp_tools,
         native_options=dict(native_options_raw or {}),
     )

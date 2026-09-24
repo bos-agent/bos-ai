@@ -119,3 +119,37 @@ def test_a_non_table_native_options_is_rejected(parse):
     with pytest.raises(ValueError) as excinfo:
         parse(native_options="oops")
     assert "native_options" in str(excinfo.value)
+
+
+def test_a_non_string_cwd_is_rejected(parse):
+    """Final review, item 5: the type sweep that hardened mcp_tools/native_options
+    stopped one key short. `cwd = ["a", "b"]` used to pass through `str(cfg.get(...))`
+    unchecked and become a directory literally named "['a', 'b']" — inside the root,
+    so not an escape, but the wrong shape reaching disk instead of failing here."""
+    with pytest.raises(ValueError) as excinfo:
+        parse(cwd=["a", "b"])
+    assert "cwd" in str(excinfo.value)
+
+
+def test_a_non_string_model_is_rejected(parse):
+    with pytest.raises(ValueError) as excinfo:
+        parse(model=123)
+    assert "model" in str(excinfo.value)
+
+
+def test_a_non_number_timeout_seconds_is_rejected(parse):
+    with pytest.raises(ValueError) as excinfo:
+        parse(timeout_seconds="soon")
+    assert "timeout_seconds" in str(excinfo.value)
+
+
+def test_a_non_string_system_prompt_is_rejected(parse):
+    with pytest.raises(ValueError) as excinfo:
+        parse(system_prompt=123)
+    assert "system_prompt" in str(excinfo.value)
+
+
+def test_a_non_string_base_instructions_is_rejected(parse):
+    with pytest.raises(ValueError) as excinfo:
+        parse(base_instructions=123)
+    assert "base_instructions" in str(excinfo.value)
