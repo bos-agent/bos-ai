@@ -251,3 +251,23 @@ def test_the_reserved_kind_table_matches_the_harness(tmp_path):
     from bos.core.harness import EXTERNAL_AGENT_KINDS
 
     assert set(_EXTERNAL_RUNTIME_SPECS) == set(EXTERNAL_AGENT_KINDS)
+
+
+@pytest.mark.asyncio
+async def test_inspect_reports_an_external_agent_without_touching_agent_internals(tmp_path, fake_runtimes):
+    from bos.cli.commands.inspect import _agent_capabilities
+
+    ws = _write_workspace(
+        tmp_path,
+        '[agents.george]\n_parent = "codex"\ncwd = "."\npermission = "read-only"\n',
+    )
+    ws.resolve_agents()
+    ws.bootstrap_platform()
+
+    info = await _agent_capabilities(ws, "george")
+
+    assert info["name"] == "george"
+    assert info["runtime"] == "codex"
+    assert info["permission"] == "read-only"
+    assert info["plugins"] == []
+    assert info["skills"] == {}

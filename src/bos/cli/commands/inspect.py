@@ -181,6 +181,26 @@ async def _agent_capabilities(ws, agent_kind: str, agent_cfg: dict[str, Any] | N
     await harness.__aenter__()
     try:
         agent = await harness.create_agent(agent_kind, agent_cfg=agent_cfg)
+
+        from bos.core.agent import Agent
+
+        if not isinstance(agent, Agent):
+            # BEP 19 §3.3.1. An external runtime has no plugins, no resolved
+            # ToolSet and no prompt provider; the lines below read exactly those.
+            # Report what it does have, from the config it was built with.
+            cfg = getattr(agent, "cfg", {}) or {}
+            return {
+                "kind": agent_kind,
+                "name": agent.name,
+                "runtime": cfg.get("external_runtime") or agent_kind,
+                "cwd": str(cfg.get("cwd", ".")),
+                "permission": cfg.get("permission"),
+                "mcp_tools": sorted(cfg.get("mcp_tools", [])),
+                "plugins": [],
+                "tools": {},
+                "skills": {},
+            }
+
         bound = list(getattr(agent._prompt_provider, "_plugins", []))
 
         skills: dict[str, str] = {}
