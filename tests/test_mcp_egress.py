@@ -362,6 +362,7 @@ async def test_two_sequential_harnesses_share_no_runtime_state(tmp_path, host_to
 
     from bos.core.harness import AgentHarness
 
+    servers = []
     ports: list[int] = []
     tokens: list[str] = []
     for name in ("ws-a", "ws-b"):
@@ -371,11 +372,13 @@ async def test_two_sequential_harnesses_share_no_runtime_state(tmp_path, host_to
             agent = await harness.create_agent("codex", agent_cfg={"permission": "read-only"})
             server = agent.mcp()
             await server.start()
+            servers.append(server)
             ports.append(urlparse(server.url).port)
             tokens.append(server.register_agent("george", ["EgressAlpha"]))
         assert harness._tool_mcp_server is None, "nothing BEP 19 added should survive teardown"
         assert harness._owned == []
 
+    assert servers[0] is not servers[1], "each harness builds its own MCP server, not a shared one"
     assert ports[0] != ports[1], "each harness binds its own ephemeral port"
     assert tokens[0] != tokens[1], "tokens do not carry across harnesses"
 
