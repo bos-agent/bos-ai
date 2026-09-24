@@ -58,6 +58,33 @@ def _default_structured_validator() -> Any:
     return _structured_validator_singleton
 
 
+# BEP 19 §3.2. Kind → "module:Class", not the class itself: this module is
+# imported on a base install with no extras, so importing a vendor SDK here
+# would break `import bos.sdk`. Resolved on first build, per kind.
+EXTERNAL_AGENT_KINDS: dict[str, str] = {
+    "claude-code": "bos.extensions.runtimes.claude_code:ClaudeCodeAgent",
+    "codex": "bos.extensions.runtimes.codex:CodexAgent",
+}
+
+EXTERNAL_RUNTIME_EXTRAS: dict[str, str] = {"claude-code": "claude-code", "codex": "codex"}
+
+
+def _load_external_runtime(runtime: str) -> type:
+    """Import a runtime class by dotted path, or explain which extra is missing."""
+    import importlib
+
+    module_path, _, class_name = EXTERNAL_AGENT_KINDS[runtime].partition(":")
+    try:
+        module = importlib.import_module(module_path)
+    except ImportError as exc:
+        extra = EXTERNAL_RUNTIME_EXTRAS.get(runtime, runtime)
+        raise RuntimeError(
+            f"Agent runtime {runtime!r} needs its optional dependency. "
+            f"Install it with: pip install 'bos-ai[{extra}]'"
+        ) from exc
+    return getattr(module, class_name)
+
+
 class AgentRegistry:
     _registry: dict[str, dict[str, Any]] = {}
 
@@ -318,6 +345,10 @@ class AgentHarness:
         # Per-chat compaction locks (BEP 5)
         self._compaction_locks: dict[str, asyncio.Lock] = {}
 
+        # External-runtime loopback MCP server (BEP 19 §3.8), started lazily
+        # by _ensure_tool_mcp_server on first use.
+        self._tool_mcp_server: Any = None
+
     async def __aenter__(self):
         if self._active:
             raise RuntimeError("AgentHarness is already active; do not re-enter the same instance.")
@@ -394,6 +425,26 @@ class AgentHarness:
         # nested dicts into the registry's stored defaults.
         merged_cfg = _deep_merge(copy.deepcopy(agent_defaults), agent_cfg or {})
 
+        # BEP 19 §3.2. Dispatch on the reserved name, or on the external_runtime
+        # an agent inherited from one via _parent. Before plugin binding: none of
+        # plugins, the local ToolRegistry, ResolvedToolSet, the composite
+        # interceptor or the prompt provider applies to a runtime that owns its
+        # own tool loop.
+        runtime = kind if kind in EXTERNAL_AGENT_KINDS else merged_cfg.get("external_runtime")
+        if runtime is not None:
+            if runtime not in EXTERNAL_AGENT_KINDS:
+                known = ", ".join(sorted(EXTERNAL_AGENT_KINDS))
+                raise RuntimeError(f"Unknown external runtime {runtime!r}. Known: {known}.")
+            external = _load_external_runtime(runtime)(
+                kind=kind or runtime,
+                cfg=merged_cfg,
+                chat_store=self.chat_store,
+                workspace=self._workspace,
+                mcp=self._ensure_tool_mcp_server,
+            )
+            self._owned.append(external)
+            return external
+
         agent_name = kind or merged_cfg.get("kind") or "undef"
         plugins = await self._bind_plugins_for_agent(merged_cfg)
 
@@ -427,7 +478,8 @@ class AgentHarness:
             "structured_validator": _default_structured_validator(),
         }
 
-        return _apply(Agent, kwargs)
+        agent: Agent = _apply(Agent, kwargs)
+        return agent
 
     async def _bind_plugins_for_agent(
         self,
@@ -543,3 +595,7 @@ class AgentHarness:
         if chat_id not in self._compaction_locks:
             self._compaction_locks[chat_id] = asyncio.Lock()
         return self._compaction_locks[chat_id]
+
+    def _ensure_tool_mcp_server(self) -> Any:
+        """The loopback MCP tool server, started on first use (BEP 19 §3.8)."""
+        return self._tool_mcp_server

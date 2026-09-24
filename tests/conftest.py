@@ -6,7 +6,9 @@ import asyncio
 import contextlib
 from typing import Any
 
-from bos.core.agent import Agent, TurnContext
+import pytest
+
+from bos.core.agent import Agent, AgentResult, TurnContext
 from bos.core.contract import Message, TurnInterceptor, ep_consolidator, ep_tool
 from bos.core.harness import ChainInterceptor, ResolvedToolSet, _CompositePluginInterceptor, _PluginPromptProvider
 from bos.core.llm import LLMClient
@@ -120,6 +122,38 @@ class CloseTrackingConsolidator(RecordingConsolidator):
 def _default_test_consolidator(model=None, llm=None, **kwargs):
     """Default test consolidator factory — returns a MessageOnlyConsolidator."""
     return MessageOnlyConsolidator()
+
+
+class _FakeRuntime:
+    """Stands in for ClaudeCodeAgent / CodexAgent (BEP 19 §6 Layer 1)."""
+
+    def __init__(self, *, kind, cfg, chat_store, workspace, mcp):
+        self._kind, self.cfg, self.workspace, self.mcp = kind, cfg, workspace, mcp
+        self.closed = False
+
+    @property
+    def name(self) -> str:
+        return self._kind
+
+    def request_stop(self) -> None:
+        pass
+
+    async def ask(self, chat_id, content, **kwargs) -> str:
+        return "fake"
+
+    async def run(self, chat_id, content, **kwargs) -> AgentResult:
+        return AgentResult(output="fake")
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+@pytest.fixture
+def fake_runtimes(monkeypatch):
+    """Both reserved kinds resolve to _FakeRuntime, without any vendor SDK."""
+    from bos.core import harness as harness_mod
+
+    monkeypatch.setattr(harness_mod, "_load_external_runtime", lambda runtime: _FakeRuntime)
 
 
 @contextlib.asynccontextmanager
