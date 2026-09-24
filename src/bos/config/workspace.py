@@ -68,6 +68,17 @@ class _LoadedAgentCandidate:
 
 _EXTERNAL_AGENT_SUFFIXES = {".toml", ".md"}
 
+# BEP 19 §3.4. Reserved agent kinds usable as a `_parent`. The value is the spec
+# merged underneath the child, so an agent inheriting one carries the marker
+# `create_agent` dispatches on. Kept in sync with
+# bos.core.harness.EXTERNAL_AGENT_KINDS by
+# test_external_agent_seam.py::test_the_reserved_kind_table_matches_the_harness —
+# not imported, because bos.config must not depend on bos.core (BEP 13).
+_EXTERNAL_RUNTIME_SPECS: dict[str, dict[str, Any]] = {
+    "codex": {"external_runtime": "codex"},
+    "claude-code": {"external_runtime": "claude-code"},
+}
+
 
 def find_discovered_config(workspace: Path) -> Path | None:
     for parent in [workspace] + list(workspace.parents):
@@ -631,10 +642,26 @@ class Workspace:
             name: _agent_config_to_core_kwargs(agent_config)
             for name, agent_config in (self.config.agents or {}).items()
         }
+
+        # BEP 19 §3.4: `external_runtime` is the marker the resolver writes onto
+        # an agent that inherits a reserved kind; it must not double as a config
+        # key a project sets by hand. Reject before the resolver runs — once it
+        # has, a resolver-written key and a hand-written one are indistinguishable.
+        for agent_name, spec in config_specs.items():
+            if "external_runtime" in spec:
+                raise ValueError(
+                    f"Agent {agent_name!r} sets `external_runtime`, which BOS writes, not config. "
+                    f'Use `_parent = "<runtime>"` instead (BEP 19 §3.4).'
+                )
+
         # Resolve [agents.<name>] _parent inheritance before the defaults/factory
         # merge, so each agent's effective TOML spec already folds in its base.
         # Factory agents (ep_agent, e.g. the built-in BOS) are valid parents too.
-        config_specs = _resolve_agent_inheritance(config_specs, factory_specs)
+        # BEP 19 §3.4: the reserved kinds are valid _parent targets. Merged only
+        # here — deliberately NOT into the registration enumeration below, so a
+        # project that never names them gains no phantom agent and
+        # resolve_default_agent() sees no new candidate.
+        config_specs = _resolve_agent_inheritance(config_specs, factory_specs | _EXTERNAL_RUNTIME_SPECS)
 
         # Rebuild rather than accumulate: every entry below is derived from
         # factory_specs (ep_agent) and config_specs (config.agents), so a
@@ -647,7 +674,15 @@ class Workspace:
             # shared between the defaults, the factory specs and every agent
             # registered here — each iteration would write that agent's config
             # into objects the others hold, and the last one would win for all.
-            merged = _deep_merge(copy.deepcopy(agent_defaults), copy.deepcopy(factory_specs.get(name, {})))
+            # BEP 19 §3.2.1: [agent.defaults] is BOS-agent config — a LiteLLM
+            # `model`, `max_tokens`, `plugins`. Letting it reach a runtime that
+            # reads `model` as a *native* model name is a silent misconfiguration,
+            # so externally-backed agents start from nothing. Keyed on the resolved
+            # spec, not just the name, because an inheriting agent (`george`) is
+            # not itself a reserved name.
+            externally_backed = name in _EXTERNAL_RUNTIME_SPECS or "external_runtime" in config_specs.get(name, {})
+            base = {} if externally_backed else copy.deepcopy(agent_defaults)
+            merged = _deep_merge(base, copy.deepcopy(factory_specs.get(name, {})))
             merged = _deep_merge(merged, copy.deepcopy(config_specs.get(name, {})))
             merged.pop("name", None)  # name is the registration key, not a kwarg
             merged.pop("_parent", None)  # inheritance directive, not an Agent kwarg

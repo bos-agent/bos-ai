@@ -181,6 +181,35 @@ async def _agent_capabilities(ws, agent_kind: str, agent_cfg: dict[str, Any] | N
     await harness.__aenter__()
     try:
         agent = await harness.create_agent(agent_kind, agent_cfg=agent_cfg)
+
+        from bos.core.agent import Agent
+
+        if not isinstance(agent, Agent):
+            # BEP 19 §3.3.1. An external runtime has no plugins, no resolved
+            # ToolSet and no prompt provider; the lines below read exactly those.
+            # Report what it does have, from the config it was built with.
+            cfg = getattr(agent, "cfg", {}) or {}
+            mcp_tools_raw = cfg.get("mcp_tools", [])
+            if isinstance(mcp_tools_raw, (list, tuple)):
+                mcp_tools: Any = sorted(mcp_tools_raw)
+            else:
+                # An ordinary config typo (e.g. `mcp_tools = 7`) must be reported,
+                # not crash `boscli inspect` with an unhandled TypeError out of
+                # sorted() — strict validation of this shape is parse_external_config's
+                # job (BEP 19 §3.4), which nothing wires into this path yet.
+                mcp_tools = [f"<malformed: expected a list, got {type(mcp_tools_raw).__name__} {mcp_tools_raw!r}>"]
+            return {
+                "kind": agent_kind,
+                "name": agent.name,
+                "runtime": cfg.get("external_runtime") or agent_kind,
+                "cwd": str(cfg.get("cwd", ".")),
+                "permission": cfg.get("permission"),
+                "mcp_tools": mcp_tools,
+                "plugins": [],
+                "tools": {},
+                "skills": {},
+            }
+
         bound = list(getattr(agent._prompt_provider, "_plugins", []))
 
         skills: dict[str, str] = {}
@@ -373,7 +402,20 @@ def _render_agent(console, a: dict[str, Any]) -> None:
     if a.get("error"):
         console.print(f"  [red]error: {a['error']}[/]")
         return
-    console.print(f"  model:        {a.get('model') or '— (set agent.defaults.model or BOS_MODEL)'}")
+
+    # BEP 19 §3.3.1 / §4.3. Only the external branch of _agent_capabilities
+    # emits "runtime" — [agent.defaults] is deliberately not merged into an
+    # externally-backed agent, so the model/BOS_MODEL hint below would be
+    # actively false for it. Report the fields that branch actually returns
+    # instead.
+    if "runtime" in a:
+        console.print(f"  runtime:      {a['runtime']}")
+        console.print(f"  cwd:          {a.get('cwd', '—')}")
+        console.print(f"  permission:   {a.get('permission') or '—'}")
+        mcp_tools = ", ".join(a.get("mcp_tools", [])) or "—"
+        console.print(f"  mcp_tools:    {mcp_tools}")
+    else:
+        console.print(f"  model:        {a.get('model') or '— (set agent.defaults.model or BOS_MODEL)'}")
     plugins = a.get("plugins", [])
     console.print(f"\n[bold]Plugins[/] ({len(plugins)})")
     console.print("  " + (", ".join(plugins) or "—"))

@@ -4,7 +4,7 @@ import json
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Literal, Protocol, runtime_checkable
+from typing import Any, Awaitable, Literal, Protocol, runtime_checkable
 
 from ._content import MessageContent
 from ._utils import _as_parts
@@ -416,6 +416,50 @@ class TurnEventSink(Protocol):
     concern (``HostChannelSink``)."""
 
     async def emit(self, event: TurnEvent) -> None: ...
+
+
+@runtime_checkable
+class AgentPort(Protocol):
+    """What a host requires of an agent, whichever runtime backs it (BEP 19 §3.3).
+
+    ``Agent`` is BOS's own implementation. An external runtime (Claude Code,
+    Codex) implements this without being an ``Agent`` — it runs none of the
+    turn loop, holds no ``LLM`` and no ``Consolidator``. These four members are
+    the whole of what ``AgentActor``, ``_HarnessAgentRunner``, ``BosApp`` and
+    ``boscli ask`` call, so they are the whole of the port.
+    """
+
+    @property
+    def name(self) -> str: ...
+
+    def request_stop(self) -> None: ...
+
+    async def ask(
+        self,
+        chat_id: str,
+        content: MessageContent,
+        interrupt: Callable[[], dict[str, Any] | Awaitable[dict[str, Any]] | None] | None = None,
+        ctx_metadata: dict[str, Any] | None = None,
+        llm_args: dict[str, Any] | None = None,
+        event_sink: TurnEventSink | None = None,
+        turn_id: str | None = None,
+        commit_observer: Callable[[Any], Any | Awaitable[Any]] | None = None,
+    ) -> str: ...
+
+    async def run(
+        self,
+        chat_id: str,
+        content: MessageContent,
+        *,
+        interrupt: Callable[[], dict[str, Any] | Awaitable[dict[str, Any]] | None] | None = None,
+        ctx_metadata: dict[str, Any] | None = None,
+        llm_args: dict[str, Any] | None = None,
+        event_sink: TurnEventSink | None = None,
+        turn_id: str | None = None,
+        commit_observer: Callable[[Any], Any | Awaitable[Any]] | None = None,
+        schema: dict[str, Any] | None = None,
+        max_schema_retries: int = 1,
+    ) -> AgentResult: ...
 
 
 @runtime_checkable

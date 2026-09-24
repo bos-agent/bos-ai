@@ -15,7 +15,7 @@ from ._utils import (
     _deep_merge,
     _pick_collection,
 )
-from .agent import AbortTurn, Agent, TurnContext
+from .agent import AbortTurn, Agent, AgentPort, TurnContext
 from .contract import (
     AgentPlugin,
     AgentResult,
@@ -56,6 +56,39 @@ def _default_structured_validator() -> Any:
 
         _structured_validator_singleton = JsonSchemaValidator()
     return _structured_validator_singleton
+
+
+# BEP 19 §3.2. Kind → "module:Class", not the class itself: this module is
+# imported on a base install with no extras, so importing a vendor SDK here
+# would break `import bos.sdk`. Resolved on first build, per kind.
+EXTERNAL_AGENT_KINDS: dict[str, str] = {
+    "claude-code": "bos.extensions.runtimes.claude_code:ClaudeCodeAgent",
+    "codex": "bos.extensions.runtimes.codex:CodexAgent",
+}
+
+EXTERNAL_RUNTIME_EXTRAS: dict[str, str] = {"claude-code": "claude-code", "codex": "codex"}
+
+
+def _load_external_runtime(runtime: str) -> type:
+    """Import a runtime class by dotted path, reporting what failed on ImportError.
+
+    The failure isn't necessarily a missing extra — it could be an import
+    failing inside a runtime module that *is* installed (a typo'd import, a
+    broken transitive dependency). Report the actual error and offer the
+    extra as the likely fix rather than asserting it's the cause.
+    """
+    import importlib
+
+    module_path, _, class_name = EXTERNAL_AGENT_KINDS[runtime].partition(":")
+    try:
+        module = importlib.import_module(module_path)
+    except ImportError as exc:
+        extra = EXTERNAL_RUNTIME_EXTRAS.get(runtime, runtime)
+        raise RuntimeError(
+            f"Could not load the {runtime!r} agent runtime: {exc}. "
+            f"If its optional dependency is missing, install it with: pip install 'bos-ai[{extra}]'"
+        ) from exc
+    return getattr(module, class_name)
 
 
 class AgentRegistry:
@@ -318,6 +351,10 @@ class AgentHarness:
         # Per-chat compaction locks (BEP 5)
         self._compaction_locks: dict[str, asyncio.Lock] = {}
 
+        # External-runtime loopback MCP server (BEP 19 §3.8), started lazily
+        # by _ensure_tool_mcp_server on first use.
+        self._tool_mcp_server: Any = None
+
     async def __aenter__(self):
         if self._active:
             raise RuntimeError("AgentHarness is already active; do not re-enter the same instance.")
@@ -367,6 +404,7 @@ class AgentHarness:
         for resource in reversed(self._owned):
             await _aclose(resource)
         self._owned.clear()
+        self._tool_mcp_server = None
 
         self._active = False
 
@@ -374,7 +412,7 @@ class AgentHarness:
         self,
         kind: str | None = None,
         agent_cfg: dict[str, Any] | None = None,
-    ) -> Agent:
+    ) -> AgentPort:
         if not self._active:
             raise RuntimeError("create_agent must be called within an active AgentHarness context.")
 
@@ -393,6 +431,26 @@ class AgentHarness:
         # shallow copy would let per-agent overrides write through the shared
         # nested dicts into the registry's stored defaults.
         merged_cfg = _deep_merge(copy.deepcopy(agent_defaults), agent_cfg or {})
+
+        # BEP 19 §3.2. Dispatch on the reserved name, or on the external_runtime
+        # an agent inherited from one via _parent. Before plugin binding: none of
+        # plugins, the local ToolRegistry, ResolvedToolSet, the composite
+        # interceptor or the prompt provider applies to a runtime that owns its
+        # own tool loop.
+        runtime = kind if kind in EXTERNAL_AGENT_KINDS else merged_cfg.get("external_runtime")
+        if runtime is not None:
+            if runtime not in EXTERNAL_AGENT_KINDS:
+                known = ", ".join(sorted(EXTERNAL_AGENT_KINDS))
+                raise RuntimeError(f"Unknown external runtime {runtime!r}. Known: {known}.")
+            external = _load_external_runtime(runtime)(
+                kind=kind or runtime,
+                cfg=merged_cfg,
+                chat_store=self.chat_store,
+                workspace=self._workspace,
+                mcp=self._ensure_tool_mcp_server,
+            )
+            self._owned.append(external)
+            return external
 
         agent_name = kind or merged_cfg.get("kind") or "undef"
         plugins = await self._bind_plugins_for_agent(merged_cfg)
@@ -427,7 +485,8 @@ class AgentHarness:
             "structured_validator": _default_structured_validator(),
         }
 
-        return _apply(Agent, kwargs)
+        agent: Agent = _apply(Agent, kwargs)
+        return agent
 
     async def _bind_plugins_for_agent(
         self,
@@ -543,3 +602,33 @@ class AgentHarness:
         if chat_id not in self._compaction_locks:
             self._compaction_locks[chat_id] = asyncio.Lock()
         return self._compaction_locks[chat_id]
+
+    def _ensure_tool_mcp_server(self) -> Any:
+        """The loopback MCP tool server, started on first use (BEP 19 §3.8).
+
+        Lazy: a harness whose agents expose no tools never builds one, and never
+        binds a port. Registered in ``_owned`` so it closes with the harness.
+        The accessor is sync and ``start()`` is async, so the runtime awaits
+        ``start()`` itself on first use; ``start()`` is idempotent.
+        """
+        if not self._active:
+            # Same guard as create_agent: a runtime object a host still holds past
+            # harness teardown must not be able to build a fresh server into a
+            # cleared _owned, whose listener nothing would ever close.
+            raise RuntimeError("_ensure_tool_mcp_server must be called within an active AgentHarness context.")
+        if self._tool_mcp_server is None:
+            # Resolved by dotted path, like EXTERNAL_AGENT_KINDS above and for the
+            # same two reasons: the assembly ring never names an outer ring at
+            # import time (BEP 13 §3.1), and this module is imported on a base
+            # install that has neither mcp nor uvicorn.
+            import importlib
+
+            module = importlib.import_module("bos.extensions.runtimes.mcp_egress")
+            self._tool_mcp_server = module.BosToolMcpServer()
+            # insert(0), not append: __aexit__ closes reversed(_owned), so index 0
+            # closes last — after every external runtime, which may still be
+            # calling a tool through this server as it shuts down. A runtime that
+            # asks for the server lazily lands *after* itself in _owned, so an
+            # append would tear the server down first. Do not "tidy" this.
+            self._owned.insert(0, self._tool_mcp_server)
+        return self._tool_mcp_server

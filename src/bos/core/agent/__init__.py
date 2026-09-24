@@ -35,6 +35,7 @@ from .agent import AbortTurn, Agent
 from .contract import (
     LLM,
     AgentEventType,
+    AgentPort,
     AgentResult,
     ChatCommit,
     ChatMeta,
@@ -68,6 +69,7 @@ __all__ = [
     "AbortTurn",
     "Agent",
     "AgentEventType",
+    "AgentPort",
     "AgentResult",
     "ChatCommit",
     "StructuredOutputError",
