@@ -619,5 +619,10 @@ class AgentHarness:
 
             module = importlib.import_module("bos.extensions.runtimes.mcp_egress")
             self._tool_mcp_server = module.BosToolMcpServer()
-            self._owned.append(self._tool_mcp_server)
+            # insert(0), not append: __aexit__ closes reversed(_owned), so index 0
+            # closes last — after every external runtime, which may still be
+            # calling a tool through this server as it shuts down. A runtime that
+            # asks for the server lazily lands *after* itself in _owned, so an
+            # append would tear the server down first. Do not "tidy" this.
+            self._owned.insert(0, self._tool_mcp_server)
         return self._tool_mcp_server

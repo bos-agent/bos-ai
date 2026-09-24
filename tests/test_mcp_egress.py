@@ -179,22 +179,68 @@ async def test_a_bad_token_is_rejected(host_tools):
 
 
 @pytest.mark.asyncio
+async def test_a_request_with_no_authorization_header_is_refused_over_http(host_tools):
+    """The absent-header case on the wire, not through a double: Starlette's own Headers."""
+    import httpx
+
+    from bos.extensions.runtimes.mcp_egress import BosToolMcpServer
+
+    server = BosToolMcpServer()
+    try:
+        await server.start()
+        server.register_agent("george", ["EgressAlpha"])
+        body = {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                server.url,
+                json=body,
+                headers={"Accept": "application/json, text/event-stream", "Content-Type": "application/json"},
+            )
+        assert response.status_code == 401
+    finally:
+        await server.aclose()
+
+
+@pytest.mark.asyncio
 async def test_a_request_with_no_usable_credential_is_granted_nothing(host_tools):
-    """The deny-by-default arms: no HTTP request at all, and a header that is not a bearer."""
+    """The deny-by-default arms: no request at all, and a header that is not a bearer."""
+    from starlette.datastructures import Headers
+
     from bos.extensions.runtimes.mcp_egress import BosToolMcpServer
 
     server = BosToolMcpServer()
     token = server.register_agent("george", ["EgressAlpha"])
 
     assert server._grant(None) is None
-    assert server._grant(_FakeRequest({})) is None
-    assert server._grant(_FakeRequest({"authorization": token})) is None  # no "Bearer " prefix
-    assert server._grant(_FakeRequest({"authorization": f"Bearer {token}"})) == ("george", frozenset({"EgressAlpha"}))
+    assert server._grant(Headers({})) is None
+    assert server._grant(Headers({"authorization": token})) is None  # no "Bearer " prefix
+    assert server._grant(Headers({"authorization": f"Bearer {token}"})) == ("george", frozenset({"EgressAlpha"}))
+    # Starlette's Headers are case-insensitive; the wire spelling must work too.
+    assert server._grant(Headers({"Authorization": f"Bearer {token}"})) == ("george", frozenset({"EgressAlpha"}))
 
 
-class _FakeRequest:
-    def __init__(self, headers: dict[str, str]) -> None:
-        self.headers = headers
+@pytest.mark.asyncio
+async def test_a_websocket_scope_is_closed_rather_than_waved_through(host_tools):
+    """Fail-closed on scope type: only `lifespan` may skip the check (Review item 2)."""
+    from bos.extensions.runtimes.mcp_egress import BosToolMcpServer
+
+    reached: list[str] = []
+    sent: list[dict] = []
+
+    async def _inner(scope, receive, send):
+        reached.append(scope["type"])
+
+    async def _send(message):
+        sent.append(message)
+
+    async def _receive():
+        raise AssertionError("a refused scope must not be read from")
+
+    server = BosToolMcpServer()
+    await server._gate(_inner)({"type": "websocket", "headers": []}, _receive, _send)
+
+    assert sent == [{"type": "websocket.close", "code": 1008}]
+    assert reached == []  # the app never saw it
 
 
 @pytest.mark.asyncio
@@ -285,7 +331,9 @@ async def test_the_harness_owns_one_lazily_created_server(tmp_path):
         assert harness._tool_mcp_server is None  # nothing built until an agent asks
         server = harness._ensure_tool_mcp_server()
         assert harness._ensure_tool_mcp_server() is server  # one per harness
-        assert server in harness._owned
+        # Index 0, because __aexit__ closes reversed(_owned): the tool server must
+        # outlive every external runtime that may still be calling through it.
+        assert harness._owned[0] is server
         await server.start()
         port = server.url
 

@@ -26,7 +26,13 @@ import asyncio
 import logging
 import secrets
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:  # annotations only — `from __future__ import annotations` keeps these unevaluated
+    import mcp.types as types
+    from mcp.server import ServerRequestContext
+    from starlette.requests import Request
+    from starlette.types import ASGIApp, Receive, Scope, Send
 
 logger = logging.getLogger(__name__)
 
@@ -74,14 +80,14 @@ class BosToolMcpServer:
         self._allowed[token] = (agent_name, frozenset(resolved))
         return token
 
-    def _grant(self, request: Any) -> tuple[str, frozenset[str]] | None:
-        """``(agent, tools)`` for this request's bearer token, or None for no grant.
+    def _grant(self, headers: Mapping[str, str] | None) -> tuple[str, frozenset[str]] | None:
+        """``(agent, tools)`` for this caller's bearer token, or None for no grant.
 
-        *request* is the Starlette request the MCP transport carries into the
-        handler; None (no HTTP request behind this message) grants nothing.
+        *headers* are the HTTP headers behind this message; None (no request
+        behind it at all) grants nothing, as does any header set without a
+        bearer token this server issued.
         """
-        headers: Mapping[str, str] = request.headers if request is not None else {}
-        value = headers.get("authorization", "")
+        value = (headers or {}).get("authorization", "")
         token = value[len(_BEARER) :] if value.startswith(_BEARER) else ""
         return self._allowed.get(token)
 
@@ -119,32 +125,45 @@ class BosToolMcpServer:
         self._running = (server, asyncio.ensure_future(server.main_loop()))
         self._port = server.servers[0].sockets[0].getsockname()[1]
 
-    def _gate(self, app: Any) -> Any:
-        """Refuse any HTTP request without a known bearer token, before MCP sees it.
+    def _gate(self, app: ASGIApp) -> ASGIApp:
+        """Refuse any request without a known bearer token, before MCP sees it.
+
+        Fail-closed on the scope type: only ``lifespan`` — which is how the MCP
+        session manager starts, and which carries no headers — bypasses the
+        check. Everything else must present a grant, including the ``websocket``
+        scope uvicorn will happily deliver even though this app registers no
+        websocket route.
 
         Raw ASGI, not ``BaseHTTPMiddleware``: the latter buffers through a
         wrapping response and does not get along with the transport's SSE
-        streams. Non-HTTP scopes (the lifespan that starts the MCP session
-        manager) pass straight through.
+        streams.
         """
-        from starlette.requests import Request
+        from starlette.datastructures import Headers
         from starlette.responses import JSONResponse
 
-        async def gated(scope: Any, receive: Any, send: Any) -> None:
-            if scope["type"] == "http" and self._grant(Request(scope)) is None:
-                await JSONResponse({"error": "unauthorized"}, status_code=401)(scope, receive, send)
+        async def gated(scope: Scope, receive: Receive, send: Send) -> None:
+            if scope["type"] != "lifespan" and self._grant(Headers(scope=scope)) is None:
+                if scope["type"] == "websocket":
+                    # A 401 body is not a thing on this protocol; 1008 is "policy violation".
+                    await send({"type": "websocket.close", "code": 1008})
+                else:
+                    await JSONResponse({"error": "unauthorized"}, status_code=401)(scope, receive, send)
                 return
             await app(scope, receive, send)
 
         return gated
 
-    async def _on_list_tools(self, ctx: Any, _params: Any) -> Any:
+    async def _on_list_tools(
+        self,
+        ctx: ServerRequestContext[Any, Request],
+        _params: types.PaginatedRequestParams | None,
+    ) -> types.ListToolsResult:
         """Exactly the calling agent's tools — the listing *is* the allowlist."""
         import mcp.types as types
 
         from bos.core.contract import ep_tool
 
-        _agent, allowed = self._grant(ctx.request) or _NO_GRANT
+        _agent, allowed = self._grant(_headers_of(ctx)) or _NO_GRANT
         return types.ListToolsResult(
             tools=[
                 types.Tool(
@@ -157,13 +176,17 @@ class BosToolMcpServer:
             ]
         )
 
-    async def _on_call_tool(self, ctx: Any, params: Any) -> Any:
+    async def _on_call_tool(
+        self,
+        ctx: ServerRequestContext[Any, Request],
+        params: types.CallToolRequestParams,
+    ) -> types.CallToolResult:
         """Run one host tool, in this process, under this agent's allowlist."""
         import mcp.types as types
 
         from bos.core.contract import ep_tool
 
-        agent, allowed = self._grant(ctx.request) or _NO_GRANT
+        agent, allowed = self._grant(_headers_of(ctx)) or _NO_GRANT
         if params.name not in allowed:
             logger.warning("Agent %r may not call %r; refusing.", agent, params.name)
             return _tool_error(f"Tool {params.name!r} is not available to this agent.")
@@ -188,7 +211,20 @@ class BosToolMcpServer:
         await server.shutdown()
 
 
-def _tool_error(message: str) -> Any:
+def _headers_of(ctx: ServerRequestContext[Any, Request]) -> Mapping[str, str] | None:
+    """The HTTP headers behind this MCP message, or None when there is no request.
+
+    ``mcp`` frames every streamable-HTTP message with the Starlette request
+    (``mcp/server/streamable_http.py``) and ``ServerRequestContext.request``
+    carries it into the handler. That attribute is marked transitional upstream
+    ("TODO(L54): remove for Context rework"), so this is the one place that
+    reads it — annotated, so a type check catches the day it moves, and
+    returning None (deny) if a transport ever leaves it unset.
+    """
+    return ctx.request.headers if ctx.request is not None else None
+
+
+def _tool_error(message: str) -> types.CallToolResult:
     import mcp.types as types
 
     return types.CallToolResult(content=[types.TextContent(type="text", text=message)], is_error=True)
