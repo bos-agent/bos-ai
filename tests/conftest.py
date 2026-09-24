@@ -284,9 +284,24 @@ def fake_codex(monkeypatch):
     class _Registry:
         def __init__(self) -> None:
             self.instances: list[FakeAsyncCodex] = []
+            self._pending: dict[str, Any] = {}
+
+        def arm(self, **attrs: Any) -> None:
+            """Set attributes on the *next* instance this registry builds.
+
+            ``CodexAgent`` builds its client lazily inside ``_thread_for`` /
+            ``_ensure_client``, with no seam in between for a test to reach in
+            after construction but before the client is used — so arming a
+            failure (e.g. ``resume_error``) has to happen before that call,
+            against the instance that does not exist yet.
+            """
+            self._pending.update(attrs)
 
         def __call__(self, config: Any = None) -> FakeAsyncCodex:
             instance = FakeAsyncCodex(config)
+            for name, value in self._pending.items():
+                setattr(instance, name, value)
+            self._pending.clear()
             self.instances.append(instance)
             return instance
 
