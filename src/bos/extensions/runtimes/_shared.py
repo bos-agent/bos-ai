@@ -12,6 +12,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
+from bos.core.agent import AgentResult, ChatCommit, ChatStore, Message, MessageContent
+
 logger = logging.getLogger(__name__)
 
 PERMISSIONS = ("read-only", "workspace-write", "full-access")
@@ -133,4 +135,93 @@ def parse_external_config(
         timeout_seconds=cfg.get("timeout_seconds"),
         mcp_tools=mcp_tools,
         native_options=dict(native_options_raw or {}),
+    )
+
+
+async def read_native_session_id(store: ChatStore, chat_id: str, *, runtime: str) -> str | None:
+    """The native session this chat is bound to, or None to start a fresh one.
+
+    Read from the metadata of the newest committed message that names *runtime*
+    (BEP 19 §3.6) — no second store and no schema change. Returns None rather
+    than raising for an unknown chat, a chat that predates this feature, or a
+    turn whose metadata was written incompletely: the caller's correct response
+    to all three is to start a new native session.
+    """
+    try:
+        messages = await store.get_messages(chat_id)
+    except Exception:
+        logger.debug("No chat %r to recover a %s session from", chat_id, runtime, exc_info=True)
+        return None
+    for message in reversed(messages):
+        metadata = message.metadata or {}
+        if metadata.get("external_runtime") != runtime:
+            continue
+        session_id = metadata.get("native_session_id")
+        return session_id if isinstance(session_id, str) and session_id else None
+    return None
+
+
+async def commit_external_turn(
+    store: ChatStore,
+    chat_id: str,
+    *,
+    turn_id: str,
+    user_content: MessageContent,
+    response: str,
+    runtime: str,
+    native_session_id: str,
+    native_turn_id: str | None = None,
+    usage: dict[str, int] | None = None,
+) -> ChatCommit:
+    """Persist the user message and the final answer — and nothing else.
+
+    Two messages per turn, not a mirror of the native transcript: the runtime
+    owns its own history and compaction, and a second copy would be a second
+    source of truth that BOS cannot keep correct (BEP 19 §3.7). Intra-turn tool
+    activity reaches a UI through the event sink; the full transcript is read
+    back from the runtime on demand.
+    """
+    metadata: dict[str, Any] = {
+        "external_runtime": runtime,
+        "native_session_id": native_session_id,
+    }
+    if native_turn_id is not None:
+        metadata["native_turn_id"] = native_turn_id
+    if usage:
+        metadata["usage"] = dict(usage)
+    return await store.commit_turn(
+        chat_id,
+        [
+            Message(llm_message={"role": "user", "content": user_content or ""}, turn_id=turn_id),
+            Message(
+                llm_message={"role": "assistant", "content": response},
+                turn_id=turn_id,
+                metadata=metadata,
+            ),
+        ],
+        turn_id=turn_id,
+    )
+
+
+def external_agent_result(
+    *,
+    output: Any,
+    turn_id: str,
+    usage: dict[str, int] | None,
+    finish_reason: str | None,
+    structured: bool = False,
+) -> AgentResult:
+    """An ``AgentResult`` for a turn the native harness ran.
+
+    ``iterations`` is 1: BOS ran one turn against the runtime. How many model
+    calls the runtime made inside it is its own business and is not comparable
+    to a BOS agent's iteration count.
+    """
+    return AgentResult(
+        output=output,
+        structured=structured,
+        iterations=1,
+        usage=dict(usage or {}),
+        turn_id=turn_id,
+        finish_reason=finish_reason,
     )
