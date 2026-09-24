@@ -169,11 +169,12 @@ def test_the_contract_surface_is_importable_and_identical():
 
     expected = {
         "BosApp", "open_harness",
-        "Agent", "AgentHarness", "AgentResult", "Message", "TurnContext",
+        "Agent", "AgentPort", "AgentHarness", "AgentResult", "Message", "TurnContext",
         "LLM", "LLMResponse", "ChatStore", "ChatCommit", "ChatMeta",
         "ContextResult", "TokenEstimate", "Consolidator", "ToolSet",
         "ToolAttributes", "ToolCallRequest", "TurnInterceptor",
         "PromptProvider", "TurnEventSink", "TurnEvent",
+        "MessageContent", "TextPart", "ImagePart", "FilePart",
         "ep_tool", "ep_provider", "ep_agent", "ep_chat_store", "ep_mail_route",
         "ep_consolidator", "ep_turn_interceptor", "ep_channel", "ep_plugin",
         "Workspace", "RootConfig", "validate_config",

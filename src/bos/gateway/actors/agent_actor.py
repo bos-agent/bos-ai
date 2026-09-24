@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from bos.core.actor import Actor, Envelope, EventBus, MailBox, MessageType
-from bos.core.agent import AbortTurn, Agent, MessageContent, TurnEvent
+from bos.core.agent import AbortTurn, AgentPort, MessageContent, TurnEvent
 from bos.core.contract import SessionEvent, SessionEventKind
 from bos.core.sinks import CLIENT_TURN_EVENT_TYPES, HostChannelSink, MailboxEventSink
 
@@ -102,7 +102,7 @@ class AgentActor(Actor):
 
     def __init__(
         self,
-        agent: Agent,
+        agent: AgentPort,
         mailbox: MailBox,
         *,
         event_bus: EventBus | None = None,

@@ -15,7 +15,7 @@ from ._utils import (
     _deep_merge,
     _pick_collection,
 )
-from .agent import AbortTurn, Agent, TurnContext
+from .agent import AbortTurn, Agent, AgentPort, TurnContext
 from .contract import (
     AgentPlugin,
     AgentResult,
@@ -374,7 +374,7 @@ class AgentHarness:
         self,
         kind: str | None = None,
         agent_cfg: dict[str, Any] | None = None,
-    ) -> Agent:
+    ) -> AgentPort:
         if not self._active:
             raise RuntimeError("create_agent must be called within an active AgentHarness context.")
 

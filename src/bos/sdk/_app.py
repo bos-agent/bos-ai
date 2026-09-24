@@ -13,7 +13,7 @@ from ._bootstrap import open_harness
 
 if TYPE_CHECKING:
     from bos.config import RootConfig
-    from bos.core import Agent, AgentHarness
+    from bos.core import AgentHarness, AgentPort
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +46,7 @@ class BosApp:
             self._workspace = Workspace(workspace=".", bos_dir=bos_dir, config=config)
         self._stack: contextlib.AsyncExitStack | None = None
         self._harness: AgentHarness | None = None
-        self._agents: dict[str, Agent] = {}
+        self._agents: dict[str, AgentPort] = {}
 
     async def __aenter__(self) -> BosApp:
         global _ACTIVE
@@ -120,7 +120,7 @@ class BosApp:
             if _ACTIVE is self:
                 _ACTIVE = None
 
-    def agent(self, kind: str | None = None) -> Agent:
+    def agent(self, kind: str | None = None) -> AgentPort:
         """A cached agent. With no *kind*, the workspace's default."""
         self._require_open()
         if kind is None:
@@ -137,7 +137,7 @@ class BosApp:
         known = ", ".join(sorted(set(self._agents) | set(AgentRegistry.describe()))) or "none"
         raise RuntimeError(f"Unknown agent {kind!r}. Available: {known}.")
 
-    async def build_agent(self, kind: str) -> Agent:
+    async def build_agent(self, kind: str) -> AgentPort:
         """Build, cache and return an agent the config does not name."""
         harness = self._require_open()
         if kind not in self._agents:

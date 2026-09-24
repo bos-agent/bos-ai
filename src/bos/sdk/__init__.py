@@ -12,6 +12,7 @@ from bos.core import (
     LLM,
     Agent,
     AgentHarness,
+    AgentPort,
     AgentResult,
     ChatCommit,
     ChatMeta,
@@ -37,10 +38,20 @@ from bos.core import (
     ep_turn_interceptor,
 )
 
+# AgentPort.ask/run annotate `content` as MessageContent, a bare TypeAlias
+# (str | list[MessageContentPart]) that typing.get_type_hints() inlines away —
+# so the promise-completeness test below never sees the name "MessageContent"
+# itself, only the TypedDicts it expands to. Not re-exported by bos.core or
+# bos.core.contract, so — same idiom as the block below — they come straight
+# from bos.core.agent. Promised by hand alongside MessageContent: an
+# implementer needs them to build a non-string `content` value from the
+# contract alone.
+from bos.core.agent import FilePart, ImagePart, TextPart
+
 # Not re-exported by bos.core/__init__.py — importing straight from bos.core.contract
 # is the idiom bos.plugins already uses (subagent.py, task.py). Widening bos.core's
-# public surface for these three is an API change BEP 18 does not make.
-from bos.core.contract import PromptProvider, ToolAttributes, ToolSet
+# public surface for these is an API change BEP 18 does not make.
+from bos.core.contract import MessageContent, PromptProvider, ToolAttributes, ToolSet
 
 from ._app import BosApp
 from ._bootstrap import bootstrap as bootstrap
@@ -53,6 +64,7 @@ __all__ = [
     "open_harness",
     "Agent",
     "AgentHarness",
+    "AgentPort",
     "AgentResult",
     "Message",
     "TurnContext",
@@ -76,6 +88,10 @@ __all__ = [
     "PromptProvider",
     "TurnEventSink",
     "TurnEvent",
+    "MessageContent",
+    "TextPart",
+    "ImagePart",
+    "FilePart",
     "ep_tool",
     "ep_provider",
     "ep_agent",
