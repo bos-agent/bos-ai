@@ -269,13 +269,13 @@ This needs **no change to the loader**: the body lands in `system_prompt`, which
 
 One frontmatter constraint, which the existing parser imposes rather than this BEP: `_parse_simple_yaml_mapping` is a small subset of YAML, so keys must be plain scalars or simple indented blocks ([`workspace.py:229-262`](../../src/bos/config/workspace.py)). The list form shown in §3.4 for `mcp_tools` is within it; anything more structured belongs in a `.toml` agent file or in `[agents.*]`.
 
-**2. `agent_cfg`, programmatically — the embedding route.** A host that keeps prompts in its own store (per tenant, in a database, templated per request) passes the resolved string:
+**2. `agent_cfg`, programmatically — the embedding route.** A host that keeps prompts in its own store (per tenant, in a database, templated per request) passes the resolved string, to a kind the workspace's own config does not already build:
 
 ```python
-coder = await app.build_agent("george", agent_cfg={"system_prompt": prompts.for_tenant(t)})
+coder = await app.build_agent("codex", agent_cfg={"permission": "read-only", "system_prompt": prompts.for_tenant(t)})
 ```
 
-`agent_cfg` is the override layer, so it wins over the `.md` file, `[agents.george]` and the inherited `[agents.codex]` alike. The TOML equivalent for a per-actor profile is a section — which, unlike an inline table, can hold a multi-line string:
+`agent_cfg` is the override layer for that call, so it wins over `[agents.codex]` if written. It is **not**, however, a way to reconfigure an agent that `BosApp` already built: `__aenter__` pre-builds and caches every kind your config names in `[agents]` — including a named instance such as `george` from `agents/george.md` — before application code runs, and `build_agent` caches per kind. So `build_agent("george", agent_cfg={…})` finds `george` already cached and raises, naming the cache and what to do instead, rather than silently discarding the override ([`sdk/_app.py`](../../src/bos/sdk/_app.py)'s `BosApp.build_agent`). Reach for `agent_cfg` on a kind the config leaves unbuilt — a bare reserved kind with no `[agents.<reserved>]` table, as above — or call `harness.create_agent` directly, which has no per-kind cache and honours `agent_cfg` on every call. The TOML equivalent for a per-actor profile is a section — which, unlike an inline table, can hold a multi-line string:
 
 ```toml
 [runtime.actors.coder.agent_cfg]
@@ -285,7 +285,7 @@ You are the implementer for this service. …
 """
 ```
 
-Precedence, lowest to highest: the reserved kind's `{"external_runtime": …}` → `[agents.<reserved>]` if written → the named agent's own spec (`.md` frontmatter and body, or `[agents.george]`) → `[runtime.actors.*].agent_cfg` → the `agent_cfg` passed to `build_agent` / `create_agent`. This is BEP 6 merge order with the §3.4 parent link slotted in; nothing new.
+Precedence, lowest to highest, within one `create_agent` call: the reserved kind's `{"external_runtime": …}` → `[agents.<reserved>]` if written → the named agent's own spec (`.md` frontmatter and body, or `[agents.george]`) → `[runtime.actors.*].agent_cfg` → the `agent_cfg` passed to `build_agent` / `create_agent`. This is BEP 6 merge order with the §3.4 parent link slotted in; nothing new. Through `BosApp.build_agent`, this order is reachable only on a kind's first build — a kind already cached cannot re-enter it (above).
 
 #### 3.4.1.2 What belongs in it
 
@@ -372,7 +372,7 @@ Per-runtime acceptance (§7) asserts observed effects — a write outside the ro
 | Claude Code | `ClaudeAgentOptions.resume = <session_id>` | `ResultMessage.session_id` |
 | Codex | `AsyncCodex.thread_resume(thread_id)` | `AsyncThread.id` |
 
-The mapping is stored in the **metadata of the assistant message BOS commits each turn** (§3.7): `{"external_runtime": "codex", "native_session_id": "…"}`. It is rewritten every turn, so the newest committed message always carries the freshest id; recovery after a restart is `chat_store.get_messages(chat_id)` scanned from the end, with an in-process cache in front. No new store, no `ChatStore` schema change, no separate mapping file.
+The mapping is stored in the **metadata of the assistant message BOS commits each turn** (§3.7): `{"external_runtime": "codex", "native_session_id": "…"}`. It is rewritten every turn, so the newest committed message always carries the freshest id; recovery after a restart is `chat_store.get_messages(chat_id)` scanned from the end. No new store, no `ChatStore` schema change, no separate mapping file. `read_native_session_id` re-runs that scan on every call; an in-process cache in front of it is not built (§8.2).
 
 A native session that cannot be resumed — deleted, archived, pruned — is reported as an error naming the runtime and the id. BOS does not silently start a fresh session under the same `chat_id`.
 
@@ -538,12 +538,13 @@ async with BosApp(config, bos_dir=".bos") as app:
 
 The same `chat_id` on the next call resumes the same Codex thread. `app.agent("george")` works without `build_agent` when the workspace ships an `agents/george.md` with `_parent: codex` (§3.4) — which is the shape most projects should use, since the agent then has its own name and its own prompt file.
 
-A host holding several workspaces opens them **one at a time** (§3.12) and picks the prompt route that matches where its prompts live — the workspace's own `agents/george.md` when the prompt belongs to the project, or `agent_cfg` when the host keeps prompts per tenant:
+A host holding several workspaces opens them **one at a time** (§3.12) and picks the prompt route that matches where its prompts live — the workspace's own `agents/george.md` when the prompt belongs to the project, or `agent_cfg` on a bare reserved kind when the host keeps prompts per tenant instead of shipping a named agent file (§3.4.1.1 — `george` would already be cached by `__aenter__` the moment a workspace ships that file):
 
 ```python
 for ws in tenant_workspaces:                       # sequential: BosApp is one-per-process
     async with BosApp(ws) as app:
-        coder = await app.build_agent("george", agent_cfg={
+        coder = await app.build_agent("codex", agent_cfg={
+            "permission": "read-only",
             "system_prompt": prompts.for_tenant(ws.name),   # a resolved string, never a path
         })
         await coder.ask(chat_id_for(ws), task)
@@ -555,7 +556,7 @@ Through a BOS agent, unchanged: the main agent calls `AskSubagent(role="coder", 
 
 ### 4.3 Operator
 
-- `boscli inspect --agent codex` reports the resolved runtime, the absolute `cwd`, the `permission` level, the resolved `mcp_tools` with any unmatched names, and whether the extra is installed and the native login present (§3.3.1).
+- `boscli inspect agent codex` reports the resolved runtime, the absolute `cwd`, the `permission` level, the resolved `mcp_tools` with any unmatched names, and whether the extra is installed and the native login present (§3.3.1).
 - A missing extra, an absent login, an escaping `cwd`, an unknown config key, and `workspace-write` on Claude Code where the bash sandbox is unavailable all fail at `create_agent` with a message naming the fix.
 - Unmatched `mcp_tools` names appear as warnings, once, at build.
 - Native transcripts are where the runtime puts them; `app.get_messages(chat_id, source="bos")` is the record BOS guarantees (§3.7).
@@ -598,7 +599,7 @@ Two new optional dependencies, each pinned exactly, each carrying a vendor CLI b
 
 **Layer 2 — shared runtime scaffolding, still no SDKs.**
 5. Config parsing and strict validation shared by both runtimes: `cwd` resolution and containment, `permission`, `system_prompt` / `base_instructions` (mutually exclusive), `external_runtime` rejected when hand-written, `timeout_seconds`, `auth`, `mcp_tools`, `native_options`, unknown-key rejection (§3.4, §3.4.1, §3.5.1).
-6. Session mapping: write on commit, read back from `chat_store`, in-process cache (§3.6). Tested against the fake.
+6. Session mapping: write on commit, read back from `chat_store` (§3.6). Tested against the fake.
 7. The thin two-message commit and `AgentResult` assembly (§3.7, §3.9).
 
 **Layer 3 — the MCP egress.** Depends on 5.
@@ -628,7 +629,7 @@ Two new optional dependencies, each pinned exactly, each carrying a vendor CLI b
 6. An in-process MCP client with agent A's bearer token lists and calls only A's subset; agent B's token cannot reach A's tools; a request with no token is rejected.
 7. `harness.__aexit__` leaves no live MCP server and no child process.
 8. `tests/test_sdk.py::test_the_contract_surface_is_importable_and_identical` and `::test_promised_ports_are_implementable_from_the_contract_alone` pass with `AgentPort` in `__all__`.
-9. `boscli inspect --agent <external>` succeeds and reports runtime, absolute `cwd`, `permission`, and resolved `mcp_tools`.
+9. `boscli inspect agent <external>` succeeds and reports runtime, absolute `cwd`, `permission`, and resolved `mcp_tools`.
 10. `import bos.sdk` on a base install with no extras succeeds; `create_agent("codex")` there raises an error naming `bos-ai[codex]`.
 11. An `agents/george.md` whose frontmatter is `_parent: codex` and whose body is a prompt builds a Codex-backed agent whose `name` is `george` and whose `system_prompt` is the file body. `[agents.codex] cwd = "x"` reaches `george` unless `george` overrides it. A workspace naming neither reserved kind has no `codex` entry in `AgentRegistry.describe()`, and `resolve_default_agent()` is unaffected.
 12. A hand-written `external_runtime` key raises, and the message names `_parent` (§3.4). Setting both `system_prompt` and `base_instructions` raises (§3.4.1).
@@ -683,6 +684,7 @@ Two new optional dependencies, each pinned exactly, each carrying a vendor CLI b
 - **`_load_external_runtime`'s `ImportError` handling cannot yet tell "the extra isn't installed" apart from "the runtime module itself is broken."** Both look identical: an `ImportError` out of `importlib.import_module`. Telling them apart needs the real vendor module names (`claude_agent_sdk`, `openai_codex`), which exist only once `bos/extensions/runtimes/{claude_code,codex}.py` do — only then can a test simulate a missing extra by blocking the *vendor's* module rather than a runtime module that does not exist yet.
 - **`inspect`'s external branch reads the runtime's config by `getattr(agent, "cfg", {})`.** `AgentPort` promises nothing about a `.cfg` attribute, so this is a duck-typed reach: if a real runtime class names its config attribute something else, the failure is a silently under-populated report, not an error. Re-check once `ClaudeCodeAgent` / `CodexAgent` exist.
 - **The MCP egress has no install path that reaches it outside development.** `mcp` lives only in the `dev` dependency group; no optional-dependency extra installs it. This is deliberate for now — inventing a friendlier error naming an extra that does not exist yet would be a worse lie than the bare `ModuleNotFoundError` `BosToolMcpServer.start()` raises today — but Layer 5's `claude-code`/`codex` extras (§3.10.4) must pin `mcp>=2,<3` before either runtime ships. (`starlette` and `uvicorn` already ship via `bos-ai[gateway]`; they are not part of this gap.)
+- **`read_native_session_id` has no in-process cache.** §3.6 describes recovery after a restart as a `chat_store.get_messages(chat_id)` scan from the end; an in-process cache in front of that scan was listed as part of Layer 2 (§6) but was never built, so every call re-scans the store. It plausibly belongs on the Layer 4 runtime object, which is the thing that would actually own a per-`chat_id` cache's lifetime; re-check once `ClaudeCodeAgent` / `CodexAgent` exist.
 - **Two guarantees are proven only on the half that needs no child process.** `_FakeRuntime`, the Layer 1–3 test double, spawns nothing. So "no child process survives harness teardown" (§7.27) and "a runtime whose `mcp_tools` is empty never invokes the MCP-server accessor" (§3.1, the lazy-construction half of §7.7) are each proven today only for the harness-side bookkeeping and the accessor's own laziness — proven by construction and by `test_the_harness_owns_one_lazily_created_server`, respectively. The subprocess half of each lives in `claude_code.py` / `codex.py` and is re-checked once they exist.
 
 ### 8.3 Resolved during design
@@ -701,6 +703,10 @@ Two new optional dependencies, each pinned exactly, each carrying a vendor CLI b
 ---
 
 ## 9. Revision history
+
+- 2026-09-24 — Final fix wave before merge, applying a whole-branch review of Layers 1–3. All four Important findings were the same shape: two individually-correct tasks composing into wrong behaviour, invisible to either task's own review. `BosApp.build_agent`'s `agent_cfg` was silently discarded whenever a kind was already cached — either because `__aenter__` pre-built every kind `[agents]` names (Task 4 × Task 8), or because an earlier `build_agent` call had; it now raises, naming the cache and what to do instead, and `build_agent(kind)` with no `agent_cfg` still returns the cache unchanged. `boscli inspect agent`'s `mcp_tools` line crashed with an unhandled `TypeError` on a non-list config value (e.g. `mcp_tools = 7`) instead of reporting it as malformed. `BosApp.get_messages`'s auto-routing scan used the compaction-active window while `read_native_session_id`'s identical backwards scan over the same metadata had already been fixed to use `active_only=False` (§3.6); a summary written over an externally-backed chat silently routed `source="auto"` to the BOS record instead of native — the routing scan now reads separately with `active_only=False`, while `source="bos"` keeps the active-window read §3.7 pins it to. `_ensure_tool_mcp_server` had no active-harness guard, unlike `create_agent`; a runtime object a host still held past harness teardown could build a fresh server into a cleared `_owned` and start a listener nothing would ever close. `parse_external_config`'s type sweep, which already hardened `mcp_tools`/`native_options` against a bare value where a structure belongs, is extended to `cwd`, `model`, `timeout_seconds`, `system_prompt` and `base_instructions` — `cwd = ["a", "b"]` no longer becomes a directory literally named `['a', 'b']`. `AgentPort` is now asserted directly against what `create_agent`'s reserved-kind dispatch returns, not only inferred from it not being an `Agent`.
+
+  Three passages here were also wrong. §3.4.1.1 and §4.1 showed `build_agent("george", agent_cfg=…)` as the worked example for the programmatic prompt route; `george` is exactly the kind a project names via `agents/george.md`, so `__aenter__` would already have cached it and the shown call now raises. Both examples build a bare reserved kind (`codex`) the config leaves unbuilt instead, and §3.4.1.1 states the `BosApp`-cache caveat in prose. §4.3 and §7.9 wrote `boscli inspect --agent <kind>`; the real form is the `inspect agent NAME` subcommand, `--agent` is not an option on it, and both are corrected. §6 Layer 2 step 6 listed an in-process session-id cache as shipped, and §3.6 stated it in passing; `read_native_session_id` never grew one — moved to §8.2 as a Layer 4 carry-forward, and §3.6 now says so.
 
 - 2026-09-24 — Implementation, Layers 1–3 (this branch, `bc0ddb1..1b5f474`, sixteen commits across nine tasks). §6's Layer 1 (the seam), Layer 2 (shared config/session/commit scaffolding) and Layer 3 (the MCP egress) are built and tested without either vendor SDK; Layer 4 (`ClaudeCodeAgent`, `CodexAgent`) and Layer 5 (packaging, live validation) have not started. §7 criteria 1–12, 14 and 27 pass; 13 needs `ClaudeCodeAgent` and is now explicitly Layer 4's; 15–26 need a real subscription login and stay unverified, as designed. Passing needs one qualification worth stating plainly: several criteria are proven at the shared module that now exists rather than through a live `create_agent("codex")` call, because no runtime class exists yet to call that module from its own `__init__`. Criteria 1–3 and the `system_prompt`/`base_instructions` half of 12 are pinned by `test_external_agent_config.py` calling `bos.extensions.runtimes._shared.parse_external_config` directly; the harness's own dispatch (`harness.py:440-453`) never calls it, and `_FakeRuntime` (`tests/conftest.py:127-148`, standing in for both reserved kinds via the `fake_runtimes` fixture) performs no validation at all — so `create_agent("codex", agent_cfg={})` under that fixture does *not* raise on a missing `permission` today; only `parse_external_config({}, ...)` does. Criterion 5's warning-and-skip half is fully proven end-to-end against `BosToolMcpServer` (`test_an_unmatched_tool_name_warns_and_is_skipped`); its "starts no MCP server" half rests on the same lazy-construction guarantee as criterion 7, which §8.2 already carries forward. Criterion 9 is a genuine partial: `boscli inspect` succeeds and correctly reports `runtime`, `permission` and `mcp_tools` (`test_inspect_reports_an_external_agent_without_touching_agent_internals`), but the `cwd` it reports is `cfg.get("cwd", ".")` — the configured value, not the absolute one `parse_external_config` would compute — contradicting the "absolute" language in §3.3.1, §4.3 and §7.9 itself; no test asserts otherwise, and this is the same gap Task 4's review recorded and §8.2 now carries forward. Criteria 4, 6, 8, 10, 11, 12's `_parent`-rejection half, and 27 are real, complete proofs at the layer they belong to: 4 through `AgentRegistry.get_defaults` after a genuine `Workspace.bootstrap_platform()` run, 6 and 27 through a real in-process `mcp.ClientSession` speaking streamable HTTP to a real `BosToolMcpServer`, 8 through `bos.sdk`'s actual `__all__` and `typing.get_type_hints`, 10 through the real `_load_external_runtime` import-and-report path (with only the target module name faked), 11 through `Workspace.resolve_agents()`/`bootstrap_platform()` on real TOML and Markdown fixtures.
 
