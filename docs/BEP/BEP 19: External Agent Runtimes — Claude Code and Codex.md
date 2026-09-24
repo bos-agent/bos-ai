@@ -30,7 +30,7 @@ The obvious alternative is to expose each runtime as a set of tools — start a 
 
 Making the runtimes *agents* removes all of it, because BOS already has every one of those mechanisms for agents:
 
-- Delegation: `_HarnessAgentRunner.run()` ([`harness.py:255-277`](../../src/bos/core/harness.py)) calls `create_agent(kind)`. The existing `AskSubagent(role=…)` tool therefore reaches an external runtime the day the runtime is an agent kind, with no new tool and no change to [`plugins/subagent.py`](../../src/bos/plugins/subagent.py).
+- Delegation: `_HarnessAgentRunner.run()` ([`harness.py:282-314`](../../src/bos/core/harness.py)) calls `create_agent(kind)`. The existing `AskSubagent(role=…)` tool therefore reaches an external runtime the day the runtime is an agent kind, with no new tool and no change to [`plugins/subagent.py`](../../src/bos/plugins/subagent.py).
 - Turn lifecycle, interrupt, event fan-out, parent/child nesting: `AgentActor` and the gateway, unchanged.
 - Persistence and recovery: `ChatStore`, unchanged.
 
@@ -139,7 +139,7 @@ A repo-wide scan of what those consumers actually *call* returns four members, a
 | Member | Call sites |
 |---|---|
 | `ask(chat_id, content, interrupt=, ctx_metadata=, llm_args=, event_sink=, turn_id=, commit_observer=)` | [`agent_actor.py:358`](../../src/bos/gateway/actors/agent_actor.py) |
-| `run(chat_id, content, *, …, schema=, max_schema_retries=)` | [`harness.py:274`](../../src/bos/core/harness.py), [`cli/commands/agent.py:442`](../../src/bos/cli/commands/agent.py) |
+| `run(chat_id, content, *, …, schema=, max_schema_retries=)` | [`harness.py:307`](../../src/bos/core/harness.py), [`cli/commands/agent.py:442`](../../src/bos/cli/commands/agent.py) |
 | `request_stop()` | [`agent_actor.py:133`](../../src/bos/gateway/actors/agent_actor.py) |
 | `name` | [`agent_actor.py:540`](../../src/bos/gateway/actors/agent_actor.py), via `getattr` |
 
@@ -515,7 +515,7 @@ BOS is a library. The first host embeds it and may manage several workspaces ins
 2. **Native session storage is per OS user, not per workspace.** Claude Code writes transcripts under `~/.claude/projects/`; Codex keeps threads under `CODEX_HOME` (default `~/.codex`). Reads are safe because BOS always addresses a session by the explicit id it stored (§3.6) and passes the resolved `cwd` as `directory` to `get_session_messages`, so lookups are scoped and ids do not collide across workspaces. What is *not* isolated is the storage itself: one workspace's operator-visible transcript directory is every workspace's. Relocating Codex's would mean moving `CODEX_HOME`, which also holds `auth.json` and would break subscription login (§8.2).
 3. **The environment.** The Claude auth preflight (§3.10.3) reads `ANTHROPIC_API_KEY` from the process environment, which is shared. The check is per agent and read-only, so it is correct either way; but because `ClaudeAgentOptions.env` and `CodexConfig.env` are per client, each runtime passes an explicit environment to its child rather than letting it inherit whatever another workspace's `[platform.envs]` wrote.
 
-**The pre-existing blocker, named rather than solved.** A host cannot hold two workspaces open *concurrently* today, and BEP 19 does not change that. `BosApp.__aenter__` refuses a second live instance in one process, and its own comment gives the reason: `bootstrap_platform()` writes `os.environ` and rebuilds the agent registry, so two would overwrite each other ([`sdk/_app.py:20-27`, `:60-66`](../../src/bos/sdk/_app.py)). `open_harness` has the same hazard, because it calls the same `bootstrap` ([`sdk/_bootstrap.py:14-31`](../../src/bos/sdk/_bootstrap.py)), and the shared state is `AgentRegistry`'s class-level dict, the `[exts]` defaults merged into process-global `ExtensionPoint` objects, and `[platform.envs]`. Sequential use — open, use, close, open the next — works today and is what §4.1 shows.
+**The pre-existing blocker, named rather than solved.** A host cannot hold two workspaces open *concurrently* today, and BEP 19 does not change that. `BosApp.__aenter__` refuses a second live instance in one process, and its own comment gives the reason: `bootstrap_platform()` writes `os.environ` and rebuilds the agent registry, so two would overwrite each other ([`sdk/_app.py:20-27`, `:51-58`](../../src/bos/sdk/_app.py)). `open_harness` has the same hazard, because it calls the same `bootstrap` ([`sdk/_bootstrap.py:14-32`](../../src/bos/sdk/_bootstrap.py)), and the shared state is `AgentRegistry`'s class-level dict, the `[exts]` defaults merged into process-global `ExtensionPoint` objects, and `[platform.envs]`. Sequential use — open, use, close, open the next — works today and is what §4.1 shows.
 
 Making concurrent multi-workspace hosting work means moving that state off the process, which is a BEP 18 / BEP 6 change with its own fallout and is out of scope here. What BEP 19 owes it is not to deepen the hole: every criterion in §7 that could be affected is asserted per harness, and §7.27 pins that two harnesses opened in sequence leave no shared runtime state behind.
 
