@@ -404,6 +404,7 @@ class AgentHarness:
         for resource in reversed(self._owned):
             await _aclose(resource)
         self._owned.clear()
+        self._tool_mcp_server = None
 
         self._active = False
 

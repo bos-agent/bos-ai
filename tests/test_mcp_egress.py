@@ -339,3 +339,52 @@ async def test_the_harness_owns_one_lazily_created_server(tmp_path):
 
     assert server._running is None  # harness teardown closed it
     assert port
+
+
+@pytest.mark.asyncio
+async def test_two_sequential_harnesses_share_no_runtime_state(tmp_path, host_tools, fake_runtimes):
+    """BEP 19 §7.27: per-harness, not per-process.
+
+    Two harnesses over two workspaces, opened and closed in sequence — never
+    concurrently; ``BosApp``/``bootstrap`` cannot hold two workspaces open at
+    once today, and this guard does not pretend that is solved (§3.12). Each
+    harness must get its own MCP server on its own ephemeral port with a
+    disjoint bearer token, and closing one must leave nothing behind for the
+    next: no ``_tool_mcp_server`` reference, no owned resource, and no
+    listening socket.
+
+    Uses the ``fake_runtimes`` fixture (patches ``_load_external_runtime``),
+    not a monkeypatched ``EXTERNAL_AGENT_KINDS`` entry: "codex" is already a
+    real reserved kind, so only how it is *loaded* needs faking.
+    """
+    import socket
+    from urllib.parse import urlparse
+
+    from bos.core.harness import AgentHarness
+
+    ports: list[int] = []
+    tokens: list[str] = []
+    for name in ("ws-a", "ws-b"):
+        root = tmp_path / name
+        root.mkdir()
+        async with AgentHarness(bos_dir=root, workspace=root) as harness:
+            agent = await harness.create_agent("codex", agent_cfg={"permission": "read-only"})
+            server = agent.mcp()
+            await server.start()
+            ports.append(urlparse(server.url).port)
+            tokens.append(server.register_agent("george", ["EgressAlpha"]))
+        assert harness._tool_mcp_server is None, "nothing BEP 19 added should survive teardown"
+        assert harness._owned == []
+
+    assert ports[0] != ports[1], "each harness binds its own ephemeral port"
+    assert tokens[0] != tokens[1], "tokens do not carry across harnesses"
+
+    for port in ports:
+        with socket.socket() as probe:
+            # Deliberately no SO_REUSEADDR: that option lets a bind succeed
+            # against a TIME_WAIT remnant of an already-closed connection, but
+            # Linux still refuses it outright while another socket is actively
+            # listening on this exact address. A plain bind is the stronger
+            # check — the one that actually rules out a leaked listener rather
+            # than one that could pass merely because reuse was allowed.
+            probe.bind(("127.0.0.1", port))
