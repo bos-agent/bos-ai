@@ -611,6 +611,11 @@ class AgentHarness:
         The accessor is sync and ``start()`` is async, so the runtime awaits
         ``start()`` itself on first use; ``start()`` is idempotent.
         """
+        if not self._active:
+            # Same guard as create_agent: a runtime object a host still holds past
+            # harness teardown must not be able to build a fresh server into a
+            # cleared _owned, whose listener nothing would ever close.
+            raise RuntimeError("_ensure_tool_mcp_server must be called within an active AgentHarness context.")
         if self._tool_mcp_server is None:
             # Resolved by dotted path, like EXTERNAL_AGENT_KINDS above and for the
             # same two reasons: the assembly ring never names an outer ring at

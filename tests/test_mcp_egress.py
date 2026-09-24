@@ -342,6 +342,23 @@ async def test_the_harness_owns_one_lazily_created_server(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_ensure_tool_mcp_server_refuses_on_a_closed_harness(tmp_path):
+    """Final review, item 4: create_agent refuses a closed harness; this accessor
+    did not. A runtime object a host still holds past teardown could call it, get
+    a fresh BosToolMcpServer inserted into a cleared _owned, and start a listener
+    nothing would ever close (against §7.7/§7.27). Same guard as create_agent."""
+    from bos.core.harness import AgentHarness
+
+    async with AgentHarness(workspace=tmp_path) as harness:
+        pass
+
+    with pytest.raises(RuntimeError, match="active AgentHarness context"):
+        harness._ensure_tool_mcp_server()
+    assert harness._tool_mcp_server is None
+    assert harness._owned == []
+
+
+@pytest.mark.asyncio
 async def test_two_sequential_harnesses_share_no_runtime_state(tmp_path, host_tools, fake_runtimes):
     """BEP 19 §7.27: per-harness, not per-process.
 
