@@ -45,6 +45,7 @@ from openai_codex import (
     RunInput,
     Sandbox,
     TextInput,
+    TurnResult,
 )
 from openai_codex.types import TurnStatus
 
@@ -124,6 +125,23 @@ def _content_to_codex_input(content: MessageContent) -> RunInput:
                 )
             items.append(MentionInput(name=Path(source["value"]).name, path=source["value"]))
     return items
+
+
+class TurnNotCompletedError(RuntimeError):
+    """A Codex turn ended without producing a usable answer, on a status Codex
+    itself hands back as a normal ``TurnResult`` rather than raising for.
+
+    Today that is only ``interrupted`` — ``failed`` is raised by the vendor
+    SDK before it ever constructs a ``TurnResult`` (see the comment in
+    ``run()``), so it never reaches this exception. Carries ``turn_result``
+    so a caller has more than a message to work with: Task 7 needs the full
+    result to decide between raising and BOS's own cooperative-stop handoff
+    shape, not just the fact that something other than ``completed`` happened.
+    """
+
+    def __init__(self, message: str, *, turn_result: TurnResult) -> None:
+        super().__init__(message)
+        self.turn_result = turn_result
 
 
 class CodexAgent:
@@ -317,9 +335,23 @@ class CodexAgent:
         second, divergent validation path). A validation failure re-sends a
         plain-text correction message on the *same* thread, up to
         ``max_schema_retries`` times; exhausting retries raises
-        ``StructuredOutputError`` and — like a native ``failed``/``interrupted``
-        turn — commits nothing, so a half-validated exchange never looks like
-        turn history the next resume can reason from.
+        ``StructuredOutputError`` and — like a native turn failure — commits
+        nothing, so a half-validated exchange never looks like turn history
+        the next resume can reason from.
+
+        A ``TurnStatus.interrupted`` result raises :class:`TurnNotCompletedError`
+        (carrying the ``TurnResult``) and commits nothing — right for today's
+        only source of it, `timeout_seconds` expiry (BEP 19 §7 criterion 20:
+        "... raises"). But Task 7 also makes `request_stop()` produce
+        `interrupted`, and BOS's own cooperative-stop contract for that case is
+        the opposite: `Agent.run` treats a stop as `turn_status="completed"`,
+        persists a handoff, and returns (`agent.py` `_StopRequested` handling
+        and `_close_with_handoff`) — it does not raise and discard the partial
+        answer. Task 7 must reopen this branch and choose, for a
+        cooperatively-stopped turn, between raising (as here) and building the
+        equivalent handoff-and-return shape; ``turn_result`` is attached
+        precisely so that decision has the real result to work with instead of
+        a bare message.
         """
         turn_id = turn_id or uuid.uuid4().hex
         thread, _ = await self._thread_for(chat_id)
@@ -334,21 +366,38 @@ class CodexAgent:
         structured_ok = False
         retries = 0
         while True:
-            result = await thread.run(codex_input, **turn_kwargs)
-
-            if result.status is not TurnStatus.completed:
-                # Covers both `failed` and `interrupted` (and, defensively, any
-                # other non-terminal-success status) identically: neither is a
-                # real answer BOS should treat as turn history, so both raise
-                # and commit nothing, exactly like a failure (BEP 19 §7
-                # criterion 20 — a timeout-driven interrupt "raises" too).
-                # Applies on a retry turn too: a native failure while sending
-                # a correction message is a new native failure, not one more
-                # validation attempt to retry.
-                detail = result.error.message if result.error is not None and result.error.message else None
+            try:
+                result = await thread.run(codex_input, **turn_kwargs)
+            except Exception as exc:
+                # A native TurnStatus.failed is raised by the SDK itself,
+                # before it ever constructs a TurnResult: openai_codex._run's
+                # _raise_for_failed_turn runs inside _collect_async_turn_result
+                # ahead of the `TurnResult(...)` call, so `await thread.run(...)`
+                # never returns one for a failed turn — this method's own
+                # status check below is unreachable for `failed` against the
+                # real SDK. Re-wrapped here so the runtime/agent/turn_id/chat_id
+                # context this method would attach to a `TurnResult`-shaped
+                # failure is not lost on the one path a real vendor call
+                # actually takes. Applies on a retry turn too: a native
+                # failure while sending a correction message is a new native
+                # failure, not one more validation attempt to retry.
                 raise RuntimeError(
                     f"{self._config.runtime} runtime {self._kind!r}: turn {turn_id!r} for chat "
-                    f"{chat_id!r} ended with status {result.status.value!r}" + (f": {detail}" if detail else "")
+                    f"{chat_id!r} failed: {exc}"
+                ) from exc
+
+            if result.status is not TurnStatus.completed:
+                # The only status left that reaches here as a normal
+                # TurnResult is `interrupted` (see TurnNotCompletedError and
+                # this method's own docstring); `failed` is handled above,
+                # and is never returned as a TurnResult by the real SDK to
+                # begin with. Commits nothing, same reasoning as the raise
+                # above: neither is a real answer BOS should treat as turn
+                # history.
+                raise TurnNotCompletedError(
+                    f"{self._config.runtime} runtime {self._kind!r}: turn {turn_id!r} for chat "
+                    f"{chat_id!r} ended with status {result.status.value!r}",
+                    turn_result=result,
                 )
 
             text = result.final_response or ""

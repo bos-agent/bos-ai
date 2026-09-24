@@ -212,6 +212,21 @@ class FakeTurnHandle:
         self.interrupted = True
 
     async def run(self) -> Any:
+        # Mirrors openai_codex._run._raise_for_failed_turn exactly: the real
+        # AsyncTurnHandle.run() raises a bare RuntimeError for a failed turn
+        # *before* ever constructing a TurnResult (that function runs inside
+        # _collect_async_turn_result, ahead of the `TurnResult(...)` call) —
+        # so a caller's `await thread.run(...)` never receives a TurnResult
+        # whose status is `failed`. Only mirrored here, not in .stream():
+        # CodexAgent doesn't call .stream() until Task 6.
+        if self._result is not None:
+            from openai_codex.generated.v2_all import TurnStatus
+
+            if self._result.status is TurnStatus.failed:
+                error = self._result.error
+                if error is not None and error.message:
+                    raise RuntimeError(error.message)
+                raise RuntimeError(f"turn failed with status {self._result.status.value}")
         return self._result
 
 

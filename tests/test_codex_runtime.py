@@ -255,8 +255,31 @@ async def test_a_failed_turn_raises_rather_than_returning_none(tmp_path, fake_co
 
     with pytest.raises(RuntimeError) as excinfo:
         await agent.run("chat-1", "do it", turn_id="t1")
-    assert "model exploded" in str(excinfo.value)
+    message = str(excinfo.value)
+    assert "model exploded" in message
+    # Fix round 2, Finding 2: the real SDK raises this *before* constructing a
+    # TurnResult (openai_codex._run._raise_for_failed_turn), so the bare
+    # vendor message alone would reach the caller with nothing to attribute it
+    # to in a multi-chat process. codex.py wraps it with exactly this context.
+    assert "codex" in message and "george" in message and "chat-1" in message and "t1" in message
     assert await mem_store.get_messages("chat-1") == [], "a failed turn commits nothing"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_turn_with_no_error_detail_still_raises_with_bos_context(tmp_path, fake_codex, mem_store):
+    """Mirrors openai_codex._run._raise_for_failed_turn's *other* branch: no
+    `error`, or an `error` with a blank `message`, falls back to a generic
+    "turn failed with status ..." rather than KeyError-ing or going silent.
+    FakeTurnHandle.run() (fix round 2, Finding 2) reproduces this exactly."""
+    agent = _agent(tmp_path, fake_codex, chat_store=mem_store)
+    _arm_result(fake_codex, final_response=None, status=TurnStatus.failed)  # no error_message
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await agent.run("chat-1", "do it", turn_id="t1")
+    message = str(excinfo.value)
+    assert "turn failed with status" in message and "failed" in message
+    assert "codex" in message and "george" in message and "chat-1" in message and "t1" in message
+    assert await mem_store.get_messages("chat-1") == []
 
 
 @pytest.mark.asyncio
@@ -292,13 +315,24 @@ async def test_an_interrupted_turn_raises_and_commits_nothing(tmp_path, fake_cod
     applies here too: raise, commit nothing. Pinned as its own test (distinct
     from the failed-turn test above) so a future change that special-cases
     `interrupted` into a silently-committed partial answer does not slip in
-    unnoticed — Task 7 builds cancellation on top of this contract."""
-    agent = _agent(tmp_path, fake_codex, chat_store=mem_store)
-    _arm_result(fake_codex, final_response="partial", status=TurnStatus.interrupted)
+    unnoticed — Task 7 builds cancellation on top of this contract.
 
-    with pytest.raises(RuntimeError) as excinfo:
+    Fix round 2, Finding 3: Task 7 will also reach `interrupted` from a
+    cooperative `request_stop()`, where BOS's own contract (`Agent.run`) is to
+    persist a handoff and return, not raise and discard the answer — the
+    opposite of what this method does today. `turn_result` is attached to the
+    exception precisely so that reopened decision has the full `TurnResult` to
+    work with instead of a bare message; asserted here so a future edit that
+    drops the attribute (leaving only the string) is caught."""
+    from bos.extensions.runtimes.codex import TurnNotCompletedError
+
+    agent = _agent(tmp_path, fake_codex, chat_store=mem_store)
+    armed = _arm_result(fake_codex, final_response="partial", status=TurnStatus.interrupted)
+
+    with pytest.raises(TurnNotCompletedError) as excinfo:
         await agent.run("chat-1", "do it", turn_id="t1")
     assert "interrupted" in str(excinfo.value)
+    assert excinfo.value.turn_result is armed
     assert await mem_store.get_messages("chat-1") == [], "an interrupted turn commits nothing"
 
 
@@ -359,6 +393,31 @@ async def test_schema_validation_exhausting_retries_raises_and_commits_nothing(t
 
     assert len(fake_codex.instances[0].turn_calls) == 2, "exactly the initial attempt plus the one allowed retry"
     assert await mem_store.get_messages("chat-1") == [], "an unvalidated reply is not turn history"
+
+
+@pytest.mark.asyncio
+async def test_schema_validation_rejects_valid_json_of_the_wrong_type(tmp_path, fake_codex, mem_store):
+    """Fix round 2, Finding 1: every other schema case here used unparseable
+    text ("not json at all"), so a parse-only stand-in (json.loads with no
+    jsonschema check) would pass every one of them — proving parsing works,
+    not validation. '{"ok": "yes"}' is valid JSON that a bare json.loads
+    accepts outright, but "ok" must be a boolean per _OK_SCHEMA, so real
+    jsonschema validation must reject it. Confirmed by mutation: degrading the
+    injected validator to parse_json makes this test fail with
+    "DID NOT RAISE" while the rest of the suite stays green."""
+    from bos.core.agent import StructuredOutputError
+
+    agent = _agent(tmp_path, fake_codex, chat_store=mem_store)
+    await agent._ensure_client()
+    first = _arm_result(fake_codex, final_response='{"ok": "yes"}')
+    second = _arm_result(fake_codex, final_response='{"ok": "yes"}')
+    fake_codex.instances[0].next_results = [first, second]
+
+    with pytest.raises(StructuredOutputError):
+        await agent.run("chat-1", "do it", turn_id="t1", schema=_OK_SCHEMA, max_schema_retries=1)
+
+    assert len(fake_codex.instances[0].turn_calls) == 2, "exactly the initial attempt plus the one allowed retry"
+    assert await mem_store.get_messages("chat-1") == []
 
 
 @pytest.mark.asyncio
