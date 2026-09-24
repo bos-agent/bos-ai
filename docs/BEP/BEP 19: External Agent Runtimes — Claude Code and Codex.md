@@ -119,7 +119,7 @@ There is no extension point and no adapter abstraction. Two names, two classes, 
 
 #### 3.2.1 Externally-backed agents do not inherit `[agent.defaults]`
 
-`bootstrap_platform` merges `[agent.defaults]` under every registered agent ([`workspace.py:644-646`](../../src/bos/config/workspace.py)). A project with `[agent.defaults] model = "gpt-4o"` would silently hand `"gpt-4o"` to Codex as a *native* model name, along with `max_tokens`, `plugins` and the rest.
+`bootstrap_platform` merges `[agent.defaults]` under every registered agent ([`workspace.py:683-685`](../../src/bos/config/workspace.py)). A project with `[agent.defaults] model = "gpt-4o"` would silently hand `"gpt-4o"` to Codex as a *native* model name, along with `max_tokens`, `plugins` and the rest.
 
 The registration loop therefore starts from `{}` instead of `agent_defaults` when the name is reserved **or** the inheritance-resolved spec carries `external_runtime` — the second half is what keeps `george` covered, since `george` is not a reserved name. `config_specs` is already inheritance-resolved at that point in the loop, so the check is available where it is needed. Each runtime then validates its own config strictly (§3.4).
 
