@@ -217,8 +217,11 @@ class FakeTurnHandle:
         # *before* ever constructing a TurnResult (that function runs inside
         # _collect_async_turn_result, ahead of the `TurnResult(...)` call) —
         # so a caller's `await thread.run(...)` never receives a TurnResult
-        # whose status is `failed`. Only mirrored here, not in .stream():
-        # CodexAgent doesn't call .stream() until Task 6.
+        # whose status is `failed`. CodexAgent itself has called only
+        # .stream() since Task 6 (its own codex.py has the same mirror,
+        # reached through _emit_stream instead) — this method is unreached by
+        # production code now, but kept as a faithful stand-in for the real
+        # AsyncThread.run()/AsyncTurnHandle.run() surface.
         if self._result is not None:
             from openai_codex.generated.v2_all import TurnStatus
 
@@ -228,6 +231,69 @@ class FakeTurnHandle:
                     raise RuntimeError(error.message)
                 raise RuntimeError(f"turn failed with status {self._result.status.value}")
         return self._result
+
+
+def _default_turn_notifications(thread_id: str, turn_id: str, result: Any) -> list[Any]:
+    """Task 5's tests arm a ``TurnResult`` via ``_arm_result`` and inspect only
+    the ``AgentResult`` ``run()`` returns — none of them pass an ``event_sink``.
+    Since Task 6, ``CodexAgent.run()`` no longer takes that ``TurnResult``
+    directly: it reconstructs one from the notifications ``handle.stream()``
+    yields. Rather than rewrite every one of those pre-existing tests to
+    hand-build a ``Notification`` sequence, synthesize the minimal one that
+    reconstructs an equivalent ``TurnResult`` from *this* armed result, so the
+    streaming path Task 6 introduces is what actually produces their answer.
+
+    Only used when a test never explicitly arms ``next_notifications`` itself
+    (see ``FakeThread.turn`` below) — a test exercising the mapping/ordering
+    of events arms its own real ``Notification`` sequence instead, and this is
+    never consulted.
+    """
+    from openai_codex.generated.v2_all import AgentMessageThreadItem, MessagePhase, ThreadItem, Turn
+    from openai_codex.models import (
+        ItemCompletedNotification,
+        Notification,
+        ThreadTokenUsageUpdatedNotification,
+        TurnCompletedNotification,
+    )
+
+    if result is None:
+        return []
+    notifications: list[Any] = []
+    if result.final_response:
+        item = ThreadItem(
+            AgentMessageThreadItem(
+                id=f"{turn_id}-response", text=result.final_response, phase=MessagePhase.final_answer,
+                type="agentMessage",
+            )
+        )
+        notifications.append(
+            Notification(
+                method="item/completed",
+                payload=ItemCompletedNotification(item=item, completed_at_ms=0, thread_id=thread_id, turn_id=turn_id),
+            )
+        )
+    if result.usage is not None:
+        notifications.append(
+            Notification(
+                method="thread/tokenUsage/updated",
+                payload=ThreadTokenUsageUpdatedNotification(
+                    thread_id=thread_id, token_usage=result.usage, turn_id=turn_id
+                ),
+            )
+        )
+    turn = Turn(
+        id=turn_id,
+        items=[],
+        status=result.status,
+        error=result.error,
+        started_at=result.started_at,
+        completed_at=result.completed_at,
+        duration_ms=result.duration_ms,
+    )
+    notifications.append(
+        Notification(method="turn/completed", payload=TurnCompletedNotification(thread_id=thread_id, turn=turn))
+    )
+    return notifications
 
 
 class FakeThread:
@@ -244,7 +310,15 @@ class FakeThread:
         # priority; next_result is the pre-existing single persistent slot,
         # unchanged for every caller that never touches next_results.
         result = self._codex.next_results.pop(0) if self._codex.next_results else self._codex.next_result
-        return FakeTurnHandle(self, f"turn-{len(self._codex.turn_calls)}", self._codex.next_notifications, result)
+        # The real AsyncTurnHandle.id IS the native turn id (both come from
+        # the same TurnStartResponse.turn.id) — TurnResult.id can never differ
+        # from the handle that produced it. Mirror that: when a result is
+        # armed, the handle's id (and the turn id notifications carry) is
+        # *its* id, not an independent counter; only fall back to a counter
+        # when nothing was armed at all.
+        turn_id = result.id if result is not None else f"turn-{len(self._codex.turn_calls)}"
+        notifications = self._codex.next_notifications or _default_turn_notifications(self.id, turn_id, result)
+        return FakeTurnHandle(self, turn_id, notifications, result)
 
     async def run(self, input: Any, **kwargs: Any) -> Any:
         handle = await self.turn(input, **kwargs)

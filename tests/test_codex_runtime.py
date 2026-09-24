@@ -1,9 +1,10 @@
 """BEP 19 Layer 4a: the Codex runtime.
 
-Stage 3 of 4 over CodexAgent's turn path: construction, config resolution and
-lifecycle (Task 3), the client and thread lifecycle (Task 4), and here — a
-turn actually runs and is persisted (Task 5). Tasks 6-8 add event streaming,
-interrupt/timeout and the approval handler on top of this.
+Stage 4 of 4 over CodexAgent's turn path: construction, config resolution and
+lifecycle (Task 3), the client and thread lifecycle (Task 4), a turn that
+runs and persists itself (Task 5), and here — that turn streamed as
+TurnEvents (Task 6). Tasks 7-8 add interrupt/cooperative-stop/timeout and the
+approval handler on top of this.
 """
 
 from __future__ import annotations
@@ -12,7 +13,28 @@ from typing import Any
 
 import pytest
 from openai_codex import ImageInput, LocalImageInput, MentionInput, TextInput, TurnResult
-from openai_codex.generated.v2_all import ThreadTokenUsage, TokenUsageBreakdown, TurnError, TurnStatus
+from openai_codex.generated.v2_all import (
+    AgentMessageThreadItem,
+    CommandExecutionStatus,
+    CommandExecutionThreadItem,
+    McpToolCallStatus,
+    McpToolCallThreadItem,
+    MessagePhase,
+    ThreadItem,
+    ThreadTokenUsage,
+    TokenUsageBreakdown,
+    Turn,
+    TurnError,
+    TurnStatus,
+)
+from openai_codex.models import (
+    ItemCompletedNotification,
+    ItemStartedNotification,
+    Notification,
+    ThreadTokenUsageUpdatedNotification,
+    TurnCompletedNotification,
+    UnknownNotification,
+)
 
 from bos.extensions.chat_stores.in_memory import InMemChatStore
 
@@ -322,17 +344,28 @@ async def test_an_interrupted_turn_raises_and_commits_nothing(tmp_path, fake_cod
     persist a handoff and return, not raise and discard the answer — the
     opposite of what this method does today. `turn_result` is attached to the
     exception precisely so that reopened decision has the full `TurnResult` to
-    work with instead of a bare message; asserted here so a future edit that
-    drops the attribute (leaving only the string) is caught."""
+    work with instead of a bare message; asserted here (on its meaningful
+    fields, not by identity — see below) so a future edit that drops the
+    attribute (leaving only the string) is caught.
+
+    Task 6: `run()` now reaches this through `_emit_stream`, which *rebuilds*
+    a `TurnResult` from the notification stream rather than handing back the
+    vendor's own object unchanged (that is the point of streaming: BOS never
+    gets one ready-made result to just pass through). So `turn_result` is no
+    longer the exact object `_arm_result` returned — asserting identity would
+    fail for a reason that has nothing to do with this test's actual contract.
+    What must survive is the *content*: the status and the answer snapshot the
+    turn was cut off with."""
     from bos.extensions.runtimes.codex import TurnNotCompletedError
 
     agent = _agent(tmp_path, fake_codex, chat_store=mem_store)
-    armed = _arm_result(fake_codex, final_response="partial", status=TurnStatus.interrupted)
+    _arm_result(fake_codex, final_response="partial", status=TurnStatus.interrupted)
 
     with pytest.raises(TurnNotCompletedError) as excinfo:
         await agent.run("chat-1", "do it", turn_id="t1")
     assert "interrupted" in str(excinfo.value)
-    assert excinfo.value.turn_result is armed
+    assert excinfo.value.turn_result.status is TurnStatus.interrupted
+    assert excinfo.value.turn_result.final_response == "partial"
     assert await mem_store.get_messages("chat-1") == [], "an interrupted turn commits nothing"
 
 
@@ -589,3 +622,353 @@ async def test_a_multipart_turn_reaches_codex_as_converted_input_items(tmp_path,
     assert [type(item) for item in sent_input] == [TextInput, ImageInput]
     assert sent_input[0].text == "look at this"
     assert sent_input[1].url == "u"
+
+
+# ── Task 6: streaming notifications to TurnEvent (BEP 19 §3.9) ─────────────
+#
+# Unlike Task 5's tests above, these arm a real Notification sequence directly
+# (`_arm_notifications`) instead of a single TurnResult: the whole point of
+# this task is what CodexAgent does with each notification as it streams by,
+# which a canned final result can't exercise. None of these need a chat_store
+# — they assert on the returned AgentResult and the sink's events, never on
+# committed messages (Task 5's tests already cover persistence).
+#
+# Every notification below is stamped turn_id="turn-1" because none of these
+# tests arm a TurnResult (_arm_result): with no result to take a native id
+# from, FakeThread.turn() falls back to its own counter ("turn-{n}"), which
+# is "turn-1" for the first turn of a fresh agent — see conftest.py.
+
+
+class CaptureSink:
+    def __init__(self) -> None:
+        self.events: list[Any] = []
+
+    async def emit(self, event: Any) -> None:
+        self.events.append(event)
+
+
+class RaisingSink:
+    """Fails on every emit. `events` still records each attempt (appended
+    before the raise), so a test can prove the turn keeps emitting past a
+    failure instead of quietly giving up after the first one."""
+
+    def __init__(self) -> None:
+        self.events: list[Any] = []
+
+    async def emit(self, event: Any) -> None:
+        self.events.append(event)
+        raise RuntimeError("sink exploded")
+
+
+def _arm_notifications(fake_codex, notifications: list[Any]) -> None:
+    """Mirrors `_arm_result`'s staging: CodexAgent builds its client lazily, so
+    arming has to reach whichever FakeAsyncCodex instance exists — or will
+    exist — by the time `.turn()` is called."""
+    if fake_codex.instances:
+        fake_codex.instances[-1].next_notifications = notifications
+    else:
+        fake_codex.arm(next_notifications=notifications)
+
+
+def _command_item(item_id: str, command: str, *, status: CommandExecutionStatus) -> ThreadItem:
+    return ThreadItem(
+        CommandExecutionThreadItem(
+            id=item_id, command=command, command_actions=[], cwd="/tmp", status=status, type="commandExecution"
+        )
+    )
+
+
+def _mcp_item(item_id: str, tool: str, server: str, *, status: McpToolCallStatus) -> ThreadItem:
+    return ThreadItem(
+        McpToolCallThreadItem(id=item_id, arguments={}, server=server, status=status, tool=tool, type="mcpToolCall")
+    )
+
+
+def _agent_message_item(item_id: str, text: str, *, phase: MessagePhase | None = MessagePhase.final_answer):
+    return ThreadItem(AgentMessageThreadItem(id=item_id, text=text, phase=phase, type="agentMessage"))
+
+
+def _item_started(item: ThreadItem, *, turn_id: str = "turn-1") -> Notification:
+    return Notification(
+        method="item/started",
+        payload=ItemStartedNotification(item=item, started_at_ms=0, thread_id="thread-1", turn_id=turn_id),
+    )
+
+
+def _item_completed(item: ThreadItem, *, turn_id: str = "turn-1") -> Notification:
+    return Notification(
+        method="item/completed",
+        payload=ItemCompletedNotification(item=item, completed_at_ms=1, thread_id="thread-1", turn_id=turn_id),
+    )
+
+
+def _turn_completed(turn_id: str = "turn-1", *, status: TurnStatus = TurnStatus.completed) -> Notification:
+    return Notification(
+        method="turn/completed",
+        payload=TurnCompletedNotification(thread_id="thread-1", turn=Turn(id=turn_id, items=[], status=status)),
+    )
+
+
+@pytest.mark.asyncio
+async def test_stream_emits_tool_and_response_events_in_order(tmp_path, fake_codex):
+    """The brief's own sequence: a command execution started and completed, an
+    agent message, a turn completed — asserted in order, by type/phase/name."""
+    agent = _agent(tmp_path, fake_codex)
+    running = _command_item("cmd-1", "ls -la", status=CommandExecutionStatus.in_progress)
+    finished = _command_item("cmd-1", "ls -la", status=CommandExecutionStatus.completed)
+    _arm_notifications(
+        fake_codex,
+        [
+            _item_started(running),
+            _item_completed(finished),
+            _item_completed(_agent_message_item("msg-1", "done")),
+            _turn_completed(),
+        ],
+    )
+    sink = CaptureSink()
+
+    result = await agent.run("chat-1", "do it", turn_id="t1", event_sink=sink)
+
+    assert result.output == "done"
+    assert [(e.event_type, e.phase) for e in sink.events] == [
+        ("tool", "start"),
+        ("tool", "finish"),
+        ("response", "finish"),
+        ("turn", "finish"),
+    ]
+    assert sink.events[0].tool_name == "ls -la"
+    assert sink.events[1].tool_name == "ls -la"
+    assert sink.events[2].content == "done"
+    for event in sink.events:
+        assert event.chat_id == "chat-1"
+        assert event.turn_id == "t1", "the BOS turn_id, not the native one"
+        assert event.agent_name == "george"
+
+
+@pytest.mark.asyncio
+async def test_stream_maps_an_mcp_tool_call_to_a_tool_event(tmp_path, fake_codex):
+    """McpToolCallThreadItem is the mapping's other tool-bearing variant —
+    untested by the command-execution sequence above."""
+    agent = _agent(tmp_path, fake_codex)
+    _arm_notifications(
+        fake_codex,
+        [
+            _item_started(_mcp_item("mcp-1", "search", "web", status=McpToolCallStatus.in_progress)),
+            _item_completed(_mcp_item("mcp-1", "search", "web", status=McpToolCallStatus.completed)),
+            _turn_completed(),
+        ],
+    )
+    sink = CaptureSink()
+
+    await agent.run("chat-1", "do it", turn_id="t1", event_sink=sink)
+
+    tool_events = [e for e in sink.events if e.event_type == "tool"]
+    assert [e.phase for e in tool_events] == ["start", "finish"]
+    assert all(e.tool_name == "search" for e in tool_events)
+
+
+@pytest.mark.asyncio
+async def test_stream_skips_item_types_with_no_tool_mapping(tmp_path, fake_codex):
+    """A ThreadItem variant that is neither a command execution, an MCP tool
+    call, nor an agent message (e.g. ReasoningThreadItem) has no BOS `tool`
+    vocabulary: skipped at both item/started and item/completed, not raised
+    and not force-fit into a tool event."""
+    from openai_codex.generated.v2_all import ReasoningThreadItem
+
+    agent = _agent(tmp_path, fake_codex)
+    reasoning = ThreadItem(ReasoningThreadItem(id="r1", type="reasoning"))
+    _arm_notifications(fake_codex, [_item_started(reasoning), _item_completed(reasoning), _turn_completed()])
+    sink = CaptureSink()
+
+    await agent.run("chat-1", "do it", turn_id="t1", event_sink=sink)
+
+    assert [e.event_type for e in sink.events] == ["turn"]
+
+
+@pytest.mark.asyncio
+async def test_stream_skips_an_unrecognized_notification_method(tmp_path, fake_codex):
+    """The vendor adds notification kinds between releases; UnknownNotification
+    is the real shape a client falls back to for one this SDK doesn't parse.
+    Must not raise, and must not stop the turn from completing normally."""
+    agent = _agent(tmp_path, fake_codex)
+    unknown = Notification(method="future/thing", payload=UnknownNotification(params={"whatever": True}))
+    _arm_notifications(fake_codex, [unknown, _turn_completed()])
+    sink = CaptureSink()
+
+    result = await agent.run("chat-1", "do it", turn_id="t1", event_sink=sink)
+
+    assert [e.event_type for e in sink.events] == ["turn"]
+    assert result.finish_reason == "completed"
+
+
+@pytest.mark.asyncio
+async def test_stream_ignores_notifications_for_a_different_turn(tmp_path, fake_codex):
+    """_collect_async_turn_result filters every accumulated notification by
+    turn_id even though the real subscription is already scoped to one turn;
+    mirrored here as the same defensive backstop, for all three accumulated
+    kinds (item, usage, turn/completed).
+
+    Every foreign notification below is placed *after* its genuine
+    counterpart, specifically so that if a turn_id guard were ever deleted,
+    the *foreign* value would be the one left standing: the reverse scan for
+    final_response finds the last-appended item first, and a later write
+    would otherwise overwrite usage/completed. A real stream() could never
+    actually deliver anything after its own turn's completion — this ordering
+    tests BOS's accumulation guards in isolation from that upstream guarantee,
+    the same way _collect_async_turn_result's own filters apply unconditionally
+    regardless of what the subscription is expected to already scope out."""
+    agent = _agent(tmp_path, fake_codex)
+    foreign_usage = ThreadTokenUsage(
+        last=TokenUsageBreakdown(
+            cached_input_tokens=0, input_tokens=1, output_tokens=0, reasoning_output_tokens=0, total_tokens=1
+        ),
+        total=TokenUsageBreakdown(
+            cached_input_tokens=0, input_tokens=1, output_tokens=0, reasoning_output_tokens=0, total_tokens=1
+        ),
+    )
+    _arm_notifications(
+        fake_codex,
+        [
+            _item_completed(_agent_message_item("real-msg", "the real answer")),
+            _turn_completed(),
+            _item_completed(_agent_message_item("foreign-msg", "should not win"), turn_id="turn-999"),
+            Notification(
+                method="thread/tokenUsage/updated",
+                payload=ThreadTokenUsageUpdatedNotification(
+                    thread_id="thread-1", token_usage=foreign_usage, turn_id="turn-999"
+                ),
+            ),
+            # A different status so a leaked overwrite of `completed` is
+            # observable through finish_reason, not just silently harmless.
+            _turn_completed("turn-999", status=TurnStatus.interrupted),
+        ],
+    )
+
+    result = await agent.run("chat-1", "do it", turn_id="t1")
+
+    assert result.output == "the real answer", "a foreign item must not win the reverse scan for the final answer"
+    assert result.usage == {}, "the foreign-turn usage notification must not be accumulated"
+    assert result.finish_reason == "completed", "a foreign turn/completed must not overwrite this turn's own"
+    assert result.usage == {}, "the foreign-turn usage notification must not be accumulated"
+
+
+@pytest.mark.asyncio
+async def test_stream_with_no_sink_still_streams_and_returns_a_result(tmp_path, fake_codex):
+    """sink may be None — the common case for _HarnessAgentRunner — and a turn
+    with none must still stream, collect and return its result."""
+    agent = _agent(tmp_path, fake_codex)
+    _arm_notifications(fake_codex, [_item_completed(_agent_message_item("msg-1", "done")), _turn_completed()])
+
+    result = await agent.run("chat-1", "do it", turn_id="t1")  # event_sink omitted -> None
+
+    assert result.output == "done"
+
+
+@pytest.mark.asyncio
+async def test_stream_sink_that_raises_does_not_break_the_turn(tmp_path, fake_codex):
+    """Emitting is best-effort: a sink that raises must not kill the turn, and
+    must not stop later notifications from being attempted either — asserted
+    via RaisingSink's own event count, not just that run() didn't raise."""
+    agent = _agent(tmp_path, fake_codex)
+    _arm_notifications(
+        fake_codex,
+        [
+            _item_started(_command_item("cmd-1", "ls", status=CommandExecutionStatus.in_progress)),
+            _item_completed(_command_item("cmd-1", "ls", status=CommandExecutionStatus.completed)),
+            _item_completed(_agent_message_item("msg-1", "done")),
+            _turn_completed(),
+        ],
+    )
+    sink = RaisingSink()
+
+    result = await agent.run("chat-1", "do it", turn_id="t1", event_sink=sink)
+
+    assert result.output == "done"
+    assert len(sink.events) == 4, "every notification's event was attempted despite each emit raising"
+
+
+@pytest.mark.asyncio
+async def test_stream_raises_if_the_stream_ends_without_a_turn_completed(tmp_path, fake_codex):
+    """Mirrors _collect_async_turn_result's own guard: `completed is None`
+    after the stream ends is a RuntimeError, not a silently empty result."""
+    agent = _agent(tmp_path, fake_codex)
+    _arm_notifications(fake_codex, [_item_completed(_agent_message_item("msg-1", "partial"))])
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await agent.run("chat-1", "do it", turn_id="t1")
+    message = str(excinfo.value)
+    assert "turn completed event not received" in message
+    assert "codex" in message and "george" in message
+
+
+@pytest.mark.asyncio
+async def test_final_response_falls_back_to_an_unphased_message_and_skips_commentary(tmp_path, fake_codex):
+    """Mirrors _final_assistant_response_from_items exactly: with no
+    final_answer-phase item, the last *unphased* one wins — but a
+    commentary-phase item is neither the answer nor a fallback candidate, so
+    it must be skipped rather than mistakenly picked up as one."""
+    agent = _agent(tmp_path, fake_codex)
+    _arm_notifications(
+        fake_codex,
+        [
+            _item_completed(_agent_message_item("c1", "commentary text", phase=MessagePhase.commentary)),
+            _item_completed(_agent_message_item("u1", "unphased text", phase=None)),
+            _turn_completed(),
+        ],
+    )
+
+    result = await agent.run("chat-1", "do it", turn_id="t1")
+
+    assert result.output == "unphased text"
+
+
+@pytest.mark.asyncio
+async def test_final_response_skips_non_agent_message_items_while_scanning_backward(tmp_path, fake_codex):
+    """_final_assistant_response_from_items scans `items` in reverse looking
+    for an AgentMessageThreadItem. A different item type appended *after* the
+    real answer (so it is visited *first* in the reverse scan) must be
+    stepped over via `continue`, not mistaken for one — a
+    CommandExecutionThreadItem has no `.phase` at all, so deleting that
+    isinstance guard turns this into an AttributeError instead of a skip."""
+    agent = _agent(tmp_path, fake_codex)
+    _arm_notifications(
+        fake_codex,
+        [
+            _item_completed(_agent_message_item("msg-1", "the answer")),
+            _item_completed(_command_item("cmd-1", "ls", status=CommandExecutionStatus.completed)),
+            _turn_completed(),
+        ],
+    )
+
+    result = await agent.run("chat-1", "do it", turn_id="t1")
+
+    assert result.output == "the answer"
+
+
+@pytest.mark.asyncio
+async def test_a_turn_with_nothing_armed_raises_rather_than_answering_silently(tmp_path, fake_codex):
+    """Guards the fake itself: FakeThread.turn() falls back to synthesizing
+    notifications from an armed TurnResult when nothing was explicitly armed
+    via _arm_notifications, but if a test forgets to arm *anything* (no
+    _arm_result either) there is nothing to synthesize from. That must
+    surface as the same loud failure a real turn that never completes would
+    — not a silent, bogus empty answer that would mask the mistake."""
+    agent = _agent(tmp_path, fake_codex)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await agent.run("chat-1", "do it", turn_id="t1")
+    assert "turn completed event not received" in str(excinfo.value)
+
+
+def test_unwrap_thread_item_falls_back_when_root_is_absent():
+    """The `hasattr(item, "root") else item` half of the vendor's own unwrap
+    (openai_codex/_run.py:36-40) — every item built through ThreadItem(...) in
+    the tests above always has `.root`, so only a direct unit test exercises
+    the fallback for an item that arrives already unwrapped."""
+    from bos.extensions.runtimes.codex import _unwrap_thread_item
+
+    class _NoRoot:
+        pass
+
+    bare = _NoRoot()
+    assert _unwrap_thread_item(bare) is bare

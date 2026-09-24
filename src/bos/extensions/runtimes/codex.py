@@ -13,13 +13,15 @@ here: it is reached exclusively through ``importlib``, from
 ``bos/sdk/`` may import this module or the vendor package directly, so a base
 install with neither extra never touches either.
 
-Stage 3 of 4 over ``CodexAgent``'s turn path: construction (Task 3), the
-client and thread lifecycle (Task 4), and here — a turn actually runs and is
-persisted, including schema-validated structured output (BEP 12 semantics,
-via the injected ``StructuredValidator`` — BEP 19 §3.2, §3.9). Tasks 6-8 add
-event streaming, interrupt/timeout and the approval handler on top of this;
-``run()`` is deliberately plain until then (no streaming, no interrupt
-wiring).
+Stage 4 of 4 over ``CodexAgent``'s turn path: construction (Task 3), the
+client and thread lifecycle (Task 4), a turn that runs and persists itself
+including schema-validated structured output (BEP 12 semantics, via the
+injected ``StructuredValidator`` — BEP 19 §3.2, §3.9) (Task 5), and here —
+that turn is made observable: ``run()`` starts each native turn with
+``thread.turn()`` and consumes it through ``_emit_stream``, which streams
+``AsyncTurnHandle.stream()`` into BOS ``TurnEvent``s as they arrive rather
+than awaiting one final result (BEP 19 §3.9). Tasks 7-8 add interrupt/
+cooperative-stop/timeout and the approval handler on top of this.
 """
 
 from __future__ import annotations
@@ -27,16 +29,18 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import inspect
+import logging
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import AsyncGenerator, Callable, Mapping
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Awaitable
+from typing import Any, Awaitable, cast
 
 from openai_codex import (
     ApprovalMode,
     AsyncCodex,
     AsyncThread,
+    AsyncTurnHandle,
     CodexConfig,
     ImageInput,
     InputItem,
@@ -47,14 +51,31 @@ from openai_codex import (
     TextInput,
     TurnResult,
 )
-from openai_codex.types import TurnStatus
+from openai_codex.generated.v2_all import (
+    AgentMessageThreadItem,
+    CommandExecutionThreadItem,
+    McpToolCallThreadItem,
+    MessagePhase,
+)
+from openai_codex.models import ItemCompletedNotification, ItemStartedNotification, Notification
+from openai_codex.types import (
+    ThreadItem,
+    ThreadTokenUsage,
+    ThreadTokenUsageUpdatedNotification,
+    Turn,
+    TurnCompletedNotification,
+    TurnStatus,
+)
 
 from bos.core.agent import (
+    AgentEventType,
     AgentResult,
     ChatStore,
     MessageContent,
     StructuredOutputError,
     StructuredValidator,
+    TurnEvent,
+    TurnEventPhase,
     TurnEventSink,
     _compact,
     content_as_parts,
@@ -65,6 +86,8 @@ from bos.extensions.runtimes._shared import (
     parse_external_config,
     read_native_session_id,
 )
+
+logger = logging.getLogger(__name__)
 
 # Patched in tests to inject FakeAsyncCodex — the only seam the double needs.
 _CODEX_FACTORY: Callable[..., Any] = AsyncCodex
@@ -125,6 +148,72 @@ def _content_to_codex_input(content: MessageContent) -> RunInput:
                 )
             items.append(MentionInput(name=Path(source["value"]).name, path=source["value"]))
     return items
+
+
+def _unwrap_thread_item(item: ThreadItem) -> Any:
+    """``ThreadItem`` is a pydantic ``RootModel`` union; unwrap it to the concrete
+    variant before an ``isinstance`` check, exactly as ``openai_codex/_run.py``
+    (lines 36-40) does ahead of its own ``isinstance`` checks. The ``hasattr``
+    guard — rather than assuming ``.root`` is always present — is the vendor's
+    own hedge against a future item that arrives unwrapped; mirrored verbatim
+    rather than simplified to a bare ``.root``.
+    """
+    return item.root if hasattr(item, "root") else item
+
+
+def _tool_name_for(item: Any) -> str | None:
+    """The two ``ThreadItem`` variants BEP 19 §3.9 maps to a ``tool`` event.
+
+    ``CommandExecutionThreadItem`` has no separate "tool name" field — the
+    command being run *is* the tool identity — so its own ``command`` string
+    is what a host has to show. ``McpToolCallThreadItem`` names its tool
+    directly. Every other variant (``FileChangeThreadItem``,
+    ``ReasoningThreadItem``, a future addition, ...) returns ``None``: BOS has
+    no ``tool`` vocabulary for it, so the caller skips the notification
+    instead of emitting a half-populated event.
+    """
+    if isinstance(item, CommandExecutionThreadItem):
+        return item.command
+    if isinstance(item, McpToolCallThreadItem):
+        return item.tool
+    return None
+
+
+def _raise_for_failed_turn(turn: Turn) -> None:
+    """Mirrors ``openai_codex._run._raise_for_failed_turn`` exactly.
+
+    ``_collect_async_turn_result`` calls this on the completed ``Turn`` before
+    ever building a ``TurnResult``, so a failed turn never reaches its caller
+    as a normal result on the streaming path either — the same place
+    ``AsyncThread.run()`` raises for Task 5's plain (non-streaming) call.
+    Reimplemented rather than imported: this is vendor-internal (leading
+    underscore) code, so a citation in a comment is the stable reference,
+    not a runtime dependency on a module that owes us no compatibility.
+    """
+    if turn.status is not TurnStatus.failed:
+        return
+    if turn.error is not None and turn.error.message:
+        raise RuntimeError(turn.error.message)
+    raise RuntimeError(f"turn failed with status {turn.status.value}")
+
+
+def _final_assistant_response_from_items(items: list[ThreadItem]) -> str | None:
+    """Mirrors ``openai_codex._run._final_assistant_response_from_items`` exactly:
+    the *last* ``AgentMessageThreadItem`` whose ``phase`` is ``final_answer``,
+    or — only when none exists — the last one with no phase at all. A
+    ``commentary``-phase message is neither: it is not the answer, and it is
+    not a fallback candidate either, so it is silently skipped either way.
+    """
+    last_unknown_phase_response: str | None = None
+    for item in reversed(items):
+        thread_item = _unwrap_thread_item(item)
+        if not isinstance(thread_item, AgentMessageThreadItem):
+            continue
+        if thread_item.phase is MessagePhase.final_answer:
+            return thread_item.text
+        if thread_item.phase is None and last_unknown_phase_response is None:
+            last_unknown_phase_response = thread_item.text
+    return last_unknown_phase_response
 
 
 class TurnNotCompletedError(RuntimeError):
@@ -282,6 +371,171 @@ class CodexAgent:
             ) from exc
         return thread, False
 
+    def _event(
+        self,
+        *,
+        chat_id: str,
+        turn_id: str,
+        event_type: str,
+        phase: str,
+        detail: str | None = None,
+        tool_name: str | None = None,
+        content: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> TurnEvent:
+        return TurnEvent(
+            event_type=event_type,
+            phase=phase,
+            chat_id=chat_id,
+            turn_id=turn_id,
+            agent_name=self._kind,
+            detail=detail,
+            tool_name=tool_name,
+            content=content,
+            metadata=dict(metadata or {}),
+        )
+
+    def _event_for_notification(
+        self,
+        notification: Notification,
+        *,
+        chat_id: str,
+        turn_id: str,
+        metadata: dict[str, Any] | None,
+    ) -> TurnEvent | None:
+        """BEP 19 §3.9's mapping. ``Notification.method`` drives it, refined by
+        the concrete ``ThreadItem`` variant for ``item/started``/``item/completed``:
+
+        - ``item/started`` on a ``CommandExecutionThreadItem``/``McpToolCallThreadItem``
+          -> ``tool``/``start``.
+        - the matching ``item/completed`` -> ``tool``/``finish``.
+        - ``item/completed`` on an ``AgentMessageThreadItem`` -> ``response``/``finish``.
+        - ``turn/completed`` -> ``turn``/``finish``.
+
+        Anything else — an unrecognised ``method``, or an item variant BOS has
+        no ``tool`` vocabulary for (a ``FileChangeThreadItem``, a future
+        addition, ...) — returns ``None``. The vendor adds notification and
+        item kinds between releases; a turn must not die because BOS has not
+        heard of one yet, so this is a lookup that misses cleanly, never a
+        raise.
+        """
+        payload = notification.payload
+        if notification.method == "item/started" and isinstance(payload, ItemStartedNotification):
+            tool_name = _tool_name_for(_unwrap_thread_item(payload.item))
+            if tool_name is None:
+                return None
+            return self._event(
+                chat_id=chat_id,
+                turn_id=turn_id,
+                event_type=AgentEventType.tool,
+                phase=TurnEventPhase.start,
+                tool_name=tool_name,
+                metadata=metadata,
+            )
+        if notification.method == "item/completed" and isinstance(payload, ItemCompletedNotification):
+            item = _unwrap_thread_item(payload.item)
+            if isinstance(item, AgentMessageThreadItem):
+                return self._event(
+                    chat_id=chat_id,
+                    turn_id=turn_id,
+                    event_type=AgentEventType.response,
+                    phase=TurnEventPhase.finish,
+                    content=item.text,
+                    metadata=metadata,
+                )
+            tool_name = _tool_name_for(item)
+            if tool_name is None:
+                return None
+            return self._event(
+                chat_id=chat_id,
+                turn_id=turn_id,
+                event_type=AgentEventType.tool,
+                phase=TurnEventPhase.finish,
+                tool_name=tool_name,
+                metadata=metadata,
+            )
+        if notification.method == "turn/completed" and isinstance(payload, TurnCompletedNotification):
+            return self._event(
+                chat_id=chat_id,
+                turn_id=turn_id,
+                event_type=AgentEventType.turn,
+                phase=TurnEventPhase.finish,
+                metadata=metadata,
+            )
+        return None
+
+    async def _emit_stream(
+        self,
+        handle: AsyncTurnHandle,
+        sink: TurnEventSink | None,
+        *,
+        chat_id: str,
+        turn_id: str,
+        ctx_metadata: dict[str, Any] | None,
+    ) -> TurnResult:
+        """Consume ``handle.stream()``, translating each ``Notification`` into a
+        ``TurnEvent`` for ``sink`` while accumulating exactly what
+        ``openai_codex._run._collect_async_turn_result`` does, so the
+        ``TurnResult`` this returns is what a plain ``await handle.run()``
+        would have produced (BEP 19 §3.9) — the only difference is that the
+        caller also got to watch it happen.
+
+        ``sink`` may be ``None`` (the common case for ``_HarnessAgentRunner``):
+        the turn still streams and collects, translation is just skipped.
+        Emitting is best-effort — a sink that raises must not end the turn,
+        mirroring how ``Agent._emit_event`` guards ``event_sink.emit``
+        (``agent.py``).
+        """
+        items: list[ThreadItem] = []
+        usage: ThreadTokenUsage | None = None
+        completed: TurnCompletedNotification | None = None
+
+        # `AsyncTurnHandle.stream()` is annotated `-> AsyncIterator[Notification]`,
+        # but its body is an `async def ... yield ...` function, so calling it
+        # always produces a real async generator — `AsyncIterator` just doesn't
+        # declare the `aclose()` every async generator actually has. A vendor
+        # stub gap, not a guess: cast to what it actually is rather than
+        # suppress the check.
+        stream = cast(AsyncGenerator[Notification, None], handle.stream())
+        try:
+            async for notification in stream:
+                payload = notification.payload
+                if isinstance(payload, ItemCompletedNotification) and payload.turn_id == handle.id:
+                    items.append(payload.item)
+                elif isinstance(payload, ThreadTokenUsageUpdatedNotification) and payload.turn_id == handle.id:
+                    usage = payload.token_usage
+                elif isinstance(payload, TurnCompletedNotification) and payload.turn.id == handle.id:
+                    completed = payload
+
+                if sink is not None:
+                    event = self._event_for_notification(
+                        notification, chat_id=chat_id, turn_id=turn_id, metadata=ctx_metadata
+                    )
+                    if event is not None:
+                        try:
+                            await sink.emit(event)
+                        except Exception:
+                            logger.debug("Codex event sink emit error", exc_info=True)
+        finally:
+            await stream.aclose()
+
+        if completed is None:
+            raise RuntimeError("turn completed event not received")
+        turn = completed.turn
+        _raise_for_failed_turn(turn)
+
+        return TurnResult(
+            id=turn.id,
+            status=turn.status,
+            error=turn.error,
+            started_at=turn.started_at,
+            completed_at=turn.completed_at,
+            duration_ms=turn.duration_ms,
+            final_response=_final_assistant_response_from_items(items),
+            items=items,
+            usage=usage,
+        )
+
     async def ask(
         self,
         chat_id: str,
@@ -320,12 +574,17 @@ class CodexAgent:
         schema: dict[str, Any] | None = None,
         max_schema_retries: int = 1,
     ) -> AgentResult:
-        """Run one Codex turn to completion and persist it (BEP 19 §3.7, §3.9).
+        """Run one Codex turn to completion, streaming it, and persist it
+        (BEP 19 §3.7, §3.9).
 
-        Deliberately plain otherwise (stage 3 of 4, see the module docstring):
-        no event streaming (``event_sink`` is accepted but not yet fed — Task
-        6), no ``interrupt``/timeout wiring (Task 7), no approval handling
-        (Task 8).
+        Every native turn — including each schema-validation retry — is
+        started with ``thread.turn()`` and consumed through
+        :meth:`_emit_stream`, which streams ``handle.stream()`` into
+        ``TurnEvent``s for ``event_sink`` while accumulating the same
+        ``TurnResult`` a plain ``await thread.run(...)`` would have produced.
+        Still deliberately plain otherwise (stage 4 of 4, see the module
+        docstring): no ``interrupt``/timeout wiring (Task 7), no approval
+        handling (Task 8).
 
         ``schema`` maps to ``thread.turn(output_schema=...)`` as a provider
         hint, but that hint is never trusted on its own: the reply is always
@@ -367,20 +626,27 @@ class CodexAgent:
         retries = 0
         while True:
             try:
-                result = await thread.run(codex_input, **turn_kwargs)
+                handle = await thread.turn(codex_input, **turn_kwargs)
+                result = await self._emit_stream(
+                    handle, event_sink, chat_id=chat_id, turn_id=turn_id, ctx_metadata=ctx_metadata
+                )
             except Exception as exc:
-                # A native TurnStatus.failed is raised by the SDK itself,
-                # before it ever constructs a TurnResult: openai_codex._run's
-                # _raise_for_failed_turn runs inside _collect_async_turn_result
-                # ahead of the `TurnResult(...)` call, so `await thread.run(...)`
-                # never returns one for a failed turn — this method's own
-                # status check below is unreachable for `failed` against the
-                # real SDK. Re-wrapped here so the runtime/agent/turn_id/chat_id
-                # context this method would attach to a `TurnResult`-shaped
-                # failure is not lost on the one path a real vendor call
-                # actually takes. Applies on a retry turn too: a native
-                # failure while sending a correction message is a new native
-                # failure, not one more validation attempt to retry.
+                # A native TurnStatus.failed is raised before a TurnResult is
+                # ever built, on both the plain and the streaming path:
+                # openai_codex._run's own _raise_for_failed_turn runs inside
+                # _collect_async_turn_result ahead of the `TurnResult(...)`
+                # call, and `_emit_stream` mirrors that exact check (this
+                # module's own `_raise_for_failed_turn`) ahead of its own
+                # `TurnResult(...)` call — so neither `thread.turn()` nor
+                # `_emit_stream` ever hands back a `TurnResult` for a failed
+                # turn; this method's own status check below is unreachable
+                # for `failed`. Re-wrapped here so the runtime/agent/turn_id/
+                # chat_id context this method would attach to a
+                # `TurnResult`-shaped failure is not lost on the one path a
+                # real vendor call actually takes. Applies on a retry turn
+                # too: a native failure while sending a correction message is
+                # a new native failure, not one more validation attempt to
+                # retry.
                 raise RuntimeError(
                     f"{self._config.runtime} runtime {self._kind!r}: turn {turn_id!r} for chat "
                     f"{chat_id!r} failed: {exc}"
