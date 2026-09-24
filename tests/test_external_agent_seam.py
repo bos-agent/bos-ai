@@ -271,3 +271,36 @@ async def test_inspect_reports_an_external_agent_without_touching_agent_internal
     assert info["permission"] == "read-only"
     assert info["plugins"] == []
     assert info["skills"] == {}
+
+
+@pytest.mark.asyncio
+async def test_inspect_text_render_shows_external_fields_and_hides_the_model_hint(tmp_path, fake_runtimes):
+    """BEP 19 §4.3: text mode is the default operator view, not `--json`.
+
+    An external agent's report has no "model" — [agent.defaults] is
+    deliberately not merged into it — so the renderer must not print the
+    BOS_MODEL hint, and must instead show the fields this task added.
+    """
+    import io
+
+    from rich.console import Console
+
+    from bos.cli.commands.inspect import _agent_capabilities, _render_agent
+
+    ws = _write_workspace(
+        tmp_path,
+        '[agents.george]\n_parent = "codex"\ncwd = "."\npermission = "read-only"\nmcp_tools = ["search"]\n',
+    )
+    ws.resolve_agents()
+    ws.bootstrap_platform()
+
+    info = await _agent_capabilities(ws, "george")
+
+    buffer = io.StringIO()
+    _render_agent(Console(file=buffer, width=200), info)
+    output = buffer.getvalue()
+
+    assert "codex" in output, "the resolved runtime must be shown"
+    assert "read-only" in output, "the permission level must be shown"
+    assert "search" in output, "the resolved mcp_tools must be shown"
+    assert "BOS_MODEL" not in output, "no such setting exists for an external runtime"
