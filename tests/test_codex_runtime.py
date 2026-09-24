@@ -21,17 +21,33 @@ def _agent(tmp_path, fake_codex, **cfg: Any):
     """Build a CodexAgent with sane defaults: permission="read-only" and no cwd
     override unless the caller passes one. Used by every later task.
 
-    `chat_store` is popped out of **cfg and passed straight to the constructor
-    rather than validated as agent config; everything else in **cfg becomes the
-    config dict. `fake_codex` is a required parameter (not read here) so every
-    caller is guaranteed the `_CODEX_FACTORY` patch is live before the agent
-    goes on to build a client from it.
+    `chat_store` and `structured_validator` are popped out of **cfg and passed
+    straight to the constructor rather than validated as agent config;
+    everything else in **cfg becomes the config dict. `fake_codex` is a
+    required parameter (not read here) so every caller is guaranteed the
+    `_CODEX_FACTORY` patch is live before the agent goes on to build a client
+    from it.
+
+    `structured_validator` defaults to the real, jsonschema-backed
+    `JsonSchemaValidator` — the same class `create_agent` injects via
+    `_default_structured_validator()` — not a fake, so schema tests exercise
+    real BEP 12 validation rather than a stand-in that could silently drift
+    from what production actually enforces.
     """
+    from bos.core.defaults.structured_validator import JsonSchemaValidator
     from bos.extensions.runtimes.codex import CodexAgent
 
     chat_store = cfg.pop("chat_store", None)
+    structured_validator = cfg.pop("structured_validator", None) or JsonSchemaValidator()
     cfg.setdefault("permission", "read-only")
-    return CodexAgent(kind="george", cfg=cfg, chat_store=chat_store, workspace=tmp_path, mcp=lambda: None)
+    return CodexAgent(
+        kind="george",
+        cfg=cfg,
+        chat_store=chat_store,
+        workspace=tmp_path,
+        mcp=lambda: None,
+        structured_validator=structured_validator,
+    )
 
 
 def _arm_result(
@@ -106,7 +122,9 @@ async def test_construction_rejects_an_invalid_config(tmp_path, fake_codex):
     from bos.extensions.runtimes.codex import CodexAgent
 
     with pytest.raises(ValueError) as excinfo:
-        CodexAgent(kind="george", cfg={}, chat_store=None, workspace=tmp_path, mcp=lambda: None)
+        CodexAgent(
+            kind="george", cfg={}, chat_store=None, workspace=tmp_path, mcp=lambda: None, structured_validator=None
+        )
     assert "permission" in str(excinfo.value)
 
 
@@ -160,6 +178,7 @@ async def test_subscription_auth_preflight_fails_loudly_without_an_account(tmp_p
     with pytest.raises(RuntimeError) as excinfo:
         await agent._ensure_client()
     assert "codex" in str(excinfo.value)
+    assert fake_codex.instances[0].closed is True, "a client that fails preflight is closed, not leaked"
 
 
 @pytest.mark.asyncio
@@ -217,6 +236,7 @@ async def test_a_turn_returns_the_final_response_and_commits_two_messages(tmp_pa
     result = await agent.run("chat-1", "do it", turn_id="t1")
 
     assert result.output == "done"
+    assert result.structured is False, "no schema was requested"
     assert result.iterations == 1
     assert result.usage  # non-empty
     assert result.finish_reason == "completed", "finish_reason carries TurnStatus.value verbatim"
@@ -282,20 +302,63 @@ async def test_an_interrupted_turn_raises_and_commits_nothing(tmp_path, fake_cod
     assert await mem_store.get_messages("chat-1") == [], "an interrupted turn commits nothing"
 
 
-@pytest.mark.asyncio
-async def test_a_schema_request_raises_because_codexagent_has_no_validator(tmp_path, fake_codex, mem_store):
-    """CodexAgent is never constructed with a StructuredValidator —
-    ExternalRuntime.__init__ (BEP 19 §3.2) fixes the constructor to exactly
-    kind/cfg/chat_store/workspace/mcp — so it cannot fulfil BEP 12's
-    "validated" promise for `schema=`. This must raise before ever touching
-    Codex, not silently forward `output_schema` and return unvalidated text as
-    though nothing were missing."""
-    agent = _agent(tmp_path, fake_codex, chat_store=mem_store)
+_OK_SCHEMA = {"type": "object", "required": ["ok"], "properties": {"ok": {"type": "boolean"}}}
 
-    with pytest.raises(NotImplementedError):
-        await agent.run("chat-1", "do it", turn_id="t1", schema={"type": "object"})
-    assert fake_codex.instances == [], "must fail before ever building a client or touching Codex"
-    assert await mem_store.get_messages("chat-1") == []
+
+@pytest.mark.asyncio
+async def test_schema_is_forwarded_and_the_validated_object_is_returned(tmp_path, fake_codex, mem_store):
+    """Fix round 1: CodexAgent now receives the same injected StructuredValidator
+    create_agent gives every Agent (BEP 19 §3.2 gained a sixth constructor
+    kwarg for exactly this). `_agent()` wires a real JsonSchemaValidator, so
+    this is real jsonschema validation, not a stand-in."""
+    agent = _agent(tmp_path, fake_codex, chat_store=mem_store)
+    _arm_result(fake_codex, final_response='{"ok": true}')
+
+    result = await agent.run("chat-1", "do it", turn_id="t1", schema=_OK_SCHEMA)
+
+    assert result.structured is True
+    assert result.output == {"ok": True}
+    _thread_id, _input, kwargs = fake_codex.instances[0].turn_calls[0]
+    assert kwargs["output_schema"] == _OK_SCHEMA, "the schema is also forwarded as a provider hint"
+    messages = await mem_store.get_messages("chat-1")
+    assert messages[1].llm_message["content"] == '{"ok": true}', "the raw text is stored, not the parsed object"
+
+
+@pytest.mark.asyncio
+async def test_schema_validation_failure_retries_with_a_correction_message_then_succeeds(
+    tmp_path, fake_codex, mem_store
+):
+    agent = _agent(tmp_path, fake_codex, chat_store=mem_store)
+    await agent._ensure_client()  # build the client now so both queued results serve ONE run() call
+    bad = _arm_result(fake_codex, final_response="not json at all")
+    good = _arm_result(fake_codex, final_response='{"ok": true}')
+    fake_codex.instances[0].next_results = [bad, good]
+
+    result = await agent.run("chat-1", "do it", turn_id="t1", schema=_OK_SCHEMA, max_schema_retries=1)
+
+    assert result.structured is True
+    assert result.output == {"ok": True}
+    calls = fake_codex.instances[0].turn_calls
+    assert len(calls) == 2, "one initial attempt plus one retry"
+    _thread_id, correction_input, _kwargs = calls[1]
+    assert "schema validation" in correction_input and "not json at all" not in correction_input
+
+
+@pytest.mark.asyncio
+async def test_schema_validation_exhausting_retries_raises_and_commits_nothing(tmp_path, fake_codex, mem_store):
+    from bos.core.agent import StructuredOutputError
+
+    agent = _agent(tmp_path, fake_codex, chat_store=mem_store)
+    await agent._ensure_client()
+    first = _arm_result(fake_codex, final_response="not json at all")
+    second = _arm_result(fake_codex, final_response="still not json")
+    fake_codex.instances[0].next_results = [first, second]
+
+    with pytest.raises(StructuredOutputError):
+        await agent.run("chat-1", "do it", turn_id="t1", schema=_OK_SCHEMA, max_schema_retries=1)
+
+    assert len(fake_codex.instances[0].turn_calls) == 2, "exactly the initial attempt plus the one allowed retry"
+    assert await mem_store.get_messages("chat-1") == [], "an unvalidated reply is not turn history"
 
 
 @pytest.mark.asyncio

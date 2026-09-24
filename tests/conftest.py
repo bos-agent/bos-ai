@@ -127,8 +127,9 @@ def _default_test_consolidator(model=None, llm=None, **kwargs):
 class _FakeRuntime:
     """Stands in for ClaudeCodeAgent / CodexAgent (BEP 19 §6 Layer 1)."""
 
-    def __init__(self, *, kind, cfg, chat_store, workspace, mcp):
+    def __init__(self, *, kind, cfg, chat_store, workspace, mcp, structured_validator):
         self._kind, self.cfg, self.workspace, self.mcp = kind, cfg, workspace, mcp
+        self.structured_validator = structured_validator
         self.closed = False
 
     @property
@@ -223,9 +224,12 @@ class FakeThread:
 
     async def turn(self, input: Any, **kwargs: Any) -> FakeTurnHandle:
         self._codex.turn_calls.append((self.id, input, kwargs))
-        return FakeTurnHandle(
-            self, f"turn-{len(self._codex.turn_calls)}", self._codex.next_notifications, self._codex.next_result
-        )
+        # A queued result (Task 5 fix round: schema-retry tests need a
+        # *different* TurnResult per call within one run() invocation) takes
+        # priority; next_result is the pre-existing single persistent slot,
+        # unchanged for every caller that never touches next_results.
+        result = self._codex.next_results.pop(0) if self._codex.next_results else self._codex.next_result
+        return FakeTurnHandle(self, f"turn-{len(self._codex.turn_calls)}", self._codex.next_notifications, result)
 
     async def run(self, input: Any, **kwargs: Any) -> Any:
         handle = await self.turn(input, **kwargs)
@@ -250,6 +254,7 @@ class FakeAsyncCodex:
         self.resume_error: Exception | None = None
         self.next_notifications: list[Any] = []
         self.next_result: Any = None
+        self.next_results: list[Any] = []
         self.next_thread_read: Any = None
 
     async def account(self, *, refresh_token: bool = False) -> Any:

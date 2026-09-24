@@ -15,7 +15,7 @@ from ._utils import (
     _deep_merge,
     _pick_collection,
 )
-from .agent import AbortTurn, Agent, AgentPort, ExternalRuntime, TurnContext
+from .agent import AbortTurn, Agent, AgentPort, ExternalRuntime, StructuredValidator, TurnContext
 from .contract import (
     AgentPlugin,
     AgentResult,
@@ -43,13 +43,16 @@ from .sinks import derive_event_sink
 
 logger = logging.getLogger(__name__)
 
-_structured_validator_singleton: Any = None
+_structured_validator_singleton: StructuredValidator | None = None
 
 
-def _default_structured_validator() -> Any:
+def _default_structured_validator() -> StructuredValidator:
     """The default (jsonschema-backed) structured-output validator injected into
-    agents (BEP 12). Lazily imported so the agent ring stays stdlib-pure and the
-    third-party dep is only pulled when an agent is actually built."""
+    every agent (BEP 12) — ``Agent`` and, as of BEP 19 §3.9, every vendor
+    runtime built by ``create_agent`` too, so ``schema=`` validates the same
+    way regardless of which kind of agent ran the turn. Lazily imported so the
+    agent ring stays stdlib-pure and the third-party dep is only pulled when an
+    agent is actually built."""
     global _structured_validator_singleton
     if _structured_validator_singleton is None:
         from bos.core.defaults.structured_validator import JsonSchemaValidator
@@ -472,6 +475,7 @@ class AgentHarness:
                 chat_store=self.chat_store,
                 workspace=self._workspace,
                 mcp=self._ensure_tool_mcp_server,
+                structured_validator=_default_structured_validator(),
             )
             self._owned.append(external)
             return external

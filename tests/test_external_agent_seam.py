@@ -432,7 +432,8 @@ def test_external_runtime_requires_aclose_and_resolved_config():
 
     from bos.core.agent import ExternalRuntime
 
-    assert isinstance(_FakeRuntime(kind="k", cfg={}, chat_store=None, workspace=".", mcp=None), ExternalRuntime)
+    fake = _FakeRuntime(kind="k", cfg={}, chat_store=None, workspace=".", mcp=None, structured_validator=None)
+    assert isinstance(fake, ExternalRuntime)
 
 
 def test_external_runtime_rejects_a_runtime_without_aclose():
