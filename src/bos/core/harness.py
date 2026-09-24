@@ -70,7 +70,13 @@ EXTERNAL_RUNTIME_EXTRAS: dict[str, str] = {"claude-code": "claude-code", "codex"
 
 
 def _load_external_runtime(runtime: str) -> type:
-    """Import a runtime class by dotted path, or explain which extra is missing."""
+    """Import a runtime class by dotted path, reporting what failed on ImportError.
+
+    The failure isn't necessarily a missing extra — it could be an import
+    failing inside a runtime module that *is* installed (a typo'd import, a
+    broken transitive dependency). Report the actual error and offer the
+    extra as the likely fix rather than asserting it's the cause.
+    """
     import importlib
 
     module_path, _, class_name = EXTERNAL_AGENT_KINDS[runtime].partition(":")
@@ -79,8 +85,8 @@ def _load_external_runtime(runtime: str) -> type:
     except ImportError as exc:
         extra = EXTERNAL_RUNTIME_EXTRAS.get(runtime, runtime)
         raise RuntimeError(
-            f"Agent runtime {runtime!r} needs its optional dependency. "
-            f"Install it with: pip install 'bos-ai[{extra}]'"
+            f"Could not load the {runtime!r} agent runtime: {exc}. "
+            f"If its optional dependency is missing, install it with: pip install 'bos-ai[{extra}]'"
         ) from exc
     return getattr(module, class_name)
 
