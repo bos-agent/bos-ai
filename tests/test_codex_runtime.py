@@ -1,11 +1,9 @@
 """BEP 19 Layer 4a: the Codex runtime.
 
-Stage 2 of 4 over CodexAgent's turn path: construction, config resolution and
-lifecycle (Task 3), plus the client and thread lifecycle (Task 4) — lazily
-starting one AsyncCodex and mapping a chat_id onto a Codex thread. Task 5
-makes a turn actually run, Tasks 6-8 add streaming, interrupt/timeout and the
-approval handler — ask()/run() raising NotImplementedError here is that
-staging, not a gap that this file's tests are meant to cover yet.
+Stage 3 of 4 over CodexAgent's turn path: construction, config resolution and
+lifecycle (Task 3), the client and thread lifecycle (Task 4), and here — a
+turn actually runs and is persisted (Task 5). Tasks 6-8 add event streaming,
+interrupt/timeout and the approval handler on top of this.
 """
 
 from __future__ import annotations
@@ -13,6 +11,8 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from openai_codex import ImageInput, LocalImageInput, MentionInput, TextInput, TurnResult
+from openai_codex.generated.v2_all import ThreadTokenUsage, TokenUsageBreakdown, TurnError, TurnStatus
 
 from bos.extensions.chat_stores.in_memory import InMemChatStore
 
@@ -32,6 +32,56 @@ def _agent(tmp_path, fake_codex, **cfg: Any):
     chat_store = cfg.pop("chat_store", None)
     cfg.setdefault("permission", "read-only")
     return CodexAgent(kind="george", cfg=cfg, chat_store=chat_store, workspace=tmp_path, mcp=lambda: None)
+
+
+def _arm_result(
+    fake_codex,
+    *,
+    final_response: str | None,
+    status: TurnStatus = TurnStatus.completed,
+    error_message: str | None = None,
+    usage_input: int | None = None,
+    native_turn_id: str = "native-turn-1",
+) -> TurnResult:
+    """Build a REAL openai_codex TurnResult (Task 5) and arm it as the next
+    turn's result — not a hand-rolled look-alike: every field below is the
+    vendor's own TurnResult/TurnError/ThreadTokenUsage/TokenUsageBreakdown, so
+    a shape the vendor renames or retypes breaks this helper, and every test
+    using it, instead of silently drifting.
+
+    `CodexAgent` builds its `AsyncCodex` lazily and caches it for the agent's
+    whole lifetime (Task 4's `_ensure_client`), so a *second* turn in the same
+    test reuses the client the *first* turn already built. Arm that existing
+    instance directly; only when none exists yet (the first turn of a test)
+    is there nothing to reach, so stage the value the same way `_Registry.arm`
+    does, for the registry to apply when it builds the client.
+    """
+    usage = None
+    if usage_input is not None:
+        breakdown = TokenUsageBreakdown(
+            cached_input_tokens=0,
+            input_tokens=usage_input,
+            output_tokens=0,
+            reasoning_output_tokens=0,
+            total_tokens=usage_input,
+        )
+        usage = ThreadTokenUsage(last=breakdown, total=breakdown)
+    result = TurnResult(
+        id=native_turn_id,
+        status=status,
+        error=TurnError(message=error_message) if error_message is not None else None,
+        started_at=0,
+        completed_at=1,
+        duration_ms=1,
+        final_response=final_response,
+        items=[],
+        usage=usage,
+    )
+    if fake_codex.instances:
+        fake_codex.instances[-1].next_result = result
+    else:
+        fake_codex.arm(next_result=result)
+    return result
 
 
 @pytest.fixture
@@ -154,3 +204,233 @@ async def test_an_unresumable_thread_is_reported_not_silently_replaced(tmp_path,
     message = str(excinfo.value)
     assert "thread_gone" in message and "codex" in message
     assert fake_codex.instances[0].thread_start_calls == [], "no silent replacement"
+
+
+# ── Task 5: one turn — run() and ask() (BEP 19 §3.7, §3.9) ──────────────────
+
+
+@pytest.mark.asyncio
+async def test_a_turn_returns_the_final_response_and_commits_two_messages(tmp_path, fake_codex, mem_store):
+    agent = _agent(tmp_path, fake_codex, chat_store=mem_store)
+    _arm_result(fake_codex, final_response="done", usage_input=11)
+
+    result = await agent.run("chat-1", "do it", turn_id="t1")
+
+    assert result.output == "done"
+    assert result.iterations == 1
+    assert result.usage  # non-empty
+    assert result.finish_reason == "completed", "finish_reason carries TurnStatus.value verbatim"
+    messages = await mem_store.get_messages("chat-1")
+    assert [m.llm_message["role"] for m in messages] == ["user", "assistant"]
+    assert messages[1].metadata["external_runtime"] == "codex"
+    assert messages[1].metadata["native_session_id"] == "thread-1"
+    assert messages[1].metadata["native_turn_id"] == "native-turn-1"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_turn_raises_rather_than_returning_none(tmp_path, fake_codex, mem_store):
+    """Review Focus 2: TurnResult.final_response is None on a failed turn."""
+    agent = _agent(tmp_path, fake_codex, chat_store=mem_store)
+    _arm_result(fake_codex, final_response=None, status=TurnStatus.failed, error_message="model exploded")
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await agent.run("chat-1", "do it", turn_id="t1")
+    assert "model exploded" in str(excinfo.value)
+    assert await mem_store.get_messages("chat-1") == [], "a failed turn commits nothing"
+
+
+@pytest.mark.asyncio
+async def test_a_completed_turn_with_no_text_is_an_empty_string_not_none(tmp_path, fake_codex, mem_store):
+    """Review Focus 2, the other half: completed but silent must not hand a host None."""
+    agent = _agent(tmp_path, fake_codex, chat_store=mem_store)
+    _arm_result(fake_codex, final_response=None, status=TurnStatus.completed)
+
+    result = await agent.run("chat-1", "do it", turn_id="t1")
+    assert result.output == ""
+
+
+@pytest.mark.asyncio
+async def test_an_interrupted_turn_raises_and_commits_nothing(tmp_path, fake_codex, mem_store):
+    """The failure mode the brief leaves open: an interrupted turn gets the
+    same treatment as a failed one. Its `final_response` is a snapshot of a
+    turn deliberately cut off before the model was done — not real turn
+    history — so BEP 19 §7 criterion 20 ("timeout_seconds expiry ... raises")
+    applies here too: raise, commit nothing. Pinned as its own test (distinct
+    from the failed-turn test above) so a future change that special-cases
+    `interrupted` into a silently-committed partial answer does not slip in
+    unnoticed — Task 7 builds cancellation on top of this contract."""
+    agent = _agent(tmp_path, fake_codex, chat_store=mem_store)
+    _arm_result(fake_codex, final_response="partial", status=TurnStatus.interrupted)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await agent.run("chat-1", "do it", turn_id="t1")
+    assert "interrupted" in str(excinfo.value)
+    assert await mem_store.get_messages("chat-1") == [], "an interrupted turn commits nothing"
+
+
+@pytest.mark.asyncio
+async def test_a_schema_request_raises_because_codexagent_has_no_validator(tmp_path, fake_codex, mem_store):
+    """CodexAgent is never constructed with a StructuredValidator —
+    ExternalRuntime.__init__ (BEP 19 §3.2) fixes the constructor to exactly
+    kind/cfg/chat_store/workspace/mcp — so it cannot fulfil BEP 12's
+    "validated" promise for `schema=`. This must raise before ever touching
+    Codex, not silently forward `output_schema` and return unvalidated text as
+    though nothing were missing."""
+    agent = _agent(tmp_path, fake_codex, chat_store=mem_store)
+
+    with pytest.raises(NotImplementedError):
+        await agent.run("chat-1", "do it", turn_id="t1", schema={"type": "object"})
+    assert fake_codex.instances == [], "must fail before ever building a client or touching Codex"
+    assert await mem_store.get_messages("chat-1") == []
+
+
+@pytest.mark.asyncio
+async def test_a_turn_without_a_chat_store_still_returns_a_result(tmp_path, fake_codex):
+    """CodexAgent may be built with chat_store=None (ExternalRuntime allows it);
+    run() still completes the turn and returns a normal AgentResult instead of
+    crashing on the missing store when it reaches the commit step."""
+    agent = _agent(tmp_path, fake_codex)  # chat_store defaults to None
+    _arm_result(fake_codex, final_response="hi")
+
+    result = await agent.run("chat-1", "do it", turn_id="t1")
+
+    assert result.output == "hi"
+
+
+@pytest.mark.asyncio
+async def test_commit_observer_is_called_with_the_commit(tmp_path, fake_codex, mem_store):
+    agent = _agent(tmp_path, fake_codex, chat_store=mem_store)
+    _arm_result(fake_codex, final_response="ok")
+    seen = []
+
+    await agent.run("chat-1", "do it", turn_id="t1", commit_observer=seen.append)
+
+    assert len(seen) == 1
+    assert seen[0].chat_id == "chat-1"
+
+
+@pytest.mark.asyncio
+async def test_ask_delegates_to_run_and_returns_the_text(tmp_path, fake_codex, mem_store):
+    """None of the other tests here ever call ask() itself (only inspect its
+    signature, in test_ask_and_run_accept_every_agent_port_keyword below) —
+    this exercises the actual delegation body."""
+    agent = _agent(tmp_path, fake_codex, chat_store=mem_store)
+    _arm_result(fake_codex, final_response="hi")
+
+    output = await agent.ask("chat-1", "do it", turn_id="t1")
+
+    assert output == "hi"
+    assert isinstance(output, str)
+
+
+@pytest.mark.asyncio
+async def test_llm_args_model_and_reasoning_effort_reach_the_turn_call(tmp_path, fake_codex, mem_store):
+    agent = _agent(tmp_path, fake_codex, chat_store=mem_store)
+    _arm_result(fake_codex, final_response="ok")
+
+    await agent.run(
+        "chat-1", "do it", turn_id="t1", llm_args={"model": "gpt-5.1-codex", "reasoning_effort": "high"}
+    )
+
+    _thread_id, _input, kwargs = fake_codex.instances[0].turn_calls[0]
+    assert kwargs["model"] == "gpt-5.1-codex"
+    assert kwargs["effort"] == "high"
+
+
+@pytest.mark.asyncio
+async def test_ask_and_run_accept_every_agent_port_keyword(tmp_path, fake_codex, mem_store):
+    """AgentActor and _HarnessAgentRunner pass these by NAME; a rename is a TypeError
+    that runtime_checkable isinstance cannot catch."""
+    import inspect as inspect_mod
+
+    from bos.extensions.runtimes.codex import CodexAgent
+
+    for method, expected in (
+        (CodexAgent.ask, {"chat_id", "content", "interrupt", "ctx_metadata", "llm_args",
+                          "event_sink", "turn_id", "commit_observer"}),
+        (CodexAgent.run, {"chat_id", "content", "interrupt", "ctx_metadata", "llm_args",
+                          "event_sink", "turn_id", "commit_observer", "schema", "max_schema_retries"}),
+    ):
+        names = set(inspect_mod.signature(method).parameters) - {"self"}
+        assert expected <= names, f"{method.__name__} is missing {expected - names}"
+
+
+@pytest.mark.asyncio
+async def test_a_second_turn_resumes_and_rewrites_the_session_id(tmp_path, fake_codex, mem_store):
+    agent = _agent(tmp_path, fake_codex, chat_store=mem_store)
+    _arm_result(fake_codex, final_response="one")
+    await agent.run("chat-1", "a", turn_id="t1")
+    _arm_result(fake_codex, final_response="two")
+    await agent.run("chat-1", "b", turn_id="t2")
+
+    assert fake_codex.instances[0].thread_resume_calls, "the second turn resumed"
+    messages = await mem_store.get_messages("chat-1")
+    assert messages[-1].metadata["native_session_id"] == "thread-1"
+    assert messages[-1].llm_message["content"] == "two", "the second _arm_result must reach the built client"
+
+
+# ── Task 5: content conversion (BEP 19 §3.9) ────────────────────────────────
+
+
+def test_content_conversion_passes_a_plain_string_through_unchanged():
+    from bos.extensions.runtimes.codex import _content_to_codex_input
+
+    assert _content_to_codex_input("do it") == "do it"
+
+
+@pytest.mark.parametrize(
+    ("part", "expected_type", "expected_attrs"),
+    [
+        ({"type": "text", "text": "hi"}, TextInput, {"text": "hi"}),
+        (
+            {"type": "image", "source": {"kind": "url", "value": "https://x/y.png"}},
+            ImageInput,
+            {"url": "https://x/y.png"},
+        ),
+        (
+            {"type": "image", "source": {"kind": "path", "value": "/tmp/y.png"}},
+            LocalImageInput,
+            {"path": "/tmp/y.png"},
+        ),
+        (
+            {"type": "file", "mime_type": "text/plain", "source": {"kind": "path", "value": "/tmp/a/b.txt"}},
+            MentionInput,
+            {"name": "b.txt", "path": "/tmp/a/b.txt"},
+        ),
+    ],
+)
+def test_content_conversion_maps_each_bos_part_to_its_codex_input_type(part, expected_type, expected_attrs):
+    from bos.extensions.runtimes.codex import _content_to_codex_input
+
+    [item] = _content_to_codex_input([part])
+
+    assert isinstance(item, expected_type)
+    for attr, value in expected_attrs.items():
+        assert getattr(item, attr) == value
+
+
+def test_content_conversion_rejects_a_url_sourced_file_part():
+    """Codex's MentionInput has no wire form for a remote file — BEP 19 §3.9
+    defines FilePart -> MentionInput(name, path), a local-only mechanism."""
+    from bos.extensions.runtimes.codex import _content_to_codex_input
+
+    with pytest.raises(ValueError, match="local path"):
+        _content_to_codex_input(
+            [{"type": "file", "mime_type": "text/plain", "source": {"kind": "url", "value": "https://x/a.txt"}}]
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_multipart_turn_reaches_codex_as_converted_input_items(tmp_path, fake_codex, mem_store):
+    """Wiring check: run() actually calls the converter, not just that the
+    converter works in isolation above."""
+    agent = _agent(tmp_path, fake_codex, chat_store=mem_store)
+    _arm_result(fake_codex, final_response="ok")
+    content = [{"type": "text", "text": "look at this"}, {"type": "image", "source": {"kind": "url", "value": "u"}}]
+
+    await agent.run("chat-1", content, turn_id="t1")
+
+    _thread_id, sent_input, _kwargs = fake_codex.instances[0].turn_calls[0]
+    assert [type(item) for item in sent_input] == [TextInput, ImageInput]
+    assert sent_input[0].text == "look at this"
+    assert sent_input[1].url == "u"

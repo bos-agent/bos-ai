@@ -13,27 +13,47 @@ here: it is reached exclusively through ``importlib``, from
 ``bos/sdk/`` may import this module or the vendor package directly, so a base
 install with neither extra never touches either.
 
-Stage 2 of 4 over ``CodexAgent``'s turn path: construction (Task 3) plus the
-client and thread lifecycle built here — lazily starting one ``AsyncCodex``
-and mapping a BOS ``chat_id`` onto a Codex thread. Task 5 makes a turn
-actually run, Tasks 6-8 add streaming, interrupt/timeout and the approval
-handler. ``ask()``/``run()`` raise ``NotImplementedError`` below for that
-reason — it is a stage boundary, not a gap.
+Stage 3 of 4 over ``CodexAgent``'s turn path: construction (Task 3), the
+client and thread lifecycle (Task 4), and here — a turn actually runs and is
+persisted. Tasks 6-8 add event streaming, interrupt/timeout and the approval
+handler on top of this; ``run()`` is deliberately plain until then (no
+streaming, no interrupt wiring, no schema validation — see ``run``'s
+docstring for the last one).
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
+import uuid
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Awaitable
 
-from openai_codex import ApprovalMode, AsyncCodex, AsyncThread, CodexConfig, Sandbox
+from openai_codex import (
+    ApprovalMode,
+    AsyncCodex,
+    AsyncThread,
+    CodexConfig,
+    ImageInput,
+    InputItem,
+    LocalImageInput,
+    MentionInput,
+    RunInput,
+    Sandbox,
+    TextInput,
+)
+from openai_codex.types import TurnStatus
 
-from bos.core.agent import AgentResult, ChatStore, MessageContent, TurnEventSink
-from bos.extensions.runtimes._shared import parse_external_config, read_native_session_id
+from bos.core.agent import AgentResult, ChatStore, MessageContent, TurnEventSink, _compact, content_as_parts
+from bos.extensions.runtimes._shared import (
+    commit_external_turn,
+    external_agent_result,
+    parse_external_config,
+    read_native_session_id,
+)
 
 # Patched in tests to inject FakeAsyncCodex — the only seam the double needs.
 _CODEX_FACTORY: Callable[..., Any] = AsyncCodex
@@ -48,6 +68,52 @@ _SANDBOX_AND_APPROVAL: dict[str, tuple[Sandbox, ApprovalMode]] = {
     "workspace-write": (Sandbox.workspace_write, ApprovalMode.auto_review),
     "full-access": (Sandbox.full_access, ApprovalMode.auto_review),
 }
+
+
+def _content_to_codex_input(content: MessageContent) -> RunInput:
+    """BOS ``MessageContent`` -> a Codex ``RunInput`` (BEP 19 §3.9).
+
+    A plain string is already a valid ``RunInput`` (the SDK wraps it in a
+    ``TextInput`` itself) and passes straight through unchanged. A list of BOS
+    parts is mapped item by item:
+
+    - ``TextPart`` -> ``TextInput``.
+    - ``ImagePart`` -> ``ImageInput`` for a url/data source, or
+      ``LocalImageInput`` for a path — Codex reads that path itself, since it
+      runs against this same filesystem; there is no reason to base64-encode
+      it the way a remote-only provider would.
+    - ``FilePart`` -> ``MentionInput``, named after the file since a BOS
+      ``FilePart`` carries no separate display name. Codex's mention mechanism
+      has no wire form for a remote file, so a url-sourced ``FilePart`` is
+      rejected rather than silently dropped or mis-sent as a local path.
+
+    ``content_as_parts`` validates as well as normalizes, so every part
+    reaching the loop below is already one of exactly ``text``/``image``/
+    ``file`` — the three kinds ``_content.py`` currently defines.
+    """
+    if isinstance(content, str):
+        return content
+    items: list[InputItem] = []
+    for part in content_as_parts(content):
+        part_type = part.get("type")
+        if part_type == "text":
+            items.append(TextInput(text=part["text"]))
+        elif part_type == "image":
+            source = part["source"]
+            if source["kind"] == "url":
+                items.append(ImageInput(url=source["value"]))
+            else:
+                items.append(LocalImageInput(path=source["value"]))
+        elif part_type == "file":
+            source = part["source"]
+            if source["kind"] != "path":
+                raise ValueError(
+                    f"codex runtime: a FilePart sent to Codex must be a local path, not a "
+                    f"{source['kind']!r} source ({source['value']!r}); Codex has no wire form "
+                    "for mentioning a remote file."
+                )
+            items.append(MentionInput(name=Path(source["value"]).name, path=source["value"]))
+    return items
 
 
 class CodexAgent:
@@ -197,8 +263,18 @@ class CodexAgent:
         turn_id: str | None = None,
         commit_observer: Callable[[Any], Any | Awaitable[Any]] | None = None,
     ) -> str:
-        # Task 5 makes a turn actually run (BEP 19 Layer 4a, stage 3 of 4).
-        raise NotImplementedError("CodexAgent.ask lands in Task 5")
+        """Thin wrapper over :meth:`run`, mirroring ``Agent.ask`` (BOS's own agent)."""
+        result = await self.run(
+            chat_id,
+            content,
+            interrupt=interrupt,
+            ctx_metadata=ctx_metadata,
+            llm_args=llm_args,
+            event_sink=event_sink,
+            turn_id=turn_id,
+            commit_observer=commit_observer,
+        )
+        return str(result.output)
 
     async def run(
         self,
@@ -214,12 +290,78 @@ class CodexAgent:
         schema: dict[str, Any] | None = None,
         max_schema_retries: int = 1,
     ) -> AgentResult:
-        # Task 5 makes a turn actually run (BEP 19 Layer 4a, stage 3 of 4).
-        raise NotImplementedError("CodexAgent.run lands in Task 5")
+        """Run one Codex turn to completion and persist it (BEP 19 §3.7, §3.9).
+
+        Deliberately plain (stage 3 of 4, see the module docstring): no event
+        streaming (``event_sink`` is accepted but not yet fed — Task 6), no
+        ``interrupt``/timeout wiring (Task 7), no approval handling (Task 8).
+
+        ``schema`` is refused rather than half-implemented. BEP 12 requires the
+        result to be *validated* — ``self._structured_validator.validate(...)``,
+        the same way ``Agent`` does it — but ``ExternalRuntime.__init__`` (BEP
+        19 §3.2) builds every vendor runtime from exactly ``kind``, ``cfg``,
+        ``chat_store``, ``workspace``, ``mcp``: there is no constructor slot for
+        a ``StructuredValidator`` to arrive through, so ``CodexAgent`` never
+        has one to call. Forwarding ``output_schema`` to Codex without
+        validating the reply would silently break the guarantee ``schema=``
+        promises callers, which is worse than refusing outright; the
+        alternative (bolt on a private, uninjected validator here) would be a
+        second, divergent validation path. Raised eagerly, before any Codex
+        call, so a schema request never starts a thread it can't finish.
+        """
+        if schema is not None:
+            raise NotImplementedError(
+                f"{self._config.runtime} runtime {self._kind!r}: schema-validated output needs a "
+                "StructuredValidator (BEP 12), but ExternalRuntime.__init__ (BEP 19 §3.2) does not "
+                "inject one into CodexAgent — there is nowhere for `schema` to be validated yet. "
+                "Wire a validator through construction before passing `schema` to this runtime."
+            )
+
+        turn_id = turn_id or uuid.uuid4().hex
+        thread, _ = await self._thread_for(chat_id)
+        turn_kwargs = _compact(model=(llm_args or {}).get("model"), effort=(llm_args or {}).get("reasoning_effort"))
+
+        result = await thread.run(_content_to_codex_input(content), **turn_kwargs)
+
+        if result.status is not TurnStatus.completed:
+            # Covers both `failed` and `interrupted` (and, defensively, any
+            # other non-terminal-success status) identically: neither is a
+            # real answer BOS should treat as turn history, so both raise and
+            # commit nothing, exactly like a failure (BEP 19 §7 criterion 20 —
+            # a timeout-driven interrupt "raises" too). Task 7 decides what a
+            # caller-triggered interrupt/timeout does *before* this point; from
+            # here on, anything but `completed` is reported, never persisted.
+            detail = result.error.message if result.error is not None and result.error.message else None
+            raise RuntimeError(
+                f"{self._config.runtime} runtime {self._kind!r}: turn {turn_id!r} for chat "
+                f"{chat_id!r} ended with status {result.status.value!r}" + (f": {detail}" if detail else "")
+            )
+
+        output = result.final_response or ""
+        usage = result.usage.last.model_dump() if result.usage is not None else None
+
+        if self._chat_store is not None:
+            commit = await commit_external_turn(
+                self._chat_store,
+                chat_id,
+                turn_id=turn_id,
+                user_content=content,
+                response=output,
+                runtime=self._config.runtime,
+                native_session_id=thread.id,
+                native_turn_id=result.id,
+                usage=usage,
+            )
+            if commit_observer is not None:
+                observed = commit_observer(commit)
+                if inspect.isawaitable(observed):
+                    await observed
+
+        return external_agent_result(output=output, turn_id=turn_id, usage=usage, finish_reason=result.status.value)
 
     async def aclose(self) -> None:
-        # Task 7 adds interrupting an in-flight turn before this. There is
-        # never one yet — ask()/run() are not implemented until Task 5 — so
-        # closing the client, if one was ever built, is the whole of it today.
+        # Task 7 adds interrupting an in-flight turn before this closes the
+        # client — nothing here races a live run() yet. Closing the client, if
+        # one was ever built, is the whole of it today.
         if self._client is not None:
             await self._client.close()
