@@ -143,13 +143,29 @@ class BosApp:
         *agent_cfg* is the highest-precedence config layer (BEP 19 §3.4.1.1) —
         it is how an embedder supplies per-agent options, including an external
         runtime's `cwd`, `permission`, `system_prompt` and `mcp_tools`, without
-        writing TOML. Caching is **per kind**: a second call with a different
-        *agent_cfg* returns the first agent, unchanged. Build distinct agents
-        under distinct kinds rather than expecting the cache to key on config.
+        writing TOML.
+
+        Caching is **per kind**. A kind already cached — because `__aenter__`
+        pre-built every kind your config names in `[agents]`, or because an
+        earlier `build_agent` call did — cannot take new config: passing
+        *agent_cfg* for one raises rather than silently discarding it. Call
+        `build_agent(kind)` with no *agent_cfg* to get the cached agent
+        unchanged; give an override its own kind (e.g. a named `_parent`
+        instance, BEP 19 §3.4) for a second configuration of the same runtime.
         """
         harness = self._require_open()
-        if kind not in self._agents:
-            self._agents[kind] = await harness.create_agent(kind=kind, agent_cfg=agent_cfg)
+        if kind in self._agents:
+            if agent_cfg is not None:
+                raise RuntimeError(
+                    f"Agent {kind!r} is already built — either your config names it in "
+                    f"`[agents]` (built at app entry, before this call) or an earlier "
+                    f"`build_agent({kind!r}, ...)` call cached it. A cached agent cannot "
+                    f"take new config: {agent_cfg!r} would be silently discarded. Call "
+                    f"`build_agent({kind!r})` with no `agent_cfg` for the cached agent, or "
+                    "give the override its own kind (e.g. a `_parent`-inheriting agent file)."
+                )
+            return self._agents[kind]
+        self._agents[kind] = await harness.create_agent(kind=kind, agent_cfg=agent_cfg)
         return self._agents[kind]
 
     async def get_messages(
@@ -169,8 +185,13 @@ class BosApp:
         messages = await store.get_messages(chat_id)
         if source == "bos":
             return messages
+        # active_only=False: same reasoning as _shared.read_native_session_id — a
+        # summary written over this chat must not hide the message carrying the
+        # routing metadata from this scan. Read separately from the "bos" return
+        # above, which BEP 19 §3.7 pins to the active-window read, unchanged.
+        routing_messages = await store.get_messages(chat_id, active_only=False)
         runtime = next(
-            (m.metadata["external_runtime"] for m in reversed(messages) if m.metadata.get("external_runtime")),
+            (m.metadata["external_runtime"] for m in reversed(routing_messages) if m.metadata.get("external_runtime")),
             None,
         )
         if source == "auto" and runtime is None:

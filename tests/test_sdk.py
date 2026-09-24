@@ -287,15 +287,39 @@ async def test_build_agent_applies_agent_cfg(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_build_agent_caches_per_kind_not_per_cfg(tmp_path):
-    """A second call with a different cfg returns the cached agent — documented, not silent."""
+async def test_build_agent_rejects_agent_cfg_on_an_already_cached_kind(tmp_path):
+    """Final review, item 1: a second call passing `agent_cfg` for an already-cached
+    kind used to return the first agent unchanged, discarding the override with no
+    signal — "documented, not silent" in name only. It now raises, naming the cache
+    and what to do instead."""
     from bos.sdk import BosApp
 
     config = {}
     async with BosApp(config, bos_dir=tmp_path) as app:
         first = await app.build_agent("assistant", agent_cfg={"system_prompt": "a"})
-        second = await app.build_agent("assistant", agent_cfg={"system_prompt": "b"})
-        assert first is second
+        with pytest.raises(RuntimeError, match="already built"):
+            await app.build_agent("assistant", agent_cfg={"system_prompt": "b"})
+        # No agent_cfg still returns the cached agent, unchanged — the one thing
+        # this fix must not break.
+        assert await app.build_agent("assistant") is first
+
+
+@pytest.mark.asyncio
+async def test_build_agent_rejects_agent_cfg_for_a_kind_the_config_already_names(tmp_path):
+    """Final review, item 1: `__aenter__` pre-builds every kind `[agents]` names,
+    with `agent_cfg=None`, before any application code runs. `build_agent("solo",
+    agent_cfg=...)` used to find that cache and silently drop the caller's config
+    on the floor — exactly the `agents/george.md` scenario BEP 19 §3.4.1.1 and
+    §4.1 use as the worked example."""
+    from bos.sdk import BosApp
+
+    config = {"agents": {"solo": {"system_prompt": "hi"}}}
+    async with BosApp(config, bos_dir=tmp_path) as app:
+        with pytest.raises(RuntimeError, match="already built"):
+            await app.build_agent("solo", agent_cfg={"system_prompt": "override"})
+        # No agent_cfg still returns the cache __aenter__ built, unchanged.
+        agent = await app.build_agent("solo")
+        assert agent._system_prompt == "hi"
 
 
 @pytest.mark.asyncio
@@ -326,3 +350,36 @@ async def test_get_messages_native_is_not_implemented_yet(tmp_path):
     async with BosApp(config, bos_dir=tmp_path) as app:
         with pytest.raises(NotImplementedError):
             await app.get_messages("chat-1", source="native")
+
+
+@pytest.mark.asyncio
+async def test_get_messages_auto_routes_to_native_after_a_summary(tmp_path):
+    """Final review, item 3: the auto-routing scan used the same active-window
+    default `read_native_session_id` was fixed to stop using (BEP 19 §3.6) — a
+    `save_summary` call after the turn hid the message carrying
+    `external_runtime` metadata, so `source="auto"` fell back to the BOS record
+    instead of routing to (unimplemented) native. Sibling of
+    test_external_agent_session.py::test_the_session_id_survives_a_summary_written_after_the_turn.
+    """
+    from bos.extensions.runtimes._shared import commit_external_turn
+    from bos.sdk import BosApp
+
+    config = {"agents": {"assistant": {"system_prompt": "hi"}}, "default_agent": "assistant"}
+    async with BosApp(config, bos_dir=tmp_path) as app:
+        store = app.harness.chat_store
+        await commit_external_turn(
+            store, "chat-1", turn_id="t1", user_content="a", response="b",
+            runtime="codex", native_session_id="thread_abc",
+        )
+        await store.save_summary("chat-1", "summary of the conversation so far")
+
+        # Still routes to "native" (unimplemented) instead of silently falling
+        # back to the BOS record just because a summary hid the routing metadata.
+        with pytest.raises(NotImplementedError):
+            await app.get_messages("chat-1", source="auto")
+
+        # source="bos" is unaffected: BEP 19 §3.7 pins it to the active window,
+        # which is just the summary here.
+        bos_messages = await app.get_messages("chat-1", source="bos")
+        assert len(bos_messages) == 1
+        assert bos_messages[0].is_summary
