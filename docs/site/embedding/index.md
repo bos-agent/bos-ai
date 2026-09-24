@@ -67,8 +67,8 @@ asyncio.run(main())
 
 Four things that snippet is showing you:
 
-**`agent()` returns an `Agent`, not a reply.** There is deliberately no
-`app.ask()`. `Agent.run()` takes ten parameters — streaming via `event_sink`,
+**`agent()` returns an `AgentPort`, not a reply.** There is deliberately no
+`app.ask()`. `run()` takes ten parameters — streaming via `event_sink`,
 structured output via `schema`, `interrupt`, `llm_args`, `turn_id` and more — and
 any one-line façade over it sends you back down a layer the moment you want one
 of them. Dropping to the lower layer therefore hands you the *same* objects, not
@@ -266,12 +266,18 @@ not, it may move:
 python -c "import bos.sdk; print(len(bos.sdk.__all__))"
 ```
 
-It holds 34 names: `BosApp` and `open_harness`; the agent surface (`Agent`,
-`AgentHarness`, `AgentResult`, `Message`, `TurnContext`); the ports you can
-implement (`LLM`, `ChatStore`, `Consolidator`, `ToolSet`, `TurnInterceptor`,
+It holds 39 names: `BosApp` and `open_harness`; the agent surface (`AgentPort`,
+`Agent`, `AgentHarness`, `AgentResult`, `Message`, `TurnContext`); the ports you
+can implement (`LLM`, `ChatStore`, `Consolidator`, `ToolSet`, `TurnInterceptor`,
 `PromptProvider`, `TurnEventSink`) together with every type those ports' own
-methods take or return; the nine `ep_*` extension points; and `Workspace`,
-`RootConfig`, `validate_config`.
+methods take or return, including the message-content types (`MessageContent`,
+`TextPart`, `ImagePart`, `FilePart`); the nine `ep_*` extension points; and
+`Workspace`, `RootConfig`, `validate_config`.
+
+`AgentPort` is what the agent-returning calls are typed as — the four members a
+host actually uses (`name`, `request_stop`, `ask`, `run`). `Agent` is BOS's own
+implementation of it and satisfies it structurally; an agent backed by an
+external runtime implements the port without being an `Agent` (BEP 19 §3.3).
 
 That last point is enforced, not aspirational: a test walks every Protocol in
 `__all__` and fails if any type in one of its method signatures is unpromised. So
