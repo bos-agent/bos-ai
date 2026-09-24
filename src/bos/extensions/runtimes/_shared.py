@@ -92,7 +92,15 @@ def parse_external_config(
             "`base_instructions` (replaces it), not both."
         )
 
-    mcp_tools = tuple(cfg.get("mcp_tools") or ())
+    mcp_tools_raw = cfg.get("mcp_tools")
+    if mcp_tools_raw is not None and not isinstance(mcp_tools_raw, (list, tuple)):
+        raise ValueError(
+            f"`mcp_tools` must be a list of tool names, even for one tool; got "
+            f"{mcp_tools_raw!r} ({type(mcp_tools_raw).__name__}). A bare string is split "
+            f"into individual characters, not treated as a single tool name — write it "
+            f"as a one-item list instead."
+        )
+    mcp_tools = tuple(mcp_tools_raw or ())
     if "*" in mcp_tools:
         raise ValueError(
             '`mcp_tools` does not accept "*". List every tool to expose; the default '
@@ -102,6 +110,17 @@ def parse_external_config(
     auth = cfg.get("auth", "subscription")
     if auth not in ("subscription", "api_key"):
         raise ValueError(f'`auth` must be "subscription" or "api_key"; got {auth!r}.')
+
+    # Same shape as `mcp_tools` above: a bare value where a table belongs must fail
+    # here, not surface as an uncontrolled TypeError from dict() (or a silently wrong
+    # native_options) once a runtime actually reads it.
+    native_options_raw = cfg.get("native_options")
+    if native_options_raw is not None and not isinstance(native_options_raw, dict):
+        raise ValueError(
+            f"`native_options` must be a table of runtime-specific settings; got "
+            f"{native_options_raw!r} ({type(native_options_raw).__name__}). Use "
+            f'`native_options = {{ key = "value" }}`.'
+        )
 
     return ExternalAgentConfig(
         runtime=runtime,
@@ -113,5 +132,5 @@ def parse_external_config(
         auth=auth,
         timeout_seconds=cfg.get("timeout_seconds"),
         mcp_tools=mcp_tools,
-        native_options=dict(cfg.get("native_options") or {}),
+        native_options=dict(native_options_raw or {}),
     )

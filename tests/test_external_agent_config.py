@@ -92,3 +92,30 @@ def test_mcp_tools_is_a_tuple_and_star_is_rejected(parse):
     with pytest.raises(ValueError) as excinfo:
         parse(mcp_tools=["*"])
     assert "*" in str(excinfo.value)
+
+
+def test_mcp_tools_as_a_bare_string_is_rejected(parse):
+    """Fix round 1, Finding 1: a bare string is the natural TOML mistake for a list
+    field — it must fail construction, not be shredded into one-character tools."""
+    with pytest.raises(ValueError) as excinfo:
+        parse(mcp_tools="DeskCreateTask")
+    assert "mcp_tools" in str(excinfo.value)
+
+
+def test_an_invalid_auth_names_the_key_and_its_values(parse):
+    """Fix round 1, Finding 2: the invalid-auth branch had no test backing it."""
+    with pytest.raises(ValueError) as excinfo:
+        parse(auth="oauth")
+    message = str(excinfo.value)
+    assert "auth" in message
+    assert "subscription" in message
+    assert "api_key" in message
+
+
+def test_a_non_table_native_options_is_rejected(parse):
+    """Fix round 1, branch-coverage walk: same shape as Finding 1, one field over —
+    `dict(...)` on a bare value raises an uncontrolled TypeError, not this module's
+    documented ValueError, unless it is checked first."""
+    with pytest.raises(ValueError) as excinfo:
+        parse(native_options="oops")
+    assert "native_options" in str(excinfo.value)
