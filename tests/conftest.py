@@ -185,3 +185,111 @@ async def serve_asgi(app):
         server.should_exit = True
         await asyncio.gather(serving, return_exceptions=True)
         await server.shutdown()
+
+
+# ── Codex runtime double (BEP 19 Layer 4a) ──────────────────────────────────
+#
+# Fakes the *transport* (AsyncCodex/AsyncThread/AsyncTurnHandle), never the
+# vendor's data shapes: every object CodexAgent reads out of a call is a real
+# openai_codex type, so a shape the vendor changes breaks these tests instead
+# of a hand-rolled stand-in silently drifting from it.
+
+
+class FakeTurnHandle:
+    """Stands in for openai_codex.AsyncTurnHandle."""
+
+    def __init__(self, thread: FakeThread, turn_id: str, notifications: list[Any], result: Any) -> None:
+        self._thread, self.id = thread, turn_id
+        self._notifications, self._result = notifications, result
+        self.interrupted = False
+
+    async def stream(self):
+        for notification in self._notifications:
+            yield notification
+
+    async def interrupt(self) -> None:
+        self.interrupted = True
+
+    async def run(self) -> Any:
+        return self._result
+
+
+class FakeThread:
+    """Stands in for openai_codex.AsyncThread."""
+
+    def __init__(self, codex: FakeAsyncCodex, thread_id: str) -> None:
+        self._codex, self.id = codex, thread_id
+        self.read_calls: list[bool] = []
+
+    async def turn(self, input: Any, **kwargs: Any) -> FakeTurnHandle:
+        self._codex.turn_calls.append((self.id, input, kwargs))
+        return FakeTurnHandle(
+            self, f"turn-{len(self._codex.turn_calls)}", self._codex.next_notifications, self._codex.next_result
+        )
+
+    async def run(self, input: Any, **kwargs: Any) -> Any:
+        handle = await self.turn(input, **kwargs)
+        return await handle.run()
+
+    async def read(self, *, include_turns: bool = False) -> Any:
+        self.read_calls.append(include_turns)
+        return self._codex.next_thread_read
+
+
+class FakeAsyncCodex:
+    """Fakes the transport, not the protocol: every object it returns is a real
+    openai_codex type, so a shape the vendor changes breaks these tests."""
+
+    def __init__(self, config: Any = None) -> None:
+        self.config = config
+        self.thread_start_calls: list[dict] = []
+        self.thread_resume_calls: list[tuple[str, dict]] = []
+        self.turn_calls: list[tuple] = []
+        self.closed = False
+        self.account_error: Exception | None = None
+        self.resume_error: Exception | None = None
+        self.next_notifications: list[Any] = []
+        self.next_result: Any = None
+        self.next_thread_read: Any = None
+
+    async def account(self, *, refresh_token: bool = False) -> Any:
+        if self.account_error is not None:
+            raise self.account_error
+        # GetAccountResponse.account is optional and ApiKeyAccount needs only its
+        # literal discriminator field, so a real, fully-valid response costs
+        # nothing here — the brief's documented sentinel fallback was not needed.
+        from openai_codex.generated.v2_all import Account, ApiKeyAccount, GetAccountResponse
+
+        return GetAccountResponse(account=Account(root=ApiKeyAccount(type="apiKey")), requires_openai_auth=False)
+
+    async def thread_start(self, **kwargs: Any) -> FakeThread:
+        self.thread_start_calls.append(kwargs)
+        return FakeThread(self, f"thread-{len(self.thread_start_calls)}")
+
+    async def thread_resume(self, thread_id: str, **kwargs: Any) -> FakeThread:
+        if self.resume_error is not None:
+            raise self.resume_error
+        self.thread_resume_calls.append((thread_id, kwargs))
+        return FakeThread(self, thread_id)
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+@pytest.fixture
+def fake_codex(monkeypatch):
+    """Point CodexAgent's client factory at the double. Records every instance."""
+    import bos.extensions.runtimes.codex as codex_mod
+
+    class _Registry:
+        def __init__(self) -> None:
+            self.instances: list[FakeAsyncCodex] = []
+
+        def __call__(self, config: Any = None) -> FakeAsyncCodex:
+            instance = FakeAsyncCodex(config)
+            self.instances.append(instance)
+            return instance
+
+    registry = _Registry()
+    monkeypatch.setattr(codex_mod, "_CODEX_FACTORY", registry)
+    return registry
