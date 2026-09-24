@@ -250,6 +250,20 @@ async def test_a_completed_turn_with_no_text_is_an_empty_string_not_none(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_run_generates_a_turn_id_when_none_is_given(tmp_path, fake_codex, mem_store):
+    """Every other test in this file passes turn_id explicitly; this is the
+    only one exercising the `turn_id or uuid.uuid4().hex` fallback itself."""
+    agent = _agent(tmp_path, fake_codex, chat_store=mem_store)
+    _arm_result(fake_codex, final_response="ok")
+
+    result = await agent.run("chat-1", "do it")
+
+    assert result.turn_id, "a turn_id must be generated, not left blank"
+    messages = await mem_store.get_messages("chat-1")
+    assert messages[0].turn_id == result.turn_id
+
+
+@pytest.mark.asyncio
 async def test_an_interrupted_turn_raises_and_commits_nothing(tmp_path, fake_codex, mem_store):
     """The failure mode the brief leaves open: an interrupted turn gets the
     same treatment as a failed one. Its `final_response` is a snapshot of a
@@ -304,6 +318,25 @@ async def test_commit_observer_is_called_with_the_commit(tmp_path, fake_codex, m
     seen = []
 
     await agent.run("chat-1", "do it", turn_id="t1", commit_observer=seen.append)
+
+    assert len(seen) == 1
+    assert seen[0].chat_id == "chat-1"
+
+
+@pytest.mark.asyncio
+async def test_an_async_commit_observer_is_awaited(tmp_path, fake_codex, mem_store):
+    """Agent.run's own commit_observer supports a sync OR an async callable
+    (`if inspect.isawaitable(result): await result`); CodexAgent mirrors that
+    exactly. The sync test above never reaches the `await observed` line, so
+    it needs this test of its own."""
+    agent = _agent(tmp_path, fake_codex, chat_store=mem_store)
+    _arm_result(fake_codex, final_response="ok")
+    seen = []
+
+    async def observe(commit):
+        seen.append(commit)
+
+    await agent.run("chat-1", "do it", turn_id="t1", commit_observer=observe)
 
     assert len(seen) == 1
     assert seen[0].chat_id == "chat-1"
