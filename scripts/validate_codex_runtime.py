@@ -413,7 +413,7 @@ async def vendor_turns(ctx: Ctx, kind: str, chat_id: str) -> list[list[dict[str,
     return turns
 
 
-_BRIEF_KEYS = ("type", "phase", "server", "tool", "status", "error", "command", "exitCode")
+_BRIEF_KEYS = ("type", "phase", "server", "tool", "status", "error", "readOnlyHint", "command", "exitCode")
 
 
 def brief(item: dict[str, Any]) -> dict[str, Any]:
