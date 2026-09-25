@@ -369,17 +369,49 @@ _MCP_SERVERS_KEY = "mcp_servers"
 # as a constant so `native_options` can be checked against it at config-parse
 # time (BEP 19 §3.4) rather than colliding at the call; the pair is pinned
 # together by test_the_bos_owned_thread_kwargs_constant_matches_what_is_sent,
-# which fails the day a kwarg is added here and not there.
+# which fails the day an *unconditional* kwarg is added here and not there. A
+# kwarg set only for some configs would escape that test — see its docstring —
+# so keep the dict below a flat literal.
 _BOS_THREAD_KWARGS = frozenset(
     {"sandbox", "approval_mode", "cwd", "model", "developer_instructions", "base_instructions", "config"}
 )
 
+# Sub-tables of `config` that `native_options` may not carry. Two entries, two
+# different reasons, so neither is a special case of the other:
+_RESERVED_CONFIG_KEYS = frozenset(
+    {
+        # BOS writes its own server here (`_mcp_egress_config`), and a host
+        # entry would sit beside the credential or replace it.
+        _MCP_SERVERS_KEY,
+        # This one reaches the sandbox `permission` chose, which the `config`
+        # layer is otherwise unable to do. Measured on 0.156.1 against the real
+        # child: `sandbox_mode` and `approval_policy` placed in `config` *lose*
+        # to the typed kwargs BOS sends, so the named settings are safe — but
+        # the chosen mode's own sub-table is not a typed parameter, so under
+        # `permission = "workspace-write"` a `{"writable_roots": ["/etc"],
+        # "network_access": true}` here is resolved by the server verbatim and
+        # BOS forwards it. Reserved WHOLESALE, not by the two keys measured:
+        # over-reserving fails loudly and can be relaxed on request, while
+        # under-reserving widens the confinement in silence, and three
+        # incomplete enumerations on this branch have earned the default.
+        "sandbox_workspace_write",
+    }
+)
+
 # What `native_options` may therefore not name. Every owned kwarg, with `config`
 # as the one exception that names itself: BOS does not own that table outright,
-# it writes a single key into it and merges the host's own `config` underneath
-# (§3.4.1.4's `project_doc_max_bytes` is why the table has to stay reachable).
-# So only the sub-key BOS writes is reserved there.
-_RESERVED_NATIVE_OPTIONS = (_BOS_THREAD_KWARGS - {"config"}) | {f"config.{_MCP_SERVERS_KEY}"}
+# it writes into it and merges the host's own `config` underneath (§3.4.1.4's
+# `project_doc_max_bytes` is why the table has to stay reachable), so only the
+# sub-tables above are reserved there.
+#
+# This is a denylist and it is not provably complete. The Codex settings that
+# can reach what `permission` decided are not enumerated anywhere BOS can read:
+# there is no `codex mcp get --json` equivalent for top-level config and the
+# app-server schema does not model config.toml, so the entry above came from
+# probing candidates against the resolved `SandboxPolicy`, not from a listing.
+# Seven candidate settings were probed and one moved it. See BEP 19 §8.2
+# for what that leaves open.
+_RESERVED_NATIVE_OPTIONS = (_BOS_THREAD_KWARGS - {"config"}) | {f"config.{k}" for k in _RESERVED_CONFIG_KEYS}
 
 
 def _content_to_codex_input(content: MessageContent) -> Input | str:

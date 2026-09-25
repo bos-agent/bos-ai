@@ -165,6 +165,20 @@ def parse_external_config(
         )
     native_options = dict(native_options_raw or {})
 
+    # A reserved path like "config.mcp_servers" is BOS declaring that
+    # `native_options.config` is a *table*, which is the only place BOS knows
+    # that about a runtime-specific key. Same message shape as the check above,
+    # one level down, and for the same reason: without it a non-table lands as
+    # an unattributable TypeError out of the runtime's own merge, and a falsy
+    # one (`config = 0`) is dropped in silence.
+    for head in sorted({n.split(".", 1)[0] for n in reserved_native_options if "." in n} & set(native_options)):
+        if not isinstance(native_options[head], dict):
+            raise ValueError(
+                f"`native_options.{head}` must be a table of {runtime!r} settings; got "
+                f"{native_options[head]!r} ({type(native_options[head]).__name__}). Use "
+                f'`native_options.{head} = {{ key = "value" }}`.'
+            )
+
     # Rejected, not last-write-wins and not warned past. A runtime derives its
     # sandbox, its approval mode and its working directory from `permission` and
     # `cwd`, and a `native_options` that could quietly replace any of them would
@@ -172,11 +186,11 @@ def parse_external_config(
     # hatch is for the knobs BOS does not touch; this is what keeps that true.
     if clashes := sorted(_reserved_clashes(native_options, reserved_native_options)):
         raise ValueError(
-            f"`native_options` may not set {clashes}: the {runtime!r} runtime sets "
-            f"{'that' if len(clashes) == 1 else 'those'} itself, from `permission`, `cwd`, the "
-            f"prompt keys and the MCP egress. `native_options` is the escape hatch for settings "
-            f"BOS does not touch — letting it reach these would silently override the ones that "
-            f"decide what the runtime is allowed to do."
+            f"`native_options` may not set {clashes}: "
+            f"{'that setting is' if len(clashes) == 1 else 'those settings are'} decided by the "
+            f"{runtime!r} runtime from the rest of this agent's config — `permission` above all. "
+            f"`native_options` is the escape hatch for the settings it does *not* decide; letting "
+            f"it reach these would silently override what the runtime is allowed to do."
         )
 
     return ExternalAgentConfig(

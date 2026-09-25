@@ -2387,11 +2387,51 @@ async def test_native_options_may_not_reach_bos_own_mcp_servers_entry(tmp_path, 
 
 
 @pytest.mark.asyncio
+async def test_native_options_may_not_widen_the_sandbox_permission_chose(tmp_path, fake_codex):
+    """The one `config` sub-table that reaches what `permission` decided.
+
+    `sandbox_mode` and `approval_policy` placed in `config` lose to the typed
+    kwargs BOS sends — measured against the real child — but the chosen mode's
+    own sub-table is not a typed parameter, so under `workspace-write` a
+    `writable_roots`/`network_access` here is resolved verbatim. Reserved
+    wholesale, so this asserts the *table* is refused, not two key names.
+    """
+    with pytest.raises(ValueError) as excinfo:
+        _agent(
+            tmp_path,
+            fake_codex,
+            permission="workspace-write",
+            native_options={"config": {"sandbox_workspace_write": {"exclude_slash_tmp": False}}},
+        )
+
+    assert "config.sandbox_workspace_write" in str(excinfo.value)
+
+
+@pytest.mark.asyncio
+async def test_a_native_options_table_that_is_not_a_table_is_a_config_error(tmp_path, fake_codex):
+    """One level below the check `native_options` itself already has. Without
+    it this is a bare `TypeError: 'int' object is not a mapping` out of BOS's
+    own merge, naming neither the key nor the agent — and `config = 0` is
+    dropped in silence, which is worse."""
+    with pytest.raises(ValueError) as excinfo:
+        _agent(tmp_path, fake_codex, native_options={"config": 5})
+
+    message = str(excinfo.value)
+    assert "native_options.config" in message and "table" in message
+
+
+@pytest.mark.asyncio
 async def test_the_bos_owned_thread_kwargs_constant_matches_what_is_sent(tmp_path, fake_codex):
     """The anti-drift half of the rule above. `_RESERVED_NATIVE_OPTIONS` is
     derived from `_BOS_THREAD_KWARGS`, and that constant is only as good as its
     agreement with the literal in `_thread_for` — a kwarg added there and not
     here silently becomes overridable by `native_options`.
+
+    It catches that in both directions, but only for kwargs sent
+    *unconditionally*: it compares one call made with a default config, so a
+    kwarg gated on config this agent does not set would be invisible to it.
+    The dict in `_thread_for` is a flat literal today, so there is none; a
+    conditional one would need its own case here.
     """
     from bos.extensions.runtimes.codex import _BOS_THREAD_KWARGS
 
