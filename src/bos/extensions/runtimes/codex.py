@@ -46,8 +46,9 @@ The other thing hanging off ``_ensure_client`` is ``_mcp_egress_config`` (Task
 starts BOS's one loopback MCP server and tells every thread of this agent to
 connect to it, carrying a per-agent bearer token. Everything else this module
 sends Codex is a setting or a prompt; this is the one thing the model can
-*call*. It stays lazy the whole way down: an agent whose ``mcp_tools`` is empty
-never so much as asks the harness for a server, so no port is bound for it.
+*call*. It stays lazy the whole way down: an agent with nothing servable —
+no ``mcp_tools``, or none the host has an ``ep_tool`` for — never so much as
+asks the harness for a server, so no port is bound on its account.
 """
 
 from __future__ import annotations
@@ -329,25 +330,31 @@ _UNKNOWN_FILE_MIME_TYPE = "application/octet-stream"
 
 
 # The name BOS's loopback tool server takes in Codex's `[mcp_servers.<name>]`
-# namespace (BEP 19 §3.8). It is a deliberate choice, because `config=` is an
-# override *merged over* the operator's own `~/.codex/config.toml` rather than
-# a replacement, so this name is shared with whatever they already have there.
-# Measured against codex-cli 0.145.0 with a throwaway CODEX_HOME, via the CLI's
-# own `-c` flag (see `_mcp_egress_config` for why that is the stand-in):
+# namespace (BEP 19 §3.8). Not cosmetic: `config=` is an override *merged over*
+# the operator's own `~/.codex/config.toml`, not a replacement, so this name is
+# shared with whatever they already have there, and a collision is a real
+# failure. Measured against codex-cli 0.145.0 with a throwaway CODEX_HOME, via
+# the CLI's own `-c` flag (see `_mcp_egress_config` for why that is the
+# stand-in):
 #
-# - the merge is per key, even for a whole-table override: overriding
-#   `mcp_servers.bos` wholesale with a `{url, http_headers}` table left a
-#   `bearer_token_env_var` from config.toml in place on the merged entry, so a
-#   collision with an HTTP server of the same name means Codex carries the
-#   operator's credential keys alongside the header below.
-# - a collision with a *stdio* server of the same name fails the whole config
-#   load — "url is not supported for stdio in `mcp_servers.bos`" — which
-#   takes the turn with it rather than degrading.
+# - the merge is per key even for a whole-table override: overriding
+#   `mcp_servers.<name>` wholesale with a `{url, http_headers}` table left a
+#   `bearer_token_env_var` from config.toml in place on the merged entry. So a
+#   collision with an HTTP server of the same name leaves Codex holding the
+#   operator's credential key next to the header below, and BOS cannot say
+#   which Authorization it then sends. If it sends theirs, `_gate` answers 401
+#   and the agent simply has no BOS tools — silently, since `_gate` does not
+#   log and the server runs with `access_log=False`.
+# - a collision with a *stdio* server of the same name is louder and worse: the
+#   whole config fails to load ("url is not supported for stdio in
+#   `mcp_servers.<name>`"), which fails the turn rather than degrading it.
 #
-# "bos" rather than something engineered to not collide: this is the host's own
-# name, an operator reading it in their Codex config should recognise it
-# immediately, and the collision that actually matters is the loud one.
-_MCP_SERVER_NAME = "bos"
+# Hence "bos-tools" rather than the bare project name: it is the name the
+# server already reports for itself over MCP (`Server("bos-tools", …)` in
+# mcp_egress.py), so one server has one name on both sides of the wire, and it
+# is a good deal less likely than "bos" to be a table an operator already has.
+# Hyphens are fine — `-c mcp_servers.bos-tools={…}` parses as a dotted override.
+_MCP_SERVER_NAME = "bos-tools"
 
 
 def _content_to_codex_input(content: MessageContent) -> Input | str:
@@ -681,21 +688,28 @@ class CodexAgent:
     async def _mcp_egress_config(self) -> JsonObject | None:
         """Start BOS's loopback MCP server and return the Codex config override
         that points this agent's threads at it (BEP 19 §3.8) — or None when
-        the agent listed no tools to expose.
+        there is nothing for that server to serve this agent.
 
-        That empty case does not merely skip the override: it never calls the
-        ``mcp`` accessor at all (§3.1, the lazy half of §7.7). The accessor
-        (``AgentHarness._ensure_tool_mcp_server``) *builds* the server as a
-        side effect of being asked, so calling it and discarding the answer
-        would bind a loopback port for every agent instead of only the ones
-        that asked for one.
+        "Nothing to serve" is two cases, and neither one touches the ``mcp``
+        accessor: an empty ``mcp_tools``, and an ``mcp_tools`` whose every name
+        the host has no ``ep_tool`` for. Not touching it is the point (§3.1,
+        the lazy half of §7.7) — ``AgentHarness._ensure_tool_mcp_server``
+        *builds* the server as a side effect of being asked, so asking and then
+        discarding the answer binds a loopback port to serve an empty tool
+        list. §7.5 asks for both halves of the second case at once: that
+        warning, and no server.
 
-        Which tools the server actually grants is its decision, not this one's:
-        ``register_agent`` warns about and skips a name ``ep_tool`` does not
-        have. This method does not re-derive that — :attr:`resolved_config`
-        reports the same set from the same predicate
-        (``mcp_egress.unregistered_tools``), so an operator sees the gap
-        through ``boscli inspect`` on an agent that has never run a turn.
+        Both halves are reachable only because the skip rule is a predicate
+        rather than something the server decides. Asking
+        ``mcp_egress.unregistered_tools`` here needs no server, so this method
+        owns the warning — one line per missing name, naming the agent kind,
+        which is knowledge the registry does not have — and hands
+        ``register_agent`` only names that already resolve. That is why there
+        is exactly *one* warning per typo and not two: ``register_agent``'s own
+        warn-and-skip is left in place as the safety net for any other caller,
+        and this path never trips it. The same predicate feeds
+        :attr:`resolved_config`, so ``boscli inspect`` reports the same names on
+        an agent that has never run a turn and so never reached this method.
 
         The bearer token is minted per agent and travels only as a request
         header. Three vendor notes, all measured against codex-cli 0.145.0
@@ -718,11 +732,21 @@ class CodexAgent:
           client is constructed — which, since this runs just before that,
           is before the token exists.
         """
-        if not self._config.mcp_tools:
+        unavailable = unregistered_tools(self._config.mcp_tools)
+        for name in unavailable:
+            logger.warning(
+                "%s runtime %r: mcp_tools names %r, which is not a registered tool; it is not exposed.",
+                self._config.runtime,
+                self._kind,
+                name,
+            )
+        available = [name for name in self._config.mcp_tools if name not in unavailable]
+        if not available:
             return None
         server = self._mcp()
         await server.start()
-        token = server.register_agent(self._kind, self._config.mcp_tools)
+        # Only resolvable names, so register_agent has nothing to warn about.
+        token = server.register_agent(self._kind, available)
         # Annotated, not inferred: `JsonObject` is `dict[str, JsonValue]` and
         # `dict` is invariant in its value type, so an unannotated nested literal
         # infers as `dict[str, dict[str, ...]]` and will not assign to it.
@@ -886,7 +910,7 @@ class CodexAgent:
             # BEP 19 §3.8. Both thread_start and thread_resume take it, so a
             # resumed chat reaches the same tools a fresh one does. None is the
             # vendor's own default for the parameter, and is what an agent with
-            # no `mcp_tools` passes.
+            # nothing servable passes — see `_mcp_egress_config`.
             "config": self._mcp_config,
         }
         if native_session_id is None:

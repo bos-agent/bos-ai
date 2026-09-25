@@ -43,17 +43,20 @@ _NO_GRANT: tuple[str, frozenset[str]] = ("<unauthenticated>", frozenset())
 def unregistered_tools(names: Sequence[str]) -> tuple[str, ...]:
     """Which of *names* the global ``ep_tool`` registry has no entry for.
 
-    The skip rule of BEP 19 §3.8, in one place because two callers need the
+    The skip rule of BEP 19 §3.8, in one place because three callers need the
     same answer and must not drift: :meth:`BosToolMcpServer.register_agent`,
-    which warns and skips exactly these, and an external runtime's
+    which warns and skips exactly these; an external runtime's
     ``resolved_config``, which reports them so ``boscli inspect`` can show an
-    operator that an agent asks for a tool the host does not have.
+    operator that an agent asks for a tool the host does not have; and that
+    same runtime's egress setup, which warns about them and then declines to
+    start a server it would have nothing to put in.
 
-    A free function, not a method, because of that second caller: ``inspect``
-    builds an agent and runs no turn, and a runtime builds its client — and
-    with it its MCP registration — lazily on the first turn (§3.1), so there
-    is no server to ask. Comparing what an agent requested against what a
-    server granted would report nothing at all on that path.
+    A free function, not a method, because of the last two: ``inspect`` builds
+    an agent and runs no turn, and a runtime builds its client — and with it
+    its MCP registration — lazily on the first turn (§3.1). Neither has a
+    server to ask, so the question has to be answerable without one, and
+    "compare what was requested against what a server granted" would report
+    nothing at all on either path.
 
     Order- and duplicate-preserving, so a caller's warnings line up one for
     one with the names it was given.
@@ -90,6 +93,11 @@ class BosToolMcpServer:
 
         Returns only the token: what was *skipped* is reported by
         :func:`unregistered_tools`, which the caller can ask without a server.
+
+        A caller that asks it first and passes only resolvable names gets no
+        warning from here, which is how ``CodexAgent`` keeps BEP 19 §7.5's
+        "exactly one warning" while owning that warning itself. The warning
+        below stays as the safety net for every other caller.
         """
         missing = unregistered_tools(tools)
         for name in missing:

@@ -2,17 +2,22 @@
 and `boscli inspect` reading the runtime's *resolved* config (§3.8, §8.2).
 
 The two belong together because they share one seam: what an agent asked for
-(`mcp_tools`) versus what the host can actually serve. `register_agent` decides
-that at registration time and returns only a token, so there is nothing to read
-back out of it — and `inspect` never reaches registration anyway, because the
-client (and with it the MCP server) is built lazily on the first turn and
-`inspect` runs none. Both sides therefore ask the same predicate,
-`mcp_egress.unregistered_tools`, and the first test below pins them together.
+(`mcp_tools`) versus what the host can actually serve. It could not be the MCP
+server that answers it. `register_agent` returns only a token, so there is
+nothing to read back out of it, and `inspect` never reaches registration
+anyway, because the client — and with it the server — is built lazily on the
+first turn and `inspect` runs none. So the rule is a predicate,
+`mcp_egress.unregistered_tools`, with three readers: `register_agent`'s own
+warn-and-skip, `CodexAgent`'s egress setup (which warns, then declines to build
+a server with nothing in it — BEP 19 §7.5), and `resolved_config`, which is
+what `inspect` reads. The tests below pin them to each other rather than
+one at a time.
 """
 
 from __future__ import annotations
 
 import io
+import logging
 
 import pytest
 from test_external_agent_seam import _write_workspace
@@ -85,7 +90,9 @@ async def _list_tools(url: str, authorization: str) -> list[str]:
 
 
 @pytest.mark.asyncio
-async def test_the_thread_config_opens_the_door_to_exactly_the_agents_tools(tmp_path, fake_codex, host_tools):
+async def test_the_thread_config_opens_the_door_to_exactly_the_agents_tools(
+    tmp_path, fake_codex, host_tools, caplog
+):
     """The whole chain in one, against a real server: the parsed `mcp_tools`
     tuple -> `register_agent` -> a bearer token -> the `http_headers` Codex is
     told to send -> a `tools/list` that answers with exactly the granted tools.
@@ -95,13 +102,18 @@ async def test_the_thread_config_opens_the_door_to_exactly_the_agents_tools(tmp_
     rather than a restatement: what the server grants is the parsed list minus
     what `resolved_config` reports as unavailable. That is the tie between the
     two halves of this task — one predicate, two readers.
+
+    It also pins BEP 19 §7.5's "exactly one" against a double warning. Both
+    `CodexAgent` and `register_agent` can warn about an unknown name, and
+    `CodexAgent` filters before registering precisely so only the first does.
     """
     from bos.extensions.runtimes.mcp_egress import BosToolMcpServer
 
     server = BosToolMcpServer()
     agent = _agent(tmp_path, fake_codex, mcp=lambda: server, mcp_tools=["WiringAlpha", "NoSuchTool"])
     try:
-        await agent._thread_for("chat-1", turn_id="t1")
+        with caplog.at_level(logging.WARNING):
+            await agent._thread_for("chat-1", turn_id="t1")
 
         (kwargs,) = fake_codex.instances[0].thread_start_calls
         config = kwargs["config"]
@@ -109,8 +121,8 @@ async def test_the_thread_config_opens_the_door_to_exactly_the_agents_tools(tmp_
         # here is a config Codex refuses to load at all (`bearer_token` is the
         # live example — "bearer_token is not supported for streamable_http").
         assert set(config) == {"mcp_servers"}
-        assert set(config["mcp_servers"]) == {"bos"}
-        entry = config["mcp_servers"]["bos"]
+        assert set(config["mcp_servers"]) == {"bos-tools"}
+        entry = config["mcp_servers"]["bos-tools"]
         assert set(entry) == {"url", "http_headers"}
         assert entry["url"] == server.url
         assert set(entry["http_headers"]) == {"Authorization"}
@@ -119,6 +131,10 @@ async def test_the_thread_config_opens_the_door_to_exactly_the_agents_tools(tmp_
         resolved = agent.resolved_config
         assert granted == sorted(set(resolved["mcp_tools"]) - set(resolved["mcp_tools_unavailable"]))
         assert granted == ["WiringAlpha"]
+
+        warnings = [r for r in caplog.records if "NoSuchTool" in r.getMessage()]
+        assert len(warnings) == 1, "one warning per typo, from CodexAgent — register_agent must not warn again"
+        assert "george" in warnings[0].getMessage(), "§7.5: the warning names the agent"
     finally:
         await server.aclose()
 
@@ -136,6 +152,25 @@ async def test_an_agent_with_no_mcp_tools_never_asks_for_a_server(tmp_path, fake
 
     (kwargs,) = fake_codex.instances[0].thread_start_calls
     assert kwargs["config"] is None, "no override at all — not an empty mcp_servers table"
+
+
+@pytest.mark.asyncio
+async def test_a_config_naming_only_unknown_tools_warns_and_starts_no_server(tmp_path, fake_codex, caplog):
+    """BEP 19 §7.5, both halves at once — and they are only both reachable
+    because the skip rule is a predicate rather than something the server
+    decides. `CodexAgent` asks `unregistered_tools` itself, so it can warn and
+    *then* decline to build a server that would serve an empty tool list.
+    """
+    agent = _agent(tmp_path, fake_codex, mcp=_never_called, mcp_tools=["NoSuchTool"])
+
+    with caplog.at_level(logging.WARNING):
+        await agent._thread_for("chat-1", turn_id="t1")
+
+    warnings = [r for r in caplog.records if "NoSuchTool" in r.getMessage()]
+    assert len(warnings) == 1, "exactly one"
+    assert "george" in warnings[0].getMessage(), "naming the agent"
+    (kwargs,) = fake_codex.instances[0].thread_start_calls
+    assert kwargs["config"] is None, "and no server: Codex is not told to connect to anything"
 
 
 @pytest.mark.asyncio
