@@ -4,9 +4,11 @@ import json
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Awaitable, Literal, Protocol, runtime_checkable
 
 from ._content import MessageContent
+from ._structured import StructuredValidator
 from ._utils import _as_parts
 
 # Every contract the Agent defines or depends on. ``core.agent`` is the
@@ -460,6 +462,52 @@ class AgentPort(Protocol):
         schema: dict[str, Any] | None = None,
         max_schema_retries: int = 1,
     ) -> AgentResult: ...
+
+
+@runtime_checkable
+class ExternalRuntime(AgentPort, Protocol):
+    """What the *harness* requires of an agent backed by a vendor runtime (BEP 19 §3.3).
+
+    ``AgentPort`` is what a host requires of any agent; this is the extra a
+    vendor-backed one owes the harness that owns its lifetime.
+
+    ``aclose`` is here and not on ``AgentPort`` because ``Agent`` has no close
+    and needs none — but ``AgentHarness.__aexit__`` drains ``_owned`` through
+    ``_aclose``, which is a ``hasattr`` probe: a runtime that forgets ``aclose``
+    is skipped in silence and leaks whatever child process it spawned.
+
+    ``resolved_config`` is what ``boscli inspect`` reports. It is the *parsed*
+    config — absolute ``cwd``, validated ``permission`` — not the raw input the
+    constructor was handed. A ``Mapping``, not the parsing layer's dataclass,
+    because this ring may not import from ``bos.extensions``.
+
+    ``__init__`` is part of the contract too: ``AgentHarness.create_agent`` is
+    the *only* call site that builds a vendor runtime, and it builds every kind
+    through these same six keyword arguments (BEP 19 §3.2's sketch). A runtime whose
+    constructor drifts from this shape should fail where it is written, not the
+    first time the harness tries to build one.
+
+    ``structured_validator`` is the same object ``create_agent`` injects into
+    every ``Agent`` (via ``_default_structured_validator()``), passed the same
+    way, so ``schema=`` on a vendor runtime validates with identical BEP 12
+    semantics rather than a second, divergent validation path.
+    """
+
+    def __init__(
+        self,
+        *,
+        kind: str,
+        cfg: Mapping[str, Any],
+        chat_store: ChatStore | None,
+        workspace: Path,
+        mcp: Callable[[], Any],
+        structured_validator: StructuredValidator,
+    ) -> None: ...
+
+    @property
+    def resolved_config(self) -> Mapping[str, Any]: ...
+
+    async def aclose(self) -> None: ...
 
 
 @runtime_checkable

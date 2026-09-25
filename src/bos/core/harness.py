@@ -15,7 +15,7 @@ from ._utils import (
     _deep_merge,
     _pick_collection,
 )
-from .agent import AbortTurn, Agent, AgentPort, TurnContext
+from .agent import AbortTurn, Agent, AgentPort, ExternalRuntime, StructuredValidator, TurnContext
 from .contract import (
     AgentPlugin,
     AgentResult,
@@ -43,13 +43,16 @@ from .sinks import derive_event_sink
 
 logger = logging.getLogger(__name__)
 
-_structured_validator_singleton: Any = None
+_structured_validator_singleton: StructuredValidator | None = None
 
 
-def _default_structured_validator() -> Any:
+def _default_structured_validator() -> StructuredValidator:
     """The default (jsonschema-backed) structured-output validator injected into
-    agents (BEP 12). Lazily imported so the agent ring stays stdlib-pure and the
-    third-party dep is only pulled when an agent is actually built."""
+    every agent (BEP 12) — ``Agent`` and, as of BEP 19 §3.9, every vendor
+    runtime built by ``create_agent`` too, so ``schema=`` validates the same
+    way regardless of which kind of agent ran the turn. Lazily imported so the
+    agent ring stays stdlib-pure and the third-party dep is only pulled when an
+    agent is actually built."""
     global _structured_validator_singleton
     if _structured_validator_singleton is None:
         from bos.core.defaults.structured_validator import JsonSchemaValidator
@@ -68,14 +71,23 @@ EXTERNAL_AGENT_KINDS: dict[str, str] = {
 
 EXTERNAL_RUNTIME_EXTRAS: dict[str, str] = {"claude-code": "claude-code", "codex": "codex"}
 
+# The vendor package each runtime module imports. Used to tell "the extra is not
+# installed" from "the runtime module itself is broken" — both arrive as
+# ImportError, and only the first should point at `pip install`. `claude-code`
+# has no entry yet: until its runtime module exists, any ImportError under that
+# kind reports its real cause rather than guessing.
+EXTERNAL_RUNTIME_VENDOR_MODULES: dict[str, str] = {"codex": "openai_codex"}
 
-def _load_external_runtime(runtime: str) -> type:
+
+def _load_external_runtime(runtime: str) -> type[ExternalRuntime]:
     """Import a runtime class by dotted path, reporting what failed on ImportError.
 
     The failure isn't necessarily a missing extra — it could be an import
     failing inside a runtime module that *is* installed (a typo'd import, a
-    broken transitive dependency). Report the actual error and offer the
-    extra as the likely fix rather than asserting it's the cause.
+    broken transitive dependency, a renamed symbol after a vendor version
+    bump). Only point at `pip install` when the module or submodule that
+    actually failed to import is the vendor's own; otherwise report the
+    real cause.
     """
     import importlib
 
@@ -83,11 +95,26 @@ def _load_external_runtime(runtime: str) -> type:
     try:
         module = importlib.import_module(module_path)
     except ImportError as exc:
-        extra = EXTERNAL_RUNTIME_EXTRAS.get(runtime, runtime)
-        raise RuntimeError(
-            f"Could not load the {runtime!r} agent runtime: {exc}. "
-            f"If its optional dependency is missing, install it with: pip install 'bos-ai[{extra}]'"
-        ) from exc
+        vendor = EXTERNAL_RUNTIME_VENDOR_MODULES.get(runtime)
+        missing = getattr(exc, "name", "") or ""
+        # ModuleNotFoundError means the module/submodule itself could not be
+        # found — that's "the extra isn't installed". A plain ImportError
+        # (e.g. `from openai_codex import Renamed` after a vendor rename)
+        # can carry the same .name — the *package* — even though the package
+        # was found and imported fine; only something *inside* it is wrong,
+        # which is a real bug, not a missing extra.
+        vendor_missing = (
+            isinstance(exc, ModuleNotFoundError)
+            and vendor is not None
+            and (missing == vendor or missing.startswith(f"{vendor}."))
+        )
+        if vendor_missing:
+            extra = EXTERNAL_RUNTIME_EXTRAS.get(runtime, runtime)
+            raise RuntimeError(
+                f"The {runtime!r} agent runtime needs its optional dependency. "
+                f"Install it with: pip install 'bos-ai[{extra}]'"
+            ) from exc
+        raise RuntimeError(f"Could not load the {runtime!r} agent runtime: {exc}") from exc
     return getattr(module, class_name)
 
 
@@ -139,6 +166,70 @@ class AgentRegistry:
     @classmethod
     def describe(cls) -> dict[str, str]:
         return {name: entry["description"] for name, entry in cls._registry.items()}
+
+
+def _resolve_agent_cfg_parent(kind: str | None, agent_cfg: dict[str, Any]) -> dict[str, Any]:
+    """Resolve a ``_parent`` that arrives in ``agent_cfg`` (BEP 19 §3.4.1.1).
+
+    ``agent_cfg`` bypasses the workspace resolver, so a ``_parent`` here used to
+    be dropped without a word — ``_apply`` filters it out of ``Agent``'s kwargs
+    — and a caller asking for a Codex agent got a BOS one, its ``permission``
+    ignored. The parent is looked up where the resolver left its work: a
+    registered agent's ``AgentRegistry`` defaults already hold its whole
+    resolved chain, so deep-merging them under ``agent_cfg`` gives what the same
+    settings under ``[agents.<name>]`` with that ``_parent`` would — given in
+    ``agent_cfg``'s own shape, which is the harness's argument shape rather than
+    TOML's (``tools`` is a list, not a ``[tools]`` table). A reserved runtime
+    is a parent even with no ``[agents.<runtime>]`` table, seeded with the
+    marker ``_EXTERNAL_RUNTIME_SPECS`` writes. A ``None`` parent is no parent, as
+    in config.
+
+    Refused: a parent that is neither; a ``kind`` that is already registered,
+    whose defaults already fold in a lineage of their own, so a second parent has
+    no defined place in the merge; and a parent whose runtime contradicts the one
+    ``kind`` or an ``external_runtime`` key (``None`` included) names.
+    """
+    cfg = dict(agent_cfg)
+    parent = cfg.pop("_parent")
+    if parent is None:
+        return cfg
+    if kind is not None and AgentRegistry.has_registered(kind):
+        raise ValueError(
+            f"agent_cfg sets `_parent = {parent!r}` for {kind!r}, which is already registered with a lineage of "
+            f"its own; agent_cfg cannot give it another. Build the variant under a new name."
+        )
+    reserved = isinstance(parent, str) and parent in EXTERNAL_AGENT_KINDS
+    registered = isinstance(parent, str) and AgentRegistry.has_registered(parent)
+    if not (reserved or registered):
+        known = ", ".join(sorted({*EXTERNAL_AGENT_KINDS, *AgentRegistry.describe()}))
+        raise ValueError(
+            f"agent_cfg sets `_parent = {parent!r}`, which is neither a reserved runtime nor a registered "
+            f"agent. Known: {known}."
+        )
+    base: dict[str, Any] = {"external_runtime": parent} if reserved else {}
+    if registered:
+        inherited = copy.deepcopy(AgentRegistry.get_defaults(parent))
+        # `kind` in registered defaults is the parent's own name. Per-agent plugin
+        # state is keyed by `agent_name or kind` (`_bind_plugins_for_agent`), so
+        # replace it with the child's, as `register()` does for a config child;
+        # dropping it would key every child without an `agent_name` as "default".
+        # An `agent_name` the parent sets is inherited, on this route as in config.
+        inherited.pop("kind", None)
+        if kind is not None:
+            inherited["kind"] = kind
+        base = _deep_merge(base, inherited)
+    runtime = base.get("external_runtime")
+    resolves_to = f"the {runtime!r} runtime" if runtime else "a BOS agent"
+    if kind in EXTERNAL_AGENT_KINDS and kind != runtime:
+        raise ValueError(
+            f"{kind!r} is the {kind!r} runtime, but `_parent = {parent!r}` resolves to {resolves_to}."
+        )
+    if "external_runtime" in cfg and cfg["external_runtime"] != runtime:
+        raise ValueError(
+            f"agent_cfg sets `external_runtime = {cfg['external_runtime']!r}`, but `_parent = {parent!r}` "
+            f"resolves to {resolves_to}."
+        )
+    return _deep_merge(base, cfg)
 
 
 class ResolvedToolSet:
@@ -427,6 +518,9 @@ class AgentHarness:
                 "tools": [],
             }
 
+        if agent_cfg and "_parent" in agent_cfg:
+            agent_cfg = _resolve_agent_cfg_parent(kind, agent_cfg)
+
         # Deep-copy the defaults: _deep_merge mutates its base in place, and a
         # shallow copy would let per-agent overrides write through the shared
         # nested dicts into the registry's stored defaults.
@@ -448,6 +542,7 @@ class AgentHarness:
                 chat_store=self.chat_store,
                 workspace=self._workspace,
                 mcp=self._ensure_tool_mcp_server,
+                structured_validator=_default_structured_validator(),
             )
             self._owned.append(external)
             return external

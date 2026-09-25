@@ -150,8 +150,11 @@ class BosApp:
         earlier `build_agent` call did — cannot take new config: passing
         *agent_cfg* for one raises rather than silently discarding it. Call
         `build_agent(kind)` with no *agent_cfg* to get the cached agent
-        unchanged; give an override its own kind (e.g. a named `_parent`
-        instance, BEP 19 §3.4) for a second configuration of the same runtime.
+        unchanged; give a variant its own kind instead — a new name whose
+        *agent_cfg* carries `_parent`, naming a reserved runtime or any
+        registered agent (`build_agent("martha", agent_cfg={"_parent":
+        "codex", ...})`), or a `_parent` instance in config (BEP 19
+        §3.4.1.1).
         """
         harness = self._require_open()
         if kind in self._agents:
@@ -162,7 +165,8 @@ class BosApp:
                     f"`build_agent({kind!r}, ...)` call cached it. A cached agent cannot "
                     f"take new config: {agent_cfg!r} would be silently discarded. Call "
                     f"`build_agent({kind!r})` with no `agent_cfg` for the cached agent, or "
-                    "give the override its own kind (e.g. a `_parent`-inheriting agent file)."
+                    "give the override its own kind — a new name with `agent_cfg={'_parent': ...}`, "
+                    "or a `_parent`-inheriting agent file."
                 )
             return self._agents[kind]
         self._agents[kind] = await harness.create_agent(kind=kind, agent_cfg=agent_cfg)
@@ -173,10 +177,43 @@ class BosApp:
     ) -> list[Message]:
         """A chat's messages, from BOS or from the runtime that owns the session.
 
-        ``"bos"`` is the record BOS persists and guarantees. ``"native"`` reads the
-        external runtime's own transcript, which BOS does not own — it can be
-        compacted or deleted by that runtime (BEP 19 §3.7). ``"auto"`` picks
-        ``"native"`` when the stored turn metadata names an external runtime.
+        ``"bos"`` is the record BOS persists and guarantees: two messages per
+        turn for an externally-backed chat, always available, and changed by
+        nothing outside BOS. It is the *active-context* window, so a summary
+        written over the chat does shorten it — that is BOS's own compaction,
+        not the runtime's. ``"auto"`` picks
+        ``"native"`` when the chat's stored turn metadata names an external
+        runtime, and ``"bos"`` otherwise.
+
+        ``"native"`` delegates to that runtime's own ``native_messages``, and
+        **it promises nothing** (BEP 19 §3.7). It is a live read of a store BOS
+        does not own: each runtime compacts and prunes on its own schedule, a
+        Codex thread can be archived or deleted, and Claude Code's transcripts
+        live under the invoking user's home directory. So a native read can
+        return fewer messages than it did last time, can contain markers where
+        the runtime declined to load part of its own history, and can fail
+        outright — none of which is a bug in BOS. ``"bos"`` is the only read
+        BOS stands behind.
+
+        **It is the conversation, not the work: user and assistant messages
+        only, no tool activity.** A runtime's tool calls, results, reasoning
+        and file edits are not projected, because BOS represents tool
+        activity as a *pair of messages* — an assistant message advertising
+        ``tool_calls``, then a ``role="tool"`` message whose ``tool_call_id``
+        matches it — and a native transcript has no such pairing, so building
+        one would mean inventing call ids the runtime never issued. BOS has
+        that activity nowhere else either: it is streamed live to an
+        ``event_sink`` while BOS runs a turn and is never persisted, and for a
+        session BOS did not run there was no stream. If you need it, read the
+        runtime's own store with the runtime's own tools.
+
+        Which runtime is asked is decided by the chat's stored metadata, and
+        which *agent* speaks for that runtime is decided by matching
+        ``resolved_config["external_runtime"]`` against it. That match is not
+        guessed at: no built agent for the runtime, more than one, or one that
+        cannot read its transcript back each raise rather than quietly reading
+        the wrong thing or falling back to the BOS record, which would answer a
+        different question than the one asked.
         """
         harness = self._require_open()
         store = harness.chat_store
@@ -196,10 +233,54 @@ class BosApp:
         )
         if source == "auto" and runtime is None:
             return messages
-        raise NotImplementedError(
-            "Reading a native transcript needs the runtime adapters (BEP 19 §6 Layer 4). "
-            'Use source="bos" for the record BOS persists.'
-        )
+        if runtime is None:
+            raise RuntimeError(
+                f'get_messages({chat_id!r}, source="native") has no runtime to ask: nothing in that '
+                f"chat's stored metadata names an external runtime, so either no external agent ever "
+                f'served it or the chat does not exist. Use source="bos" for the record BOS persists.'
+            )
+        # `resolved_config` is part of what every ExternalRuntime promises
+        # (BEP 19 §3.3), and the only part of it that names the vendor behind
+        # the agent. Reached with `getattr` because `AgentPort` does not
+        # promise it and BOS's own `Agent` does not have it — `self._agents`
+        # holds both kinds.
+        candidates = [
+            (kind, agent)
+            for kind, agent in self._agents.items()
+            if (getattr(agent, "resolved_config", None) or {}).get("external_runtime") == runtime
+        ]
+        if not candidates:
+            raise RuntimeError(
+                f"Chat {chat_id!r} was served by the {runtime!r} runtime, but no agent built on this "
+                f"BosApp declares it. Build one (e.g. `await app.build_agent({runtime!r})`) before "
+                f'reading its native transcript, or use source="bos".'
+            )
+        if len(candidates) > 1:
+            # BOS stores the runtime per turn, not the agent kind, so two
+            # agents on the same runtime are indistinguishable from here — and
+            # they are not interchangeable in general: a Claude Code transcript
+            # is keyed by the agent's `cwd`, so the wrong one reads a different
+            # conversation. Named rather than picked (BEP 19 §8.2).
+            kinds = ", ".join(sorted(kind for kind, _ in candidates))
+            raise RuntimeError(
+                f"Chat {chat_id!r} was served by the {runtime!r} runtime and {len(candidates)} built "
+                f"agents declare it ({kinds}). BOS does not record which one served the chat and will "
+                f"not guess, because the wrong one can read a different transcript. Call "
+                f"`app.agent(<kind>).native_messages({chat_id!r})` on the one you mean."
+            )
+        kind, agent = candidates[0]
+        # Duck-typed, not an AgentPort/ExternalRuntime method: only a runtime
+        # that has a native transcript can offer this, and widening either
+        # protocol would oblige every agent — including BOS's own `Agent` — to
+        # implement it. The cost of that choice is this check, which turns a
+        # bare AttributeError into the sentence below.
+        native_messages = getattr(agent, "native_messages", None)
+        if native_messages is None:
+            raise RuntimeError(
+                f"Agent {kind!r} backs chat {chat_id!r} with the {runtime!r} runtime but does not "
+                f'implement native_messages(), so its transcript cannot be read back. Use source="bos".'
+            )
+        return await native_messages(chat_id)
 
     @property
     def harness(self) -> AgentHarness:

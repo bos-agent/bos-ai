@@ -31,7 +31,7 @@ from ._utils import (
     _strip_think,
     _xml_attr,
 )
-from .agent import AbortTurn, Agent
+from .agent import ABORTED_TURN_CONTENT, SHUTDOWN_CONTENT, AbortTurn, Agent
 from .contract import (
     LLM,
     AgentEventType,
@@ -42,6 +42,7 @@ from .contract import (
     ChatStore,
     Consolidator,
     ContextResult,
+    ExternalRuntime,
     InterceptorStage,
     LLMResponse,
     Message,
@@ -65,6 +66,8 @@ from .contract import (
 )
 
 __all__ = [
+    "ABORTED_TURN_CONTENT",
+    "SHUTDOWN_CONTENT",
     "LLM",
     "AbortTurn",
     "Agent",
@@ -79,6 +82,7 @@ __all__ = [
     "Consolidator",
     "ContentSource",
     "ContextResult",
+    "ExternalRuntime",
     "TurnEventDetail",
     "TurnEventPhase",
     "TurnEventStage",

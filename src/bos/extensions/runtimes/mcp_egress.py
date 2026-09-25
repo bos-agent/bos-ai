@@ -40,6 +40,32 @@ _BEARER = "Bearer "
 _NO_GRANT: tuple[str, frozenset[str]] = ("<unauthenticated>", frozenset())
 
 
+def unregistered_tools(names: Sequence[str]) -> tuple[str, ...]:
+    """Which of *names* the global ``ep_tool`` registry has no entry for.
+
+    The skip rule of BEP 19 §3.8, in one place because three callers need the
+    same answer and must not drift: :meth:`BosToolMcpServer.register_agent`,
+    which warns and skips exactly these; an external runtime's
+    ``resolved_config``, which reports them so ``boscli inspect`` can show an
+    operator that an agent asks for a tool the host does not have; and that
+    same runtime's egress setup, which warns about them and then declines to
+    start a server it would have nothing to put in.
+
+    A free function, not a method, because of the last two: ``inspect`` builds
+    an agent and runs no turn, and a runtime builds its client — and with it
+    its MCP registration — lazily on the first turn (§3.1). Neither has a
+    server to ask, so the question has to be answerable without one, and
+    "compare what was requested against what a server granted" would report
+    nothing at all on either path.
+
+    Order- and duplicate-preserving, so a caller's warnings line up one for
+    one with the names it was given.
+    """
+    from bos.core.contract import ep_tool
+
+    return tuple(name for name in names if not ep_tool.has(name))
+
+
 class BosToolMcpServer:
     """Per-harness MCP endpoint over the global ``ep_tool`` registry.
 
@@ -63,21 +89,25 @@ class BosToolMcpServer:
         return f"http://{self._host}:{self._port}/mcp"
 
     def register_agent(self, agent_name: str, tools: Sequence[str]) -> str:
-        """Grant *agent_name* the named tools and return its bearer token."""
-        from bos.core.contract import ep_tool
+        """Grant *agent_name* the named tools and return its bearer token.
 
-        resolved: set[str] = set()
-        for name in tools:
-            if ep_tool.has(name):
-                resolved.add(name)
-            else:
-                logger.warning(
-                    "Agent %r lists mcp_tools=%r, which is not a registered tool; skipping.",
-                    agent_name,
-                    name,
-                )
+        Returns only the token: what was *skipped* is reported by
+        :func:`unregistered_tools`, which the caller can ask without a server.
+
+        A caller that asks it first and passes only resolvable names gets no
+        warning from here, which is how ``CodexAgent`` keeps BEP 19 §7.5's
+        "exactly one warning" while owning that warning itself. The warning
+        below stays as the safety net for every other caller.
+        """
+        missing = unregistered_tools(tools)
+        for name in missing:
+            logger.warning(
+                "Agent %r lists mcp_tools=%r, which is not a registered tool; skipping.",
+                agent_name,
+                name,
+            )
         token = secrets.token_urlsafe(32)
-        self._allowed[token] = (agent_name, frozenset(resolved))
+        self._allowed[token] = (agent_name, frozenset(tools) - frozenset(missing))
         return token
 
     def _grant(self, headers: Mapping[str, str] | None) -> tuple[str, frozenset[str]] | None:

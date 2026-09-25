@@ -77,6 +77,192 @@ async def test_an_external_runtime_key_dispatches_and_is_not_passed_on(tmp_path,
 
 
 @pytest.mark.asyncio
+async def test_a_reserved_parent_in_agent_cfg_dispatches_like_one_in_config(tmp_path, fake_runtimes):
+    """`agent_cfg` bypasses the workspace resolver, so a `_parent` arriving here
+    used to be dropped without a word — `_apply` filters it out of `Agent`'s
+    kwargs — and a caller asking for a Codex agent got a BOS one, its
+    `permission` ignored."""
+    from bos.core.harness import AgentHarness
+
+    async with AgentHarness(bos_dir=tmp_path, workspace=tmp_path) as harness:
+        agent = await harness.create_agent("martha", agent_cfg={"_parent": "codex", "permission": "read-only"})
+        assert isinstance(agent, _FakeRuntime)
+        assert agent.name == "martha"
+        assert agent.cfg["external_runtime"] == "codex"
+        assert agent.cfg["permission"] == "read-only"
+        assert "_parent" not in agent.cfg, "an inheritance directive, not runtime config"
+
+
+@pytest.mark.asyncio
+async def test_a_reserved_parents_own_config_reaches_an_agent_cfg_child(tmp_path, fake_runtimes):
+    """Same inheritance as `test_a_reserved_parents_own_config_reaches_the_child`,
+    through `agent_cfg` instead of a config table."""
+    ws = _write_workspace(tmp_path, '[agents.codex]\ncwd = "services"\npermission = "read-only"\n')
+    ws.resolve_agents()
+    ws.bootstrap_platform()
+
+    async with ws.harness() as harness:
+        agent = await harness.create_agent(
+            "martha", agent_cfg={"_parent": "codex", "permission": "workspace-write"}
+        )
+    assert agent.cfg["cwd"] == "services", "inherited from [agents.codex]"
+    assert agent.cfg["permission"] == "workspace-write", "agent_cfg wins"
+
+
+@pytest.mark.asyncio
+async def test_a_null_parent_in_agent_cfg_is_no_parent(tmp_path, fake_runtimes):
+    from bos.core.agent import Agent
+    from bos.core.harness import AgentHarness
+
+    async with AgentHarness(bos_dir=tmp_path, workspace=tmp_path) as harness:
+        agent = await harness.create_agent(agent_cfg={"_parent": None, "system_prompt": "hi", "tools": []})
+        assert isinstance(agent, Agent)
+
+
+@pytest.mark.asyncio
+async def test_a_registered_bos_parent_in_agent_cfg_is_inherited(tmp_path, fake_runtimes):
+    """A registered agent's defaults already hold its resolved chain, so a BOS
+    parent resolves through agent_cfg the way it does in config."""
+    from bos.core.agent import Agent
+
+    ws = _write_workspace(tmp_path, '[agents.solo]\nsystem_prompt = "solo prompt"\n')
+    ws.resolve_agents()
+    ws.bootstrap_platform()
+
+    async with ws.harness() as harness:
+        agent = await harness.create_agent("solo2", agent_cfg={"_parent": "solo"})
+        assert isinstance(agent, Agent)
+        assert agent._system_prompt == "solo prompt"
+
+
+@pytest.mark.asyncio
+async def test_a_registered_runtime_instance_is_a_parent_in_agent_cfg(tmp_path, fake_runtimes):
+    """A variant of a named runtime instance, e.g. the same agent in another cwd."""
+    ws = _write_workspace(
+        tmp_path, '[agents.george]\n_parent = "codex"\npermission = "read-only"\ncwd = "a"\n'
+    )
+    ws.resolve_agents()
+    ws.bootstrap_platform()
+
+    async with ws.harness() as harness:
+        agent = await harness.create_agent("george2", agent_cfg={"_parent": "george", "cwd": "b"})
+    assert isinstance(agent, _FakeRuntime)
+    assert agent.name == "george2"
+    assert agent.cfg["external_runtime"] == "codex"
+    assert agent.cfg["permission"] == "read-only", "inherited from george"
+    assert agent.cfg["cwd"] == "b", "agent_cfg wins"
+
+
+@pytest.mark.asyncio
+async def test_bos_variants_bind_plugins_under_their_own_names(tmp_path, fake_runtimes, monkeypatch):
+    """Per-agent plugin state — MemoryPlugin's store — is keyed by
+    `agent_name or kind or "default"`. Two variants of one parent must not both
+    bind as "default" and share it, which is what dropping the parent's `kind`
+    without writing the child's did."""
+    from bos.core.harness import AgentHarness
+
+    ws = _write_workspace(tmp_path, '[agents.solo]\nsystem_prompt = "hi"\n')
+    ws.resolve_agents()
+    ws.bootstrap_platform()
+    identities: list[str] = []
+    original = AgentHarness._bind_plugins_for_agent
+
+    async def spy(self, agent_cfg):
+        identities.append(agent_cfg.get("agent_name") or agent_cfg.get("kind") or "default")
+        return await original(self, agent_cfg)
+
+    monkeypatch.setattr(AgentHarness, "_bind_plugins_for_agent", spy)
+    async with ws.harness() as harness:
+        await harness.create_agent("solo2", agent_cfg={"_parent": "solo"})
+        await harness.create_agent("solo3", agent_cfg={"_parent": "solo"})
+    assert identities == ["solo2", "solo3"]
+
+
+@pytest.mark.asyncio
+async def test_resolving_an_agent_cfg_parent_writes_through_to_nothing(tmp_path, fake_runtimes):
+    """`_deep_merge` mutates its base in place: neither the parent's registry
+    entry nor the caller's dict may change. Popping `_parent` from the caller's
+    own dict would make its next reuse build a plain Agent again."""
+    import copy
+
+    from bos.core import AgentRegistry
+
+    ws = _write_workspace(
+        tmp_path,
+        '[agents.codex]\npermission = "read-only"\n\n[agents.codex.native_options.config]\ny = 2\n',
+    )
+    ws.resolve_agents()
+    ws.bootstrap_platform()
+    registry_before = copy.deepcopy(AgentRegistry.get_defaults("codex"))
+    agent_cfg = {"_parent": "codex", "native_options": {"config": {"x": 1}}}
+    caller_before = copy.deepcopy(agent_cfg)
+
+    async with ws.harness() as harness:
+        agent = await harness.create_agent("martha", agent_cfg=agent_cfg)
+    assert agent.cfg["native_options"]["config"] == {"x": 1, "y": 2}
+    assert AgentRegistry.get_defaults("codex") == registry_before
+    assert agent_cfg == caller_before
+    assert agent.cfg["kind"] == "martha", "the child's name, not the parent's"
+
+
+@pytest.mark.asyncio
+async def test_a_null_parent_is_stripped_on_the_runtime_path(tmp_path, fake_runtimes):
+    from bos.core.harness import AgentHarness
+
+    async with AgentHarness(bos_dir=tmp_path, workspace=tmp_path) as harness:
+        agent = await harness.create_agent("codex", agent_cfg={"_parent": None, "permission": "read-only"})
+    assert "_parent" not in agent.cfg
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("parent", ["no-such-parent", ["codex"]])
+async def test_an_unknown_parent_in_agent_cfg_is_refused_not_dropped(tmp_path, fake_runtimes, parent):
+    ws = _write_workspace(tmp_path, '[agents.solo]\nsystem_prompt = "hi"\n')
+    ws.resolve_agents()
+    ws.bootstrap_platform()
+
+    async with ws.harness() as harness:
+        with pytest.raises(ValueError) as excinfo:
+            await harness.create_agent("martha", agent_cfg={"_parent": parent, "system_prompt": "hi"})
+    message = str(excinfo.value)
+    assert repr(parent) in message
+    assert "solo" in message and "codex" in message, "lists what it could have been"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("kind", "agent_cfg", "expected"),
+    [
+        ("martha", {"_parent": "codex", "external_runtime": "claude-code"}, "external_runtime = 'claude-code'"),
+        # An explicit None used to slip past the check and build a plain Agent
+        # with `permission` dropped — the defect this whole path exists to stop.
+        ("martha", {"_parent": "codex", "external_runtime": None}, "external_runtime = None"),
+        ("claude-code", {"_parent": "codex"}, "is the 'claude-code' runtime"),
+    ],
+)
+async def test_a_reserved_parent_that_contradicts_the_runtime_is_refused(
+    tmp_path, fake_runtimes, kind, agent_cfg, expected
+):
+    from bos.core.harness import AgentHarness
+
+    async with AgentHarness(bos_dir=tmp_path, workspace=tmp_path) as harness:
+        with pytest.raises(ValueError, match=expected):
+            await harness.create_agent(kind, agent_cfg={**agent_cfg, "permission": "read-only"})
+
+
+@pytest.mark.asyncio
+async def test_agent_cfg_cannot_reparent_a_configured_agent(tmp_path, fake_runtimes):
+    ws = _write_workspace(tmp_path, '[agents.plain]\nsystem_prompt = "hi"\n')
+    ws.resolve_agents()
+    ws.bootstrap_platform()
+
+    async with ws.harness() as harness:
+        with pytest.raises(ValueError) as excinfo:
+            await harness.create_agent("plain", agent_cfg={"_parent": "codex", "permission": "read-only"})
+    assert "'plain'" in str(excinfo.value)
+
+
+@pytest.mark.asyncio
 async def test_the_runtime_is_closed_with_the_harness(tmp_path, fake_runtimes):
     from bos.core.harness import AgentHarness
 
@@ -87,16 +273,110 @@ async def test_the_runtime_is_closed_with_the_harness(tmp_path, fake_runtimes):
 
 @pytest.mark.asyncio
 async def test_a_missing_extra_names_the_extra_to_install(tmp_path, monkeypatch):
+    """A failure inside the vendor package's own namespace is still the vendor's
+    problem to install (the `missing.startswith(f"{vendor}.")` half of the
+    classification) — `openai_codex` is a real dependency in this dev venv, so a
+    genuinely absent *submodule* of it, not the package itself, is what's faked
+    here. test_a_missing_vendor_module_names_the_extra below covers the other
+    half: the package itself missing.
+    """
     from bos.core import harness as harness_mod
     from bos.core.harness import AgentHarness
 
-    monkeypatch.setitem(harness_mod.EXTERNAL_AGENT_KINDS, "codex", "bos_nonexistent_module:CodexAgent")
+    fake_target = "openai_codex.bos_nonexistent_submodule:CodexAgent"
+    monkeypatch.setitem(harness_mod.EXTERNAL_AGENT_KINDS, "codex", fake_target)
     async with AgentHarness(bos_dir=tmp_path, workspace=tmp_path) as harness:
         with pytest.raises(RuntimeError) as excinfo:
             await harness.create_agent("codex")
     message = str(excinfo.value)
     assert "bos-ai[codex]" in message
     assert "codex" in message
+
+
+@pytest.mark.asyncio
+async def test_a_missing_vendor_module_names_the_extra(tmp_path, monkeypatch):
+    """The friendly message is for a missing VENDOR module, and only that.
+
+    `bos.extensions.runtimes.codex` doesn't exist yet (Task 3 adds it), so
+    there is no real module whose own `import openai_codex` can fail here.
+    Standing in with a dotted path that *is* the vendor module makes
+    `_load_external_runtime` see the same `exc.name == "openai_codex"` that a
+    real codex.py's failed import would produce once that module exists.
+    """
+    import sys
+
+    from conftest import BlockImport
+
+    from bos.core import harness as harness_mod
+    from bos.core.harness import AgentHarness
+
+    monkeypatch.setattr(sys, "meta_path", [BlockImport("openai_codex"), *sys.meta_path])
+    monkeypatch.delitem(sys.modules, "openai_codex", raising=False)
+    monkeypatch.setitem(harness_mod.EXTERNAL_AGENT_KINDS, "codex", "openai_codex:CodexAgent")
+
+    async with AgentHarness(bos_dir=tmp_path, workspace=tmp_path) as harness:
+        with pytest.raises(RuntimeError) as excinfo:
+            await harness.create_agent("codex", agent_cfg={"permission": "read-only"})
+    assert "bos-ai[codex]" in str(excinfo.value)
+
+
+@pytest.mark.asyncio
+async def test_a_broken_import_inside_the_runtime_module_is_not_relabelled(tmp_path, monkeypatch):
+    """A typo'd import inside codex.py must report itself, not 'install the extra'.
+
+    No BlockImport needed: `bos_totally_absent_helper` names no real package
+    anywhere, so `importlib.import_module` fails on its own — this is exactly
+    the shape of a typo'd `import` statement inside an installed runtime module.
+    """
+    from bos.core import harness as harness_mod
+    from bos.core.harness import AgentHarness
+
+    monkeypatch.setitem(harness_mod.EXTERNAL_AGENT_KINDS, "codex", "bos_totally_absent_helper:CodexAgent")
+
+    async with AgentHarness(bos_dir=tmp_path, workspace=tmp_path) as harness:
+        with pytest.raises(RuntimeError) as excinfo:
+            await harness.create_agent("codex", agent_cfg={"permission": "read-only"})
+    message = str(excinfo.value)
+    assert "bos_totally_absent_helper" in message, "the real cause must be visible"
+    assert "bos-ai[codex]" not in message, "an unrelated import failure must not be relabelled as the missing extra"
+
+
+@pytest.mark.asyncio
+async def test_a_missing_symbol_in_an_installed_vendor_module_is_not_relabelled(tmp_path, monkeypatch):
+    """Fix round 1: a renamed/removed symbol in an *installed* vendor package
+    raises a plain ImportError whose `.name` is just the package
+    ("openai_codex") — the same `.name` a genuinely-missing package would set.
+    Only `ModuleNotFoundError` means "not found"; a plain `ImportError` here
+    means the package was found and something inside it wasn't, which must
+    report itself and not be relabelled as a missing extra.
+
+    Uses the real, installed `openai_codex` (no BlockImport) via a throwaway
+    module on `sys.path` that does what codex.py (Task 3) will do — `from
+    openai_codex import <symbol>` — with a symbol that doesn't exist, standing
+    in for a vendor rename or version skew.
+    """
+    import sys
+
+    from bos.core import harness as harness_mod
+    from bos.core.harness import AgentHarness
+
+    probe_dir = tmp_path / "probe"
+    probe_dir.mkdir()
+    (probe_dir / "bos_task2_symbol_probe.py").write_text(
+        "from openai_codex import _totally_bogus_attr_or_submodule\n"
+    )
+    monkeypatch.syspath_prepend(str(probe_dir))
+    monkeypatch.delitem(sys.modules, "bos_task2_symbol_probe", raising=False)
+    monkeypatch.setitem(harness_mod.EXTERNAL_AGENT_KINDS, "codex", "bos_task2_symbol_probe:CodexAgent")
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    async with AgentHarness(bos_dir=workspace, workspace=workspace) as harness:
+        with pytest.raises(RuntimeError) as excinfo:
+            await harness.create_agent("codex", agent_cfg={"permission": "read-only"})
+    message = str(excinfo.value)
+    assert "_totally_bogus_attr_or_submodule" in message, "the real cause must be visible"
+    assert "bos-ai[codex]" not in message, "a symbol missing from an installed package is not a missing extra"
 
 
 @pytest.mark.asyncio
@@ -329,3 +609,54 @@ async def test_inspect_text_render_shows_external_fields_and_hides_the_model_hin
     assert "read-only" in output, "the permission level must be shown"
     assert "search" in output, "the resolved mcp_tools must be shown"
     assert "BOS_MODEL" not in output, "no such setting exists for an external runtime"
+
+
+def test_external_runtime_requires_aclose_and_resolved_config():
+    """BEP 19 §8.2: a runtime without aclose() is silently skipped by _aclose and
+    leaks its child process. The protocol is what makes pyright catch that."""
+    from conftest import _FakeRuntime
+
+    from bos.core.agent import ExternalRuntime
+
+    fake = _FakeRuntime(kind="k", cfg={}, chat_store=None, workspace=".", mcp=None, structured_validator=None)
+    assert isinstance(fake, ExternalRuntime)
+
+
+def test_external_runtime_rejects_a_runtime_without_aclose():
+    from bos.core.agent import AgentPort, AgentResult, ExternalRuntime
+
+    class NoClose:
+        @property
+        def name(self) -> str:
+            return "x"
+
+        @property
+        def resolved_config(self):
+            return {}
+
+        def request_stop(self) -> None: ...
+
+        async def ask(self, chat_id, content, **kwargs) -> str:
+            return ""
+
+        async def run(self, chat_id, content, **kwargs) -> AgentResult:
+            return AgentResult(output="")
+
+    instance = NoClose()
+    assert isinstance(instance, AgentPort), "still a valid host-facing agent"
+    assert not isinstance(instance, ExternalRuntime), "but not a valid external runtime"
+
+
+def test_a_parent_in_an_actors_agent_cfg_is_refused_at_load_naming_the_actor():
+    """It used to pass validation and be dropped; with agent_cfg now resolving
+    `_parent`, an actor's copy would otherwise start resolving (or failing) at
+    gateway start. Refuse it where the config is read."""
+    from pydantic import ValidationError
+
+    from bos.config import validate_config
+
+    with pytest.raises(ValidationError) as excinfo:
+        validate_config({"runtime": {"actors": {"coder": {"agent": "codex", "agent_cfg": {"_parent": "codex"}}}}})
+    message = str(excinfo.value)
+    assert "coder" in message
+    assert "_parent" in message

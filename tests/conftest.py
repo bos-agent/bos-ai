@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -127,13 +128,18 @@ def _default_test_consolidator(model=None, llm=None, **kwargs):
 class _FakeRuntime:
     """Stands in for ClaudeCodeAgent / CodexAgent (BEP 19 §6 Layer 1)."""
 
-    def __init__(self, *, kind, cfg, chat_store, workspace, mcp):
+    def __init__(self, *, kind, cfg, chat_store, workspace, mcp, structured_validator):
         self._kind, self.cfg, self.workspace, self.mcp = kind, cfg, workspace, mcp
+        self.structured_validator = structured_validator
         self.closed = False
 
     @property
     def name(self) -> str:
         return self._kind
+
+    @property
+    def resolved_config(self):
+        return self.cfg
 
     def request_stop(self) -> None:
         pass
@@ -181,3 +187,398 @@ async def serve_asgi(app):
         server.should_exit = True
         await asyncio.gather(serving, return_exceptions=True)
         await server.shutdown()
+
+
+# ── Codex runtime double (BEP 19 Layer 4a) ──────────────────────────────────
+#
+# Fakes the *transport* (AsyncCodex/AsyncThread/AsyncTurnHandle), never the
+# vendor's data shapes: every object CodexAgent reads out of a call is a real
+# openai_codex type, so a shape the vendor changes breaks these tests instead
+# of a hand-rolled stand-in silently drifting from it.
+
+
+class _Hang:
+    """Task 7: a sentinel placed in a FakeTurnHandle's armed notifications.
+
+    ``stream()`` pauses on it instead of yielding, simulating a turn still
+    being worked on by the vendor — nothing to test interrupt/stop/timeout/
+    busy/aclose against without one, since the existing notification list is
+    otherwise exhausted (and the fake done) faster than any of those can race
+    it. ``release`` — set directly by a test, standing in for the vendor
+    eventually confirming an interrupt — is what unblocks it; production
+    code's own ``handle.interrupt()`` call is recorded (``interrupted``) but
+    deliberately does *not* auto-release, so a test can also model a native
+    turn that ignores the interrupt entirely, which timeout and aclose() must
+    both tolerate without hanging.
+    """
+
+
+HANG = _Hang()
+
+
+class FakeTurnHandle:
+    """Stands in for openai_codex.AsyncTurnHandle."""
+
+    def __init__(self, thread: FakeThread, turn_id: str, notifications: list[Any], result: Any) -> None:
+        self._thread, self.id = thread, turn_id
+        self._notifications, self._result = notifications, result
+        self.interrupted = False
+        # Fix round 1: every input handed to steer(), in call order — a
+        # truthy interrupt-callback return delivers into the running turn via
+        # steer(), not interrupt(), so a test asserts on this instead.
+        self.steered: list[Any] = []
+        # See HANG. hang_reached lets a test `wait_for()` the pause reliably
+        # instead of guessing how many event-loop turns run() needs to get
+        # there; release is what ends it.
+        self.hang_reached = asyncio.Event()
+        self.release = asyncio.Event()
+        # Fix round 2: the ways this double used to be *more reliable than
+        # the vendor*, which is what let round 1 delete a real safety bound as
+        # "dead code". A real interrupt()/steer() is an RPC to the app-server
+        # that can be slow or fail, and a real turn is not guaranteed to
+        # release the event loop when BOS cancels it. All default to the old,
+        # always-fast, always-succeeds behaviour, so every pre-existing test
+        # is unchanged; a test opts in per handle (see
+        # FakeAsyncCodex.next_handle_attrs for arming one that does not exist
+        # yet).
+        self.interrupt_hang: asyncio.Event | None = None  # set -> interrupt() blocks on it
+        self.interrupt_error: Exception | None = None  # set -> interrupt() raises it
+        self.steer_error: Exception | None = None  # set -> steer() raises it (after recording)
+        # True -> the turn ignores cancellation and keeps hanging. See the
+        # note in stream() for which production await this actually stands in
+        # for — it is NOT the vendor's own stream.
+        self.swallow_cancel = False
+        self.cancels_swallowed = 0
+
+    async def stream(self):
+        for notification in self._notifications:
+            if notification is HANG:
+                self.hang_reached.set()
+                while True:
+                    try:
+                        await self.release.wait()
+                        break
+                    except asyncio.CancelledError:
+                        # Fix round 3 (N1): the vendor's OWN stream does die
+                        # on cancel — driven directly, the consuming task ends
+                        # in 0.000s; only the `asyncio.to_thread` worker thread
+                        # leaks. So this is not modelling the vendor.
+                        #
+                        # What it models is the other two awaits inside
+                        # _emit_stream's loop: `await sink.emit(event)` and
+                        # `await _apply_async(interrupt, {})`. Both are
+                        # host-supplied code, arbitrary and able to shield,
+                        # block or swallow a cancel — and a stream task parked
+                        # in one of them is exactly the task _settle_interrupted
+                        # ABANDONS, which is why aclose() needs a bound of its
+                        # own. Simulated here at the stream level only because
+                        # that is the cheapest seam in this double, not because
+                        # the vendor stream behaves this way.
+                        if not self.swallow_cancel:
+                            raise
+                        self.cancels_swallowed += 1
+                continue
+            yield notification
+
+    async def interrupt(self) -> None:
+        self.interrupted = True
+        if self.interrupt_hang is not None:
+            await self.interrupt_hang.wait()
+        if self.interrupt_error is not None:
+            raise self.interrupt_error
+
+    async def steer(self, input: Any) -> None:
+        self.steered.append(input)
+        if self.steer_error is not None:
+            raise self.steer_error
+
+
+def _default_turn_notifications(thread_id: str, turn_id: str, result: Any) -> list[Any]:
+    """Task 5's tests arm a ``TurnResult`` via ``_arm_result`` and inspect only
+    the ``AgentResult`` ``run()`` returns — none of them pass an ``event_sink``.
+    Since Task 6, ``CodexAgent.run()`` no longer takes that ``TurnResult``
+    directly: it reconstructs one from the notifications ``handle.stream()``
+    yields. Rather than rewrite every one of those pre-existing tests to
+    hand-build a ``Notification`` sequence, synthesize the minimal one that
+    reconstructs an equivalent ``TurnResult`` from *this* armed result, so the
+    streaming path Task 6 introduces is what actually produces their answer.
+
+    Only used when a test never explicitly arms ``next_notifications`` itself
+    (see ``FakeThread.turn`` below) — a test exercising the mapping/ordering
+    of events arms its own real ``Notification`` sequence instead, and this is
+    never consulted.
+    """
+    from openai_codex.generated.v2_all import AgentMessageThreadItem, MessagePhase, ThreadItem, Turn
+    from openai_codex.models import (
+        ItemCompletedNotification,
+        Notification,
+        ThreadTokenUsageUpdatedNotification,
+        TurnCompletedNotification,
+    )
+
+    if result is None:
+        return []
+    notifications: list[Any] = []
+    if result.final_response:
+        item = ThreadItem(
+            AgentMessageThreadItem(
+                id=f"{turn_id}-response", text=result.final_response, phase=MessagePhase.final_answer,
+                type="agentMessage",
+            )
+        )
+        notifications.append(
+            Notification(
+                method="item/completed",
+                payload=ItemCompletedNotification(item=item, completed_at_ms=0, thread_id=thread_id, turn_id=turn_id),
+            )
+        )
+    if result.usage is not None:
+        notifications.append(
+            Notification(
+                method="thread/tokenUsage/updated",
+                payload=ThreadTokenUsageUpdatedNotification(
+                    thread_id=thread_id, token_usage=result.usage, turn_id=turn_id
+                ),
+            )
+        )
+    turn = Turn(
+        id=turn_id,
+        items=[],
+        status=result.status,
+        error=result.error,
+        started_at=result.started_at,
+        completed_at=result.completed_at,
+        duration_ms=result.duration_ms,
+    )
+    notifications.append(
+        Notification(method="turn/completed", payload=TurnCompletedNotification(thread_id=thread_id, turn=turn))
+    )
+    return notifications
+
+
+class FakeThread:
+    """Stands in for openai_codex.AsyncThread."""
+
+    def __init__(self, codex: FakeAsyncCodex, thread_id: str) -> None:
+        self._codex, self.id = codex, thread_id
+
+    async def turn(self, input: Any, **kwargs: Any) -> FakeTurnHandle:
+        self._codex.turn_calls.append((self.id, input, kwargs))
+        if self._codex.turn_hang is not None:
+            await self._codex.turn_hang.wait()
+        # A queued result (Task 5 fix round: schema-retry tests need a
+        # *different* TurnResult per call within one run() invocation) takes
+        # priority; next_result is the pre-existing single persistent slot,
+        # unchanged for every caller that never touches next_results.
+        result = self._codex.next_results.pop(0) if self._codex.next_results else self._codex.next_result
+        # The real AsyncTurnHandle.id IS the native turn id (both come from
+        # the same TurnStartResponse.turn.id) — TurnResult.id can never differ
+        # from the handle that produced it. Mirror that: when a result is
+        # armed, the handle's id (and the turn id notifications carry) is
+        # *its* id, not an independent counter; only fall back to a counter
+        # when nothing was armed at all.
+        turn_id = result.id if result is not None else f"turn-{len(self._codex.turn_calls)}"
+        notifications = self._codex.next_notifications or _default_turn_notifications(self.id, turn_id, result)
+        handle = FakeTurnHandle(self, turn_id, notifications, result)
+        # Fix round 2: the handle is built here, inside production code's own
+        # `await thread.turn(...)`, so a test that needs a slow or failing RPC
+        # from the very first notification has no seam to reach it afterwards
+        # — same staging problem (and same solution) as next_notifications.
+        for name, value in self._codex.next_handle_attrs.items():
+            setattr(handle, name, value)
+        # Task 7: every handle ever created, in creation order, so a test can
+        # reach into an in-flight turn (e.g. via HANG above) without CodexAgent
+        # itself ever handing the handle back.
+        self._codex.turn_handles.append(handle)
+        return handle
+
+    # Deliberately no `run()` here, and none on FakeTurnHandle either. The
+    # vendor has both, but production has driven `handle.stream()` since Task 6
+    # and nothing calls them — a faithful stand-in for a surface nothing uses is
+    # a second definition of correctness, free to drift where no test looks.
+    # (The failed-turn raise they used to mirror is production's own
+    # `_raise_for_failed_turn`, reached through `_emit_stream`.)
+    #
+    # Task 9 deliberately has no `read()` here either. `CodexAgent.native_messages`
+    # does not go through a thread object the client handed it — it builds a
+    # REAL `openai_codex.AsyncThread` over the client (BEP 19 §3.7; resuming
+    # would be a write on a read), so the vendor's own `AsyncThread.read()`
+    # runs and lands on `FakeAsyncCodex._client.thread_read` below. A `read()`
+    # on this class would be dead code that looks like the seam under test.
+
+
+class FakeAsyncCodex:
+    """Fakes the transport, not the protocol: every object it returns is a real
+    openai_codex type, so a shape the vendor changes breaks these tests."""
+
+    def __init__(self, config: Any = None) -> None:
+        self.config = config
+        self.thread_start_calls: list[dict] = []
+        self.thread_resume_calls: list[tuple[str, dict]] = []
+        self.turn_calls: list[tuple] = []
+        self.closed = False
+        self.account_error: Exception | None = None
+        self.resume_error: Exception | None = None
+        self.next_notifications: list[Any] = []
+        self.next_result: Any = None
+        self.next_results: list[Any] = []
+        # Task 9: what `_client.thread_read` answers with, and every call it
+        # received as `(thread_id, include_turns)`. Armed with a REAL
+        # `ThreadReadResponse`; `thread_read_error` (a real `CodexError`
+        # subclass) models a missing or deleted thread, which `ThreadReadResponse`
+        # has no way to express — its `thread` field is required and not
+        # nullable — so the vendor raises instead of answering with an empty one.
+        self.next_thread_read: Any = None
+        self.thread_read_error: Exception | None = None
+        self.thread_read_calls: list[tuple[str, bool]] = []
+        self.turn_handles: list[FakeTurnHandle] = []
+        # Applied to every FakeTurnHandle this client's threads create (see
+        # FakeThread.turn) — the knobs on FakeTurnHandle, armed up front.
+        self.next_handle_attrs: dict[str, Any] = {}
+        # Task 7: an aclose() racing _ensure_client()'s own preflight-auth call
+        # (the one await inside its _client_lock) needs that call held open;
+        # None (the default) means account() answers immediately, as every
+        # pre-Task-7 test relies on.
+        self.account_hang: asyncio.Event | None = None
+        # Fix round 4: the same shape as account_hang, for the three *setup*
+        # RPCs. The load-bearing property holds for all three — a blocking
+        # request with no timeout of its own, cancellable at the asyncio
+        # level — so a wedged child stalls these exactly as it stalls
+        # account() and interrupt(). None means answer immediately, as every
+        # pre-round-4 test relies on.
+        #
+        # The vendor path is NOT identical, though (fix round 5, N2).
+        # thread_start/thread_resume go through _call_sync -> asyncio.to_thread.
+        # thread.turn goes through the module-level _TURN_START_EXECUTOR with
+        # asyncio.wrap_future and a cancel callback — and cancelling it does
+        # NOT stop the submitted work: the native turn starts anyway and only
+        # the orphaned subscription is closed. This double cannot express
+        # that, because turn_hang is checked BEFORE the handle is built, so a
+        # timed-out thread.turn leaves turn_handles empty and every test sees
+        # a turn that never started. Deliberate: there is no BOS-side
+        # behaviour to assert yet (the turn id needed to interrupt it is what
+        # the cancelled call never returned), and a characterization test
+        # would only pin a limitation we would rather remove. If you reach
+        # for turn_hang to reason about what the child is doing, this is the
+        # sixth double-vs-vendor divergence found on this branch, and it is
+        # here.
+        self.thread_start_hang: asyncio.Event | None = None
+        self.thread_resume_hang: asyncio.Event | None = None
+        self.turn_hang: asyncio.Event | None = None
+        # Task 9's read is bounded by the same `timeout_seconds`, and the
+        # vendor path it stands in for is the plain one: `thread_read` ->
+        # `_call_sync` -> `asyncio.to_thread` -> a queue read with no timeout,
+        # cancellable at the asyncio level. The to_thread WORKER still parks
+        # until the process ends, exactly as it does for a wedged `interrupt()`
+        # — but that is a thread, not work the child is doing on BOS's behalf,
+        # so this has no `turn_hang`-style divergence to declare: a cancelled
+        # read leaves no orphaned native turn running against `cwd`.
+        self.thread_read_hang: asyncio.Event | None = None
+        # Task 8: _ensure_client replaces the approval handler through this
+        # exact attribute path, with no getattr guard, so the double has to
+        # carry the same shape or every test here would sail past the line
+        # under test. Mirrors the vendor's AsyncCodex._client
+        # (AsyncCodexClient, api.py:317) -> ._sync (CodexClient,
+        # async_client.py:62) -> ._approval_handler (client.py:223).
+        #
+        # Seeded None, which the vendor's never is — there it defaults to the
+        # bound CodexClient._default_approval_handler. Deliberate, and the one
+        # divergence in this attribute: None makes "replaced" distinguishable
+        # from "never installed", and the vendor's actual default is pinned
+        # against the real package by
+        # test_codex_approval_handler_attribute_exists instead.
+        # `thread_read` sits here, not on FakeThread, because Task 9's read
+        # runs the vendor's OWN `AsyncThread.read()` against this client:
+        # `AsyncThread.read` awaits `self._codex._ensure_initialized()` and
+        # then `self._codex._client.thread_read(self.id, include_turns=...)`
+        # (api.py:775-778). Same arity and keyword as the real
+        # `AsyncCodexClient.thread_read` (async_client.py:189).
+        self._client = SimpleNamespace(
+            _sync=SimpleNamespace(_approval_handler=None),
+            thread_read=self._thread_read,
+        )
+        # The handler in place when account() was called, so a test can assert
+        # the install happens BEFORE the first RPC that can spawn the child.
+        self.approval_handler_at_account: Any = "account() not called"
+
+    async def _ensure_initialized(self) -> None:
+        """The real `AsyncCodex._ensure_initialized` starts the child and runs
+        `initialize` once, under a lock (api.py:329-344). `AsyncThread.read`
+        awaits it before the RPC (api.py:777); this double spawns nothing, so
+        it is a no-op — it exists so the vendor's own `AsyncThread.read()` can
+        run against this client at all.
+        """
+
+    async def _thread_read(self, thread_id: str, include_turns: bool = False) -> Any:
+        self.thread_read_calls.append((thread_id, include_turns))
+        if self.thread_read_hang is not None:
+            await self.thread_read_hang.wait()
+        if self.thread_read_error is not None:
+            raise self.thread_read_error
+        return self.next_thread_read
+
+    async def account(self, *, refresh_token: bool = False) -> Any:
+        self.approval_handler_at_account = self._client._sync._approval_handler
+        if self.account_hang is not None:
+            await self.account_hang.wait()
+        if self.account_error is not None:
+            raise self.account_error
+        # GetAccountResponse.account is optional and ApiKeyAccount needs only its
+        # literal discriminator field, so a real, fully-valid response costs
+        # nothing here — the brief's documented sentinel fallback was not needed.
+        from openai_codex.generated.v2_all import Account, ApiKeyAccount, GetAccountResponse
+
+        return GetAccountResponse(account=Account(root=ApiKeyAccount(type="apiKey")), requires_openai_auth=False)
+
+    async def thread_start(self, **kwargs: Any) -> FakeThread:
+        # Recorded before the wait, so a test can poll for "the RPC was
+        # reached" instead of guessing how many loop ticks run() needs.
+        self.thread_start_calls.append(kwargs)
+        if self.thread_start_hang is not None:
+            await self.thread_start_hang.wait()
+        return FakeThread(self, f"thread-{len(self.thread_start_calls)}")
+
+    async def thread_resume(self, thread_id: str, **kwargs: Any) -> FakeThread:
+        if self.resume_error is not None:
+            raise self.resume_error
+        self.thread_resume_calls.append((thread_id, kwargs))
+        if self.thread_resume_hang is not None:
+            await self.thread_resume_hang.wait()
+        return FakeThread(self, thread_id)
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+@pytest.fixture
+def fake_codex(monkeypatch):
+    """Point CodexAgent's client factory at the double. Records every instance."""
+    import bos.extensions.runtimes.codex as codex_mod
+
+    class _Registry:
+        def __init__(self) -> None:
+            self.instances: list[FakeAsyncCodex] = []
+            self._pending: dict[str, Any] = {}
+
+        def arm(self, **attrs: Any) -> None:
+            """Set attributes on the *next* instance this registry builds.
+
+            ``CodexAgent`` builds its client lazily inside ``_thread_for`` /
+            ``_ensure_client``, with no seam in between for a test to reach in
+            after construction but before the client is used — so arming a
+            failure (e.g. ``resume_error``) has to happen before that call,
+            against the instance that does not exist yet.
+            """
+            self._pending.update(attrs)
+
+        def __call__(self, config: Any = None) -> FakeAsyncCodex:
+            instance = FakeAsyncCodex(config)
+            for name, value in self._pending.items():
+                setattr(instance, name, value)
+            self._pending.clear()
+            self.instances.append(instance)
+            return instance
+
+    registry = _Registry()
+    monkeypatch.setattr(codex_mod, "_CODEX_FACTORY", registry)
+    return registry

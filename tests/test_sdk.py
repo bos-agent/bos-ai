@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from bos.sdk import open_harness
@@ -287,6 +289,20 @@ async def test_build_agent_applies_agent_cfg(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_build_agent_honours_a_reserved_parent_in_agent_cfg(tmp_path, fake_runtimes):
+    """The embedding route for a second named runtime instance from code. It used
+    to build a plain BOS `Agent` and drop `permission` without a word."""
+    from bos.core.agent import Agent
+    from bos.sdk import BosApp
+
+    async with BosApp({}, bos_dir=tmp_path) as app:
+        agent = await app.build_agent("martha", agent_cfg={"_parent": "codex", "permission": "read-only"})
+        assert not isinstance(agent, Agent)
+        assert agent.resolved_config["external_runtime"] == "codex"
+        assert agent.resolved_config["permission"] == "read-only"
+
+
+@pytest.mark.asyncio
 async def test_build_agent_rejects_agent_cfg_on_an_already_cached_kind(tmp_path):
     """Final review, item 1: a second call passing `agent_cfg` for an already-cached
     kind used to return the first agent unchanged, discarding the override with no
@@ -342,13 +358,133 @@ async def test_get_messages_reads_the_bos_chat_store(tmp_path):
         assert [m.llm_message["content"] for m in messages] == ["q", "a"]
 
 
+async def _external_turn(app, chat_id: str = "chat-1", runtime: str = "codex") -> None:
+    """Commit one externally-backed turn, so the chat carries the routing
+    metadata `get_messages` looks for (BEP 19 §3.6/§3.7). That metadata is the
+    only record BOS keeps of which runtime served a chat, and writing it any
+    other way would test a shape production never produces."""
+    from bos.extensions.runtimes._shared import commit_external_turn
+
+    store = app.harness.chat_store
+    assert store is not None
+    await commit_external_turn(
+        store, chat_id, turn_id="t1", user_content="q", response="a",
+        runtime=runtime, native_session_id="thread_abc",
+    )
+
+
+class _StubExternalAgent:
+    """Stands in for a built external runtime in `BosApp._agents` (BEP 19 §3.7).
+
+    `get_messages(source="native")` decides two things: which runtime the chat
+    belongs to (stored metadata) and which built agent speaks for it
+    (`resolved_config["external_runtime"]`, then the duck-typed
+    `native_messages`). Those are the only two surfaces it touches, so this
+    carries exactly them — a real `CodexAgent` would drag the vendor SDK into
+    the SDK's own test module without exercising one more line of the routing
+    under test. `CodexAgent` satisfying both is pinned on its own side, by
+    test_codex_runtime.py::test_it_carries_the_two_surfaces_bosapp_routes_on.
+    """
+
+    def __init__(self, runtime: str, messages: list[Any] | None = None) -> None:
+        self.resolved_config = {"external_runtime": runtime}
+        self._messages = messages or []
+        self.calls: list[str] = []
+
+    async def native_messages(self, chat_id: str) -> list[Any]:
+        self.calls.append(chat_id)
+        return self._messages
+
+
 @pytest.mark.asyncio
-async def test_get_messages_native_is_not_implemented_yet(tmp_path):
+async def test_get_messages_native_has_nothing_to_ask_when_no_runtime_served_the_chat(tmp_path):
+    """`source="native"` on a chat no external runtime ever touched cannot be
+    answered: there is no runtime to delegate to. It raises rather than
+    quietly returning the BOS record, which answers a different question."""
     from bos.sdk import BosApp
 
     config = {"agents": {"assistant": {"system_prompt": "hi"}}, "default_agent": "assistant"}
     async with BosApp(config, bos_dir=tmp_path) as app:
-        with pytest.raises(NotImplementedError):
+        with pytest.raises(RuntimeError, match="no runtime to ask"):
+            await app.get_messages("chat-1", source="native")
+
+
+@pytest.mark.asyncio
+async def test_get_messages_native_routes_to_the_agent_that_declares_the_runtime(tmp_path):
+    """Two external agents built, one runtime on the chat: the right one is
+    asked, the other is not, and what it returns is what comes back."""
+    from bos.core.agent import Message
+    from bos.sdk import BosApp
+
+    config = {"agents": {"assistant": {"system_prompt": "hi"}}, "default_agent": "assistant"}
+    async with BosApp(config, bos_dir=tmp_path) as app:
+        await _external_turn(app)
+        native = [Message(llm_message={"role": "user", "content": "from the vendor"})]
+        codex = _StubExternalAgent("codex", native)
+        other = _StubExternalAgent("claude-code")
+        app._agents["codex"] = codex  # pyright: ignore[reportArgumentType] - a routing stub, not an AgentPort
+        app._agents["claude-code"] = other  # pyright: ignore[reportArgumentType]
+
+        assert await app.get_messages("chat-1", source="native") == native
+        assert await app.get_messages("chat-1", source="auto") == native
+        assert codex.calls == ["chat-1", "chat-1"]
+        assert other.calls == [], "the agent on the other runtime is never asked"
+
+
+@pytest.mark.asyncio
+async def test_get_messages_native_names_the_runtime_when_no_built_agent_serves_it(tmp_path):
+    """The chat knows which runtime owns it; nothing built can speak for it.
+    Naming the runtime is what makes the error actionable — the fix is to
+    build that agent, not to change the call."""
+    from bos.sdk import BosApp
+
+    config = {"agents": {"assistant": {"system_prompt": "hi"}}, "default_agent": "assistant"}
+    async with BosApp(config, bos_dir=tmp_path) as app:
+        await _external_turn(app)
+        with pytest.raises(RuntimeError) as excinfo:
+            await app.get_messages("chat-1", source="native")
+
+    message = str(excinfo.value)
+    assert "codex" in message and "build_agent" in message
+
+
+@pytest.mark.asyncio
+async def test_get_messages_native_refuses_to_guess_between_two_agents_on_one_runtime(tmp_path):
+    """BOS records the runtime per turn, not the agent kind, so two agents on
+    the same runtime are indistinguishable from here — and they are not
+    interchangeable in general (a Claude Code transcript is keyed by the
+    agent's `cwd`). It names both and points at the direct call."""
+    from bos.sdk import BosApp
+
+    config = {"agents": {"assistant": {"system_prompt": "hi"}}, "default_agent": "assistant"}
+    async with BosApp(config, bos_dir=tmp_path) as app:
+        await _external_turn(app)
+        app._agents["codex"] = _StubExternalAgent("codex")  # pyright: ignore[reportArgumentType]
+        app._agents["george"] = _StubExternalAgent("codex")  # pyright: ignore[reportArgumentType]
+
+        with pytest.raises(RuntimeError) as excinfo:
+            await app.get_messages("chat-1", source="native")
+
+    message = str(excinfo.value)
+    assert "codex, george" in message and "native_messages" in message
+
+
+@pytest.mark.asyncio
+async def test_get_messages_native_says_so_when_the_runtime_cannot_read_its_transcript_back(tmp_path):
+    """`native_messages` is duck-typed, not on `AgentPort` — widening that
+    would oblige BOS's own `Agent` to implement it. This is the cost of that
+    choice paid honestly: a sentence instead of an `AttributeError`."""
+    from bos.sdk import BosApp
+
+    class _NoNativeRead:
+        resolved_config = {"external_runtime": "codex"}
+
+    config = {"agents": {"assistant": {"system_prompt": "hi"}}, "default_agent": "assistant"}
+    async with BosApp(config, bos_dir=tmp_path) as app:
+        await _external_turn(app)
+        app._agents["codex"] = _NoNativeRead()  # pyright: ignore[reportArgumentType]
+
+        with pytest.raises(RuntimeError, match="native_messages"):
             await app.get_messages("chat-1", source="native")
 
 
@@ -358,7 +494,7 @@ async def test_get_messages_auto_routes_to_native_after_a_summary(tmp_path):
     default `read_native_session_id` was fixed to stop using (BEP 19 §3.6) — a
     `save_summary` call after the turn hid the message carrying
     `external_runtime` metadata, so `source="auto"` fell back to the BOS record
-    instead of routing to (unimplemented) native. Sibling of
+    instead of routing to native. Sibling of
     test_external_agent_session.py::test_the_session_id_survives_a_summary_written_after_the_turn.
     """
     from bos.extensions.runtimes._shared import commit_external_turn
@@ -373,9 +509,11 @@ async def test_get_messages_auto_routes_to_native_after_a_summary(tmp_path):
         )
         await store.save_summary("chat-1", "summary of the conversation so far")
 
-        # Still routes to "native" (unimplemented) instead of silently falling
-        # back to the BOS record just because a summary hid the routing metadata.
-        with pytest.raises(NotImplementedError):
+        # Still routes to "native" instead of silently falling back to the BOS
+        # record just because a summary hid the routing metadata. Proven by the
+        # error naming the runtime the scan recovered: a fallback would have
+        # returned the summary instead of raising at all.
+        with pytest.raises(RuntimeError, match="codex"):
             await app.get_messages("chat-1", source="auto")
 
         # source="bos" is unaffected: BEP 19 §3.7 pins it to the active window,
