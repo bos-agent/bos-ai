@@ -105,6 +105,7 @@ from openai_codex.types import (
 
 from bos.core.agent import (
     ABORTED_TURN_CONTENT,
+    SHUTDOWN_CONTENT,
     AbortTurn,
     AgentEventType,
     AgentResult,
@@ -390,11 +391,11 @@ _RESERVED_CONFIG_KEYS = frozenset(
         # the chosen mode's own sub-table is not a typed parameter, so under
         # `permission = "workspace-write"` a `{"writable_roots": ["/etc"],
         # "network_access": true}` here is resolved by the server verbatim and
-        # BOS forwards it. Reserved WHOLESALE in both directions — every
-        # sub-key, and every spelling of them, since `_reserved_clashes` also
-        # matches Codex's own dotted override paths; the first version of this
-        # entry reserved only the literal key and the widening walked past it
-        # through `{"sandbox_workspace_write.writable_roots": [...]}`.
+        # BOS forwards it. Reserved WHOLESALE — every sub-key, in either
+        # spelling, since `_reserved_clashes` also matches Codex's own dotted
+        # override paths; the first version of this entry reserved only the
+        # literal key and the widening walked past it through
+        # `{"sandbox_workspace_write.writable_roots": [...]}`.
         # Over-reserving fails loudly and can be relaxed on request, while
         # under-reserving widens the confinement in silence — as it just did,
         # under a comment claiming it did not.
@@ -1590,6 +1591,32 @@ class CodexAgent:
         which also gives :meth:`aclose` something to interrupt and wait on.
         """
         turn_id = turn_id or uuid.uuid4().hex
+        # Before anything that costs: a turn started after `request_stop()`
+        # cannot succeed, and without this check it still runs `_thread_for`
+        # (an RPC, and on a cold agent the one that spawns the child) and then
+        # a real, billed `thread.turn` before the stop race resolves and hands
+        # back nothing. `Agent` makes the same check at the top of every
+        # iteration including the first (agent.py:652), which is why its
+        # `request_stop` docstring can promise "a turn started after this
+        # returns closes immediately with the static marker" — this is that
+        # promise, kept at the one place a vendor runtime can keep it.
+        #
+        # `SHUTDOWN_CONTENT` is `Agent`'s own marker for this case, so a host
+        # that already special-cases it does not need a second string. Commits
+        # nothing, for the same reason the `AbortTurn` path above commits
+        # nothing. `_stop_requested` is never cleared — matching `Agent`,
+        # whose flag is also one-way and whose docstring says so.
+        if self._stop_requested.is_set():
+            logger.info(
+                "%s runtime %r: chat %r asked for a turn after request_stop(); returning the "
+                "shutdown marker without starting one",
+                self._config.runtime,
+                self._kind,
+                chat_id,
+            )
+            return external_agent_result(
+                output=SHUTDOWN_CONTENT, turn_id=turn_id, usage=None, finish_reason="shutdown"
+            )
         if chat_id in self._in_flight:
             raise RuntimeError(
                 f"Agent {self._kind!r} already has a turn running on chat {chat_id!r}. "

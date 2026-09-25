@@ -217,14 +217,17 @@ def _reserved_clashes(native_options: dict[str, Any], reserved: Collection[str])
     underneath, so the sub-key is reserved and the table is not.
 
     A reserved `X.y` matches a `y` key inside `X` **and** any `y.…` key inside
-    it. That second form is not defensive: a dotted key *is* a path into the
-    table for the vendors this guards, and Codex documents it as such
-    (``codex --help``: "Use a dotted path (`foo.bar.baz`) to override nested
-    values"), so `{"sandbox_workspace_write.writable_roots": [...]}` reaches the
-    same setting as the nested spelling and has to be refused the same way.
-    Matching only the exact key looked like a guard on the setting and was a
-    guard on one spelling of it — a difference visible only by sending both to
-    a real child, which is how it was found.
+    it — the two spellings measured to reach the setting, not every string that
+    might. The second is not defensive: a dotted key *is* a path into the table
+    for Codex, the one vendor this has been measured against, which documents
+    it as such (``codex --help``: "Use a dotted path (`foo.bar.baz`) to
+    override nested values"), so `{"sandbox_workspace_write.writable_roots":
+    [...]}` reaches the same setting as the nested spelling and has to be
+    refused the same way. Matching only the exact key looked like a guard on
+    the setting and was a guard on one spelling of it — a difference visible
+    only by sending both to a real child, which is how it was found. A second
+    runtime whose vendor does not read dotted keys as paths would be
+    over-reserved here, which fails loudly and is relaxable.
     """
     for name in reserved:
         head, _, tail = name.partition(".")

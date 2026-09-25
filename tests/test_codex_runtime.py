@@ -46,7 +46,7 @@ from openai_codex.models import (
     UnknownNotification,
 )
 
-from bos.core.agent import AbortTurn
+from bos.core.agent import SHUTDOWN_CONTENT, AbortTurn
 from bos.extensions.chat_stores.in_memory import InMemChatStore
 from bos.extensions.runtimes.codex import _LEGACY_REJECTION
 
@@ -2421,14 +2421,13 @@ async def test_native_options_may_not_widen_the_sandbox_permission_chose(tmp_pat
 
 @pytest.mark.asyncio
 async def test_a_dotted_path_cannot_reach_bos_own_mcp_servers_entry_either(tmp_path, fake_codex):
-    """The same hole was open on the credential table, and whether it was
-    *exploitable* there is a question about Codex's merge that this repo cannot
-    answer: probing a dotted key against a nested table of the same name gave
-    neither "nested wins" nor "dotted wins" — on `sandbox_workspace_write` the
-    narrower value won from either spelling and `writable_roots` unioned. So
-    the credential may have been shadowed by that merge or may not have been;
-    what is certain is that it was not this reservation shadowing it. One rule
-    now refuses both spellings on both tables, which makes the question moot.
+    """The same hole was open on the credential table, and there it was live:
+    a host `mcp_servers.bos-tools.command` landed on top of BOS's own entry in
+    36 of 60 runs. Codex applies each `config` key as an independent override
+    at its own dotted path in an order it does not fix, so a nested table and a
+    dotted path under the same head are a race rather than a precedence — BOS's
+    table did not shadow the host's key, it won a coin flip. One rule now
+    refuses both spellings on both tables.
     """
     with pytest.raises(ValueError) as excinfo:
         _agent(tmp_path, fake_codex, native_options={"config": {"mcp_servers.bos-tools.url": "http://x"}})
@@ -2469,3 +2468,43 @@ async def test_the_bos_owned_thread_kwargs_constant_matches_what_is_sent(tmp_pat
 
     (kwargs,) = fake_codex.instances[0].thread_start_calls
     assert set(kwargs) == _BOS_THREAD_KWARGS
+
+
+@pytest.mark.asyncio
+async def test_a_turn_started_after_request_stop_costs_nothing(tmp_path, fake_codex, mem_store):
+    """`Agent.request_stop`'s docstring promises "a turn started after this
+    returns closes immediately with the static marker", and `Agent` keeps it by
+    checking the flag at the top of every iteration including the first
+    (agent.py:652), so no model call happens.
+
+    Without a pre-flight here, `CodexAgent` reached `_thread_for` — an RPC, and
+    on a cold agent the one that spawns the child — and then a real `thread.turn`
+    the user is billed for, before the stop race resolved and handed back
+    nothing. So this asserts the cost, not just the answer: no client, no thread,
+    no turn, and nothing committed.
+    """
+    agent = _agent(tmp_path, fake_codex, chat_store=mem_store)
+    agent.request_stop()
+
+    result = await agent.run("chat-1", "do it", turn_id="t1")
+
+    assert result.output == SHUTDOWN_CONTENT, "Agent's own marker, so a host needs no second string"
+    assert result.finish_reason == "shutdown"
+    assert fake_codex.instances == [], "no client was built, so no `codex app-server` was spawned"
+    assert await mem_store.get_messages("chat-1") == [], "a turn that never ran commits nothing"
+
+
+@pytest.mark.asyncio
+async def test_request_stop_is_one_way_like_the_port_it_implements(tmp_path, fake_codex):
+    """`_stop_requested` is never cleared. That is not an oversight: `Agent`'s
+    flag is one-way too and its docstring says so, so a runtime that reset it
+    would diverge from the contract rather than improve on it."""
+    agent = _agent(tmp_path, fake_codex)
+    agent.request_stop()
+    agent.request_stop()  # idempotent
+
+    first = await agent.run("chat-1", "a", turn_id="t1")
+    second = await agent.run("chat-2", "b", turn_id="t2")
+
+    assert first.output == second.output == SHUTDOWN_CONTENT
+    assert fake_codex.instances == []
