@@ -45,8 +45,13 @@ cli = [
 # mcp.server.lowlevel, and 1.x's API differs. starlette and uvicorn come along
 # with the gateway extra, which the egress needs — not re-pinned here.
 codex = ["openai-codex==0.156.1", "mcp>=2,<3", "bos-ai[gateway]"]
-# Convenience aggregate — intentionally excludes `codex`, which ships a vendor
-# CLI binary (openai-codex-cli-bin) that `all` must not pull in.
+# The claude-agent-sdk wheel bundles the Claude Code CLI itself (~230 MB
+# installed). `mcp` and the gateway extra are here for the same MCP egress as
+# the codex extra above.
+claude-code = ["claude-agent-sdk==0.2.159", "mcp>=2,<3", "bos-ai[gateway]"]
+# Convenience aggregate — intentionally excludes `codex` and `claude-code`,
+# which each ship a vendor CLI binary (openai-codex-cli-bin; the claude CLI
+# bundled in the claude-agent-sdk wheel) that `all` must not pull in.
 all = ["bos-ai[litellm,gateway,search,lark,cli]"]
 
 [build-system]
@@ -62,6 +67,10 @@ dev = [
     # collectable test suite. Without it the extras split (BEP 16) leaves the
     # dev venv without click/starlette/litellm and 16 test modules fail to import.
     "bos-ai[all]",
+    # Not part of `all` (the wheel bundles the claude CLI) but needed here so CI
+    # type-checks the claude-code adapter against real SDK types (BEP 19 §3.10.4)
+    # and the vendor-fact tests can drive the real bundled CLI.
+    "claude-agent-sdk==0.2.159",
     "ipdb==0.13.13",
     "mcp>=2,<3",
     # Not part of `all` (ships a vendor CLI binary) but needed here so CI

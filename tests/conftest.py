@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from fake_anthropic import FakeAnthropic
 
 from bos.core.agent import Agent, AgentResult, TurnContext
 from bos.core.contract import Message, TurnInterceptor, ep_consolidator, ep_tool
@@ -582,3 +585,65 @@ def fake_codex(monkeypatch):
     registry = _Registry()
     monkeypatch.setattr(codex_mod, "_CODEX_FACTORY", registry)
     return registry
+
+
+# ── Claude Code real-CLI support (BEP 19 Layer 4b) ──────────────────────────
+#
+# The model is the only fake: tests drive the real `claude` CLI bundled in
+# claude-agent-sdk against FakeAnthropic, so every permission decision in them is
+# the vendor's own.
+
+
+# Each of these, when set, moves some of the CLI's per-user config, data, cache or
+# state out of HOME — its Anthropic credentials lookup ($XDG_CONFIG_HOME/anthropic)
+# among them.
+_XDG_HOMES =("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME")
+
+
+@pytest.fixture
+def fake_anthropic(monkeypatch):
+    """A fresh FakeAnthropic for one test (tests/fake_anthropic.py), closed after it.
+
+    Also removes every ``CLAUDE*``, ``ANTHROPIC*`` and ``MCP_*`` variable, and the XDG
+    base directories in ``_XDG_HOMES``, from this process for the test's duration. The
+    SDK builds the child's environment from ``os.environ`` with ``options.env``
+    layered on top, so ``claude_cli_env`` can override a variable but never unset one.
+    A pytest run started from inside a Claude Code session inherits that session's
+    variables — ``CLAUDE_CODE_SESSION_ID``, ``CLAUDE_CODE_MESSAGING_SOCKET``,
+    ``MCP_CONNECTION_NONBLOCKING`` among them, all read by the CLI — and a developer's
+    shell may export ``ANTHROPIC_*`` credentials or an ``XDG_CONFIG_HOME`` holding real
+    ones. CI has none of them; scrubbing makes a local run match it. A test that needs
+    one of these set for the test process itself sets it after this fixture has run.
+    """
+    for name in list(os.environ):
+        if name.startswith(("CLAUDE", "ANTHROPIC", "MCP_")) or name in _XDG_HOMES:
+            monkeypatch.delenv(name)
+    fake = FakeAnthropic()
+    yield fake
+    fake.close()
+
+
+def claude_cli_env(tmp_path: Path, fake: FakeAnthropic) -> dict[str, str]:
+    """The environment a real-CLI test hands the ``claude`` child, as ``options.env``.
+
+    ``HOME`` and ``CLAUDE_CONFIG_DIR`` are two directories under *tmp_path*, created if
+    missing, so a second call with the same *tmp_path* returns the same environment —
+    what a resumed session needs to find its transcript. With the ``fake_anthropic``
+    fixture's scrub, the child's config, credentials and transcripts all resolve under
+    them, never in the developer's ``~/.claude`` or ``~/.claude.json``. With
+    ``CLAUDE_CONFIG_DIR`` set, the CLI keeps its global config — workspace trust
+    included — at ``<CLAUDE_CONFIG_DIR>/.claude.json``, not ``<HOME>/.claude.json``;
+    ``test_fact_4_*`` in test_claude_code_vendor_facts.py pins that. The API key is a
+    placeholder only the fake ever sees.
+    """
+    home, config = tmp_path / "home", tmp_path / "claude-config"
+    home.mkdir(parents=True, exist_ok=True)
+    config.mkdir(parents=True, exist_ok=True)
+    return {
+        "HOME": str(home),
+        "CLAUDE_CONFIG_DIR": str(config),
+        "ANTHROPIC_BASE_URL": fake.url,
+        "ANTHROPIC_API_KEY": "sk-ant-fake",
+        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+        "DISABLE_TELEMETRY": "1",
+    }

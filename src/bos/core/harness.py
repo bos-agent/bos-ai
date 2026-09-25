@@ -73,10 +73,8 @@ EXTERNAL_RUNTIME_EXTRAS: dict[str, str] = {"claude-code": "claude-code", "codex"
 
 # The vendor package each runtime module imports. Used to tell "the extra is not
 # installed" from "the runtime module itself is broken" — both arrive as
-# ImportError, and only the first should point at `pip install`. `claude-code`
-# has no entry yet: until its runtime module exists, any ImportError under that
-# kind reports its real cause rather than guessing.
-EXTERNAL_RUNTIME_VENDOR_MODULES: dict[str, str] = {"codex": "openai_codex"}
+# ImportError, and only the first should point at `pip install`.
+EXTERNAL_RUNTIME_VENDOR_MODULES: dict[str, str] = {"claude-code": "claude_agent_sdk", "codex": "openai_codex"}
 
 
 def _load_external_runtime(runtime: str) -> type[ExternalRuntime]:
