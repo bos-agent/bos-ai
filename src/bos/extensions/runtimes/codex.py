@@ -30,6 +30,12 @@ wait before closing the client regardless (BEP 19 §3.10.2) (Task 7); and
 finally ``_deny_approval``, installed over the vendor's auto-accepting
 default so an escalation past the sandbox is refused rather than granted
 (BEP 19 §3.5.4) (Task 8).
+
+Beside that turn path — not a stage of it — sits ``native_messages`` (Task 9,
+BEP 19 §3.7): the read that projects Codex's *own* thread back into BOS
+``Message``s, so a host can render a session BOS did not author. It runs no
+turn, starts nothing, and is the only method here that reads state BOS does
+not own.
 """
 
 from __future__ import annotations
@@ -38,8 +44,10 @@ import asyncio
 import contextlib
 import inspect
 import logging
+import mimetypes
 import uuid
 from collections.abc import AsyncGenerator, Callable, Mapping
+from datetime import datetime
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Awaitable, TypeVar, cast
@@ -62,8 +70,15 @@ from openai_codex import (
 from openai_codex.generated.v2_all import (
     AgentMessageThreadItem,
     CommandExecutionThreadItem,
+    ImageUserInput,
+    LocalImageUserInput,
     McpToolCallThreadItem,
+    MentionUserInput,
     MessagePhase,
+    TextUserInput,
+    TurnItemsView,
+    UserInput,
+    UserMessageThreadItem,
 )
 from openai_codex.models import ItemCompletedNotification, ItemStartedNotification, JsonObject, Notification
 from openai_codex.types import (
@@ -81,7 +96,9 @@ from bos.core.agent import (
     AgentEventType,
     AgentResult,
     ChatStore,
+    Message,
     MessageContent,
+    MessageContentPart,
     StructuredOutputError,
     StructuredValidator,
     TurnEvent,
@@ -213,6 +230,37 @@ _ACLOSE_GRACE_SECONDS = 10.0
 # turn, and it is the vendor's to fix.
 _PREFLIGHT_AUTH_SECONDS = 30.0
 
+# The `Turn.items_view` values under which `Turn.items` is the turn's real,
+# complete content and `native_messages` may project it (BEP 19 §3.7). Three
+# entries for two states, and the middle one is the whole reason this is a
+# membership test rather than `is TurnItemsView.full`:
+#
+# - `TurnItemsView.full` — what the field holds when the server sends
+#   `"itemsView": "full"` and pydantic validates it into the enum.
+# - the bare string `"full"` — `Turn.items_view`'s own *default*, and pydantic
+#   does not validate defaults, so a payload that omits `itemsView` (which
+#   `Turn` permits, the field having a default) leaves the raw `str` in place.
+#   Verified against the installed package: `Turn.model_validate({...})` with
+#   no `itemsView` really does come back as `'full'`, not `TurnItemsView.full`,
+#   and `TurnItemsView` is a plain `Enum`, so the two are not even `==`. An
+#   identity check against the enum would call every such turn partial and
+#   bury a complete transcript under gap markers.
+# - `None` — the field is typed `TurnItemsView | None`. An explicit null
+#   states nothing about loading, and the vendor's own answer for "not stated"
+#   is the `"full"` default above, so this follows it rather than inventing a
+#   third verdict.
+#
+# Anything else (`notLoaded`, `summary`) means the items are absent or
+# summarized; see `native_messages` for what is emitted instead.
+_LOADED_ITEMS_VIEWS: tuple[TurnItemsView | str | None, ...] = (TurnItemsView.full, TurnItemsView.full.value, None)
+
+# The mime type a `MentionUserInput` read back out of a Codex thread becomes
+# when `mimetypes` cannot guess one from the path. BOS's `FilePart` requires a
+# non-empty `mime_type` and Codex's mention carries none, so something has to
+# be supplied; this is the value that says "unknown" rather than claiming a
+# type Codex never reported.
+_UNKNOWN_FILE_MIME_TYPE = "application/octet-stream"
+
 # The rest of the audit those three constants are half of, stated once so the
 # next reader does not have to redo it — and stated as it is, not as "every
 # wait is bounded", which was the round-2 prose that made an unbounded
@@ -242,6 +290,14 @@ _PREFLIGHT_AUTH_SECONDS = 30.0
 #   busy-guard slot is still None while setup runs, so aclose() waits on no
 #   task, takes the uncontended _client_lock and closes the client — which
 #   fails the pending RPC.
+# - `native_messages`' `thread.read()` (Task 9) is not a turn and is not in
+#   the list above, but it is the same unbounded request path
+#   (`_call_sync` -> `asyncio.to_thread` -> `waiter.get()`), so it carries its
+#   own `wait_for(..., timeout_seconds)`. Unlike the three setup RPCs it holds
+#   no lock and no in-flight slot while it waits — `_ensure_client` releases
+#   `_client_lock` before returning it — so a wedged read blocks only its own
+#   caller; bounded anyway because "the host asked for a chat's history and
+#   never got an answer" is its own failure.
 # - `_deny_approval` (Task 8) adds no await to any of the above — it is
 #   synchronous and returns a dict lookup. It does add the one place BOS code
 #   runs on the vendor's stdout reader thread rather than the event loop, and
@@ -302,6 +358,68 @@ def _content_to_codex_input(content: MessageContent) -> Input | str:
                 )
             items.append(MentionInput(name=Path(source["value"]).name, path=source["value"]))
     return items
+
+
+def _codex_input_to_content(content: list[UserInput]) -> MessageContent:
+    """A Codex ``UserMessageThreadItem.content`` -> BOS ``MessageContent`` (BEP 19 §3.7).
+
+    The inverse of :func:`_content_to_codex_input`, mirrored member by member
+    so a message BOS sent and later reads back is recognizably the same one:
+
+    - ``TextUserInput`` -> ``TextPart``.
+    - ``ImageUserInput`` -> ``ImagePart`` with a ``url`` source.
+    - ``LocalImageUserInput`` -> ``ImagePart`` with a ``path`` source.
+    - ``MentionUserInput`` -> ``FilePart`` with a ``path`` source. BOS's
+      ``FilePart`` requires a non-empty ``mime_type`` and a Codex mention
+      carries none, so it is guessed from the path and falls back to
+      ``_UNKNOWN_FILE_MIME_TYPE``. That guess is made on the way back and is
+      not something Codex reported — the outbound direction drops the mime
+      type entirely, so no round trip can preserve it.
+
+    ``UserInput`` is an eight-member union, and the four above are the four
+    :func:`_content_to_codex_input` can produce. The other four —
+    ``FileIdUserInput``, ``AudioUserInput``, ``LocalAudioUserInput``,
+    ``SkillUserInput`` — can still appear in a thread someone else authored
+    (the `codex` CLI, another client), and BOS has no content part for any of
+    them. Each becomes a text placeholder naming its kind rather than being
+    dropped: a dropped part makes the message read as though the user never
+    sent it.
+
+    A lone text part comes back as a plain ``str``, not a one-item list —
+    the same normalization ``content_as_parts`` applies on the way out, so a
+    message sent as a plain string round-trips to a plain string instead of
+    rendering differently from the copy in BOS's own record.
+    """
+    parts: list[MessageContentPart] = []
+    for wrapped in content:
+        # `.root` directly, without :func:`_unwrap_thread_item`'s ``hasattr``
+        # hedge. That hedge exists because the vendor writes it for
+        # ``ThreadItem`` in its own code (``_run.py:36-40``) and it is mirrored
+        # verbatim; there is no such vendor precedent for ``UserInput``, and
+        # every element here was validated into the ``RootModel`` when pydantic
+        # built the enclosing ``UserMessageThreadItem``.
+        item = wrapped.root
+        if isinstance(item, TextUserInput):
+            parts.append({"type": "text", "text": item.text})
+        elif isinstance(item, ImageUserInput):
+            parts.append({"type": "image", "source": {"kind": "url", "value": item.url}})
+        elif isinstance(item, LocalImageUserInput):
+            parts.append({"type": "image", "source": {"kind": "path", "value": item.path}})
+        elif isinstance(item, MentionUserInput):
+            parts.append(
+                {
+                    "type": "file",
+                    "mime_type": mimetypes.guess_type(item.path)[0] or _UNKNOWN_FILE_MIME_TYPE,
+                    "source": {"kind": "path", "value": item.path},
+                }
+            )
+        else:
+            parts.append({"type": "text", "text": f"[{type(item).__name__}: no BOS content part for this]"})
+    if len(parts) == 1:
+        only = parts[0]
+        if only["type"] == "text":
+            return only["text"]
+    return parts
 
 
 def _unwrap_thread_item(item: ThreadItem) -> Any:
@@ -1347,6 +1465,158 @@ class CodexAgent:
             )
         finally:
             self._in_flight.pop(chat_id, None)
+
+    async def native_messages(self, chat_id: str) -> list[Message]:
+        """Codex's own transcript for *chat_id*, projected into BOS ``Message``s
+        (BEP 19 §3.7) — what ``BosApp.get_messages(source="native")`` delegates
+        to, and the only read here of state BOS does not own.
+
+        **It promises nothing, by design.** BOS commits two messages per turn
+        and guarantees those; this is a live read of the vendor's store. Codex
+        compacts and prunes a thread on its own schedule, a turn's items can
+        come back unloaded (see below), and a thread can be archived or
+        deleted — so this can return *less* than it did last time, or raise,
+        and neither is a bug in BOS. ``source="bos"`` is the read BOS stands
+        behind.
+
+        Three behaviours worth stating outright, because each is a place the
+        honest answer and the convenient one differ:
+
+        - **No native session means no transcript, not a missing one.**
+          ``read_native_session_id`` returning ``None`` says this chat never
+          ran a native turn (or has no chat store at all). That is an empty
+          transcript: ``[]``, logged at DEBUG. A session id that exists and
+          cannot be read is the opposite case, and raises.
+        - **A turn Codex did not fully load becomes a visible gap.**
+          ``Turn.items_view`` is ``notLoaded``/``summary``/``full``, and on
+          anything but full the ``items`` are absent or summarized. Projecting
+          them anyway would silently publish a shorter conversation than the
+          one that happened — the exact lie §3.7 exists to prevent. Each such
+          turn emits one marker ``Message`` carrying ``metadata["items_view"]``
+          and logs at WARNING. It does not raise: a partly-unloaded old thread
+          is ordinary, and raising would break the read for exactly the
+          long-lived sessions someone wants to read. See
+          ``_LOADED_ITEMS_VIEWS`` for why "full" is a membership test.
+        - **Messages only.** ``ThreadItem`` is a nineteen-member union and only
+          ``UserMessageThreadItem`` and ``AgentMessageThreadItem`` are
+          messages. The other seventeen — reasoning, command execution, file
+          change, MCP tool call, web search, plan, the inline
+          ``ContextCompactionThreadItem`` marking where Codex compacted, … —
+          are the turn's internal work. They have no faithful BOS ``Message``
+          equivalent, and ``Message`` is what a host renders as a
+          *conversation*, so they are skipped. Intra-turn activity reaches a
+          live UI through the event sink (§3.9) instead. Among agent messages,
+          ``commentary`` is skipped too and ``final_answer``/no-phase kept —
+          the same rule ``_final_assistant_response_from_items`` applies, and
+          for the same reason: commentary is not the answer. That helper is
+          not reused, because it returns the one final answer for a single
+          turn and every answer in the thread is wanted here.
+
+        ``Message.turn_id`` is left ``None``: BOS turn ids are minted by
+        :meth:`run`, and a thread BOS did not author has none. The native ids
+        go in ``metadata`` instead, where they cannot be mistaken for one.
+        ``created_at`` is the turn's ``started_at`` when Codex reports one —
+        per turn is the finest granularity it offers — rather than letting
+        every message in a year-old thread default to "now".
+        """
+        runtime = self._config.runtime
+        native_session_id = (
+            await read_native_session_id(self._chat_store, chat_id, runtime=runtime)
+            if self._chat_store is not None
+            else None
+        )
+        if native_session_id is None:
+            logger.debug(
+                "%s runtime %r: chat %r is bound to no native session, so its native transcript is empty",
+                runtime,
+                self._kind,
+                chat_id,
+            )
+            return []
+
+        # Constructed directly, NOT via _thread_for: that would re-establish
+        # this thread with `thread_resume`, carrying this agent's sandbox,
+        # approval mode and cwd — a write to a live session on what the caller
+        # asked to be a read — and would wrap any failure in a
+        # session-continuity message that is misleading here. AsyncThread is a
+        # plain `@dataclass(slots=True)` of (_codex, id) (api.py:679-685), so
+        # building one costs no RPC; `read()` is the only call made on it, and
+        # `AsyncCodex` exposes no top-level `thread_read` to use instead.
+        thread = AsyncThread(await self._ensure_client(), native_session_id)
+        try:
+            response = await asyncio.wait_for(thread.read(include_turns=True), self._config.timeout_seconds)
+        except TimeoutError as exc:
+            # Ahead of the wrap below for the same reason as in _thread_for: a
+            # child that never answers is not a thread that cannot be read.
+            raise TimeoutError(
+                f"{runtime} runtime {self._kind!r}: reading the native transcript of thread "
+                f"{native_session_id!r} for chat {chat_id!r} exceeded "
+                f"timeout_seconds={self._config.timeout_seconds!r}"
+            ) from exc
+        except Exception as exc:
+            # A missing or deleted thread has no representation in a
+            # `ThreadReadResponse` — its `thread` field is required and not
+            # nullable — so the vendor raises (a `CodexError` subclass, via
+            # `map_jsonrpc_error`) rather than handing back an empty one.
+            # Re-wrapped so the answer names the chat and the agent, which a
+            # bare "JSON-RPC error -32602" does not — and still an error, never
+            # an empty list, because "BOS cannot read it" and "there is nothing
+            # to read" are different answers to the caller's question.
+            raise RuntimeError(
+                f"{runtime} runtime {self._kind!r}: the native transcript of thread "
+                f"{native_session_id!r} for chat {chat_id!r} could not be read: {exc}"
+            ) from exc
+
+        messages: list[Message] = []
+        for turn in response.thread.turns:
+            created_at = datetime.fromtimestamp(turn.started_at) if turn.started_at is not None else datetime.now()
+            if turn.items_view not in _LOADED_ITEMS_VIEWS:
+                view = turn.items_view
+                items_view = view.value if isinstance(view, TurnItemsView) else view
+                logger.warning(
+                    "%s runtime %r: chat %r, native turn %r came back with items_view=%r, so its "
+                    "messages are absent or summarized; the transcript has a gap there",
+                    runtime,
+                    self._kind,
+                    chat_id,
+                    turn.id,
+                    items_view,
+                )
+                messages.append(
+                    Message(
+                        # "system", not "assistant": this is a note from the
+                        # reader about what is missing, not something either
+                        # party said, and the role is what keeps a host from
+                        # attributing it to one of them.
+                        llm_message={
+                            "role": "system",
+                            "content": (
+                                f"[{runtime}: this turn's messages were not loaded by the runtime "
+                                f"(items_view={items_view!r}); the transcript is incomplete here.]"
+                            ),
+                        },
+                        created_at=created_at,
+                        metadata={"source": runtime, "native_turn_id": turn.id, "items_view": items_view},
+                    )
+                )
+                continue
+            for wrapped in turn.items:
+                item = _unwrap_thread_item(wrapped)
+                llm_message: dict[str, Any]
+                if isinstance(item, UserMessageThreadItem):
+                    llm_message = {"role": "user", "content": _codex_input_to_content(item.content)}
+                elif isinstance(item, AgentMessageThreadItem) and item.phase is not MessagePhase.commentary:
+                    llm_message = {"role": "assistant", "content": item.text}
+                else:
+                    continue
+                messages.append(
+                    Message(
+                        llm_message=llm_message,
+                        created_at=created_at,
+                        metadata={"source": runtime, "native_turn_id": turn.id, "native_item_id": item.id},
+                    )
+                )
+        return messages
 
     async def aclose(self) -> None:
         """Interrupt every in-flight turn, then close the client regardless of

@@ -382,7 +382,6 @@ class FakeThread:
 
     def __init__(self, codex: FakeAsyncCodex, thread_id: str) -> None:
         self._codex, self.id = codex, thread_id
-        self.read_calls: list[bool] = []
 
     async def turn(self, input: Any, **kwargs: Any) -> FakeTurnHandle:
         self._codex.turn_calls.append((self.id, input, kwargs))
@@ -418,9 +417,12 @@ class FakeThread:
         handle = await self.turn(input, **kwargs)
         return await handle.run()
 
-    async def read(self, *, include_turns: bool = False) -> Any:
-        self.read_calls.append(include_turns)
-        return self._codex.next_thread_read
+    # Task 9 deliberately has no `read()` here. `CodexAgent.native_messages`
+    # does not go through a thread object the client handed it — it builds a
+    # REAL `openai_codex.AsyncThread` over the client (BEP 19 §3.7; resuming
+    # would be a write on a read), so the vendor's own `AsyncThread.read()`
+    # runs and lands on `FakeAsyncCodex._client.thread_read` below. A `read()`
+    # on this class would be dead code that looks like the seam under test.
 
 
 class FakeAsyncCodex:
@@ -438,7 +440,15 @@ class FakeAsyncCodex:
         self.next_notifications: list[Any] = []
         self.next_result: Any = None
         self.next_results: list[Any] = []
+        # Task 9: what `_client.thread_read` answers with, and every call it
+        # received as `(thread_id, include_turns)`. Armed with a REAL
+        # `ThreadReadResponse`; `thread_read_error` (a real `CodexError`
+        # subclass) models a missing or deleted thread, which `ThreadReadResponse`
+        # has no way to express — its `thread` field is required and not
+        # nullable — so the vendor raises instead of answering with an empty one.
         self.next_thread_read: Any = None
+        self.thread_read_error: Exception | None = None
+        self.thread_read_calls: list[tuple[str, bool]] = []
         self.turn_handles: list[FakeTurnHandle] = []
         # Applied to every FakeTurnHandle this client's threads create (see
         # FakeThread.turn) — the knobs on FakeTurnHandle, armed up front.
@@ -473,6 +483,15 @@ class FakeAsyncCodex:
         self.thread_start_hang: asyncio.Event | None = None
         self.thread_resume_hang: asyncio.Event | None = None
         self.turn_hang: asyncio.Event | None = None
+        # Task 9's read is bounded by the same `timeout_seconds`, and the
+        # vendor path it stands in for is the plain one: `thread_read` ->
+        # `_call_sync` -> `asyncio.to_thread` -> a queue read with no timeout,
+        # cancellable at the asyncio level. The to_thread WORKER still parks
+        # until the process ends, exactly as it does for a wedged `interrupt()`
+        # — but that is a thread, not work the child is doing on BOS's behalf,
+        # so this has no `turn_hang`-style divergence to declare: a cancelled
+        # read leaves no orphaned native turn running against `cwd`.
+        self.thread_read_hang: asyncio.Event | None = None
         # Task 8: _ensure_client replaces the approval handler through this
         # exact attribute path, with no getattr guard, so the double has to
         # carry the same shape or every test here would sail past the line
@@ -486,10 +505,35 @@ class FakeAsyncCodex:
         # from "never installed", and the vendor's actual default is pinned
         # against the real package by
         # test_codex_approval_handler_attribute_exists instead.
-        self._client = SimpleNamespace(_sync=SimpleNamespace(_approval_handler=None))
+        # `thread_read` sits here, not on FakeThread, because Task 9's read
+        # runs the vendor's OWN `AsyncThread.read()` against this client:
+        # `AsyncThread.read` awaits `self._codex._ensure_initialized()` and
+        # then `self._codex._client.thread_read(self.id, include_turns=...)`
+        # (api.py:775-778). Same arity and keyword as the real
+        # `AsyncCodexClient.thread_read` (async_client.py:189).
+        self._client = SimpleNamespace(
+            _sync=SimpleNamespace(_approval_handler=None),
+            thread_read=self._thread_read,
+        )
         # The handler in place when account() was called, so a test can assert
         # the install happens BEFORE the first RPC that can spawn the child.
         self.approval_handler_at_account: Any = "account() not called"
+
+    async def _ensure_initialized(self) -> None:
+        """The real `AsyncCodex._ensure_initialized` starts the child and runs
+        `initialize` once, under a lock (api.py:329-344). `AsyncThread.read`
+        awaits it before the RPC (api.py:777); this double spawns nothing, so
+        it is a no-op — it exists so the vendor's own `AsyncThread.read()` can
+        run against this client at all.
+        """
+
+    async def _thread_read(self, thread_id: str, include_turns: bool = False) -> Any:
+        self.thread_read_calls.append((thread_id, include_turns))
+        if self.thread_read_hang is not None:
+            await self.thread_read_hang.wait()
+        if self.thread_read_error is not None:
+            raise self.thread_read_error
+        return self.next_thread_read
 
     async def account(self, *, refresh_token: bool = False) -> Any:
         self.approval_handler_at_account = self._client._sync._approval_handler
