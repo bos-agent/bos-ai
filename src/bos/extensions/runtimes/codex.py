@@ -125,6 +125,42 @@ _INTERRUPT_GRACE_SECONDS = 2.0
 # winding down normally as stuck.
 _ACLOSE_GRACE_SECONDS = 10.0
 
+# The bound on the auth preflight's account() RPC. Deliberately NOT one of the
+# two above: those are teardown graces, measured against a turn that is already
+# being given up on, while this is a startup credential check against a live
+# service — a slow but working login must not trip it. Bounded at all because
+# account() is the same unbounded request path as interrupt(): account() ->
+# account_read -> _call_sync -> asyncio.to_thread -> CodexClient._request_raw
+# -> `waiter.get()` (client.py:382), a queue read with no timeout. And
+# _preflight_auth holds _client_lock while it waits, which is the lock
+# aclose() needs before it can reach client.close() — so an unanswered
+# credential check would otherwise hold the whole harness shutdown open and
+# leave the child unreaped. What the bound frees is the event loop and the
+# lock; the to_thread worker stays parked on that queue until the process
+# ends, exactly as it does for a wedged interrupt(). That is a thread, not a
+# turn, and it is the vendor's to fix.
+_PREFLIGHT_AUTH_SECONDS = 30.0
+
+# The rest of the audit those three constants are half of, stated once so the
+# next reader does not have to redo it — and stated as it is, not as "every
+# wait is bounded", which was the round-2 prose that made an unbounded
+# account() a finding rather than a known gap:
+#
+# - `client.close()` bounds itself: CodexClient.close is proc.terminate() ->
+#   proc.wait(timeout=2) -> kill() -> two join(timeout=0.5), ~3s worst case.
+# - The stream iteration and `handle.steer()` sit inside _run_turn's
+#   `asyncio.timeout(timeout_seconds)` AND are raced against _stop_requested,
+#   so _settle_interrupted's cancel bounds them even when timeout_seconds is
+#   None.
+# - `thread_start` / `thread_resume` / `thread.turn` are **not** bounded. They
+#   are awaited in run() *outside* that timeout window, so `timeout_seconds`
+#   does not cover thread setup and a wedged child hangs that one turn. They
+#   cannot hang aclose(): the busy-guard slot is still None while they run, so
+#   aclose() waits on no task, takes the uncontended _client_lock and closes
+#   the client — which fails the pending RPC. Widening timeout_seconds to
+#   cover setup is a real change with its own error-message and stop-path
+#   consequences, so it is named here rather than smuggled into a fix round.
+
 
 def _content_to_codex_input(content: MessageContent) -> Input | str:
     """BOS ``MessageContent`` -> a Codex ``Input`` (BEP 19 §3.9).
@@ -364,13 +400,19 @@ class CodexAgent:
         """
         runtime = self._config.runtime
         try:
-            response = await client.account()
+            response = await asyncio.wait_for(client.account(), _PREFLIGHT_AUTH_SECONDS)
         except Exception as exc:
             with contextlib.suppress(Exception):
                 await client.close()
+            # wait_for's TimeoutError carries no message, and "the account
+            # check failed: " with nothing after it tells an operator nothing.
+            detail = (
+                f"did not answer within {_PREFLIGHT_AUTH_SECONDS}s"
+                if isinstance(exc, TimeoutError)
+                else f"failed: {exc}"
+            )
             raise RuntimeError(
-                f'{runtime} runtime {self._kind!r}: auth="subscription" but the account check '
-                f"failed: {exc}"
+                f'{runtime} runtime {self._kind!r}: auth="subscription" but the account check {detail}'
             ) from exc
         if response.account is None:
             with contextlib.suppress(Exception):
@@ -583,6 +625,9 @@ class CodexAgent:
           aborted-turn marker, matching what ``Agent`` hands its own caller
           (see ``run()``'s docstring; fix round 2, I4). Any *other* exception
           the callback raises is wrapped by ``run()`` as a turn failure.
+          Either way :meth:`_run_turn` interrupts the native turn on its way
+          past (fix round 3, D) — unwinding BOS-side alone would leave the
+          child running against ``cwd`` with nothing left that knows about it.
         - **A falsy return does nothing.** No steer, no interrupt, no
           state change — the turn is not even aware the callback fired.
 
@@ -698,6 +743,13 @@ class CodexAgent:
 
         Registers the streaming task in ``self._in_flight[chat_id]`` for the
         busy guard and for ``aclose()`` to find and wait on.
+
+        Whichever way the turn ends early, the native side is told: a stop or
+        a timeout through :meth:`_settle_interrupted`, and a stream task that
+        ended in an *exception* — an ``AbortTurn`` or anything else the
+        interrupt callback raised — through the bounded, best-effort
+        interrupt in the ``done()`` branch below (fix round 3, D). The three
+        are mutually exclusive, so no turn is interrupted twice.
         """
         stream_task: asyncio.Task[TurnResult] = asyncio.ensure_future(
             self._emit_stream(
@@ -730,7 +782,28 @@ class CodexAgent:
             # finish line and won — either way, nothing was abandoned. (A
             # raise from the callback — see _emit_stream's docstring —
             # surfaces here too: stream_task.result() re-raises it.)
-            return stream_task.result(), False
+            try:
+                return stream_task.result(), False
+            except Exception:
+                # BOS is giving up on this turn — an AbortTurn from the
+                # interrupt callback, or anything else it raised (deliberately
+                # unwrapped, see _emit_stream). The native turn does not know
+                # that and keeps running against cwd, which BEP 19 §3.10 says
+                # must not happen. Best-effort and bounded like every other
+                # teardown interrupt here; harmless when the turn has already
+                # ended (a vendor `failed`), since the interrupt is suppressed
+                # either way.
+                #
+                # `except Exception`, not BaseException: a cancelled
+                # stream_task raises CancelledError, and awaiting inside a
+                # cancellation unwind is its own hazard. Only
+                # _settle_interrupted cancels this task, and neither of its
+                # two callers routes through this branch, so that case cannot
+                # arrive here — and this is not a double interrupt for the
+                # same reason.
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(handle.interrupt(), _INTERRUPT_GRACE_SECONDS)
+                raise
 
         # self._stop_requested fired before the stream finished on its own:
         # a cooperative stop landed mid-turn.
@@ -751,10 +824,14 @@ class CodexAgent:
         to hand back in that case, and manufacturing one would misreport what
         happened. Worst case is three times ``_INTERRUPT_GRACE_SECONDS`` — the
         interrupt RPC, the drain wait, and the post-cancel wait — and on that
-        path the task is **abandoned**, not killed: a stream that swallows
-        ``CancelledError`` goes on running, owned by the loop rather than by
-        this turn (the same doctrine as ``Agent._abandon``). :meth:`aclose`
-        bounds its own wait because of that.
+        path the task is **abandoned**, not killed: it goes on running, owned
+        by the loop rather than by this turn (the same doctrine as
+        ``Agent._abandon``). :meth:`aclose` bounds its own wait because of
+        that. The vendor's own stream is not what survives the cancel — driven
+        directly it dies at once — but the two *host-supplied* awaits inside
+        :meth:`_emit_stream`'s loop, ``sink.emit`` and the ``interrupt``
+        callback, are arbitrary caller code that can shield, block or swallow
+        one (fix round 3, N1).
         """
         with contextlib.suppress(Exception):
             # Bounded, not merely guarded: the vendor's interrupt is an RPC
@@ -883,7 +960,8 @@ class CodexAgent:
         return into the running turn instead of ending it (see its own
         docstring), so it never produces ``interrupted``. It can still end a
         turn a different way — a raised ``AbortTurn`` — and that is
-        **caught here and returned, not propagated** (fix round 2, I4).
+        **caught here and returned, not propagated** (fix round 2, I4), after
+        :meth:`_run_turn` has told the native side to stop (fix round 3, D).
         ``Agent`` does the same with the identical signal
         (``agent.py:837-840``): it sets ``turn_status = "aborted"``, puts
         ``ABORTED_TURN_CONTENT`` in ``ctx.final_content``, and returns a

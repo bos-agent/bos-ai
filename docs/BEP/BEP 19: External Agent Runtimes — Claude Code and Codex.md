@@ -442,7 +442,7 @@ Tool execution stays in the BOS process, under BOS's own tool implementations. T
 | `schema` | `options.output_format={"type": "json_schema", "schema": …}` → `ResultMessage.structured_output` | `thread.turn(output_schema=…)` |
 | `max_schema_retries` | the injected `StructuredValidator` validates; on failure, one correction message per retry (BEP 12 semantics preserved) | same |
 | `interrupt` callback — **truthy return** (a *message*, `agent.py:600-602`) | must be delivered *into* the running turn, which then continues; the exact primitive is pinned in Layer 4b against the installed `claude-agent-sdk` | `AsyncTurnHandle.steer(input)` — "Send additional user input to this active turn"; the same handle keeps streaming afterwards |
-| `interrupt` callback — **raised `AbortTurn`** (the *stop*) | `ClaudeSDKClient.interrupt()` is reserved for this path | the turn is unwound BOS-side; no `steer` is sent |
+| `interrupt` callback — **raised `AbortTurn`** (the *stop*) | `ClaudeSDKClient.interrupt()` is reserved for this path | `AsyncTurnHandle.interrupt()`, bounded and best-effort — unwinding BOS-side alone would leave the child running against `cwd` |
 | ↳ what the caller gets on an abort | `ABORTED_TURN_CONTENT` with `finish_reason="aborted"`, as `Agent` does (`agent.py:837-840`) — **not** a re-raise | same |
 | `request_stop()` | same, raced against the native turn | same |
 | `event_sink` | `receive_response()`: `ToolUseBlock`→`tool`/`start`, `ToolResultBlock`→`tool`/`finish`, `TextBlock`→`response`, `ResultMessage`→`turn`/`finish` | `AsyncTurnHandle.stream()`: `item/started`·`item/completed`→`tool`, `turn/completed`→`turn`/`finish` |
@@ -474,7 +474,9 @@ Two concurrent turns on one `chat_id` are rejected with a busy error rather than
 
 #### 3.10.2 Timeouts and shutdown
 
-`timeout_seconds` wraps the turn in `asyncio.timeout`; on expiry the native turn is interrupted, then the error is raised. Every wait on the native side is bounded, including the interrupt request itself — it is an RPC to the child, so guarding it against *errors* is not the same as bounding it against *slowness*, and a child that never answers must not be able to hold a timeout, a stop, or a shutdown open.
+`timeout_seconds` wraps the turn in `asyncio.timeout`; on expiry the native turn is interrupted, then the error is raised.
+
+Every wait that a wedged child could otherwise use to hold a **shutdown** open is bounded. Two of them are RPCs the child answers at its leisure — the interrupt request and the `auth = "subscription"` preflight — and for both, guarding against *errors* is not the same as bounding against *slowness*: each sits on a queue read with no timeout of its own, so a child that never answers simply never returns. The preflight's bound is separate and much more generous than the teardown graces, because it is a credential check against a live service and a slow but working login must not trip it. Closing the client bounds itself (the vendor terminates, waits, then kills). What is **not** bounded, and is named here rather than left to be rediscovered: thread setup (`thread_start` / `thread_resume` / the turn request) is awaited outside `timeout_seconds`'s window, so a wedged child hangs that one turn — it cannot hang shutdown, because no turn task exists yet to wait on and closing the client fails the pending request.
 
 `aclose()` asks every in-flight turn to stop, gives them a bounded window to drain, then closes the client regardless — closing the client is what reaps the child, so it must not be reachable only on the happy path. This is a bounded drain, not a guaranteed one: a turn that ignores both the interrupt and the cancel is abandoned to the event loop (the same doctrine as `Agent._abandon`) and reported in a warning naming how many were left. What the child is doing does end, because the client closes; what BOS cannot promise is that the in-process task tracking it has finished first.
 
@@ -648,7 +650,7 @@ Two new optional dependencies, each pinned exactly, each carrying a vendor CLI b
 16. A second `ask()` on the same `chat_id` continues the same native session — asserted by the native session/thread id, not by the model's reply.
 17. After a BOS process restart, a third `ask()` on that `chat_id` resumes it, recovered from `ChatStore` metadata alone.
 18. Under `permission = "workspace-write"`, a write inside `cwd` succeeds and a write outside it **fails** — observed, per §3.5.5. Under `read-only`, every write fails.
-19. `request_stop()` mid-turn ends the native turn and reaps the child; nothing writes to the workspace afterwards.
+19. `request_stop()` mid-turn interrupts the native turn, which stops writing to the workspace, and the turn returns what it had produced with `finish_reason = "interrupted"`. Preconditions: the child confirms the interrupt within the grace — one that does not is abandoned (§3.10.2) and keeps writing until the client closes. Reaping the child is `aclose()`'s job, not `request_stop()`'s; `request_stop()` only sets the flag each in-flight turn races.
 20. `timeout_seconds` expiry interrupts the native turn and raises.
 21. `schema=` returns validated structured output through each runtime's native mechanism.
 22. With `mcp_tools` set, the runtime lists and successfully calls the exposed BOS tool, and an unexposed `ep_tool` is not callable.

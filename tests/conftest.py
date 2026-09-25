@@ -231,18 +231,22 @@ class FakeTurnHandle:
         # there; release is what ends it.
         self.hang_reached = asyncio.Event()
         self.release = asyncio.Event()
-        # Fix round 2: the three ways this double used to be *more reliable
-        # than the vendor*, which is what let round 1 delete a real safety
-        # bound as "dead code". A real interrupt()/steer() is an RPC to the
-        # app-server that can be slow or fail, and a real stream task is not
-        # guaranteed to die on cancel. All default to the old, always-fast,
-        # always-succeeds behaviour, so every pre-existing test is unchanged;
-        # a test opts in per handle (see FakeAsyncCodex.next_handle_attrs for
-        # arming one that does not exist yet).
+        # Fix round 2: the ways this double used to be *more reliable than
+        # the vendor*, which is what let round 1 delete a real safety bound as
+        # "dead code". A real interrupt()/steer() is an RPC to the app-server
+        # that can be slow or fail, and a real turn is not guaranteed to
+        # release the event loop when BOS cancels it. All default to the old,
+        # always-fast, always-succeeds behaviour, so every pre-existing test
+        # is unchanged; a test opts in per handle (see
+        # FakeAsyncCodex.next_handle_attrs for arming one that does not exist
+        # yet).
         self.interrupt_hang: asyncio.Event | None = None  # set -> interrupt() blocks on it
         self.interrupt_error: Exception | None = None  # set -> interrupt() raises it
         self.steer_error: Exception | None = None  # set -> steer() raises it (after recording)
-        self.swallow_cancel = False  # True -> the stream ignores cancellation and keeps hanging
+        # True -> the turn ignores cancellation and keeps hanging. See the
+        # note in stream() for which production await this actually stands in
+        # for — it is NOT the vendor's own stream.
+        self.swallow_cancel = False
         self.cancels_swallowed = 0
 
     async def stream(self):
@@ -254,11 +258,21 @@ class FakeTurnHandle:
                         await self.release.wait()
                         break
                     except asyncio.CancelledError:
-                        # A turn wedged below the cancellation point — the
-                        # vendor's stream sits on a queue fed by a thread, so
-                        # a cancel is a request, not a kill. This is the case
-                        # _settle_interrupted ABANDONS, which is why aclose()
-                        # needs a bound of its own.
+                        # Fix round 3 (N1): the vendor's OWN stream does die
+                        # on cancel — driven directly, the consuming task ends
+                        # in 0.000s; only the `asyncio.to_thread` worker thread
+                        # leaks. So this is not modelling the vendor.
+                        #
+                        # What it models is the other two awaits inside
+                        # _emit_stream's loop: `await sink.emit(event)` and
+                        # `await _apply_async(interrupt, {})`. Both are
+                        # host-supplied code, arbitrary and able to shield,
+                        # block or swallow a cancel — and a stream task parked
+                        # in one of them is exactly the task _settle_interrupted
+                        # ABANDONS, which is why aclose() needs a bound of its
+                        # own. Simulated here at the stream level only because
+                        # that is the cheapest seam in this double, not because
+                        # the vendor stream behaves this way.
                         if not self.swallow_cancel:
                             raise
                         self.cancels_swallowed += 1

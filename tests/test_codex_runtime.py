@@ -1105,7 +1105,12 @@ async def test_interrupt_callback_is_not_polled_after_the_terminal_notification(
 
     handle = fake_codex.instances[-1].turn_handles[-1]
     assert calls == 1, "the terminal turn/completed must not be polled"
-    assert pending == ["the user's follow-up"], "the message is left for the next turn, not eaten"
+    # Left in AgentActor's buffer rather than consumed here. Not the same as
+    # "delivered later": AgentActor clears session.interrupts when the next
+    # plain MESSAGE arrives with no turn running (agent_actor.py:193), so a
+    # follow-up that lands inside the terminal window is still lost — just not
+    # lost *by this module*, which is all this test can speak to (N4).
+    assert pending == ["the user's follow-up"], "not consumed by the terminal poll"
     assert handle.steered == []
     assert result.output == "done"
 
@@ -1147,6 +1152,84 @@ async def test_interrupt_callback_abort_turn_returns_the_marker_and_commits_noth
 
 
 @pytest.mark.asyncio
+async def test_an_aborted_turn_also_tells_codex_to_stop(tmp_path, fake_codex, mem_store):
+    """Fix round 3 (D): round 2 stopped propagating AbortTurn, but nothing
+    told Codex. The exception unwound out of _emit_stream, run() caught it and
+    returned a result — and the native turn kept running, spending tokens and
+    writing to cwd, until request_stop(), aclose() or the next thread.turn().
+    BEP 19 §3.10 says cancellation must not leave a child writing to the
+    workspace, so _run_turn now interrupts on its way past."""
+    from bos.core.agent import ABORTED_TURN_CONTENT
+
+    agent = _agent(tmp_path, fake_codex, chat_store=mem_store)
+    _arm_notifications(fake_codex, [_item_completed(_agent_message_item("msg-1", "unused"))])
+
+    def interrupt():
+        raise AbortTurn()
+
+    result = await agent.run("chat-1", "do it", turn_id="t1", interrupt=interrupt)
+
+    handle = fake_codex.instances[-1].turn_handles[-1]
+    assert handle.interrupted is True, "the native turn is told to stop, not just abandoned"
+    # Round 2's caller-facing contract is unchanged by the added interrupt.
+    assert result.output == ABORTED_TURN_CONTENT
+    assert result.finish_reason == "aborted"
+    assert await mem_store.get_messages("chat-1") == []
+
+
+@pytest.mark.asyncio
+async def test_any_callback_exception_also_tells_codex_to_stop(tmp_path, fake_codex, mem_store):
+    """The same hole swallowed every *other* exception the interrupt callback
+    raises — `await _apply_async(interrupt, {})` is deliberately unwrapped, so
+    anything it throws unwinds the same way AbortTurn does. Only AbortTurn is
+    special to run(); the native turn has to be stopped either way."""
+    agent = _agent(tmp_path, fake_codex, chat_store=mem_store)
+    _arm_notifications(fake_codex, [_item_completed(_agent_message_item("msg-1", "unused"))])
+
+    def interrupt():
+        raise ValueError("callback blew up")
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await agent.run("chat-1", "do it", turn_id="t1", interrupt=interrupt)
+
+    handle = fake_codex.instances[-1].turn_handles[-1]
+    assert handle.interrupted is True
+    # Asserted as it actually is, not as assumed: a non-AbortTurn exception is
+    # not special-cased, so run()'s generic wrap applies and the caller gets a
+    # RuntimeError naming the turn, with the original kept as __cause__.
+    assert "callback blew up" in str(excinfo.value)
+    assert "t1" in str(excinfo.value) and "chat-1" in str(excinfo.value)
+    assert isinstance(excinfo.value.__cause__, ValueError)
+    assert await mem_store.get_messages("chat-1") == []
+
+
+@pytest.mark.asyncio
+async def test_an_aborted_turn_does_not_hang_on_a_wedged_interrupt(tmp_path, fake_codex, mem_store, monkeypatch):
+    """The interrupt D adds is on the abort path, which is a path a caller is
+    waiting on — so it gets the same bound as every other interrupt in this
+    module rather than becoming a new way for a wedged child to hang run()."""
+    import bos.extensions.runtimes.codex as codex_mod
+    from bos.core.agent import ABORTED_TURN_CONTENT
+
+    monkeypatch.setattr(codex_mod, "_INTERRUPT_GRACE_SECONDS", 0.05)
+    agent = _agent(tmp_path, fake_codex, chat_store=mem_store)
+    _arm_notifications(fake_codex, [_item_completed(_agent_message_item("msg-1", "unused"))])
+    _arm_handle(fake_codex, interrupt_hang=asyncio.Event())  # never set: the child never answers
+
+    def interrupt():
+        raise AbortTurn()
+
+    started = time.perf_counter()
+    result = await asyncio.wait_for(agent.run("chat-1", "do it", turn_id="t1", interrupt=interrupt), timeout=5)
+    elapsed = time.perf_counter() - started
+
+    handle = fake_codex.instances[-1].turn_handles[-1]
+    assert handle.interrupted is True
+    assert elapsed < 1, f"the abort path is bounded by the interrupt grace: {elapsed:.2f}s"
+    assert result.output == ABORTED_TURN_CONTENT
+
+
+@pytest.mark.asyncio
 async def test_a_failed_steer_request_is_logged_and_does_not_abort_the_turn(tmp_path, fake_codex, mem_store, caplog):
     """Best-effort, but not silent (fix round 2, I3). The turn survives — a
     network blip delivering the steering message must not be mistaken for a
@@ -1169,7 +1252,16 @@ async def test_a_failed_steer_request_is_logged_and_does_not_abort_the_turn(tmp_
         )
 
     assert result.output == "still going", "a failed steer is not a turn failure"
-    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    # Filtered by logger name as well as level: caplog.at_level(..., logger=…)
+    # sets the level on that logger but collects from the root handler, so an
+    # unrelated WARNING from elsewhere in the session (the LLMConsolidator
+    # registry line, whichever test first triggers registration) lands in
+    # caplog.records too — which made this assertion order-dependent and made
+    # it fail under CLAUDE.md's own single-test command (fix round 3, N2).
+    warnings = [
+        r for r in caplog.records
+        if r.levelno == logging.WARNING and r.name == "bos.extensions.runtimes.codex"
+    ]
     assert len(warnings) == 1
     message = warnings[0].getMessage()
     assert "chat-1" in message and "t1" in message and "dropped" in message
@@ -1400,13 +1492,19 @@ async def test_aclose_is_bounded_when_the_turn_swallows_its_cancel(
 
 @pytest.mark.asyncio
 async def test_aclose_is_bounded_when_the_interrupt_rpc_never_returns(tmp_path, fake_codex, mem_store, monkeypatch):
-    """The other unbounded path (C1b): aclose() reaches client.close() only
-    after every in-flight turn's _settle_interrupted has returned, and that
-    call awaited handle.interrupt() under contextlib.suppress — which catches
-    errors, not slowness. A child that never answers the interrupt RPC held
-    aclose() open forever and the child process was never terminated, so one
-    wedged agent blocked the whole harness shutdown (core/_utils._aclose
-    catches exceptions but sets no timeout of its own)."""
+    """The end-to-end shutdown scenario for the other unbounded path: aclose()
+    reaches client.close() only after every in-flight turn's
+    _settle_interrupted has returned, and that call awaited handle.interrupt()
+    under contextlib.suppress — which catches errors, not slowness. A child
+    that never answers the interrupt RPC held aclose() open forever and was
+    never terminated, so one wedged agent blocked the whole harness shutdown
+    (core/_utils._aclose catches exceptions but sets no timeout of its own).
+
+    Does NOT pin C1b's bound on its own — either C1b's wait_for or C1a's
+    _ACLOSE_GRACE_SECONDS is enough to make it pass, and it fails only with
+    both reverted. The test that discriminates C1b is
+    test_timeout_seconds_still_raises_when_the_interrupt_rpc_never_returns
+    (fix round 3, N6)."""
     import bos.extensions.runtimes.codex as codex_mod
 
     monkeypatch.setattr(codex_mod, "_INTERRUPT_GRACE_SECONDS", 0.05)
@@ -1429,6 +1527,45 @@ async def test_aclose_is_bounded_when_the_interrupt_rpc_never_returns(tmp_path, 
     turn.cancel()
     with contextlib.suppress(BaseException):
         await turn
+
+
+@pytest.mark.asyncio
+async def test_aclose_is_bounded_when_the_auth_preflight_never_answers(tmp_path, fake_codex, monkeypatch):
+    """Fix round 3 (A/N3): the third unbounded path, and the one round 2's new
+    prose denied could exist. _preflight_auth awaits client.account() — the
+    same unbounded queue-backed RPC as interrupt() — while holding
+    _client_lock, which is the lock aclose() needs before it can reach
+    client.close(). A login check the child never answers therefore held the
+    whole harness shutdown open and left the child unreaped: C1's exact
+    symptom, on a path C1's own fix did not cover.
+
+    Bounded at the RPC, not at aclose()'s lock acquisition: the latter would
+    free teardown while leaving _ensure_client() hung forever for the turn
+    that asked for the client. The bound is its own constant, not a teardown
+    grace — this is a credential check against a live service.
+
+    Note test_aclose_racing_client_construction_does_not_leak_a_client below,
+    which *sets* account_hang and so only ever exercised the answered case."""
+    import bos.extensions.runtimes.codex as codex_mod
+
+    monkeypatch.setattr(codex_mod, "_PREFLIGHT_AUTH_SECONDS", 0.1)
+    fake_codex.arm(account_hang=asyncio.Event())  # never set: the child never answers
+    agent = _agent(tmp_path, fake_codex)  # auth defaults to "subscription"
+
+    build = asyncio.ensure_future(agent._ensure_client())
+    await _poll_until(lambda: bool(fake_codex.instances))
+
+    started = time.perf_counter()
+    await asyncio.wait_for(agent.aclose(), timeout=5)
+    elapsed = time.perf_counter() - started
+
+    assert elapsed < 1.5, f"aclose() must not wait out an unanswered preflight: {elapsed:.2f}s"
+    assert fake_codex.instances[0].closed is True, "the half-built client is closed, not leaked"
+
+    # The waiting turn gets a real, actionable error rather than hanging with it.
+    with pytest.raises(RuntimeError) as excinfo:
+        await build
+    assert "did not answer within" in str(excinfo.value)
 
 
 @pytest.mark.asyncio
