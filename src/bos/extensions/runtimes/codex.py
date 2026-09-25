@@ -149,12 +149,15 @@ _LEGACY_REJECTION = (
 # as the JSON-RPC `result`. Values below read out of the schema the shipped
 # binary generates (`codex app-server generate-json-schema`):
 #
-# Every vocabulary here offers a refusal that stops the turn and a refusal that
-# lets the agent carry on, and every entry below picks the second. A refused
-# escalation is not a turn failure: the agent is told no and left to finish
-# with what the sandbox already allows — the same reasoning as
+# A refused escalation is not a turn failure: the agent is told no and left to
+# finish with what the sandbox already allows — the same reasoning as
 # `Agent._call_tool` (agent.py:900-911) returning the error string rather than
-# raising. Method by method:
+# raising. Four of the five vocabularies put that as a choice, offering a
+# refusal that stops the turn and a refusal that lets the agent carry on, and
+# each of those four entries picks the second. The fifth,
+# `item/permissions/requestApproval`, offers no decision at all — its response
+# is a granted-permission profile, not a verdict — so refusing it means
+# granting nothing, and the agent carries on by construction. Method by method:
 #
 # - The two `requestApproval` methods share a vocabulary where `decline` is
 #   "refused, the agent continues the turn" and `cancel` is "refused, and the
