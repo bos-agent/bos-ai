@@ -148,8 +148,14 @@ _PREFLIGHT_AUTH_SECONDS = 30.0
 # wait is bounded", which was the round-2 prose that made an unbounded
 # account() a finding rather than a known gap:
 #
-# - `client.close()` bounds itself: CodexClient.close is proc.terminate() ->
-#   proc.wait(timeout=2) -> kill() -> two join(timeout=0.5), ~3s worst case.
+# - `client.close()` bounds itself: CodexClient.close is stdin.close() ->
+#   proc.terminate() -> proc.wait(timeout=2) -> kill() -> two
+#   join(timeout=0.5), ~3s worst case (measured 2.003s against a child that
+#   ignores SIGTERM). Two ways the wall clock can still exceed that, both
+#   remote enough to leave alone: stdin.close() flushes and can block on a
+#   full pipe with nothing draining it, and AsyncCodexClient.close runs on
+#   the DEFAULT to_thread executor, in which every wedged RPC above parks a
+#   worker (~32 to starve it).
 # - The stream iteration and `handle.steer()` sit inside _run_turn's
 #   `asyncio.timeout(timeout_seconds)` AND are raced against _stop_requested,
 #   so _settle_interrupted's cancel bounds them even when timeout_seconds is
@@ -443,16 +449,32 @@ class CodexAgent:
         would be a real semantic change and is not what this is.
 
         Nothing is interrupted on expiry, unlike :meth:`_settle_interrupted`'s
-        paths. During setup there is nothing to tell the vendor about: no
-        stream task exists, no handle exists yet, and the busy-guard slot is
-        still ``None``. ``wait_for`` cancelling the RPC is the whole teardown.
+        paths — but for one of the three that is a *limitation*, not a
+        cheaper teardown:
+
+        - ``thread_start`` / ``thread_resume``: nothing was started, so there
+          is genuinely nothing to tell the vendor about. ``wait_for``
+          cancelling the RPC is the whole teardown.
+        - ``thread.turn``: **the native turn may already be running.** The
+          vendor submits the start to a module-level executor and awaits it
+          through ``asyncio.wrap_future``; on cancellation it only closes the
+          orphaned *subscription* — its own docstring says "releasing an
+          unclaimed result" — and never cancels the submitted work. So the
+          child can go on working against ``cwd`` with no way for BOS to stop
+          it, because ``turn_interrupt`` needs the turn id and the turn id is
+          exactly what the cancelled call never returned. That turn ends when
+          the client closes. Known and accepted (BEP 19 §8.2): recovering it
+          would mean reading the thread back to find an in-flight turn, over
+          an RPC that can wedge the same way. This is not a regression — the
+          call used to hang *and* leave the turn running; bounding it traded
+          a silent hang for a silent orphan.
 
         ``timeout_seconds=None`` means the caller declined a deadline, and
         this declines one too rather than inventing a fallback. A wedge is
-        still recoverable in that case, for the same reason there is nothing
-        to interrupt: no turn task is registered, so ``aclose()`` waits on
-        none, takes the uncontended ``_client_lock`` and closes the client —
-        which fails the pending RPC.
+        still recoverable in that case: no turn task is registered, so
+        ``aclose()`` waits on none, takes the uncontended ``_client_lock``
+        and closes the client — which fails the pending RPC, and is also what
+        ends an orphaned ``thread.turn``.
 
         The message names the phase, so a setup timeout is never mistaken for
         a turn that timed out while streaming.
@@ -995,9 +1017,13 @@ class CodexAgent:
           ``TimeoutError`` (BEP 19 §7 criterion 20: "... raises"). Nothing is
           committed: an answer cut off by the caller's own deadline is a
           failure, not turn history. The same key also bounds the setup RPCs
-          that run *before* there is a turn to interrupt
+          that run before :meth:`_run_turn` exists to wrap them
           (:meth:`_bounded_setup`, fix round 4); that flavour names its phase
-          in the message, has nothing to interrupt, and is equally uncommitted.
+          in the message and is equally uncommitted. It interrupts nothing —
+          for ``thread_start``/``thread_resume`` because nothing started, and
+          for ``thread.turn`` because BOS never received the turn id it would
+          need, even though the native turn may be running. See
+          :meth:`_bounded_setup` for that limitation in full.
         - **A cooperative stop** — ``request_stop()`` racing the turn — is
           BOS taking the turn away, not the model or the caller failing.
           ``Agent``'s own contract for the same situation

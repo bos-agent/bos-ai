@@ -448,10 +448,27 @@ class FakeAsyncCodex:
         # pre-Task-7 test relies on.
         self.account_hang: asyncio.Event | None = None
         # Fix round 4: the same shape as account_hang, for the three *setup*
-        # RPCs — the vendor path is identical (a to_thread'd request that
-        # blocks on a queue read with no timeout of its own), so a wedged
-        # child stalls these exactly as it stalls account() and interrupt().
-        # None means answer immediately, as every pre-round-4 test relies on.
+        # RPCs. The load-bearing property holds for all three — a blocking
+        # request with no timeout of its own, cancellable at the asyncio
+        # level — so a wedged child stalls these exactly as it stalls
+        # account() and interrupt(). None means answer immediately, as every
+        # pre-round-4 test relies on.
+        #
+        # The vendor path is NOT identical, though (fix round 5, N2).
+        # thread_start/thread_resume go through _call_sync -> asyncio.to_thread.
+        # thread.turn goes through the module-level _TURN_START_EXECUTOR with
+        # asyncio.wrap_future and a cancel callback — and cancelling it does
+        # NOT stop the submitted work: the native turn starts anyway and only
+        # the orphaned subscription is closed. This double cannot express
+        # that, because turn_hang is checked BEFORE the handle is built, so a
+        # timed-out thread.turn leaves turn_handles empty and every test sees
+        # a turn that never started. Deliberate: there is no BOS-side
+        # behaviour to assert yet (the turn id needed to interrupt it is what
+        # the cancelled call never returned), and a characterization test
+        # would only pin a limitation we would rather remove. If you reach
+        # for turn_hang to reason about what the child is doing, this is the
+        # sixth double-vs-vendor divergence found on this branch, and it is
+        # here.
         self.thread_start_hang: asyncio.Event | None = None
         self.thread_resume_hang: asyncio.Event | None = None
         self.turn_hang: asyncio.Event | None = None
