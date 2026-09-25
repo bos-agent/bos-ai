@@ -27,9 +27,13 @@ all three reach here as the same ``TurnStatus.interrupted``; ``run()``'s
 ``self._in_flight`` busy guard rejects a second turn on a chat_id already
 running one; and ``aclose()`` interrupts every in-flight turn with a bounded
 wait before closing the client regardless (BEP 19 §3.10.2) (Task 7); and
-finally ``_deny_approval``, installed over the vendor's auto-accepting
-default so an escalation past the sandbox is refused rather than granted
-(BEP 19 §3.5.4) (Task 8).
+finally the approval boundary (BEP 19 §3.5.4) (Task 8): every thread runs
+with Codex's approval policy at ``never`` and no reviewer, so an escalation
+past the sandbox is refused by Codex itself before it runs, and
+``_deny_approval`` is installed over the vendor's auto-accepting default as the
+backstop for any request that arrives anyway. The first version routed
+``workspace-write``/``full-access`` escalations to an LLM reviewer inside Codex
+instead; live validation caught it (see ``_APPROVAL_MODE``).
 
 Beside that turn path — not a stage of it — sits ``native_messages`` (Task 9,
 BEP 19 §3.7): the read that projects Codex's *own* thread back into BOS
@@ -140,17 +144,38 @@ _T = TypeVar("_T")
 # Patched in tests to inject FakeAsyncCodex — the only seam the double needs.
 _CODEX_FACTORY: Callable[..., Any] = AsyncCodex
 
-# BEP 19 §3.5: Codex's confinement is an OS sandbox the vendor enforces, so the
-# permission story is these two enums plus `_APPROVAL_DENIALS` below — no
-# BOS-side tool interception like Claude Code needs (§3.5.2 vs §3.5.3).
-# `full-access` still uses `auto_review`, not because approvals matter once the
-# sandbox is open, but because `deny_all` would block turns from proceeding at
-# all.
-_SANDBOX_AND_APPROVAL: dict[str, tuple[Sandbox, ApprovalMode]] = {
-    "read-only": (Sandbox.read_only, ApprovalMode.deny_all),
-    "workspace-write": (Sandbox.workspace_write, ApprovalMode.auto_review),
-    "full-access": (Sandbox.full_access, ApprovalMode.auto_review),
+# BEP 19 §3.5: Codex's confinement is an OS sandbox the vendor enforces, so
+# `permission` picks the sandbox and nothing else. No BOS-side tool interception
+# like Claude Code needs (§3.5.2 vs §3.5.3).
+_SANDBOXES: dict[str, Sandbox] = {
+    "read-only": Sandbox.read_only,
+    "workspace-write": Sandbox.workspace_write,
+    "full-access": Sandbox.full_access,
 }
+
+# BEP 19 §3.5.4: one approval mode for every `permission`, and it is the one
+# that asks nobody. `deny_all` is `AskForApproval(never)` with no reviewer
+# (`openai_codex/_approval_mode.py`), so an escalation past the sandbox fails at
+# once with Codex's own message and the sandbox is the whole boundary.
+#
+# This used to be `auto_review` for `workspace-write` and `full-access`, on the
+# reading that `auto_review` is `on_request` and so "the server asks on
+# escalation". It asks — but it asks `ApprovalsReviewer.auto_review`, an LLM
+# guardian inside Codex that approves whatever the chat's user appears to have
+# authorized, and in a host app the chat's user is whoever typed into it. BOS's
+# handler never saw the request. Live validation found it: a `workspace-write`
+# agent wrote outside `cwd` on a guardian's "allow". Reproduced since against
+# the real 0.156.1 child with a fake model, no login — under `auto_review` the
+# child made a `codex-auto-review` model request and the write landed; under
+# `deny_all` it made none and the write did not happen.
+#
+# The cost is that MCP tool calls need approval too, and `never` refuses them;
+# BOS pre-approves its own server and only its own server — see
+# `_mcp_egress_config`. `native_options.config` cannot reopen this: an
+# `approval_policy`/`approvals_reviewer` placed there loses to the typed
+# `approval_policy = never` (measured, no guardian request, no write), and
+# `approval_mode` itself is a reserved keyword.
+_APPROVAL_MODE = ApprovalMode.deny_all
 
 # The `rejection` text the two legacy approval methods send back, shared so
 # both carry the same answer. Model-facing: the agent reads it mid-turn, so it
@@ -172,11 +197,13 @@ _LEGACY_REJECTION = (
 #   back (§2.2.2), so "no" is the only answer it can honestly give — under
 #   `full-access` too, where full access is what the *sandbox* grants and a
 #   request to go beyond it is still unanswerable.
-# - Refusing them all does not disarm a working agent: `auto_review` maps to
-#   `AskForApproval(on_request)` (`openai_codex/_approval_mode.py:29-33`), so
-#   the server asks only when the agent asks to escalate; `deny_all` maps to
-#   `AskForApproval(never)` (:34-35), where it does not ask at all and these
-#   are a backstop that should never fire.
+# - With `_APPROVAL_MODE` at `deny_all` for every permission, Codex does not
+#   ask at all, so this table is a backstop that should never fire. It stays
+#   installed because the alternative — Codex's own default handler — accepts
+#   escalations outright, and a future vendor path that asks anyway must meet
+#   "no", not "yes". An earlier revision reasoned that `auto_review` routed
+#   escalations here; it routes them to an LLM reviewer inside Codex instead,
+#   which is the defect `_APPROVAL_MODE`'s comment records.
 #
 # There is no `"deny"` decision in this protocol — each method spells refusal
 # its own way, and returning one would be a protocol violation, since
@@ -858,19 +885,45 @@ class CodexAgent:
         # `[mcp_servers.*]` entry could point at to read BOS's token out of the
         # shared environment, and a name nothing else can guess cannot be.
         env_var = f"BOS_MCP_BEARER_{uuid.uuid4().hex}"
+        # `default_tools_approval_mode = "approve"` is what lets BOS's tools run
+        # at all under `_APPROVAL_MODE`, which refuses every MCP call that needs
+        # approval — live validation's `read-only` agent failed with exactly
+        # that ("MCP tool call requires approval, but approval policy is
+        # never"). Established from the binary, not the name: its own error
+        # enumerates the values (`unknown variant ..., expected one of auto,
+        # prompt, writes, approve` in `mcp_servers.<name>.default_tools_approval_mode`),
+        # and driving the real child with a fake model under `never` showed
+        # `approve` lets a bos-tools call complete while `auto`, `prompt` and
+        # `writes` all still fail — and that it is scoped to this one server: a
+        # second, unapproved MCP server's call failed in the same turn.
+        #
+        # Server-wide rather than per tool (`tools.<name>.approval_mode`, also
+        # measured to work) because this server's `tools/list` already *is* the
+        # grant: it answers each bearer token with exactly that agent's tools and
+        # refuses calls outside them (`BosToolMcpServer._on_call_tool`), so
+        # approving everything it lists is approving exactly the grant. For the
+        # same reason `enabled_tools` is not pinned here, though it was measured
+        # to hide an unlisted tool: it would be a third copy of the grant, and
+        # whether it matches names the way Codex normalizes them (the namespace
+        # is already `mcp__bos_tools`, hyphen folded) was not measured.
+        #
         # Annotated, not inferred: `JsonObject` is `dict[str, JsonValue]` and
         # `dict` is invariant in its value type, so an unannotated nested literal
         # infers as `dict[str, dict[str, ...]]` and will not assign to it.
-        entry = {"url": server.url, "bearer_token_env_var": env_var}
+        entry = {"url": server.url, "bearer_token_env_var": env_var, "default_tools_approval_mode": "approve"}
         config: JsonObject = {_MCP_SERVERS_KEY: {_MCP_SERVER_NAME: entry}}
         return config, {env_var: token}
 
     def _deny_approval(self, method: str, params: JsonObject | None) -> JsonObject:
         """Refuse every escalation ``codex app-server`` asks for (BEP 19 §3.5.4).
 
-        Installed over ``CodexClient._default_approval_handler``, which accepts
-        command-execution and file-change escalations outright. The policy, and
-        why it needs no ``permission`` argument, is on ``_APPROVAL_DENIALS``.
+        A backstop, and one that should not fire: under ``_APPROVAL_MODE`` Codex
+        refuses escalations itself and asks nobody, so no approval request is
+        expected to reach this. It is installed anyway over
+        ``CodexClient._default_approval_handler``, which accepts
+        command-execution and file-change escalations outright, so that a vendor
+        path that asks regardless meets "no". The policy, and why it needs no
+        ``permission`` argument, is on ``_APPROVAL_DENIALS``.
 
         Synchronous and non-blocking by contract, not by preference: the vendor
         calls this from ``CodexClient._handle_server_request``, on the single
@@ -1007,7 +1060,7 @@ class CodexAgent:
             if self._chat_store is not None
             else None
         )
-        sandbox, approval_mode = _SANDBOX_AND_APPROVAL[self._config.permission]
+        sandbox, approval_mode = _SANDBOXES[self._config.permission], _APPROVAL_MODE
         # BEP 19 §3.4's escape hatch. `native_options` is handed to the vendor
         # as keywords, minus its `config` table, which is merged into the one
         # `config=` slot below instead of replacing it. Nothing here can
@@ -1510,10 +1563,11 @@ class CodexAgent:
         into ``TurnEvent``s for ``event_sink`` while racing the turn against a
         cooperative stop and ``timeout_seconds`` and polling the ``interrupt``
         callback, accumulating the same ``TurnResult`` a plain
-        ``await thread.run(...)`` would have produced. Escalations the
-        child asks for along the way are refused by :meth:`_deny_approval`,
-        installed in :meth:`_ensure_client` — that happens off this call
-        stack, on the vendor's reader thread, so nothing here waits on it.
+        ``await thread.run(...)`` would have produced. An escalation the
+        child's agent asks for along the way is refused by Codex itself, under
+        ``_APPROVAL_MODE``, and never becomes a request to BOS; if one did,
+        :meth:`_deny_approval` would answer it off this call stack, on the
+        vendor's reader thread, so nothing here waits on it either way.
 
         ``schema`` maps to ``thread.turn(output_schema=...)`` as a provider
         hint, but that hint is never trusted on its own: the reply is always

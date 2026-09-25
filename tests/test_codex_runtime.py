@@ -2508,3 +2508,64 @@ async def test_request_stop_is_one_way_like_the_port_it_implements(tmp_path, fak
 
     assert first.output == second.output == SHUTDOWN_CONTENT
     assert fake_codex.instances == []
+
+
+# ── Live-validation fix: no LLM reviewer in the approval loop (BEP 19 §3.5.4) ─
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("permission", ["read-only", "workspace-write", "full-access"])
+async def test_no_permission_puts_a_reviewer_between_an_escalation_and_bos(tmp_path, fake_codex, permission):
+    """The defect live validation found. `workspace-write` and `full-access`
+    used `ApprovalMode.auto_review`, which the SDK turns into `on_request` *plus
+    `ApprovalsReviewer.auto_review`* — an LLM guardian inside Codex that
+    approved a write outside `cwd` because the chat's user had asked for it.
+    BOS's handler never saw the request.
+
+    Asserted through the SDK's own mapping, not against the enum member: the
+    bug was a wrong belief about what that mapping produces, so the test reads
+    what it produces.
+    """
+    from openai_codex._approval_mode import _approval_mode_settings
+    from openai_codex.generated.v2_all import AskForApprovalValue
+
+    agent = _agent(tmp_path, fake_codex, permission=permission)
+    await agent._thread_for("chat-1", turn_id="t1")
+
+    (kwargs,) = fake_codex.instances[0].thread_start_calls
+    policy, reviewer = _approval_mode_settings(kwargs["approval_mode"])
+    assert reviewer is None, f"{permission}: an approvals reviewer decides escalations instead of BOS"
+    assert policy.root is AskForApprovalValue.never, f"{permission}: the sandbox must be the whole boundary"
+
+
+@pytest.mark.asyncio
+async def test_permission_still_picks_the_sandbox(tmp_path, fake_codex):
+    """With the approval mode now the same for all three, the sandbox is the
+    only thing `permission` decides — so it had better still decide it."""
+    from openai_codex import Sandbox
+
+    sent = {}
+    for permission in ("read-only", "workspace-write", "full-access"):
+        agent = _agent(tmp_path, fake_codex, permission=permission)
+        await agent._thread_for("chat-1", turn_id="t1")
+        sent[permission] = fake_codex.instances[-1].thread_start_calls[0]["sandbox"]
+
+    assert sent == {
+        "read-only": Sandbox.read_only,
+        "workspace-write": Sandbox.workspace_write,
+        "full-access": Sandbox.full_access,
+    }
+
+
+@pytest.mark.asyncio
+async def test_native_options_cannot_reach_bos_approval_setting_in_either_spelling(tmp_path, fake_codex):
+    """`default_tools_approval_mode` lives under `config.mcp_servers.<name>`,
+    which is reserved — so a host cannot pre-approve some other server's tools
+    through the escape hatch, nested or dotted."""
+    for spelling in (
+        {"mcp_servers": {"other": {"default_tools_approval_mode": "approve"}}},
+        {"mcp_servers.other.default_tools_approval_mode": "approve"},
+    ):
+        with pytest.raises(ValueError) as excinfo:
+            _agent(tmp_path, fake_codex, native_options={"config": spelling})
+        assert "config.mcp_servers" in str(excinfo.value)

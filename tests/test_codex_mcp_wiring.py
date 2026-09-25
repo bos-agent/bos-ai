@@ -23,6 +23,7 @@ import time
 from pathlib import Path
 
 import pytest
+from conftest import serve_asgi
 from test_external_agent_seam import _write_workspace
 
 
@@ -131,8 +132,12 @@ async def test_the_thread_config_opens_the_door_to_exactly_the_agents_tools(
         assert set(config) == {"mcp_servers"}
         assert set(config["mcp_servers"]) == {"bos-tools"}
         entry = config["mcp_servers"]["bos-tools"]
-        assert set(entry) == {"url", "bearer_token_env_var"}
+        assert set(entry) == {"url", "bearer_token_env_var", "default_tools_approval_mode"}
         assert entry["url"] == server.url
+        # Without it, every call to BOS's tools fails under the `never` approval
+        # policy every permission now uses; `approve` is the one value of four
+        # the real child was measured to let through.
+        assert entry["default_tools_approval_mode"] == "approve"
 
         # The token is not in the config at all — it is in the child's
         # environment, under the name the config points at. Both halves have to
@@ -333,6 +338,187 @@ async def test_the_real_codex_child_reads_the_override_and_lists_the_tool(tmp_pa
         "operator's token instead of ours and _gate refused it"
     )
     assert listed[0] == ["WiringAlpha"], "the child saw exactly this agent's grant"
+
+
+# ── A login-free model, for the approval boundary (BEP 19 §3.5.4) ───────────
+
+
+def _fake_model(route):
+    """A stand-in for OpenAI's Responses API that the real `codex app-server`
+    can run turns against with no login.
+
+    Codex only accepts `wire_api = "responses"` for a custom provider (its own
+    error says so), so this speaks that: one SSE stream per POST, each item
+    `route(body, n)` returns sent as `response.output_item.done` between
+    `response.created` and `response.completed`. Every request body is kept,
+    which is how a test sees whether Codex consulted an approvals reviewer — a
+    reviewer is a second model request, to this same endpoint.
+
+    It exists because the approval defect live validation found was invisible
+    to every double: it lives in which *party inside the child* answers an
+    escalation, and only the real child has that party.
+    """
+    import json
+
+    from starlette.applications import Starlette
+    from starlette.responses import StreamingResponse
+    from starlette.routing import Route
+
+    requests: list[dict] = []
+
+    def sse(event, data):
+        return f"event: {event}\ndata: {json.dumps({'type': event, **data})}\n\n".encode()
+
+    async def responses(request):
+        body = await request.json()
+        requests.append(body)
+        items, rid = route(body, len(requests)), f"resp_{len(requests)}"
+
+        async def stream():
+            yield sse("response.created", {"response": {"id": rid}})
+            for item in items:
+                yield sse("response.output_item.done", {"item": item})
+            usage = {"input_tokens": 1, "input_tokens_details": {"cached_tokens": 0}, "output_tokens": 1,
+                     "output_tokens_details": {"reasoning_tokens": 0}, "total_tokens": 2}
+            yield sse("response.completed", {"response": {"id": rid, "usage": usage}})
+
+        return StreamingResponse(stream(), media_type="text/event-stream")
+
+    return Starlette(routes=[Route("/v1/responses", responses, methods=["POST"])]), requests
+
+
+def _point_codex_at(tmp_path, monkeypatch, hostport, extra_toml=""):
+    """A throwaway CODEX_HOME whose provider is the fake model."""
+    home = tmp_path / "codex_home"
+    home.mkdir()
+    (home / "config.toml").write_text(
+        'model_provider = "fake"\nmodel = "fake-model"\n[model_providers.fake]\nname = "fake"\n'
+        f'base_url = "http://{hostport}/v1"\nwire_api = "responses"\n' + extra_toml
+    )
+    monkeypatch.setenv("CODEX_HOME", str(home))
+
+
+def _is_reviewer(body) -> bool:
+    """A request made by Codex's approvals reviewer rather than the agent.
+    Recognised by what live validation's rollout recorded for it: the model
+    `codex-auto-review`, instructed as "judging one planned coding-agent action"."""
+    import json
+
+    return "auto-review" in str(body.get("model")) or "planned coding-agent action" in json.dumps(body)
+
+
+def _assistant(text, n):
+    return [{"type": "message", "role": "assistant", "id": f"m{n}", "content": [{"type": "output_text", "text": text}]}]
+
+
+@pytest.mark.asyncio
+async def test_an_escalation_is_refused_by_codex_and_judged_by_nobody(tmp_path, monkeypatch):
+    """The defect live validation found, as a regression test against the real
+    child. `workspace-write` used to map to `auto_review`, so an escalation past
+    the sandbox went to an LLM reviewer inside Codex, which allowed a write
+    outside `cwd` because the chat's user had asked; BOS never saw it.
+
+    The fake model asks for exactly that — `exec_command` with
+    `require_escalated`, writing outside `cwd` — and answers any reviewer
+    request with the *allow* verdict the live rollout recorded. So if a
+    reviewer ever comes back into the loop, it approves and the test fails on
+    the reviewer request and on the file. Under the fix Codex refuses the
+    escalation itself, before the command runs, which is why nothing here
+    depends on the host's OS sandbox.
+    """
+    _codex_binary_or_skip()
+    import json
+
+    cwd = tmp_path / "ws"
+    cwd.mkdir()
+    target = tmp_path / "outside-cwd.txt"
+    verdict = {"risk_level": "low", "user_authorization": "high", "outcome": "allow",
+               "rationale": "The user explicitly requested writing to this exact path."}
+
+    def route(body, n):
+        if _is_reviewer(body):
+            return _assistant(json.dumps(verdict), n)
+        if n == 1:
+            args = {"cmd": f"echo OK > {target}", "sandbox_permissions": "require_escalated",
+                    "justification": "The user asked me to write OK to this exact path."}
+            return [{"type": "function_call", "id": "fc1", "call_id": "c1", "name": "exec_command",
+                     "arguments": json.dumps(args)}]
+        return _assistant("done", n)
+
+    app, requests = _fake_model(route)
+    async with serve_asgi(app) as hostport:
+        _point_codex_at(tmp_path, monkeypatch, hostport)
+        agent = _agent(tmp_path, None, mcp=_never_called, permission="workspace-write", cwd="ws", auth="api_key")
+        try:
+            await agent.run("chat-1", "write OK outside the workspace", turn_id="t1")
+        finally:
+            await agent.aclose()
+
+    assert not [b for b in requests if _is_reviewer(b)], "an approvals reviewer was consulted"
+    outputs = [x.get("output") for b in requests for x in b.get("input", []) if x.get("type") == "function_call_output"]
+    assert any("cannot ask for escalated permissions" in str(o) for o in outputs), outputs
+    assert not target.exists(), "the escalated write happened"
+
+
+@pytest.mark.asyncio
+async def test_bos_tools_are_pre_approved_and_nothing_else_is(tmp_path, monkeypatch):
+    """The cost of the fix, paid only for BOS's own server. Every permission now
+    runs Codex with `approval_policy = never`, which refuses any MCP call that
+    needs approval — live validation's `read-only` agent failed with exactly
+    that. `default_tools_approval_mode = "approve"` on `bos-tools` lets BOS's
+    tools through; this checks it does so in a real turn, and that a second MCP
+    server the operator configured themselves stays refused in the same turn.
+    """
+    _codex_binary_or_skip()
+    import json
+
+    from bos.core.contract import ep_tool
+    from bos.extensions.runtimes.mcp_egress import BosToolMcpServer
+
+    calls: list[str] = []
+    schema = {"type": "object", "properties": {"x": {"type": "string"}}, "required": ["x"]}
+    for name in ("GrantedTool", "OperatorTool"):
+        def make(n):
+            async def tool(x: str) -> str:
+                calls.append(n)
+                return f"{n}:{x}"
+            return tool
+        ep_tool(name=name, description=name, parameters=schema)(make(name))
+
+    def route(body, n):
+        if n == 1:
+            return [
+                {"type": "function_call", "id": "a", "call_id": "a", "name": "GrantedTool",
+                 "namespace": "mcp__bos_tools", "arguments": json.dumps({"x": "hi"})},
+                {"type": "function_call", "id": "b", "call_id": "b", "name": "OperatorTool",
+                 "namespace": "mcp__operator", "arguments": json.dumps({"x": "hi"})},
+            ]
+        return _assistant("done", n)
+
+    bos_server, operator_server = BosToolMcpServer(), BosToolMcpServer()
+    await operator_server.start()
+    monkeypatch.setenv("OPERATOR_TOKEN", operator_server.register_agent("operator", ["OperatorTool"]))
+    app, _ = _fake_model(route)
+    try:
+        async with serve_asgi(app) as hostport:
+            _point_codex_at(
+                tmp_path, monkeypatch, hostport,
+                f'[mcp_servers.operator]\nurl = "{operator_server.url}"\nbearer_token_env_var = "OPERATOR_TOKEN"\n',
+            )
+            (tmp_path / "ws").mkdir()
+            agent = _agent(tmp_path, None, mcp=lambda: bos_server, permission="workspace-write", cwd="ws",
+                           auth="api_key", mcp_tools=["GrantedTool"])
+            try:
+                await agent.run("chat-1", "call both tools", turn_id="t1")
+            finally:
+                await agent.aclose()
+    finally:
+        await bos_server.aclose()
+        await operator_server.aclose()
+        for name in ("GrantedTool", "OperatorTool"):
+            ep_tool._extensions.pop(name, None)
+
+    assert calls == ["GrantedTool"], "BOS's tool runs; the operator's unapproved server does not"
 
 
 async def _inspect_george(tmp_path) -> dict:

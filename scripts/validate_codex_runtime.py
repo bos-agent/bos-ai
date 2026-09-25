@@ -727,7 +727,16 @@ async def check_08(ctx: Ctx) -> Outcome:
 async def check_19(ctx: Ctx) -> Outcome:
     """`_deny_approval` runs on the vendor's single stdout reader thread and
     does a `logger.warning`. If that thread were blocked by the refusal, the gap
-    between notifications around it is where it would show."""
+    between notifications around it is where it would show.
+
+    Premise obsolete since the approval fix (BEP 19 §3.5.4): every permission
+    now runs Codex at `approval_policy = never`, so an escalation is refused by
+    Codex itself and never becomes a request to `_deny_approval`. An empty
+    `refusals` is therefore the *expected* result and says nothing about
+    whether the model asked — look in the vendor's thread items for Codex's own
+    "cannot ask for escalated permissions" refusal instead. Only the message
+    below was changed; the logic is untouched, since this file is run live and
+    was not re-run after the fix."""
     before = len(ctx.warnings.lines)
     result, exc, cap, secs = await turn(
         ctx.agent("ro"),
@@ -738,8 +747,9 @@ async def check_19(ctx: Ctx) -> Outcome:
     refusals = [line for line in ctx.warnings.lines[before:] if "refus" in line.lower() or "escalat" in line.lower()]
     if not refusals:
         return NOT_ARRANGED, (
-            f"no escalation request reached _deny_approval in {secs:.1f}s — the model declined to ask, so there "
-            f"was nothing to refuse. Turn finished: {getattr(result, 'finish_reason', None)!r}, {describe(exc)}"
+            f"no escalation request reached _deny_approval in {secs:.1f}s — expected under approval_policy=never, "
+            f"where Codex refuses escalations itself (BEP 19 §3.5.4); this does not show whether the model asked. "
+            f"Turn finished: {getattr(result, 'finish_reason', None)!r}, {describe(exc)}"
         )
     return OBSERVED, (
         f"{len(refusals)} refusal warning(s): {refusals[0][:160]!r}; largest gap between notifications "
