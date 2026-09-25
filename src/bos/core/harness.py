@@ -214,7 +214,9 @@ def _resolve_agent_cfg_parent(kind: str | None, agent_cfg: dict[str, Any]) -> di
         # replace it with the child's, as `register()` does for a config child;
         # dropping it would key every child without an `agent_name` as "default".
         # The parent's `agent_name` is dropped too: identity is not inherited
-        # through `_parent`, on this route as in config.
+        # through `_parent`, as in config. Unlike config, this also drops an
+        # `agent_name` from `[agent.defaults]`: the registry cannot tell the two
+        # apart (BEP 6's `_parent` addendum).
         inherited.pop("kind", None)
         if kind is not None:
             inherited["kind"] = kind
