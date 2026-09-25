@@ -104,70 +104,144 @@ _WORKSPACE_WRITE_SANDBOX: dict[str, Any] = {
 # `workspace-write` agent sends the same sandbox dict, so each client's settings carry a
 # fresh value of this variable in their `env`, which the CLI sets for its session and
 # nothing reads. test_each_clients_cli_binds_a_settings_file_of_its_own pins the file and
-# its name against the real CLI.
+# its name against the real CLI. The nonce covers only this path: the sandbox's other mount
+# points, under `<cwd>/.claude/`, are named by the repository and shared by agents that share
+# a cwd, and they race the same way (3 of 180 commands with six CLIs in one cwd; BEP 19 §8.2).
 _SETTINGS_NONCE_VAR = "BOS_SETTINGS_NONCE"
 
-# BEP 19 §3.5.3: which settings files the CLI loads — none, unless a host opts in. Left at
-# None the SDK sends no `--setting-sources` and every source loads (fact 9), so BOS always
-# sends the list, and by default it is empty: the SDK's own "isolation mode".
+# BEP 19 §3.5.3: which settings files the CLI loads. BOS always sends the list — left at
+# None the SDK sends no `--setting-sources` and every source loads (fact 9) — and by default
+# it is empty, the SDK's own "isolation mode": no user, project or local settings file. Not
+# no settings at all: the CLI always loads managed settings (the machine administrator's
+# policy, which outranks BOS's own `--settings` and can override its sandbox or carry an
+# apiKeyHelper) and BOS's own flag settings. That policy sits legitimately above BOS.
 #
 # Deny by default, because a settings file is code. Measured against CLI 2.1.281 with a
-# hostile repo, in a workspace nobody had trusted: under `project`, the repo's command hooks
-# (SessionStart and PreToolUse), its apiKeyHelper and its settings `env` all took effect,
-# and the commands ran on the host outside the bash sandbox, at every permission level —
-# none of them is a tool call, so neither `permission` nor the sandbox reaches them.
-# `local` (.claude/settings.local.json) did the same. Hooks and apiKeyHelper are only the
-# measured part of a longer list of settings that run commands, and the list of what a
-# settings file can do is the CLI's to extend; loading no repo settings is the one
-# answer that does not depend on keeping that list current. Under the default none of it
-# ran, and CLAUDE.md did not reach the model either: the SDK's docstring says `project` is
-# what loads it (test_by_default_nothing_the_repo_authors_runs_or_reaches_the_model).
+# hostile repo, in a workspace nobody had trusted: under `project` the repo's command hooks
+# (SessionStart and PreToolUse) and its apiKeyHelper ran on the host outside the bash
+# sandbox at every permission level, and `local` (.claude/settings.local.json) did the same
+# (test_a_host_that_opts_into_repo_settings_runs_the_repos_commands); the settings `env`
+# took effect too (measured, not pinned). None of them is a tool call, so neither
+# `permission` nor the sandbox reaches them. Hooks and apiKeyHelper are only the measured
+# part of a longer list of settings that run commands, and what a settings file can do is
+# the CLI's to extend; loading no repo settings is the one answer that does not depend on
+# keeping that list current. Under the default none of it ran, and the CLI loaded no
+# CLAUDE.md (test_by_default_nothing_the_repo_authors_runs_or_reaches_the_model).
 #
 # A host may still opt in; construction then logs one WARNING naming the consequence. The
 # PreToolUse hook (not built yet) must then deny the agent's own writes under `.claude/`,
 # or an agent could plant settings for its next turn: the Write tool reached `can_use_tool`
-# for .claude/settings.json and created it when allowed. A repo's .mcp.json stays inert
-# either way, because `strict_mcp_config` is always sent.
+# for .claude/settings.json and created it when allowed (measured, not pinned). A repo's
+# .mcp.json stays inert either way, because `strict_mcp_config` is always sent.
 _SETTING_SOURCES: tuple[str, ...] = get_args(SettingSource)
 _DEFAULT_SETTING_SOURCES: tuple[SettingSource, ...] = ()
 # The sources that load settings from the workspace itself, and so from the repo.
 _REPO_SETTING_SOURCES = {"project": ".claude/settings.json", "local": ".claude/settings.local.json"}
 
-# BEP 19 §3.10.3: under `auth = "subscription"`, each of these in BOS's environment makes
-# the CLI stop using the subscription login — the CLI inherits that environment whole
-# (§3.12) — so each silently moves the run onto another credential or account. Enumerated
-# from the CLI 2.1.281 source, from the two functions that decide it: the provider
-# resolver (`He()`: anything but first-party is another account's bill) and the predicate
-# for whether the claude.ai login is used at all (`Ec()`). Refused whenever set, which is
-# conservative where the CLI is stricter: it reads the provider flags as booleans, starts
-# OIDC federation only with both of its variables, and uses a profile only if the profile
-# store holds one. Examined and not refused: CLAUDE_CODE_OAUTH_TOKEN, a subscription token
-# (what `claude setup-token` makes for a headless login); ANTHROPIC_BASE_URL, which changes
-# where requests go but is not among `Ec()`'s inputs; and the per-provider credentials and
-# targets (AWS_BEARER_TOKEN_BEDROCK, ANTHROPIC_VERTEX_PROJECT_ID and the like), which the
-# CLI reads only once a flag below has chosen that provider.
-_SUBSCRIPTION_BYPASS_VARS = (
+# BEP 19 §3.12: the environment BOS inherits is trusted operator configuration — the SDK
+# hands the CLI BOS's whole os.environ and cannot unset a variable — except where a variable
+# would load what BOS's default leaves out (§3.5.3). Those are overridden in every client's
+# `env`, with the value that switches each off. Enumerated from the CLI 2.1.281 source (the
+# version test_what_was_read_from_the_cli_source_is_pinned_to_its_version pins): the
+# variables it reads whose names put them on its plugin, hook, settings, MCP, skill or agent
+# loading paths, each then read where it is used.
+_INHERITED_ENV_OVERRIDES: Mapping[str, str] = MappingProxyType({
+    # Measured against the real CLI with BOS's options; tests pin each one:
+    # loads plugin folders as inline plugins, whose hooks then ran at `read-only`.
+    "CLAUDE_CODE_PLUGIN_DIRS": "",
+    # with CLAUDE_CODE_SESSION_KIND=bg, adds allow and deny rules and working directories:
+    # an out-of-root Write then ran at `read-only` without `can_use_tool` being asked.
+    "CLAUDE_BG_SESSION_PERMISSION_RULES": "",
+    # adds working directories: a Read outside `cwd` then went unasked.
+    "CLAUDE_RELAUNCH_SESSION_ADD_DIRS": "",
+    # loads CLAUDE.md and rules files from those added directories.
+    "CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD": "",
+    # Read from the source and not measured, each overridden because BOS loads no plugins,
+    # skills or other MCP servers by default:
+    # extra roots the CLI searches for installed plugins (whether a plugin found there loads
+    # without a settings file enabling it was not measured).
+    "CLAUDE_CODE_PLUGIN_SEED_DIR": "",
+    # fetch the account's plugins and skills at startup (needs an account to measure).
+    "CLAUDE_CODE_SYNC_PLUGINS": "",
+    "CLAUDE_CODE_SYNC_SKILLS": "",
+    # opt-out: the claude.ai account's MCP connectors load unless this is false (needs a
+    # claude.ai login to measure). The CLI's own confined-evaluation environment sets it so.
+    "ENABLE_CLAUDEAI_MCP_SERVERS": "false",
+})
+# Read on those paths and left alone, because under BOS's default each is inert or loads
+# nothing from outside the session:
+# - compiled out of this build, their readers returning nothing: CLAUDE_CODE_MANAGED_
+#   SETTINGS_PATH and CLAUDE_CODE_REMOTE_SETTINGS_PATH; with no reader at all:
+#   CLAUDE_CODE_MOCK_REMOTE_SETTINGS and ALLOW_ANT_COMPUTER_USE_MCP.
+# - where the CLI keeps its own login and global config: CLAUDE_CONFIG_DIR and
+#   CLAUDE_SECURESTORAGE_CONFIG_DIR. What they hold that the default excludes stays excluded.
+# - relocations of what only a settings file enables: CLAUDE_CODE_PLUGIN_CACHE_DIR, and
+#   CLAUDE_CODE_USE_COWORK_PLUGINS, which renames the user settings file and plugin cache.
+# - background-session mode and trust: CLAUDE_CODE_SESSION_KIND and CLAUDE_BG_WORKSPACE_
+#   TRUSTED. Under the default no repo settings load for trust to gate.
+# - feature switches, which change what the CLI offers rather than load anything:
+#   CLAUDE_CODE_ENABLE_FUNCTION_HOOKS, CLAUDE_CODE_WORKFLOWS, CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT,
+#   and CLAUDE_CODE_COORDINATOR_EXTRA_TOOLS (coordinator mode only).
+# - read only by modes BOS never starts: bridge children (CLAUDE_CODE_BRIDGE_CHILD_*), the
+#   self-hosted runner (SELF_HOSTED_RUNNER_*, its lifecycle hooks included), the
+#   environment-delivered workflow subcommand (CLAUDE_REMOTE_WORKFLOW_SCRIPT and _ARGS), and
+#   the `claude agents` view (CLAUDE_AGENTS_SELECT, CLAUDE_CODE_AGENT).
+# - the CLI's own memory features: CLAUDE_MEMORY_STORES, CLAUDE_CODE_REMOTE_MEMORY_DIR,
+#   CLAUDE_COWORK_MEMORY_* and CLAUDE_CODE_POST_TURN_MEMORY*.
+# - CLAUDE_AGENT_SDK_MCP_NO_PREFIX, which renames the tools of in-process SDK MCP servers
+#   only, and BOS's MCP server is an HTTP one (§3.8).
+# - restrictions only: CLAUDE_CODE_DISABLE_* and CLAUDE_CODE_SKIP_PLUGIN_MCP_SERVERS*.
+# Every other variable on those paths was classified by its name alone as a timeout, size,
+# batch, cgroup or display setting, or as another restriction, and was not read one by one.
+
+# BEP 19 §3.10.3: under `auth = "subscription"`, each of these in BOS's environment makes the
+# CLI stop using the subscription login — the CLI inherits that environment whole (§3.12) —
+# in one of three ways, which each message names: it moves the run onto another credential or
+# provider, which bills that credential or provider; it switches the login off; or it moves
+# where the CLI looks for credentials. Enumerated from the CLI 2.1.281 source, from the two
+# functions that decide it: the provider resolver (`He()`) and the predicate for whether the
+# claude.ai login is used at all (`Ec()`). Refused whenever set, which is conservative where
+# the CLI is stricter: it reads the provider flags as booleans, starts OIDC federation only
+# with both of its variables, and uses a profile only if the profile store holds one.
+# Examined and not refused: CLAUDE_CODE_OAUTH_TOKEN, a subscription token (what `claude
+# setup-token` makes for a headless login); ANTHROPIC_BASE_URL, which changes where requests
+# go but is not among `Ec()`'s inputs; and the per-provider credentials and targets
+# (AWS_BEARER_TOKEN_BEDROCK, ANTHROPIC_VERTEX_PROJECT_ID and the like), which the CLI reads
+# only once a flag below has chosen that provider.
+_OTHER_CREDENTIAL = "bills another credential in place of the subscription login"
+_SUBSCRIPTION_BYPASS_VARS: Mapping[str, str] = MappingProxyType({
     # `Ec()`: a first-party credential used instead of the login.
-    "ANTHROPIC_API_KEY",
-    "ANTHROPIC_AUTH_TOKEN",
-    "CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR",
+    "ANTHROPIC_API_KEY": _OTHER_CREDENTIAL,
+    "ANTHROPIC_AUTH_TOKEN": _OTHER_CREDENTIAL,
+    "CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR": _OTHER_CREDENTIAL,
     # `Ec()`: an `ant` profile, or OIDC federation, in place of the login.
-    "ANTHROPIC_PROFILE",
-    "ANTHROPIC_CONFIG_DIR",
-    "ANTHROPIC_FEDERATION_RULE_ID",
-    "ANTHROPIC_ORGANIZATION_ID",
+    "ANTHROPIC_PROFILE": "selects an `ant` profile, whose credentials the CLI then bills in place of the login",
+    "ANTHROPIC_CONFIG_DIR": "moves where the CLI looks for `ant` profiles, whose credentials it can use in place "
+    "of the login",
+    "ANTHROPIC_FEDERATION_RULE_ID": "with ANTHROPIC_ORGANIZATION_ID, starts OIDC federation, billed to that "
+    "organization in place of the login",
+    "ANTHROPIC_ORGANIZATION_ID": "with ANTHROPIC_FEDERATION_RULE_ID, starts OIDC federation, billed to that "
+    "organization in place of the login",
     # `Ec()`: requests through a local socket, and bare mode, which ignores the login.
-    "ANTHROPIC_UNIX_SOCKET",
-    "CLAUDE_CODE_SIMPLE",
-    # `He()`: another provider, billed to that provider's account.
-    "CLAUDE_CODE_USE_BEDROCK",
-    "CLAUDE_CODE_USE_VERTEX",
-    "CLAUDE_CODE_USE_FOUNDRY",
-    "CLAUDE_CODE_USE_ANTHROPIC_AWS",
-    "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD",
-    "CLAUDE_CODE_USE_MANTLE",
-    "CLAUDE_CODE_USE_GATEWAY",
-)
+    "ANTHROPIC_UNIX_SOCKET": "sends requests through a local socket, billed to whatever credential serves it",
+    "CLAUDE_CODE_SIMPLE": "puts the CLI in bare mode, which does not use the login at all",
+    # `He()`: another provider, billed by that provider; the names are the CLI's own labels.
+    "CLAUDE_CODE_USE_BEDROCK": "moves the run to Amazon Bedrock, billed there instead",
+    "CLAUDE_CODE_USE_VERTEX": "moves the run to Google Vertex AI, billed there instead",
+    "CLAUDE_CODE_USE_FOUNDRY": "moves the run to Microsoft Foundry, billed there instead",
+    "CLAUDE_CODE_USE_ANTHROPIC_AWS": "moves the run to Claude Platform on AWS, billed there instead",
+    "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD": "moves the run to Claude Platform on Google Cloud, billed there instead",
+    "CLAUDE_CODE_USE_MANTLE": "moves the run to Bedrock Mantle, billed there instead",
+    "CLAUDE_CODE_USE_GATEWAY": "moves the run to a gateway, billed to the gateway's credential",
+})
+
+# BEP 19 §3.10.3: a route that is a file, not a variable. The CLI reads an API key from this
+# path whenever CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR is unset, with nothing gating the read,
+# and bills it in place of the login (read from the CLI 2.1.281 source: `y()`, `M_()`). It
+# exists on Claude Code's own remote hosts, whose user is `claude`; anywhere else it should
+# not. Its sibling `.oauth_token` is a subscription token, excluded for the reason
+# CLAUDE_CODE_OAUTH_TOKEN is.
+_WELL_KNOWN_API_KEY_FILE = Path("/home/claude/.claude/remote/.api_key")
 
 # macOS: the binary the CLI runs every sandboxed command through (read from the CLI
 # 2.1.281 source; no macOS host has measured it).
@@ -207,7 +281,8 @@ _BOS_OWNED: Mapping[str, str] = MappingProxyType({
     "mcp_servers": "reserved for BOS's MCP egress, which `mcp_tools` selects for (BEP 19 §3.8)",
     "strict_mcp_config": "set by BOS, always True, so the CLI loads only the MCP servers BOS passes and never "
     "a repo's .mcp.json (BEP 19 §3.5.3)",
-    "env": "reserved for BOS, whose MCP bearer is to travel in the CLI's environment (BEP 19 §3.8)",
+    "env": "set by BOS, to switch off inherited variables that would load what its default leaves out "
+    "(BEP 19 §3.12); its MCP bearer is to travel there too (§3.8)",
     "effort": "reserved for BOS, to set per turn from `llm_args['reasoning_effort']` (BEP 19 §3.9)",
     "resume": "reserved for BOS, to resume the chat's own native session (BEP 19 §3.6)",
     "output_format": "reserved for BOS, to set per turn from `schema=` (BEP 19 §3.9)",
@@ -358,6 +433,33 @@ class ClaudeCodeAgent:
                 f"Each names settings the CLI loads, and a bare string is not a one-item list."
             )
         self._setting_sources = cast(list[SettingSource], list(setting_sources))
+
+        _refuse_native_options(self._config.native_options)
+
+        # BEP 19 §3.10.3. Read now, from this process's environment and filesystem as they
+        # stand, since the CLI inherits both. An empty variable is not set: every read of
+        # these in the CLI 2.1.281 source trims or tests truthiness, or both.
+        if self._config.auth == "subscription":
+            routes = [
+                f"{name} is set, which {why}" for name, why in _SUBSCRIPTION_BYPASS_VARS.items() if os.environ.get(name)
+            ]
+            if _WELL_KNOWN_API_KEY_FILE.exists():
+                routes.append(f"{_WELL_KNOWN_API_KEY_FILE} exists, and the CLI reads an API key from it and bills that")
+            if routes:
+                raise ValueError(
+                    f'`auth = "subscription"` (the default), but the Claude Code CLI inherits this process\'s '
+                    f"environment and filesystem, and it would not use the subscription login: {'; '.join(routes)}. "
+                    f'Remove {"it" if len(routes) == 1 else "them"}, or set `auth = "api_key"` to run that way '
+                    f"deliberately."
+                )
+
+        if self._config.permission == "workspace-write" and (reason := _bash_sandbox_unavailable(sys.platform)):
+            raise ValueError(
+                f'`permission = "workspace-write"` is refused on this host: {reason}. It needs Claude Code\'s bash '
+                f"sandbox, and BOS refuses rather than let bash run unsandboxed (BEP 19 §3.5.3)."
+            )
+
+        # Last, so that a config refused above does not also warn about an agent never built.
         if repo_files := [path for source, path in _REPO_SETTING_SOURCES.items() if source in self._setting_sources]:
             logger.warning(
                 "%r agent: `setting_sources` = %s loads %s from the repository. Whatever the repository "
@@ -366,27 +468,6 @@ class ClaudeCodeAgent:
                 kind,
                 self._setting_sources,
                 " and ".join(repo_files),
-            )
-
-        _refuse_native_options(self._config.native_options)
-
-        # BEP 19 §3.10.3. Read now, from this process's environment as it stands, since
-        # the CLI inherits it. An empty value is not set: every read of these in the CLI
-        # 2.1.281 source trims or tests truthiness, or both.
-        if self._config.auth == "subscription":
-            if present := [name for name in _SUBSCRIPTION_BYPASS_VARS if os.environ.get(name)]:
-                raise ValueError(
-                    f'`auth = "subscription"` (the default), but {", ".join(present)} '
-                    f"{'is' if len(present) == 1 else 'are'} set in this process's environment. The Claude Code "
-                    f"CLI inherits that environment, and each of these makes it stop using the subscription login, "
-                    f"silently moving the run onto another credential or account. Unset "
-                    f'{"it" if len(present) == 1 else "them"}, or set `auth = "api_key"` to run that way deliberately.'
-                )
-
-        if self._config.permission == "workspace-write" and (reason := _bash_sandbox_unavailable(sys.platform)):
-            raise ValueError(
-                f'`permission = "workspace-write"` is refused on this host: {reason}. It needs Claude Code\'s bash '
-                f"sandbox, and BOS refuses rather than let bash run unsandboxed (BEP 19 §3.5.3)."
             )
 
         self._stop_requested = asyncio.Event()
@@ -429,12 +510,12 @@ class ClaudeCodeAgent:
         Built afresh for every client, never cached, because each call's settings carry
         a new nonce (``_SETTINGS_NONCE_VAR``).
         """
-        # `env` stays empty for now, and deliberately carries no `CLAUDE_CODE_SANDBOXED`
+        # `env` carries `_INHERITED_ENV_OVERRIDES`, and deliberately no `CLAUDE_CODE_SANDBOXED`
         # override. The CLI source reads an inherited one as "trusted", but in everything
-        # measured against CLI 2.1.281 it changed nothing: the repo's allow rules are gated
-        # on the trust recorded in the CLI's config, which that variable does not reach, and
-        # with `project` loaded, the repo's hooks, MCP servers, settings `env` and
-        # apiKeyHelper ran without any trust at all. Under the default none of them loads.
+        # measured against CLI 2.1.281 it changed nothing (measured, not pinned): the repo's
+        # allow rules are gated on the trust recorded in the CLI's config, which that variable
+        # does not reach, and with `project` loaded, the repo's hooks, MCP servers, settings
+        # `env` and apiKeyHelper ran without any trust at all.
         config = self._config
         sandbox = (
             cast(SandboxSettings, dict(_WORKSPACE_WRITE_SANDBOX)) if config.permission == "workspace-write" else None
@@ -449,6 +530,7 @@ class ClaudeCodeAgent:
             max_turns=self._max_turns,
             model=config.model,
             strict_mcp_config=True,
+            env=dict(_INHERITED_ENV_OVERRIDES),
             **config.native_options,
         )
 
