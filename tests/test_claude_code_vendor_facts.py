@@ -87,8 +87,9 @@ def _sandboxed(sandbox: dict[str, Any]) -> dict[str, Any]:
 
     The SDK sends ``sandbox`` inside inline ``--settings`` JSON, and the CLI writes that
     to ``/tmp/claude-<uid>/claude-settings-<sha256 of the content, 16 hex>.json``
-    (``GPo``/``h9`` in CLI 2.1.281) — a path the bash sandbox binds, and a file the CLI
-    removes when it exits. Two CLIs started with byte-identical settings therefore share
+    (``GPo``/``h9`` in CLI 2.1.281) — a path the bash sandbox binds. That file is gone
+    once the CLI exits: observed after every run, though the removal code itself was not
+    found in the CLI source. Two CLIs started with byte-identical settings therefore share
     one file, and when the first exits, the other's sandboxed commands fail for the rest
     of its turn with ``bwrap: Can't find source path …`` (without the nonce, fact 6b
     failed 5 and 7 times in two samples of 24 under 4-way parallel runs). A nonce makes
