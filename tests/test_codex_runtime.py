@@ -45,6 +45,7 @@ from openai_codex.models import (
 
 from bos.core.agent import AbortTurn
 from bos.extensions.chat_stores.in_memory import InMemChatStore
+from bos.extensions.runtimes.codex import _LEGACY_REJECTION
 
 
 def _agent(tmp_path, fake_codex, **cfg: Any):
@@ -1746,8 +1747,8 @@ def test_codex_approval_handler_attribute_exists():
         ("item/commandExecution/requestApproval", {"decision": "decline"}),
         ("item/fileChange/requestApproval", {"decision": "decline"}),
         ("item/permissions/requestApproval", {"permissions": {}}),
-        ("execCommandApproval", {"decision": "abort"}),
-        ("applyPatchApproval", {"decision": "abort"}),
+        ("execCommandApproval", {"decision": {"denied": {"rejection": _LEGACY_REJECTION}}}),
+        ("applyPatchApproval", {"decision": {"denied": {"rejection": _LEGACY_REJECTION}}}),
     ],
 )
 def test_every_codex_approval_request_is_refused_on_the_wire(tmp_path, fake_codex, method, expected):
@@ -1755,10 +1756,16 @@ def test_every_codex_approval_request_is_refused_on_the_wire(tmp_path, fake_code
     the reader thread writes back as the JSON-RPC `result` for each.
 
     The expected values are literals here on purpose, not `_APPROVAL_DENIALS`
-    imported from the source: a test that imports the constant it checks
-    cannot catch the constant being wrong, and being wrong here is a protocol
+    imported from the source: a test that imports the mapping it checks cannot
+    catch the mapping being wrong, and being wrong here is a protocol
     violation on the wire — there is no `"deny"` decision in this protocol,
     which is exactly the plausible guess these literals exist to catch.
+
+    The legacy pair references `_LEGACY_REJECTION` rather than repeating its
+    prose, which keeps the literal pinning the part that can violate the
+    protocol — the `decision` / `denied` / `rejection` nesting — while leaving
+    the wording free to be improved. What that string has to say is asserted
+    in test_the_two_legacy_methods_refuse_with_a_rejection_the_agent_can_act_on.
     """
     agent = _agent(tmp_path, fake_codex)
 
@@ -1816,3 +1823,33 @@ def test_a_refused_escalation_is_logged_at_warning(tmp_path, fake_codex, caplog)
     message = warnings[0].getMessage()
     assert "item/commandExecution/requestApproval" in message
     assert "codex" in message and "george" in message
+
+
+def test_the_two_legacy_methods_refuse_with_a_rejection_the_agent_can_act_on(tmp_path, fake_codex):
+    """`denied` over `abort` is only worth choosing because of this string.
+
+    `abort` tells the agent to stop until the user's next command; `denied`
+    tells it to try something else, and is the one refusal in the protocol
+    that carries text back to the model. That text is therefore the part that
+    makes adapting possible, so it is asserted here rather than left to the
+    mapping: one shared constant, the same on both methods, and the full
+    nesting the schema requires — `decision` (required on the response),
+    `denied` (the only key DeniedReviewDecision allows), `rejection` (required
+    on it, a string).
+
+    The prose itself is asserted on substance, not word for word, so it can be
+    improved without a test edit — but it cannot be gutted into a bare "no",
+    and it cannot leak BOS's own vocabulary at a model that has never heard of
+    a BEP.
+    """
+    agent = _agent(tmp_path, fake_codex)
+
+    refused_exec = agent._deny_approval("execCommandApproval", {"command": ["sudo", "true"]})
+    refused_patch = agent._deny_approval("applyPatchApproval", {"patch": "..."})
+
+    assert refused_exec == {"decision": {"denied": {"rejection": _LEGACY_REJECTION}}}
+    assert refused_patch == refused_exec, "both legacy methods send the same refusal"
+
+    assert "unattended" in _LEGACY_REJECTION, "it says why no one can be asked"
+    assert "sandbox" in _LEGACY_REJECTION, "it says what the agent can still work within"
+    assert "BEP" not in _LEGACY_REJECTION and "§" not in _LEGACY_REJECTION, "model-facing text, not BOS jargon"

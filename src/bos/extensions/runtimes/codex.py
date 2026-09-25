@@ -117,6 +117,16 @@ _SANDBOX_AND_APPROVAL: dict[str, tuple[Sandbox, ApprovalMode]] = {
     "full-access": (Sandbox.full_access, ApprovalMode.auto_review),
 }
 
+# The `rejection` text the two legacy approval methods send back, shared so
+# both carry the same answer. Model-facing: the agent reads it mid-turn, so it
+# says why the request was refused and what the agent can still do, in the
+# agent's own terms — no BOS vocabulary, no section numbers.
+_LEGACY_REJECTION = (
+    "Denied: this agent runs unattended and has no way to ask a person to approve anything "
+    "beyond its sandbox, so every such request will be refused. Continue with what the "
+    "sandbox already allows."
+)
+
 # BEP 19 §3.5.4: the refusal for every approval request the protocol defines,
 # and the whole of BOS's Codex approval policy. Keyed only by method, with no
 # `permission` branch, because there is no level at which BOS can say yes:
@@ -139,26 +149,36 @@ _SANDBOX_AND_APPROVAL: dict[str, tuple[Sandbox, ApprovalMode]] = {
 # as the JSON-RPC `result`. Values below read out of the schema the shipped
 # binary generates (`codex app-server generate-json-schema`):
 #
+# Every vocabulary here offers a refusal that stops the turn and a refusal that
+# lets the agent carry on, and every entry below picks the second. A refused
+# escalation is not a turn failure: the agent is told no and left to finish
+# with what the sandbox already allows — the same reasoning as
+# `Agent._call_tool` (agent.py:900-911) returning the error string rather than
+# raising. Method by method:
+#
 # - The two `requestApproval` methods share a vocabulary where `decline` is
 #   "refused, the agent continues the turn" and `cancel` is "refused, and the
-#   turn is immediately interrupted". A refused escalation is not a turn
-#   failure, so `decline` — the same reasoning as `Agent._call_tool`
-#   (agent.py:900-911) returning the error string rather than raising.
+#   turn is immediately interrupted". Hence `decline`.
 # - `item/permissions/requestApproval` answers with a granted-permission
 #   profile rather than a decision. `GrantedPermissionProfile` has only the
 #   optional, nullable `fileSystem` and `network`, so `{}` is a valid profile
 #   that grants nothing.
-# - The two legacy methods use the older `ReviewDecision`, which has two
-#   refusals: `abort` ("the agent should not do anything until the user's next
-#   command") and `{"denied": {"rejection": …}}` ("should continue the session
-#   and try something else"). `abort` is sent here as the stricter of the two;
-#   note it is the legacy analogue of `cancel`, not of `decline`.
+# - The two legacy methods use the older `ReviewDecision`, whose two refusals
+#   are `abort` ("the agent should not do anything until the user's next
+#   command") and `DeniedReviewDecision` ("should not execute it, but it
+#   should continue the session and try something else"). `denied` is the
+#   legacy analogue of `decline` and `abort` the analogue of `cancel`, so
+#   `denied` — and it is the one refusal in this protocol that carries text
+#   back to the model, which is the point of choosing it: an agent told why
+#   can adapt, where one told only "no" cannot. The `decision` wrapper is
+#   required and `DeniedReviewDecision` is `additionalProperties: false`, so
+#   the whole response is exactly the three nested keys below.
 _APPROVAL_DENIALS: dict[str, JsonObject] = {
     "item/commandExecution/requestApproval": {"decision": "decline"},
     "item/fileChange/requestApproval": {"decision": "decline"},
     "item/permissions/requestApproval": {"permissions": {}},
-    "execCommandApproval": {"decision": "abort"},
-    "applyPatchApproval": {"decision": "abort"},
+    "execCommandApproval": {"decision": {"denied": {"rejection": _LEGACY_REJECTION}}},
+    "applyPatchApproval": {"decision": {"denied": {"rejection": _LEGACY_REJECTION}}},
 }
 
 # How long a turn (or aclose(), across all of them) waits for the native side

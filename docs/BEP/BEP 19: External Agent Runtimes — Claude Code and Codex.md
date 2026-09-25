@@ -368,10 +368,12 @@ There is no `permission` argument and no per-level branch: `_deny_approval` refu
 | `item/commandExecution/requestApproval` | `{"decision": "decline"}` | `decline` = refused, the agent continues the turn; `cancel` would refuse *and* interrupt the turn |
 | `item/fileChange/requestApproval` | `{"decision": "decline"}` | same vocabulary |
 | `item/permissions/requestApproval` | `{"permissions": {}}` | not a `decision` at all — the response is a granted-permission profile, whose `fileSystem` and `network` are both optional, so `{}` grants nothing |
-| `execCommandApproval` (legacy) | `{"decision": "abort"}` | the older `ReviewDecision`, which has two refusals: `abort` ("do nothing until the user's next command") and `{"denied": {"rejection": …}}` ("continue the session and try something else"). `abort` is sent as the stricter; note it is the legacy analogue of `cancel`, not of `decline` |
-| `applyPatchApproval` (legacy) | `{"decision": "abort"}` | same |
+| `execCommandApproval` (legacy) | `{"decision": {"denied": {"rejection": …}}}` | the older `ReviewDecision`, which also has two refusals: `abort` ("do nothing until the user's next command") and `DeniedReviewDecision` ("should not execute it, but it should continue the session and try something else"). `denied` is the legacy analogue of `decline`, `abort` of `cancel` |
+| `applyPatchApproval` (legacy) | `{"decision": {"denied": {"rejection": …}}}` | same |
 
-A refused escalation is not a turn failure, which is why the two `decision`-based current methods get `decline` rather than `cancel` — the agent is told no and left to finish with what it can do.
+Every vocabulary above offers a refusal that stops the turn and a refusal that lets the agent carry on, and every row picks the second: a refused escalation is not a turn failure, and the agent should be left to finish with what the sandbox already allows.
+
+`denied` is also the one refusal in the protocol that carries text back to the model, and that text is the reason to prefer it over `abort`: an agent told *why* it was refused and what it may still do can adapt, where one told only "no" cannot. Both legacy methods send the same string, from a single module constant (`_LEGACY_REJECTION`). It is model-facing, so it is written in the agent's terms — that the agent runs unattended, that no one can be asked, and that it should continue within the sandbox — and carries no BOS vocabulary and no section numbers.
 
 Two further properties of the seam constrain the handler. It is handed **every** server-to-client request, not only approvals: the other five (`item/tool/call`, `item/tool/requestUserInput`, `mcpServer/elicitation/request`, `attestation/generate`, `account/chatgptAuthTokens/refresh`) fall through to `{}`, exactly as the vendor default answers them, and widening that is out of this section's scope. And it is **synchronous**, called on the vendor's single stdout reader thread rather than the event loop, so it must never block — that thread is the sole consumer of the child's stdout, and stalling it stalls every notification and every response for every turn.
 
