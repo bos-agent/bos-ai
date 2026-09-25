@@ -182,22 +182,27 @@ async def _agent_capabilities(ws, agent_kind: str, agent_cfg: dict[str, Any] | N
     try:
         agent = await harness.create_agent(agent_kind, agent_cfg=agent_cfg)
 
-        from bos.core.agent import Agent
+        from bos.core.agent import Agent, ExternalRuntime
 
         if not isinstance(agent, Agent):
             # BEP 19 §3.3.1. An external runtime has no plugins, no resolved
             # ToolSet and no prompt provider; the lines below read exactly those.
-            # Report what it does have, from the config it was built with.
-            cfg = getattr(agent, "cfg", {}) or {}
+            # Report what it does have, from `resolved_config` — the *parsed*
+            # config, so an absolute `cwd` and a validated `permission`, not the
+            # raw input the constructor was handed.
+            assert isinstance(agent, ExternalRuntime)  # create_agent builds nothing else down this branch
+            cfg = dict(agent.resolved_config)
             mcp_tools_raw = cfg.get("mcp_tools", [])
             if isinstance(mcp_tools_raw, (list, tuple)):
                 mcp_tools: Any = sorted(mcp_tools_raw)
             else:
-                # An ordinary config typo (e.g. `mcp_tools = 7`) must be reported,
-                # not crash `boscli inspect` with an unhandled TypeError out of
-                # sorted() — strict validation of this shape is parse_external_config's
-                # job (BEP 19 §3.4), which nothing wires into this path yet.
+                # `parse_external_config` (BEP 19 §3.4) rejects this shape, and
+                # the two runtimes both go through it — so what is left is a
+                # third-party ExternalRuntime whose `resolved_config` answers
+                # with something else. That must be reported, not crash `boscli
+                # inspect` with an unhandled TypeError out of sorted().
                 mcp_tools = [f"<malformed: expected a list, got {type(mcp_tools_raw).__name__} {mcp_tools_raw!r}>"]
+            unavailable = cfg.get("mcp_tools_unavailable") or []
             return {
                 "kind": agent_kind,
                 "name": agent.name,
@@ -205,6 +210,10 @@ async def _agent_capabilities(ws, agent_kind: str, agent_cfg: dict[str, Any] | N
                 "cwd": str(cfg.get("cwd", ".")),
                 "permission": cfg.get("permission"),
                 "mcp_tools": mcp_tools,
+                # Names the agent asks for that the host has no `ep_tool` for
+                # (BEP 19 §3.8): the MCP server would warn and skip them, but it
+                # is built lazily on the first turn and `inspect` runs none.
+                "mcp_tools_unavailable": sorted(unavailable) if isinstance(unavailable, (list, tuple)) else [],
                 "plugins": [],
                 "tools": {},
                 "skills": {},
@@ -414,6 +423,10 @@ def _render_agent(console, a: dict[str, Any]) -> None:
         console.print(f"  permission:   {a.get('permission') or '—'}")
         mcp_tools = ", ".join(a.get("mcp_tools", [])) or "—"
         console.print(f"  mcp_tools:    {mcp_tools}")
+        # Only when there are any: an always-present "—" line would be noise on
+        # every healthy agent, and this one is a warning, not a field.
+        if unavailable := a.get("mcp_tools_unavailable"):
+            console.print(f"  [yellow]unavailable:  {', '.join(unavailable)} (no such tool is registered)[/]")
     else:
         console.print(f"  model:        {a.get('model') or '— (set agent.defaults.model or BOS_MODEL)'}")
     plugins = a.get("plugins", [])

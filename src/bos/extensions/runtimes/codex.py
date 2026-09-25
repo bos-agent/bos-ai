@@ -40,6 +40,14 @@ there says so: it goes through ``_ensure_client`` like everything else, so on
 a cold agent the read is what spawns the ``codex app-server`` child, and under
 the default ``auth="subscription"`` it can fail on the ``account()`` preflight
 — a failure about the login, not about the transcript.
+
+The other thing hanging off ``_ensure_client`` is ``_mcp_egress_config`` (Task
+10, BEP 19 §3.8), which hands the host's selected ``ep_tool``s to Codex: it
+starts BOS's one loopback MCP server and tells every thread of this agent to
+connect to it, carrying a per-agent bearer token. Everything else this module
+sends Codex is a setting or a prompt; this is the one thing the model can
+*call*. It stays lazy the whole way down: an agent whose ``mcp_tools`` is empty
+never so much as asks the harness for a server, so no port is bound for it.
 """
 
 from __future__ import annotations
@@ -118,6 +126,10 @@ from bos.extensions.runtimes._shared import (
     parse_external_config,
     read_native_session_id,
 )
+
+# Safe at module scope: `mcp_egress` defers every third-party import into the
+# method that needs it, so naming it here costs nothing and requires no extra.
+from bos.extensions.runtimes.mcp_egress import unregistered_tools
 
 logger = logging.getLogger(__name__)
 
@@ -314,6 +326,28 @@ _UNKNOWN_FILE_MIME_TYPE = "application/octet-stream"
 #   the child's stdout, so anything slow there stalls every notification and
 #   every response for every turn, with no deadline in reach. The bound is
 #   that it cannot be slow — see the constraint recorded on the method.
+
+
+# The name BOS's loopback tool server takes in Codex's `[mcp_servers.<name>]`
+# namespace (BEP 19 §3.8). It is a deliberate choice, because `config=` is an
+# override *merged over* the operator's own `~/.codex/config.toml` rather than
+# a replacement, so this name is shared with whatever they already have there.
+# Measured against codex-cli 0.145.0 with a throwaway CODEX_HOME, via the CLI's
+# own `-c` flag (see `_mcp_egress_config` for why that is the stand-in):
+#
+# - the merge is per key, even for a whole-table override: overriding
+#   `mcp_servers.bos` wholesale with a `{url, http_headers}` table left a
+#   `bearer_token_env_var` from config.toml in place on the merged entry, so a
+#   collision with an HTTP server of the same name means Codex carries the
+#   operator's credential keys alongside the header below.
+# - a collision with a *stdio* server of the same name fails the whole config
+#   load — "url is not supported for stdio in `mcp_servers.bos`" — which
+#   takes the turn with it rather than degrading.
+#
+# "bos" rather than something engineered to not collide: this is the host's own
+# name, an operator reading it in their Codex config should recognise it
+# immediately, and the collision that actually matters is the loud one.
+_MCP_SERVER_NAME = "bos"
 
 
 def _content_to_codex_input(content: MessageContent) -> Input | str:
@@ -562,6 +596,10 @@ class CodexAgent:
         self._config = parse_external_config(dict(cfg), runtime="codex", workspace=Path(workspace))
         self._client: AsyncCodex | None = None
         self._client_lock = asyncio.Lock()
+        # The `[mcp_servers.<name>]` override every thread of this agent is
+        # started/resumed with, or None when `mcp_tools` is empty and no server
+        # was ever asked for. Built once by _ensure_client, under the same lock.
+        self._mcp_config: JsonObject | None = None
         self._stop_requested = asyncio.Event()
         # chat_id -> the task consuming that chat's in-flight turn (BEP
         # §3.10.1's busy guard). Reserved (value None) the instant run() is
@@ -590,6 +628,13 @@ class CodexAgent:
                 "auth": self._config.auth,
                 "timeout_seconds": self._config.timeout_seconds,
                 "mcp_tools": list(self._config.mcp_tools),
+                # The subset of `mcp_tools` the host has no `ep_tool` for, from
+                # the same predicate the MCP server's own warn-and-skip uses.
+                # Computed here rather than read back off the server because
+                # there may be no server: `_ensure_client` is lazy, so `boscli
+                # inspect` — which builds an agent and runs no turn — would
+                # otherwise never see the mismatch it exists to surface.
+                "mcp_tools_unavailable": list(unregistered_tools(self._config.mcp_tools)),
                 "native_options": dict(self._config.native_options),
             }
         )
@@ -607,6 +652,12 @@ class CodexAgent:
         """
         async with self._client_lock:
             if self._client is None:
+                # Ahead of the client, not after it: the egress can fail (no
+                # `mcp` installed, a harness already torn down), and a client
+                # built first would be an orphan that _preflight_auth below may
+                # already have spawned a child for. Inside the lock so two
+                # concurrent turns register one grant, not two.
+                self._mcp_config = await self._mcp_egress_config()
                 client: AsyncCodex = _CODEX_FACTORY(CodexConfig())
                 # BEP 19 §3.5.4, and before _preflight_auth below, because that
                 # is the first call that can spawn the child and so the first
@@ -626,6 +677,61 @@ class CodexAgent:
                     await self._preflight_auth(client)
                 self._client = client
             return self._client
+
+    async def _mcp_egress_config(self) -> JsonObject | None:
+        """Start BOS's loopback MCP server and return the Codex config override
+        that points this agent's threads at it (BEP 19 §3.8) — or None when
+        the agent listed no tools to expose.
+
+        That empty case does not merely skip the override: it never calls the
+        ``mcp`` accessor at all (§3.1, the lazy half of §7.7). The accessor
+        (``AgentHarness._ensure_tool_mcp_server``) *builds* the server as a
+        side effect of being asked, so calling it and discarding the answer
+        would bind a loopback port for every agent instead of only the ones
+        that asked for one.
+
+        Which tools the server actually grants is its decision, not this one's:
+        ``register_agent`` warns about and skips a name ``ep_tool`` does not
+        have. This method does not re-derive that — :attr:`resolved_config`
+        reports the same set from the same predicate
+        (``mcp_egress.unregistered_tools``), so an operator sees the gap
+        through ``boscli inspect`` on an agent that has never run a turn.
+
+        The bearer token is minted per agent and travels only as a request
+        header. Three vendor notes, all measured against codex-cli 0.145.0
+        with a throwaway ``CODEX_HOME`` — through the CLI's own ``-c`` flag,
+        which is the observable stand-in for this ``config=`` argument (the
+        app-server schema documents ``ThreadStartParams.config`` as nothing but
+        a free-form object, so that the two are one channel is inference, not
+        measurement; Task 11's manual checklist carries the live check):
+
+        - ``http_headers`` is what carries it. ``codex mcp list`` reports a
+          server configured this way as ``Auth: Bearer token``, and an invented
+          key on the same server as ``Auth: Unsupported``.
+        - **Not** ``bearer_token``. It is not a literal-token key at all, and
+          it is not ignored either: ``-c mcp_servers.probe.bearer_token="x"``
+          fails the whole config load with "bearer_token is not supported for
+          streamable_http".
+        - **Not** ``bearer_token_env_var``, though it is the only auth option
+          ``codex mcp add`` offers. It names an environment variable, and the
+          only env BOS controls here is ``CodexConfig(env=…)``, fixed when the
+          client is constructed — which, since this runs just before that,
+          is before the token exists.
+        """
+        if not self._config.mcp_tools:
+            return None
+        server = self._mcp()
+        await server.start()
+        token = server.register_agent(self._kind, self._config.mcp_tools)
+        # Annotated, not inferred: `JsonObject` is `dict[str, JsonValue]` and
+        # `dict` is invariant in its value type, so an unannotated nested literal
+        # infers as `dict[str, dict[str, ...]]` and will not assign to it.
+        config: JsonObject = {
+            "mcp_servers": {
+                _MCP_SERVER_NAME: {"url": server.url, "http_headers": {"Authorization": f"Bearer {token}"}}
+            }
+        }
+        return config
 
     def _deny_approval(self, method: str, params: JsonObject | None) -> JsonObject:
         """Refuse every escalation ``codex app-server`` asks for (BEP 19 §3.5.4).
@@ -777,6 +883,11 @@ class CodexAgent:
             "model": self._config.model,
             "developer_instructions": self._config.system_prompt,
             "base_instructions": self._config.base_instructions,
+            # BEP 19 §3.8. Both thread_start and thread_resume take it, so a
+            # resumed chat reaches the same tools a fresh one does. None is the
+            # vendor's own default for the parameter, and is what an agent with
+            # no `mcp_tools` passes.
+            "config": self._mcp_config,
         }
         if native_session_id is None:
             thread = await self._bounded_setup(
