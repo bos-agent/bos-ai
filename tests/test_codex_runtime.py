@@ -685,7 +685,7 @@ def _arm_notifications(fake_codex, notifications: list[Any]) -> None:
 def _command_item(item_id: str, command: str, *, status: CommandExecutionStatus) -> ThreadItem:
     # `cwd` is a `LegacyAppPathString` RootModel, not a `str`; a bare literal
     # validates at runtime but is a pyright error, so it is wrapped here once
-    # rather than at each of the five call sites.
+    # rather than at each of the six call sites.
     return ThreadItem(
         CommandExecutionThreadItem(
             id=item_id, command=command, command_actions=[],

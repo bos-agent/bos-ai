@@ -193,8 +193,8 @@ class BosApp:
 
         **It is the conversation, not the work: user and assistant messages
         only, no tool activity.** A runtime's tool calls, results, reasoning
-        and file edits are not projected, because a BOS ``Message`` carries
-        tool activity as a *pair* — an assistant message advertising
+        and file edits are not projected, because BOS represents tool
+        activity as a *pair of messages* — an assistant message advertising
         ``tool_calls``, then a ``role="tool"`` message whose ``tool_call_id``
         matches it — and a native transcript has no such pairing, so building
         one would mean inventing call ids the runtime never issued. BOS has

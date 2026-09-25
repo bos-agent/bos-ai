@@ -1498,7 +1498,7 @@ class CodexAgent:
         and neither is a bug in BOS. ``source="bos"`` is the read BOS stands
         behind.
 
-        Three behaviours worth stating outright, because each is a place the
+        Four behaviours worth stating outright, because each is a place the
         honest answer and the convenient one differ:
 
         - **No native session means no transcript, not a missing one.**
