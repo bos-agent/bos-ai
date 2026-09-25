@@ -16,8 +16,11 @@ one at a time.
 
 from __future__ import annotations
 
+import asyncio
 import io
 import logging
+import time
+from pathlib import Path
 
 import pytest
 from test_external_agent_seam import _write_workspace
@@ -43,9 +46,13 @@ def _agent(tmp_path, fake_codex, *, mcp, **cfg):
 
     `tests/test_codex_runtime.py`'s own `_agent` hardcodes `mcp=lambda: None`,
     which is right there — no test in that file reaches the accessor — and
-    useless here, where the accessor *is* the subject. `fake_codex` is a
-    required parameter (not read) so every caller is guaranteed the
-    `_CODEX_FACTORY` patch is live before the agent builds a client.
+    useless here, where the accessor *is* the subject.
+
+    `fake_codex` is positional and unread, so that passing it is the default
+    and every caller is reminded the `_CODEX_FACTORY` patch has to be live
+    before the agent builds a client. Exactly one caller passes `None`, and it
+    means the opposite deliberately: the vendor-binary test below wants the
+    real `AsyncCodex`, and requesting the fixture would have patched it away.
     """
     from bos.core.defaults.structured_validator import JsonSchemaValidator
     from bos.extensions.runtimes.codex import CodexAgent
@@ -72,17 +79,17 @@ def _never_called():
     raise AssertionError("the MCP server accessor was called, and calling it is what builds the server")
 
 
-async def _list_tools(url: str, authorization: str) -> list[str]:
-    """`tools/list` against *url*, sending *authorization* verbatim.
+async def _list_tools(url: str, token: str) -> list[str]:
+    """`tools/list` against *url*, presenting *token* the way Codex would.
 
-    Verbatim, not re-wrapped from a token, because the header value is exactly
-    what this task builds: a test that rebuilt `f"Bearer {token}"` itself would
-    pass on a config that told Codex to send something else.
+    *token* is read out of the `CodexConfig(env=…)` the runtime built, not
+    invented by the test, so this fails if the runtime puts a different value
+    in the variable its config override names.
     """
     from mcp import ClientSession
     from mcp.client.streamable_http import create_mcp_http_client, streamable_http_client
 
-    async with create_mcp_http_client(headers={"Authorization": authorization}) as http_client:
+    async with create_mcp_http_client(headers={"Authorization": f"Bearer {token}"}) as http_client:
         async with streamable_http_client(url, http_client=http_client) as (read, write):
             async with ClientSession(read, write) as session:
                 await session.initialize()
@@ -94,8 +101,9 @@ async def test_the_thread_config_opens_the_door_to_exactly_the_agents_tools(
     tmp_path, fake_codex, host_tools, caplog
 ):
     """The whole chain in one, against a real server: the parsed `mcp_tools`
-    tuple -> `register_agent` -> a bearer token -> the `http_headers` Codex is
-    told to send -> a `tools/list` that answers with exactly the granted tools.
+    tuple -> `register_agent` -> a bearer token -> the environment variable
+    Codex is told to read it from -> a `tools/list` that answers with exactly
+    the granted tools.
 
     `mcp_tools` deliberately names one tool the host has and one it does not, so
     the granted set is a strict subset and the assertion below is an invariant
@@ -123,11 +131,18 @@ async def test_the_thread_config_opens_the_door_to_exactly_the_agents_tools(
         assert set(config) == {"mcp_servers"}
         assert set(config["mcp_servers"]) == {"bos-tools"}
         entry = config["mcp_servers"]["bos-tools"]
-        assert set(entry) == {"url", "http_headers"}
+        assert set(entry) == {"url", "bearer_token_env_var"}
         assert entry["url"] == server.url
-        assert set(entry["http_headers"]) == {"Authorization"}
 
-        granted = await _list_tools(entry["url"], entry["http_headers"]["Authorization"])
+        # The token is not in the config at all — it is in the child's
+        # environment, under the name the config points at. Both halves have to
+        # line up or the child authenticates with nothing.
+        env = fake_codex.instances[0].config.env or {}
+        var = entry["bearer_token_env_var"]
+        assert var.startswith("BOS_MCP_BEARER_"), "a name nothing else would set"
+        assert set(env) == {var}, "exactly the one variable the override names"
+
+        granted = await _list_tools(entry["url"], env[var])
         resolved = agent.resolved_config
         assert granted == sorted(set(resolved["mcp_tools"]) - set(resolved["mcp_tools_unavailable"]))
         assert granted == ["WiringAlpha"]
@@ -181,6 +196,110 @@ async def test_a_tool_the_host_does_not_have_is_reported_without_a_server_or_a_t
 
     assert agent.resolved_config["mcp_tools_unavailable"] == ["NoSuchTool"]
     assert fake_codex.instances == [], "reading the resolved config must not build a client"
+
+
+# ── The one test that spawns the real vendor binary ─────────────────────────
+
+
+def _codex_binary_or_skip() -> None:
+    """Skip unless the CLI this test spawns is actually installed.
+
+    `bos-ai[codex]` ships it (`openai-codex-cli-bin`) and the dev group installs
+    it, so it is present in this repo — but the client resolves it at spawn
+    time, from the package or `PATH`, and a checkout without the extra has
+    neither. Asking the SDK's own resolver, private though it is, means the skip
+    matches exactly the decision the client would have made; if that private
+    name ever moves, the answer here is still "skip", not "error".
+    """
+    try:
+        from openai_codex.client import CodexConfig, _resolve_codex_bin
+
+        if not Path(_resolve_codex_bin(CodexConfig())).exists():
+            pytest.skip("the codex CLI binary is not installed")
+    except pytest.skip.Exception:
+        raise
+    except Exception as exc:
+        pytest.skip(f"the codex CLI binary could not be resolved: {exc}")
+
+
+@pytest.mark.asyncio
+async def test_the_real_codex_child_reads_the_override_and_lists_the_tool(tmp_path, host_tools, monkeypatch):
+    """The only thing here a double cannot vouch for, so it is the only test
+    that spawns `codex app-server` for real (BEP 19 §7.22, §8.2).
+
+    `thread_start(config=…)` is a wire format the SDK does not model — its
+    `ThreadStartParams.config` is a bare `dict[str, Any]` with no description —
+    and every other check on it, including this file's, asserts a dict BOS
+    built against a server BOS also wrote. That is the shape this project has
+    been bitten by: a green suite over doubles vouching for something no real
+    provider would accept. Twice on this branch the key in that dict was wrong.
+
+    So: a real child, reading a real override, authenticating against a real
+    `BosToolMcpServer` with the token out of its own environment, and listing
+    exactly the granted tool. No login is needed — `thread_start` does not
+    authenticate, which is why the first two thirds of §7.22 can live in CI
+    while the model actually *calling* the tool stays on Task 11's checklist.
+    Measured at well under a second; it is not on a slow path.
+
+    It is also the only test that can pin *which auth key* (F1): the throwaway
+    `config.toml` below holds a colliding operator entry carrying its own
+    `bearer_token_env_var`, which is the exact shape where `http_headers` — what
+    an earlier round shipped — loses. There the child sends the operator's
+    token, `_gate` answers 401, `thread_start` succeeds anyway and the agent
+    silently has no tools. Here that failure is an empty `listed`.
+
+    `auth="api_key"`, not the default, only to skip `_preflight_auth` — that
+    is a check about a login, and this test is about a wire format.
+    """
+    _codex_binary_or_skip()
+    from bos.extensions.runtimes.mcp_egress import BosToolMcpServer
+
+    listed: list[list[str]] = []
+
+    class Spy(BosToolMcpServer):
+        """Records what the child was told it may see. Not a double — the real
+        server, answering a real `tools/list`, with one line of bookkeeping."""
+
+        async def _on_list_tools(self, ctx, params):
+            result = await super()._on_list_tools(ctx, params)
+            listed.append(sorted(t.name for t in result.tools))
+            return result
+
+    # A throwaway CODEX_HOME so the machine's own ~/.codex/config.toml cannot
+    # reach the child — this asserts what BOS sends, not what is installed
+    # here. It reaches the child because `CodexConfig(env=…)` is additive, which
+    # is itself part of what is under test: the bearer variable the runtime sets
+    # must not displace the rest of the environment.
+    codex_home = tmp_path / "codex_home"
+    codex_home.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+    server = Spy()
+    # Started here, before the agent, only so the colliding entry below can name
+    # the same url. `_mcp_egress_config` calls start() too; it is idempotent.
+    await server.start()
+    monkeypatch.setenv("OPERATOR_TOKEN_VAR", "operator-token-BOS-never-issued")
+    (codex_home / "config.toml").write_text(
+        f'[mcp_servers.bos-tools]\nurl = "{server.url}"\nbearer_token_env_var = "OPERATOR_TOKEN_VAR"\n'
+    )
+
+    agent = _agent(tmp_path, None, mcp=lambda: server, auth="api_key", mcp_tools=["WiringAlpha"])
+    try:
+        await agent._thread_for("chat-1", turn_id="t1")
+        # Bounded so a build that regresses to a losing key fails in seconds
+        # rather than hanging; the passing path gets here in well under one.
+        deadline = time.monotonic() + 15
+        while not listed and time.monotonic() < deadline:
+            await asyncio.sleep(0.05)
+    finally:
+        await agent.aclose()
+        await server.aclose()
+
+    assert listed, (
+        "the child never listed tools: it did not read the override, or it authenticated with the "
+        "operator's token instead of ours and _gate refused it"
+    )
+    assert listed[0] == ["WiringAlpha"], "the child saw exactly this agent's grant"
 
 
 async def _inspect_george(tmp_path) -> dict:

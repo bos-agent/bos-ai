@@ -196,10 +196,12 @@ async def _agent_capabilities(ws, agent_kind: str, agent_cfg: dict[str, Any] | N
             if isinstance(mcp_tools_raw, (list, tuple)):
                 mcp_tools: Any = sorted(mcp_tools_raw)
             else:
-                # `parse_external_config` (BEP 19 §3.4) rejects this shape, and
-                # the two runtimes both go through it — so what is left is a
-                # third-party ExternalRuntime whose `resolved_config` answers
-                # with something else. That must be reported, not crash `boscli
+                # `CodexAgent` cannot produce this: it builds `resolved_config`
+                # from `parse_external_config` (BEP 19 §3.4), which rejects the
+                # shape. What is left is some other `ExternalRuntime` whose
+                # `resolved_config` answers with something else — and one of
+                # those is live in the suite today, `_FakeRuntime`, which
+                # returns its raw cfg. That must be reported, not crash `boscli
                 # inspect` with an unhandled TypeError out of sorted().
                 mcp_tools = [f"<malformed: expected a list, got {type(mcp_tools_raw).__name__} {mcp_tools_raw!r}>"]
             unavailable = cfg.get("mcp_tools_unavailable") or []

@@ -331,29 +331,25 @@ _UNKNOWN_FILE_MIME_TYPE = "application/octet-stream"
 
 # The name BOS's loopback tool server takes in Codex's `[mcp_servers.<name>]`
 # namespace (BEP 19 §3.8). Not cosmetic: `config=` is an override *merged over*
-# the operator's own `~/.codex/config.toml`, not a replacement, so this name is
-# shared with whatever they already have there, and a collision is a real
-# failure. Measured against codex-cli 0.145.0 with a throwaway CODEX_HOME, via
-# the CLI's own `-c` flag (see `_mcp_egress_config` for why that is the
-# stand-in):
+# the operator's own `~/.codex/config.toml`, not a replacement, and the merge is
+# per key even for a whole-table override — overriding `mcp_servers.<name>`
+# wholesale still left a `bearer_token_env_var` from config.toml in place on the
+# merged entry. So this name is shared, and a collision is a real failure.
+# Measured against the shipped codex-cli 0.156.1 with a throwaway CODEX_HOME:
 #
-# - the merge is per key even for a whole-table override: overriding
-#   `mcp_servers.<name>` wholesale with a `{url, http_headers}` table left a
-#   `bearer_token_env_var` from config.toml in place on the merged entry. So a
-#   collision with an HTTP server of the same name leaves Codex holding the
-#   operator's credential key next to the header below, and BOS cannot say
-#   which Authorization it then sends. If it sends theirs, `_gate` answers 401
-#   and the agent simply has no BOS tools — silently, since `_gate` does not
-#   log and the server runs with `access_log=False`.
-# - a collision with a *stdio* server of the same name is louder and worse: the
-#   whole config fails to load ("url is not supported for stdio in
-#   `mcp_servers.<name>`"), which fails the turn rather than degrading it.
+# - the credential half of that hazard is closed by the key
+#   `_mcp_egress_config` picks: whichever auth key the operator's colliding
+#   entry carries, the token the child actually sends is BOS's. It used not to
+#   be, which is what made this name urgent.
+# - a collision with a *stdio* server of the same name is what remains, and it
+#   is loud: the whole config fails to load ("url is not supported for stdio in
+#   `mcp_servers.<name>`"), failing the turn rather than degrading it.
 #
 # Hence "bos-tools" rather than the bare project name: it is the name the
 # server already reports for itself over MCP (`Server("bos-tools", …)` in
 # mcp_egress.py), so one server has one name on both sides of the wire, and it
 # is a good deal less likely than "bos" to be a table an operator already has.
-# Hyphens are fine — `-c mcp_servers.bos-tools={…}` parses as a dotted override.
+# Hyphens are fine — `mcp_servers.bos-tools` parses as a dotted override key.
 _MCP_SERVER_NAME = "bos-tools"
 
 
@@ -604,8 +600,10 @@ class CodexAgent:
         self._client: AsyncCodex | None = None
         self._client_lock = asyncio.Lock()
         # The `[mcp_servers.<name>]` override every thread of this agent is
-        # started/resumed with, or None when `mcp_tools` is empty and no server
-        # was ever asked for. Built once by _ensure_client, under the same lock.
+        # started/resumed with, or None when there was nothing servable and no
+        # server was ever asked for — an empty `mcp_tools`, or one whose every
+        # name the host has no `ep_tool` for. Built once by _ensure_client,
+        # under the same lock; see `_mcp_egress_config`.
         self._mcp_config: JsonObject | None = None
         self._stop_requested = asyncio.Event()
         # chat_id -> the task consuming that chat's in-flight turn (BEP
@@ -659,13 +657,19 @@ class CodexAgent:
         """
         async with self._client_lock:
             if self._client is None:
-                # Ahead of the client, not after it: the egress can fail (no
-                # `mcp` installed, a harness already torn down), and a client
-                # built first would be an orphan that _preflight_auth below may
-                # already have spawned a child for. Inside the lock so two
-                # concurrent turns register one grant, not two.
-                self._mcp_config = await self._mcp_egress_config()
-                client: AsyncCodex = _CODEX_FACTORY(CodexConfig())
+                # Ahead of the client for two reasons, and the second is now
+                # load-bearing. One: the egress can fail (no `mcp` installed, a
+                # harness already torn down), and a client built first would be
+                # an orphan that _preflight_auth below may already have spawned
+                # a child for. Two: the bearer token is minted here and reaches
+                # the child through `CodexConfig(env=…)`, which is fixed at
+                # construction — so it has to exist by this line. Inside the
+                # lock so two concurrent turns register one grant, not two.
+                self._mcp_config, mcp_env = await self._mcp_egress_config()
+                # `env=None`, not `{}`, when there is nothing to pass: the
+                # vendor's own default, and the same call this made before the
+                # egress existed.
+                client: AsyncCodex = _CODEX_FACTORY(CodexConfig(env=mcp_env or None))
                 # BEP 19 §3.5.4, and before _preflight_auth below, because that
                 # is the first call that can spawn the child and so the first
                 # moment a server request can arrive. The SDK's default handler
@@ -685,10 +689,11 @@ class CodexAgent:
                 self._client = client
             return self._client
 
-    async def _mcp_egress_config(self) -> JsonObject | None:
-        """Start BOS's loopback MCP server and return the Codex config override
-        that points this agent's threads at it (BEP 19 §3.8) — or None when
-        there is nothing for that server to serve this agent.
+    async def _mcp_egress_config(self) -> tuple[JsonObject | None, dict[str, str]]:
+        """Start BOS's loopback MCP server and return what points this agent's
+        threads at it (BEP 19 §3.8): the Codex config override, and the one
+        environment variable that override names. ``(None, {})`` when there is
+        nothing for that server to serve this agent.
 
         "Nothing to serve" is two cases, and neither one touches the ``mcp``
         accessor: an empty ``mcp_tools``, and an ``mcp_tools`` whose every name
@@ -711,26 +716,43 @@ class CodexAgent:
         :attr:`resolved_config`, so ``boscli inspect`` reports the same names on
         an agent that has never run a turn and so never reached this method.
 
-        The bearer token is minted per agent and travels only as a request
-        header. Three vendor notes, all measured against codex-cli 0.145.0
-        with a throwaway ``CODEX_HOME`` — through the CLI's own ``-c`` flag,
-        which is the observable stand-in for this ``config=`` argument (the
-        app-server schema documents ``ThreadStartParams.config`` as nothing but
-        a free-form object, so that the two are one channel is inference, not
-        measurement; Task 11's manual checklist carries the live check):
+        The bearer token is minted per agent and reaches the child through its
+        environment. Which key carries it is the one security-relevant choice
+        here, because the override is *merged* into the operator's own
+        ``~/.codex/config.toml`` (see ``_MCP_SERVER_NAME``) and the two sides
+        can name different auth keys for the same server. Measured against the
+        shipped codex-cli 0.156.1 (``codex_cli_bin/bin/codex``, the binary
+        ``bos-ai[codex]`` installs), by driving the real ``app-server`` through
+        this very ``config=`` argument against a spying loopback server and
+        reading the ``Authorization`` it actually arrived with:
 
-        - ``http_headers`` is what carries it. ``codex mcp list`` reports a
-          server configured this way as ``Auth: Bearer token``, and an invented
-          key on the same server as ``Auth: Unsupported``.
-        - **Not** ``bearer_token``. It is not a literal-token key at all, and
-          it is not ignored either: ``-c mcp_servers.probe.bearer_token="x"``
-          fails the whole config load with "bearer_token is not supported for
-          streamable_http".
-        - **Not** ``bearer_token_env_var``, though it is the only auth option
-          ``codex mcp add`` offers. It names an environment variable, and the
-          only env BOS controls here is ``CodexConfig(env=…)``, fixed when the
-          client is constructed — which, since this runs just before that,
-          is before the token exists.
+        - ``bearer_token_env_var`` wins against each of the three auth keys
+          Codex offers, which is the whole set: an operator entry carrying
+          ``http_headers``, one carrying ``env_http_headers``, and one carrying
+          ``bearer_token_env_var`` (the same key, so the per-key merge replaces
+          it) all end with the child sending *BOS's* token. So does no operator
+          entry at all. The variable name is freshly generated per client so
+          BOS's token cannot be read by some *other* ``[mcp_servers.*]`` entry
+          that happens to name the same var.
+        - **Not** ``http_headers``, which is what an earlier round of this shipped.
+          It is a recognized key (``codex mcp list`` reports ``Auth: Bearer
+          token``) and it wins a same-key collision — but against an operator
+          entry carrying ``bearer_token_env_var`` the child sent **theirs**,
+          not ours, and a 401 at ``_gate`` does not fail the turn, so the agent
+          would silently have had no BOS tools at all.
+        - **Not** ``bearer_token``. Not a literal-token key, and not ignored
+          either: it fails the whole config load with "bearer_token is not
+          supported for streamable_http" — the same message, character for
+          character, whether it arrives through ``config=`` or the CLI's
+          ``-c``, which is how the two were shown to be one channel.
+
+        The cost of the move is where the token rests: in the child's
+        environment, readable by the same user through ``/proc/<pid>/environ``,
+        rather than inside a JSON-RPC message. That is worse than the message
+        and better than ``CodexConfig(config_overrides=…)``, which would put it
+        on the command line for anyone's ``ps``. ``CodexConfig(env=…)`` is
+        additive, not a replacement (``client.py:257-259`` copies ``os.environ``
+        and updates it), so the child keeps everything else it needs to run.
         """
         unavailable = unregistered_tools(self._config.mcp_tools)
         for name in unavailable:
@@ -742,20 +764,20 @@ class CodexAgent:
             )
         available = [name for name in self._config.mcp_tools if name not in unavailable]
         if not available:
-            return None
+            return None, {}
         server = self._mcp()
         await server.start()
         # Only resolvable names, so register_agent has nothing to warn about.
         token = server.register_agent(self._kind, available)
+        # Fresh per client: the name is the only thing an operator's own
+        # `[mcp_servers.*]` entry could point at to read BOS's token out of the
+        # shared environment, and a name nothing else can guess cannot be.
+        env_var = f"BOS_MCP_BEARER_{uuid.uuid4().hex}"
         # Annotated, not inferred: `JsonObject` is `dict[str, JsonValue]` and
         # `dict` is invariant in its value type, so an unannotated nested literal
         # infers as `dict[str, dict[str, ...]]` and will not assign to it.
-        config: JsonObject = {
-            "mcp_servers": {
-                _MCP_SERVER_NAME: {"url": server.url, "http_headers": {"Authorization": f"Bearer {token}"}}
-            }
-        }
-        return config
+        config: JsonObject = {"mcp_servers": {_MCP_SERVER_NAME: {"url": server.url, "bearer_token_env_var": env_var}}}
+        return config, {env_var: token}
 
     def _deny_approval(self, method: str, params: JsonObject | None) -> JsonObject:
         """Refuse every escalation ``codex app-server`` asks for (BEP 19 §3.5.4).
