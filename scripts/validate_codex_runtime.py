@@ -1213,6 +1213,12 @@ def resolve_workspace(args: argparse.Namespace) -> None:
     if args.phase == "start":
         args.workspace = args.workspace or tempfile.mkdtemp(prefix="bos-codex-ws-")
         return
+    if args.phase == "nologin":
+        # Needs no earlier run: it answers item 12 on its own. Its own prefix, so a
+        # later bare `resume` (which globs bos-codex-ws-*) never picks this up
+        # instead of the `start` workspace — run_phase writes state here too.
+        args.workspace = args.workspace or tempfile.mkdtemp(prefix="bos-codex-nologin-ws-")
+        return
     if args.workspace:
         return
     for candidate in sorted(Path(tempfile.gettempdir()).glob("bos-codex-ws-*"), key=lambda p: -p.stat().st_mtime):
