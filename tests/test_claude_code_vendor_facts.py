@@ -3,9 +3,12 @@
 Every test but the last drives the real `claude` CLI bundled in claude-agent-sdk through
 `ClaudeSDKClient`, against the scripted model in tests/fake_anthropic.py: the model is
 fake; the CLI, the SDK and every permission decision are the vendor's. No BOS code runs.
-Measured against claude-agent-sdk 0.2.159 (bundled CLI 2.1.281). A failure here means
-the vendor moved under the design — re-measure and revisit the design before the
-assertion.
+Measured against claude-agent-sdk 0.2.159 (bundled CLI 2.1.281).
+
+When one fails, read what the CLI returned first — each assertion on what a tool did
+carries the tool results — and rule out the host: fact 6b needs socat on PATH and a bwrap
+that can actually start a sandbox. Only then does a failure mean the vendor moved under
+the design; re-measure and revisit the design before touching the assertion.
 """
 
 from __future__ import annotations
@@ -14,7 +17,6 @@ import asyncio
 import json
 import os
 import shutil
-import sys
 import threading
 import uuid
 from dataclasses import replace
@@ -80,6 +82,22 @@ def _hooks(hook: Any) -> dict[str, Any]:
     return {"PreToolUse": [HookMatcher(matcher=None, hooks=[hook])]}
 
 
+def _sandboxed(sandbox: dict[str, Any]) -> dict[str, Any]:
+    """``sandbox``, plus inline settings no other CLI shares.
+
+    The SDK sends ``sandbox`` inside inline ``--settings`` JSON, and the CLI writes that
+    to ``/tmp/claude-<uid>/claude-settings-<sha256 of the content, 16 hex>.json``
+    (``GPo``/``h9`` in CLI 2.1.281) — a path the bash sandbox binds, and a file the CLI
+    removes when it exits. Two CLIs started with byte-identical settings therefore share
+    one file, and when the first exits, the other's sandboxed commands fail for the rest
+    of its turn with ``bwrap: Can't find source path …`` (without the nonce, fact 6b
+    failed 5 and 7 times in two samples of 24 under 4-way parallel runs). A nonce makes
+    each call's settings, and so its file, its own. Nothing about this is test-specific:
+    BOS's own clients share the race unless their settings differ too.
+    """
+    return {"sandbox": sandbox, "settings": json.dumps({"env": {"BOS_TEST_NONCE": uuid.uuid4().hex}})}
+
+
 async def _turn(options: ClaudeAgentOptions) -> None:
     """One turn: prompt, then drain to the result. Bounded, so a CLI waiting on
     something that never comes fails the test instead of hanging the suite."""
@@ -106,8 +124,10 @@ def _tool_results(fake: FakeAnthropic) -> dict[str, str]:
 
 # Fact 2's control, measured per mode: an out-of-root Write the hook lets through, under a
 # can_use_tool that allows it — (landed, can_use_tool asked, the refusal the model saw).
-# The hook's deny is load-bearing only where the control lands; under dontAsk and auto
-# something else already refuses the call, so there the deny is not observable.
+# The hook's deny is load-bearing only where the control lands. Under dontAsk the mode
+# refuses the control itself, and under auto (against this fake) the classifier's failure
+# does, so there the deny is not load-bearing: the model still receives its reason, but
+# the write would have been refused anyway.
 _UNHOOKED_OUT_OF_ROOT_WRITE: dict[str, tuple[bool, bool, str | None]] = {
     "default": (True, True, None),
     "acceptEdits": (True, True, None),
@@ -149,10 +169,10 @@ async def test_fact_2_a_pretooluse_hook_sees_every_call_and_its_deny_holds_in_ev
 
     results = _tool_results(fake_anthropic)
     assert sorted(hooked) == ["tu_control", "tu_denied"], "the hook fires once per tool call"
-    assert not denied.exists()
+    assert not denied.exists(), results
     assert "outside the workspace" in results["tu_denied"], "the model is told the hook's reason"
     landed, consulted, refusal = _UNHOOKED_OUT_OF_ROOT_WRITE[mode]
-    assert control.exists() is landed
+    assert control.exists() is landed, results
     assert asked == ([str(control)] if consulted else [])
     if refusal is not None:
         assert refusal in results["tu_control"]
@@ -170,11 +190,13 @@ async def test_fact_3_can_use_tool_is_not_a_gate(tmp_path, fake_anthropic, mode,
     the callback being unwired. An in-root Read is asked about in neither mode.
 
     acceptEdits skips the callback for filesystem commands like ``touch``, not for every
-    Bash call: a script writing the same directory is still asked about, and refused."""
+    Bash call: a script writing the same directory is still asked about, and refused.
+    The script is a bare ``python3`` naming only an in-root path, so nothing in the command
+    points outside cwd; refused, it never runs, so the host need not have ``python3``."""
     ws, _ = _dirs(tmp_path)
     notes, written, touched, scripted = (ws / name for name in ("notes.txt", "written.txt", "touched", "scripted"))
     notes.write_text("in-root content")
-    script = f"{sys.executable} -c \"open({str(scripted)!r}, 'w').close()\""
+    script = f"python3 -c \"open({str(scripted)!r}, 'w').close()\""
     read = {"type": "tool_use", "id": "tu_read", "name": "Read", "input": {"file_path": str(notes)}}
     fake_anthropic.script([
         [_write("tu_write", written), _bash("tu_touch", f"touch {touched}"), _bash("tu_script", script), read]
@@ -187,12 +209,13 @@ async def test_fact_3_can_use_tool_is_not_a_gate(tmp_path, fake_anthropic, mode,
 
     await _turn(_options(ws, claude_cli_env(tmp_path, fake_anthropic), permission_mode=mode, can_use_tool=refuse))
 
-    assert sorted(asked) == asked_about
+    results = _tool_results(fake_anthropic)
+    assert sorted(asked) == asked_about, results
     applied = mode == "acceptEdits"
-    assert written.exists() is applied
-    assert touched.exists() is applied
-    assert not scripted.exists()
-    assert "in-root content" in _tool_results(fake_anthropic)["tu_read"]
+    assert written.exists() is applied, results
+    assert touched.exists() is applied, results
+    assert not scripted.exists(), results
+    assert "in-root content" in results["tu_read"]
 
 
 @pytest.mark.asyncio
@@ -227,7 +250,12 @@ async def test_fact_4_a_trusted_repos_allow_rules_switch_can_use_tool_off(tmp_pa
 
     def options(env: dict[str, str]) -> ClaudeAgentOptions:
         return _options(
-            ws, env, setting_sources=["project"], permission_mode=mode, can_use_tool=refuse, hooks=_hooks(hook),
+            ws,
+            env,
+            setting_sources=["project"],
+            permission_mode=mode,
+            can_use_tool=refuse,
+            hooks=_hooks(hook),
             stderr=stderr.append,
         )
 
@@ -236,10 +264,11 @@ async def test_fact_4_a_trusted_repos_allow_rules_switch_can_use_tool_off(tmp_pa
     allowed, denied = outside / "allowed.txt", outside / "denied.txt"
     fake_anthropic.script([[_write("tu_allowed", allowed), _write("tu_denied", denied)]])
     await _turn(options(env))
+    results = _tool_results(fake_anthropic)
     assert not [line for line in stderr if _UNTRUSTED in line], f"the CLI did not pick up the trust marker: {stderr}"
-    assert allowed.exists(), "the repo's allow rule approved the out-of-root Write"
+    assert allowed.exists(), f"the repo's allow rule approved the out-of-root Write: {results}"
     assert asked == [], "without asking can_use_tool, which would have refused"
-    assert not denied.exists(), "the hook's deny still holds"
+    assert not denied.exists(), f"the hook's deny still holds: {results}"
 
     asked.clear()
     stderr.clear()
@@ -251,7 +280,7 @@ async def test_fact_4_a_trusted_repos_allow_rules_switch_can_use_tool_off(tmp_pa
     read = str(Path(env["CLAUDE_CONFIG_DIR"], ".claude.json"))
     assert [line for line in stderr if _UNTRUSTED in line and read in line], stderr
     assert asked == [str(ignored)], "untrusted: the allow rule is ignored and can_use_tool is asked"
-    assert not ignored.exists()
+    assert not ignored.exists(), _tool_results(fake_anthropic)
 
 
 def _path_without(name: str, farm_root: Path) -> str:
@@ -297,10 +326,12 @@ async def test_fact_6_the_bash_sandbox_fails_open_when_a_dependency_is_missing(t
         return PermissionResultAllow()
 
     await _turn(
-        _options(ws, env, permission_mode="acceptEdits", sandbox=_SANDBOX, can_use_tool=allow, stderr=stderr.append)
+        _options(
+            ws, env, permission_mode="acceptEdits", can_use_tool=allow, stderr=stderr.append, **_sandboxed(_SANDBOX)
+        )
     )
     assert [line for line in stderr if _SANDBOX_DISABLED in line and "socat" in line], stderr
-    assert target.exists(), "the out-of-root touch ran unsandboxed"
+    assert target.exists(), f"the out-of-root touch ran unsandboxed: {_tool_results(fake_anthropic)}"
 
 
 @pytest.mark.asyncio
@@ -322,7 +353,7 @@ async def test_fact_6c_fail_if_unavailable_makes_the_cli_refuse_instead(tmp_path
         return PermissionResultAllow()
 
     with pytest.raises(ResultError, match="Sandbox required but unavailable"):
-        await _turn(_options(ws, env, permission_mode="acceptEdits", sandbox=sandbox, can_use_tool=allow))
+        await _turn(_options(ws, env, permission_mode="acceptEdits", can_use_tool=allow, **_sandboxed(sandbox)))
     assert fake_anthropic.requests == [], "refused at startup, before the first model call"
     assert not target.exists()
 
@@ -332,9 +363,7 @@ async def test_fact_6c_fail_if_unavailable_makes_the_cli_refuse_instead(tmp_path
     shutil.which("bwrap") is None or shutil.which("socat") is None, reason="needs bwrap and socat on PATH"
 )
 @pytest.mark.parametrize("mode", ["acceptEdits", "bypassPermissions"])
-async def test_fact_6b_with_its_dependencies_the_sandbox_confines_bash_writes_not_reads(
-    tmp_path, fake_anthropic, mode
-):
+async def test_fact_6b_with_its_dependencies_the_sandbox_confines_bash_writes_not_reads(tmp_path, fake_anthropic, mode):
     """Fact 6b, the positive half of fact 6. With bwrap and socat on PATH: an in-root
     touch lands (the sandbox runs commands at all); an out-of-root touch fails with
     "Read-only file system", under acceptEdits and bypassPermissions alike; a touch in
@@ -366,16 +395,17 @@ async def test_fact_6b_with_its_dependencies_the_sandbox_confines_bash_writes_no
     env = claude_cli_env(tmp_path, fake_anthropic)
     try:
         await _turn(
-            _options(ws, env, permission_mode=mode, sandbox=_SANDBOX, can_use_tool=refuse, stderr=stderr.append)
+            _options(ws, env, permission_mode=mode, can_use_tool=refuse, stderr=stderr.append, **_sandboxed(_SANDBOX))
         )
         results = _tool_results(fake_anthropic)
-        assert not [line for line in stderr if _SANDBOX_DISABLED in line], stderr
-        assert asked == []
-        assert inside.exists()
-        assert not escaped.exists()
-        assert "Read-only file system" in results["tu_out"]
-        assert not host_tmp.exists()
-        assert "outside content" in results["tu_read"]
+        seen = f"tool results: {results}; stderr: {stderr}"
+        assert not [line for line in stderr if _SANDBOX_DISABLED in line], seen
+        assert asked == [], seen
+        assert inside.exists(), seen
+        assert not escaped.exists(), seen
+        assert "Read-only file system" in results["tu_out"], seen
+        assert not host_tmp.exists(), seen
+        assert "outside content" in results["tu_read"], seen
     finally:
         host_tmp.unlink(missing_ok=True)
 

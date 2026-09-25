@@ -597,7 +597,7 @@ def fake_codex(monkeypatch):
 # Each of these, when set, moves some of the CLI's per-user config, data, cache or
 # state out of HOME — its Anthropic credentials lookup ($XDG_CONFIG_HOME/anthropic)
 # among them.
-_XDG_HOMES =("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME")
+_XDG_HOMES = ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME")
 
 
 @pytest.fixture
@@ -612,8 +612,9 @@ def fake_anthropic(monkeypatch):
     variables — ``CLAUDE_CODE_SESSION_ID``, ``CLAUDE_CODE_MESSAGING_SOCKET``,
     ``MCP_CONNECTION_NONBLOCKING`` among them, all read by the CLI — and a developer's
     shell may export ``ANTHROPIC_*`` credentials or an ``XDG_CONFIG_HOME`` holding real
-    ones. CI has none of them; scrubbing makes a local run match it. A test that needs
-    one of these set for the test process itself sets it after this fixture has run.
+    ones. CI is not clean either: GitHub's Ubuntu runner image sets ``XDG_CONFIG_HOME``.
+    Scrubbing makes every run hand the child the same environment. A test that needs one
+    of these set for the test process itself sets it after this fixture has run.
     """
     for name in list(os.environ):
         if name.startswith(("CLAUDE", "ANTHROPIC", "MCP_")) or name in _XDG_HOMES:
@@ -630,11 +631,13 @@ def claude_cli_env(tmp_path: Path, fake: FakeAnthropic) -> dict[str, str]:
     missing, so a second call with the same *tmp_path* returns the same environment —
     what a resumed session needs to find its transcript. With the ``fake_anthropic``
     fixture's scrub, the child's config, credentials and transcripts all resolve under
-    them, never in the developer's ``~/.claude`` or ``~/.claude.json``. With
-    ``CLAUDE_CONFIG_DIR`` set, the CLI keeps its global config — workspace trust
-    included — at ``<CLAUDE_CONFIG_DIR>/.claude.json``, not ``<HOME>/.claude.json``;
-    ``test_fact_4_*`` in test_claude_code_vendor_facts.py pins that. The API key is a
-    placeholder only the fake ever sees.
+    them, never in the developer's ``~/.claude`` or ``~/.claude.json``. In these fresh
+    directories the CLI keeps its global config — workspace trust included — at
+    ``<CLAUDE_CONFIG_DIR>/.claude.json``, not ``<HOME>/.claude.json``;
+    ``test_fact_4_*`` in test_claude_code_vendor_facts.py pins that. It is not the general
+    rule: the CLI prefers a legacy ``.config.json`` in the config directory when one exists,
+    and names the file ``.claude-custom-oauth.json`` when ``CLAUDE_CODE_CUSTOM_OAUTH_URL``
+    is set. The API key is a placeholder only the fake ever sees.
     """
     home, config = tmp_path / "home", tmp_path / "claude-config"
     home.mkdir(parents=True, exist_ok=True)

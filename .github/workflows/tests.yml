@@ -27,6 +27,22 @@ jobs:
       - name: Sync
         run: uv sync
 
+      # The Claude Code CLI's bash sandbox on Linux needs bubblewrap and socat on PATH.
+      # Without them the sandbox vendor facts (6, 6b, 6c in
+      # tests/test_claude_code_vendor_facts.py) skip, and so would every sandbox
+      # confinement test built on them — the security tests would never run in CI.
+      # Ubuntu 24.04 also restricts unprivileged user namespaces through AppArmor,
+      # which can leave bwrap installed but unable to start a sandbox; the sysctl lifts
+      # that for this VM, where the kernel has the setting. `apt-get update` first,
+      # because a hosted runner's package index can be stale.
+      - name: Install the bash sandbox's dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap socat
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+
       - name: Tests
         run: uv run pytest -q
 

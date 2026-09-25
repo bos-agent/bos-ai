@@ -102,7 +102,9 @@ the shim runs the same CLI as `python -m bos.cli`.
 | `bos-ai[search]` | `ddgs` + `beautifulsoup4`: the built-in web-search and page-fetch tools. The Tavily provider needs only an API key, not this extra |
 | `bos-ai[lark]` | The Lark/Feishu SDK |
 | `bos-ai[cli]` | The CLI's dependencies (implies `gateway`) |
-| `bos-ai[all]` | Everything |
+| `bos-ai[codex]` | `openai-codex`, which ships the `codex` binary via `openai-codex-cli-bin`, plus `mcp` 2.x for the MCP egress (implies `gateway`): the Codex external agent runtime (BEP 19) |
+| `bos-ai[claude-code]` | `claude-agent-sdk`, whose wheel bundles the `claude` CLI (~230 MB installed), plus `mcp` 2.x for the MCP egress (implies `gateway`): the Claude Code external agent runtime (BEP 19) |
+| `bos-ai[all]` | Every extra above except `codex` and `claude-code`: each bundles a vendor CLI binary, which `all` does not pull in |
 
 Built-in adapters whose extra is absent are **skipped with a warning naming the
 extra**, not an import error — so `import bos.exts` succeeds on any install. A

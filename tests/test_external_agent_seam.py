@@ -311,11 +311,12 @@ async def test_a_missing_extra_names_the_extra_to_install(tmp_path, monkeypatch)
 async def test_a_missing_vendor_module_names_the_extra(tmp_path, monkeypatch):
     """The friendly message is for a missing VENDOR module, and only that.
 
-    `bos.extensions.runtimes.codex` doesn't exist yet (Task 3 adds it), so
-    there is no real module whose own `import openai_codex` can fail here.
-    Standing in with a dotted path that *is* the vendor module makes
-    `_load_external_runtime` see the same `exc.name == "openai_codex"` that a
-    real codex.py's failed import would produce once that module exists.
+    The kind points straight at the blocked vendor module, so the import that
+    fails is `openai_codex` itself and `_load_external_runtime` sees
+    `exc.name == "openai_codex"` — the same name codex.py's own module-level
+    `from openai_codex import ...` raises when the extra is missing. Pointing at
+    codex.py instead would depend on whether an earlier test already left it in
+    `sys.modules`, in which case nothing would be imported and nothing would fail.
     """
     import sys
 
