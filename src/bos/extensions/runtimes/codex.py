@@ -16,12 +16,18 @@ install with neither extra never touches either.
 Stage 4 of 4 over ``CodexAgent``'s turn path: construction (Task 3), the
 client and thread lifecycle (Task 4), a turn that runs and persists itself
 including schema-validated structured output (BEP 12 semantics, via the
-injected ``StructuredValidator`` — BEP 19 §3.2, §3.9) (Task 5), and here —
-that turn is made observable: ``run()`` starts each native turn with
-``thread.turn()`` and consumes it through ``_emit_stream``, which streams
-``AsyncTurnHandle.stream()`` into BOS ``TurnEvent``s as they arrive rather
-than awaiting one final result (BEP 19 §3.9). Tasks 7-8 add interrupt/
-cooperative-stop/timeout and the approval handler on top of this.
+injected ``StructuredValidator`` — BEP 19 §3.2, §3.9) (Task 5), that turn made
+observable via ``_emit_stream``, which streams ``AsyncTurnHandle.stream()``
+into BOS ``TurnEvent``s as they arrive rather than awaiting one final result
+(BEP 19 §3.9) (Task 6), and here — the control surface: ``_run_turn`` races
+each native turn against a cooperative stop and ``timeout_seconds``, telling
+apart a caller's deadline (raised), BOS taking the turn away (kept, partial),
+and an unexplained vendor-side interruption (raised, as before), even though
+all three reach here as the same ``TurnStatus.interrupted``; ``run()``'s
+``self._in_flight`` busy guard rejects a second turn on a chat_id already
+running one; and ``aclose()`` interrupts every in-flight turn with a bounded
+wait before closing the client regardless (BEP 19 §3.10.2) (Task 7). Task 8
+adds the approval handler on top of this.
 """
 
 from __future__ import annotations
@@ -77,6 +83,7 @@ from bos.core.agent import (
     TurnEvent,
     TurnEventPhase,
     TurnEventSink,
+    _apply_async,
     _compact,
     content_as_parts,
 )
@@ -102,6 +109,13 @@ _SANDBOX_AND_APPROVAL: dict[str, tuple[Sandbox, ApprovalMode]] = {
     "workspace-write": (Sandbox.workspace_write, ApprovalMode.auto_review),
     "full-access": (Sandbox.full_access, ApprovalMode.auto_review),
 }
+
+# How long a turn (or aclose(), across all of them) waits for the native side
+# to confirm an interrupt before giving up on it — mirrors
+# Agent._ABANDON_TEARDOWN_SECONDS (agent.py) and the same reasoning: a codex
+# app-server that delays or ignores the request must not be able to hold a
+# stop, a timeout, or aclose() open (BEP 19 §3.10.2).
+_INTERRUPT_GRACE_SECONDS = 2.0
 
 
 def _content_to_codex_input(content: MessageContent) -> RunInput:
@@ -222,10 +236,17 @@ class TurnNotCompletedError(RuntimeError):
 
     Today that is only ``interrupted`` — ``failed`` is raised by the vendor
     SDK before it ever constructs a ``TurnResult`` (see the comment in
-    ``run()``), so it never reaches this exception. Carries ``turn_result``
-    so a caller has more than a message to work with: Task 7 needs the full
-    result to decide between raising and BOS's own cooperative-stop handoff
-    shape, not just the fact that something other than ``completed`` happened.
+    ``run()``), so it never reaches this exception. Carries ``turn_result`` so
+    a caller has more than a message to work with.
+
+    Not every ``interrupted`` turn raises this since Task 7 (BEP 19 §3.10.2).
+    A cooperative stop — ``request_stop()``, or the actor's own ``interrupt``
+    callback firing — returns the kept partial answer instead, mirroring
+    ``Agent``'s own contract for the same situation; a ``timeout_seconds``
+    expiry raises a plain ``TimeoutError`` instead, so a caller can catch a
+    deadline it imposed itself without also catching this. What is left for
+    this exception is an ``interrupted`` status this runtime never itself
+    asked for — see ``run()``'s own docstring for the full three-way split.
     """
 
     def __init__(self, message: str, *, turn_result: TurnResult) -> None:
@@ -259,6 +280,12 @@ class CodexAgent:
         self._client: AsyncCodex | None = None
         self._client_lock = asyncio.Lock()
         self._stop_requested = asyncio.Event()
+        # chat_id -> the task consuming that chat's in-flight turn (BEP
+        # §3.10.1's busy guard). Reserved (value None) the instant run() is
+        # entered, before any await can interleave a second call for the same
+        # chat_id; filled in once _run_turn creates the real task, so aclose()
+        # has something to wait on and a concurrent run() has something to see.
+        self._in_flight: dict[str, asyncio.Task[tuple[TurnResult, bool]] | None] = {}
 
     @property
     def name(self) -> str:
@@ -472,23 +499,39 @@ class CodexAgent:
         chat_id: str,
         turn_id: str,
         ctx_metadata: dict[str, Any] | None,
-    ) -> TurnResult:
+        interrupt: Callable[[], dict[str, Any] | Awaitable[dict[str, Any]] | None] | None = None,
+    ) -> tuple[TurnResult, bool]:
         """Consume ``handle.stream()``, translating each ``Notification`` into a
         ``TurnEvent`` for ``sink`` while accumulating exactly what
         ``openai_codex._run._collect_async_turn_result`` does, so the
-        ``TurnResult`` this returns is what a plain ``await handle.run()``
-        would have produced (BEP 19 §3.9) — the only difference is that the
-        caller also got to watch it happen.
+        ``TurnResult`` half of what this returns is what a plain ``await
+        handle.run()`` would have produced (BEP 19 §3.9) — the only difference
+        is that the caller also got to watch it happen.
 
         ``sink`` may be ``None`` (the common case for ``_HarnessAgentRunner``):
         the turn still streams and collects, translation is just skipped.
         Emitting is best-effort — a sink that raises must not end the turn,
         mirroring how ``Agent._emit_event`` guards ``event_sink.emit``
         (``agent.py``).
+
+        ``interrupt`` — ``AgentActor``'s poll-style callback (BEP 19 §3.9's
+        `interrupt` row) — is polled once per notification, exactly as
+        ``Agent._interrupt`` reads the same callback in ``agent.py``: a truthy
+        return "fires". Firing calls ``handle.interrupt()`` at most once (later
+        notifications are still consumed, so the stream can drain into its own
+        ``turn/completed`` instead of being abandoned mid-flight) and is
+        reported back via the second return value, so ``run()`` (Task 7) can
+        tell "BOS itself asked for this" apart from an interruption it never
+        requested, even though both end up as the same ``TurnStatus.interrupted``.
+        Unlike ``Agent``, a truthy return is not merged into any context —
+        there is no local turn context to merge it into — so a callback built
+        for steering (BOS's ``INTERRUPT_MESSAGE``) ends this turn rather than
+        injecting mid-turn; out of scope for Task 7, which only wires the stop.
         """
         items: list[ThreadItem] = []
         usage: ThreadTokenUsage | None = None
         completed: TurnCompletedNotification | None = None
+        interrupted_by_host = False
 
         # `AsyncTurnHandle.stream()` is annotated `-> AsyncIterator[Notification]`,
         # but its body is an `async def ... yield ...` function, so calling it
@@ -516,6 +559,11 @@ class CodexAgent:
                             await sink.emit(event)
                         except Exception:
                             logger.debug("Codex event sink emit error", exc_info=True)
+
+                if interrupt is not None and not interrupted_by_host and (await _apply_async(interrupt, {})):
+                    interrupted_by_host = True
+                    with contextlib.suppress(Exception):
+                        await handle.interrupt()
         finally:
             await stream.aclose()
 
@@ -524,16 +572,109 @@ class CodexAgent:
         turn = completed.turn
         _raise_for_failed_turn(turn)
 
-        return TurnResult(
-            id=turn.id,
-            status=turn.status,
-            error=turn.error,
-            started_at=turn.started_at,
-            completed_at=turn.completed_at,
-            duration_ms=turn.duration_ms,
-            final_response=_final_assistant_response_from_items(items),
-            items=items,
-            usage=usage,
+        return (
+            TurnResult(
+                id=turn.id,
+                status=turn.status,
+                error=turn.error,
+                started_at=turn.started_at,
+                completed_at=turn.completed_at,
+                duration_ms=turn.duration_ms,
+                final_response=_final_assistant_response_from_items(items),
+                items=items,
+                usage=usage,
+            ),
+            interrupted_by_host,
+        )
+
+    async def _run_turn(
+        self,
+        handle: AsyncTurnHandle,
+        sink: TurnEventSink | None,
+        *,
+        chat_id: str,
+        turn_id: str,
+        ctx_metadata: dict[str, Any] | None,
+        interrupt: Callable[[], dict[str, Any] | Awaitable[dict[str, Any]] | None] | None,
+    ) -> tuple[TurnResult, bool]:
+        """Consume one native turn, racing it against a cooperative stop and
+        ``timeout_seconds`` (BEP 19 §3.10.2) on top of ``_emit_stream``'s own
+        per-notification interrupt-callback poll.
+
+        Returns ``(result, interrupted_by_host)``. ``interrupted_by_host`` is
+        True when *this call* is why the turn ended early — a stop landing
+        here, or ``_emit_stream``'s own callback poll firing — as opposed to a
+        `timeout_seconds` expiry (raised, never returned) or a vendor-reported
+        `interrupted` this method never asked for. ``run()`` uses it to decide
+        between keeping a partial answer and raising, since the vendor's own
+        `TurnStatus.interrupted` cannot tell those apart by itself.
+
+        Registers the streaming task in ``self._in_flight[chat_id]`` for the
+        busy guard and for ``aclose()`` to find and wait on.
+        """
+        stream_task: asyncio.Task[tuple[TurnResult, bool]] = asyncio.ensure_future(
+            self._emit_stream(
+                handle, sink, chat_id=chat_id, turn_id=turn_id, ctx_metadata=ctx_metadata, interrupt=interrupt
+            )
+        )
+        self._in_flight[chat_id] = stream_task
+        stop_task = asyncio.ensure_future(self._stop_requested.wait())
+        try:
+            try:
+                async with asyncio.timeout(self._config.timeout_seconds):
+                    await asyncio.wait({stream_task, stop_task}, return_when=asyncio.FIRST_COMPLETED)
+            except TimeoutError as exc:
+                # Discard whatever _settle_interrupted comes back with: a
+                # timeout raises regardless (BEP 19 §3.10.2), so there is
+                # nothing to gain from waiting for a clean TurnResult — only
+                # from asking the native turn to stop before this returns.
+                with contextlib.suppress(Exception):
+                    await self._settle_interrupted(handle, stream_task)
+                raise TimeoutError(
+                    f"{self._config.runtime} runtime {self._kind!r}: turn {turn_id!r} for chat "
+                    f"{chat_id!r} exceeded timeout_seconds={self._config.timeout_seconds!r} and was "
+                    "interrupted"
+                ) from exc
+        finally:
+            stop_task.cancel()
+
+        if stream_task.done():
+            # Either it finished on its own, or it raced stop_task to the
+            # finish line and won — either way, nothing was abandoned.
+            return stream_task.result()
+
+        # self._stop_requested fired before the stream finished on its own:
+        # a cooperative stop landed mid-turn.
+        result = await self._settle_interrupted(handle, stream_task)
+        return result, True
+
+    async def _settle_interrupted(
+        self, handle: AsyncTurnHandle, stream_task: asyncio.Task[tuple[TurnResult, bool]]
+    ) -> TurnResult:
+        """Ask the vendor to stop, then give the stream a bounded window to
+        drain into the ``TurnResult`` that produces — rather than waiting it
+        out (BEP 19 §3.10.2, the brief's phrasing for `request_stop()`, applied
+        equally to a timeout's own best-effort interrupt). Shared by both
+        callers in :meth:`_run_turn` so "a native turn that ignores the
+        interrupt" is one code path, not two that could drift.
+
+        Raises if the native side never confirms within
+        ``_INTERRUPT_GRACE_SECONDS``: there is no ``TurnResult`` to hand back
+        in that case, and manufacturing one would misreport what happened.
+        """
+        with contextlib.suppress(Exception):
+            await handle.interrupt()
+        done, _ = await asyncio.wait({stream_task}, timeout=_INTERRUPT_GRACE_SECONDS)
+        if stream_task in done:
+            result, _ = stream_task.result()
+            return result
+        stream_task.cancel()
+        await asyncio.wait({stream_task}, timeout=_INTERRUPT_GRACE_SECONDS)
+        if stream_task.done() and not stream_task.cancelled():
+            stream_task.exception()  # consumed, so the loop does not log it as unretrieved
+        raise RuntimeError(
+            f"{self._config.runtime} runtime {self._kind!r}: turn {handle.id!r} did not respond to "
+            f"interrupt within {_INTERRUPT_GRACE_SECONDS}s"
         )
 
     async def ask(
@@ -598,119 +739,196 @@ class CodexAgent:
         nothing, so a half-validated exchange never looks like turn history
         the next resume can reason from.
 
-        A ``TurnStatus.interrupted`` result raises :class:`TurnNotCompletedError`
-        (carrying the ``TurnResult``) and commits nothing — right for today's
-        only source of it, `timeout_seconds` expiry (BEP 19 §7 criterion 20:
-        "... raises"). But Task 7 also makes `request_stop()` produce
-        `interrupted`, and BOS's own cooperative-stop contract for that case is
-        the opposite: `Agent.run` treats a stop as `turn_status="completed"`,
-        persists a handoff, and returns (`agent.py` `_StopRequested` handling
-        and `_close_with_handoff`) — it does not raise and discard the partial
-        answer. Task 7 must reopen this branch and choose, for a
-        cooperatively-stopped turn, between raising (as here) and building the
-        equivalent handoff-and-return shape; ``turn_result`` is attached
-        precisely so that decision has the real result to work with instead of
-        a bare message.
+        Ending early has three distinct causes that all surface from the
+        vendor as the same ``TurnStatus.interrupted``, so this method — not
+        the bare status — is what tells them apart, deciding as each happens
+        rather than guessing afterwards from the result alone (BEP 19 §3.10.2,
+        the decision Task 5 left open):
+
+        - **`timeout_seconds` expiry** is a deadline the *caller* asked for.
+          :meth:`_run_turn` interrupts the native turn and raises a fresh
+          ``TimeoutError`` (BEP 19 §7 criterion 20: "... raises"). Nothing is
+          committed: an answer cut off by the caller's own deadline is a
+          failure, not turn history.
+        - **A cooperative stop** — ``request_stop()`` racing the turn, or
+          ``AgentActor``'s own per-chat ``interrupt`` callback firing
+          (BEP 19 §3.9's `interrupt` row; polled inside ``_emit_stream``) — is
+          BOS taking the turn away, not the model or the caller failing.
+          ``Agent``'s own contract for the same situation
+          (``src/bos/core/agent/agent.py:648-657``, ``:831-836``) is to keep
+          what the turn established rather than raise and discard it —
+          persisting a handoff and returning. This mirrors that: it returns
+          normally, persists whatever ``final_response`` the turn had
+          produced, and reports ``finish_reason="interrupted"`` so the caller
+          can tell. It stops short of ``Agent``'s handoff *summary* — nothing
+          hands this runtime a ``Consolidator``, and BEP 19 defines none of
+          its own for it — so the kept content is the turn's own last answer,
+          not a paraphrase of what happened; Task 7's brief asks for exactly
+          this much and no more.
+        - **An unexplained `interrupted`** — the vendor reports it without
+          this call itself ever having asked for it — keeps Task 5/6's
+          original behaviour: raise :class:`TurnNotCompletedError` and commit
+          nothing. Nothing today produces this (the native session is private
+          to this one ``CodexAgent``), but a status this method did not ask
+          for is not one it should silently reinterpret as a stop.
+
+        Two concurrent turns on the same ``chat_id`` are rejected with a busy
+        ``RuntimeError`` rather than queued — the native session is
+        single-threaded (BEP 19 §3.10.1) — tracked via ``self._in_flight``,
+        which also gives :meth:`aclose` something to interrupt and wait on.
         """
         turn_id = turn_id or uuid.uuid4().hex
-        thread, _ = await self._thread_for(chat_id)
-        turn_kwargs = _compact(
-            model=(llm_args or {}).get("model"),
-            effort=(llm_args or {}).get("reasoning_effort"),
-            output_schema=schema,
-        )
-
-        codex_input = _content_to_codex_input(content)
-        structured_output: Any = None
-        structured_ok = False
-        retries = 0
-        while True:
-            try:
-                handle = await thread.turn(codex_input, **turn_kwargs)
-                result = await self._emit_stream(
-                    handle, event_sink, chat_id=chat_id, turn_id=turn_id, ctx_metadata=ctx_metadata
-                )
-            except Exception as exc:
-                # A native TurnStatus.failed is raised before a TurnResult is
-                # ever built, on both the plain and the streaming path:
-                # openai_codex._run's own _raise_for_failed_turn runs inside
-                # _collect_async_turn_result ahead of the `TurnResult(...)`
-                # call, and `_emit_stream` mirrors that exact check (this
-                # module's own `_raise_for_failed_turn`) ahead of its own
-                # `TurnResult(...)` call — so neither `thread.turn()` nor
-                # `_emit_stream` ever hands back a `TurnResult` for a failed
-                # turn; this method's own status check below is unreachable
-                # for `failed`. Re-wrapped here so the runtime/agent/turn_id/
-                # chat_id context this method would attach to a
-                # `TurnResult`-shaped failure is not lost on the one path a
-                # real vendor call actually takes. Applies on a retry turn
-                # too: a native failure while sending a correction message is
-                # a new native failure, not one more validation attempt to
-                # retry.
-                raise RuntimeError(
-                    f"{self._config.runtime} runtime {self._kind!r}: turn {turn_id!r} for chat "
-                    f"{chat_id!r} failed: {exc}"
-                ) from exc
-
-            if result.status is not TurnStatus.completed:
-                # The only status left that reaches here as a normal
-                # TurnResult is `interrupted` (see TurnNotCompletedError and
-                # this method's own docstring); `failed` is handled above,
-                # and is never returned as a TurnResult by the real SDK to
-                # begin with. Commits nothing, same reasoning as the raise
-                # above: neither is a real answer BOS should treat as turn
-                # history.
-                raise TurnNotCompletedError(
-                    f"{self._config.runtime} runtime {self._kind!r}: turn {turn_id!r} for chat "
-                    f"{chat_id!r} ended with status {result.status.value!r}",
-                    turn_result=result,
-                )
-
-            text = result.final_response or ""
-            if schema is None:
-                break
-            try:
-                structured_output = self._structured_validator.validate(text, schema)
-                structured_ok = True
-                break
-            except StructuredOutputError as e:
-                if retries >= max_schema_retries:
-                    # Exhausted: commits nothing, same as a native failure
-                    # above — an unvalidated reply is not the answer `schema=`
-                    # promised, so it is not turn history either.
-                    raise
-                retries += 1
-                codex_input = (
-                    f"Your previous response failed schema validation: {e}. Reply ONLY with JSON matching the schema."
-                )
-
-        output = structured_output if structured_ok else text
-        usage = result.usage.last.model_dump() if result.usage is not None else None
-
-        if self._chat_store is not None:
-            commit = await commit_external_turn(
-                self._chat_store,
-                chat_id,
-                turn_id=turn_id,
-                user_content=content,
-                response=text,
-                runtime=self._config.runtime,
-                native_session_id=thread.id,
-                native_turn_id=result.id,
-                usage=usage,
+        if chat_id in self._in_flight:
+            raise RuntimeError(
+                f"Agent {self._kind!r} already has a turn running on chat {chat_id!r}. "
+                f"A Codex thread is single-threaded; wait for the turn to finish."
             )
-            if commit_observer is not None:
-                observed = commit_observer(commit)
-                if inspect.isawaitable(observed):
-                    await observed
+        self._in_flight[chat_id] = None  # reserved synchronously — no await before this line
+        try:
+            thread, _ = await self._thread_for(chat_id)
+            turn_kwargs = _compact(
+                model=(llm_args or {}).get("model"),
+                effort=(llm_args or {}).get("reasoning_effort"),
+                output_schema=schema,
+            )
 
-        return external_agent_result(
-            output=output, structured=structured_ok, turn_id=turn_id, usage=usage, finish_reason=result.status.value
-        )
+            codex_input = _content_to_codex_input(content)
+            structured_output: Any = None
+            structured_ok = False
+            retries = 0
+            while True:
+                try:
+                    handle = await thread.turn(codex_input, **turn_kwargs)
+                    result, interrupted_by_host = await self._run_turn(
+                        handle,
+                        event_sink,
+                        chat_id=chat_id,
+                        turn_id=turn_id,
+                        ctx_metadata=ctx_metadata,
+                        interrupt=interrupt,
+                    )
+                except TimeoutError:
+                    raise
+                except Exception as exc:
+                    # A native TurnStatus.failed is raised before a TurnResult is
+                    # ever built, on both the plain and the streaming path:
+                    # openai_codex._run's own _raise_for_failed_turn runs inside
+                    # _collect_async_turn_result ahead of the `TurnResult(...)`
+                    # call, and `_emit_stream` mirrors that exact check (this
+                    # module's own `_raise_for_failed_turn`) ahead of its own
+                    # `TurnResult(...)` call — so neither `thread.turn()` nor
+                    # `_emit_stream` ever hands back a `TurnResult` for a failed
+                    # turn; this method's own status check below is unreachable
+                    # for `failed`. Re-wrapped here so the runtime/agent/turn_id/
+                    # chat_id context this method would attach to a
+                    # `TurnResult`-shaped failure is not lost on the one path a
+                    # real vendor call actually takes. Applies on a retry turn
+                    # too: a native failure while sending a correction message is
+                    # a new native failure, not one more validation attempt to
+                    # retry.
+                    raise RuntimeError(
+                        f"{self._config.runtime} runtime {self._kind!r}: turn {turn_id!r} for chat "
+                        f"{chat_id!r} failed: {exc}"
+                    ) from exc
+
+                if result.status is not TurnStatus.completed:
+                    if not (interrupted_by_host and result.status is TurnStatus.interrupted):
+                        # The only status left that reaches here as a normal
+                        # TurnResult is `interrupted` (see TurnNotCompletedError
+                        # and this method's own docstring); `failed` is handled
+                        # above, and is never returned as a TurnResult by the
+                        # real SDK to begin with. Commits nothing, same
+                        # reasoning as the raise above: neither is a real
+                        # answer BOS should treat as turn history.
+                        raise TurnNotCompletedError(
+                            f"{self._config.runtime} runtime {self._kind!r}: turn {turn_id!r} for chat "
+                            f"{chat_id!r} ended with status {result.status.value!r}",
+                            turn_result=result,
+                        )
+                    # BOS itself ended this turn early (see the docstring's
+                    # "cooperative stop" case) — keep what it produced instead
+                    # of raising. Never schema-checked below: the turn never
+                    # finished normally, so a validation failure here would
+                    # only replace one negative outcome with another that says
+                    # nothing truer about what the model actually produced.
+                    text = result.final_response or ""
+                    break
+
+                text = result.final_response or ""
+                if schema is None:
+                    break
+                try:
+                    structured_output = self._structured_validator.validate(text, schema)
+                    structured_ok = True
+                    break
+                except StructuredOutputError as e:
+                    if retries >= max_schema_retries:
+                        # Exhausted: commits nothing, same as a native failure
+                        # above — an unvalidated reply is not the answer `schema=`
+                        # promised, so it is not turn history either.
+                        raise
+                    retries += 1
+                    codex_input = (
+                        f"Your previous response failed schema validation: {e}. "
+                        "Reply ONLY with JSON matching the schema."
+                    )
+
+            output = structured_output if structured_ok else text
+            usage = result.usage.last.model_dump() if result.usage is not None else None
+
+            if self._chat_store is not None:
+                commit = await commit_external_turn(
+                    self._chat_store,
+                    chat_id,
+                    turn_id=turn_id,
+                    user_content=content,
+                    response=text,
+                    runtime=self._config.runtime,
+                    native_session_id=thread.id,
+                    native_turn_id=result.id,
+                    usage=usage,
+                )
+                if commit_observer is not None:
+                    observed = commit_observer(commit)
+                    if inspect.isawaitable(observed):
+                        await observed
+
+            return external_agent_result(
+                output=output,
+                structured=structured_ok,
+                turn_id=turn_id,
+                usage=usage,
+                finish_reason=result.status.value,
+            )
+        finally:
+            self._in_flight.pop(chat_id, None)
 
     async def aclose(self) -> None:
-        # Task 7 adds interrupting an in-flight turn before this closes the
-        # client — nothing here races a live run() yet. Closing the client, if
-        # one was ever built, is the whole of it today.
-        if self._client is not None:
-            await self._client.close()
+        """Interrupt every in-flight turn, then close the client regardless of
+        whether they wound down in time (BEP 19 §3.10.2).
+
+        Setting ``_stop_requested`` is enough to make each in-flight
+        :meth:`run` call interrupt its own turn and race it, exactly as
+        ``request_stop()`` does; this only adds waiting for them and the
+        client close. No *second* bound is layered on top of that wait: every
+        tracked task is already, by construction, racing ``_stop_requested``
+        through :meth:`_run_turn`, which itself never waits past
+        ``_INTERRUPT_GRACE_SECONDS`` past this line before giving up on a turn
+        that ignores the interrupt (:meth:`_settle_interrupted`) — an extra
+        ``timeout=`` here would only ever fire after that has already
+        happened, so it would be dead weight, not a second safety net. That
+        inner bound is what actually keeps harness teardown from blocking for
+        minutes on a model that is still thinking.
+
+        Also closes Task 4's hole: an ``aclose()`` racing an ``_ensure_client()``
+        still in flight no longer leaks a client. Both now take
+        ``_client_lock``, so this either finds no client built yet (nothing to
+        close), or waits for the one being built and closes that.
+        """
+        self._stop_requested.set()
+        tasks = [task for task in self._in_flight.values() if task is not None]
+        if tasks:
+            await asyncio.wait(tasks)
+        async with self._client_lock:
+            if self._client is not None:
+                await self._client.close()

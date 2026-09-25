@@ -196,6 +196,25 @@ async def serve_asgi(app):
 # of a hand-rolled stand-in silently drifting from it.
 
 
+class _Hang:
+    """Task 7: a sentinel placed in a FakeTurnHandle's armed notifications.
+
+    ``stream()`` pauses on it instead of yielding, simulating a turn still
+    being worked on by the vendor — nothing to test interrupt/stop/timeout/
+    busy/aclose against without one, since the existing notification list is
+    otherwise exhausted (and the fake done) faster than any of those can race
+    it. ``release`` — set directly by a test, standing in for the vendor
+    eventually confirming an interrupt — is what unblocks it; production
+    code's own ``handle.interrupt()`` call is recorded (``interrupted``) but
+    deliberately does *not* auto-release, so a test can also model a native
+    turn that ignores the interrupt entirely, which timeout and aclose() must
+    both tolerate without hanging.
+    """
+
+
+HANG = _Hang()
+
+
 class FakeTurnHandle:
     """Stands in for openai_codex.AsyncTurnHandle."""
 
@@ -203,9 +222,18 @@ class FakeTurnHandle:
         self._thread, self.id = thread, turn_id
         self._notifications, self._result = notifications, result
         self.interrupted = False
+        # See HANG. hang_reached lets a test `wait_for()` the pause reliably
+        # instead of guessing how many event-loop turns run() needs to get
+        # there; release is what ends it.
+        self.hang_reached = asyncio.Event()
+        self.release = asyncio.Event()
 
     async def stream(self):
         for notification in self._notifications:
+            if notification is HANG:
+                self.hang_reached.set()
+                await self.release.wait()
+                continue
             yield notification
 
     async def interrupt(self) -> None:
@@ -318,7 +346,12 @@ class FakeThread:
         # when nothing was armed at all.
         turn_id = result.id if result is not None else f"turn-{len(self._codex.turn_calls)}"
         notifications = self._codex.next_notifications or _default_turn_notifications(self.id, turn_id, result)
-        return FakeTurnHandle(self, turn_id, notifications, result)
+        handle = FakeTurnHandle(self, turn_id, notifications, result)
+        # Task 7: every handle ever created, in creation order, so a test can
+        # reach into an in-flight turn (e.g. via HANG above) without CodexAgent
+        # itself ever handing the handle back.
+        self._codex.turn_handles.append(handle)
+        return handle
 
     async def run(self, input: Any, **kwargs: Any) -> Any:
         handle = await self.turn(input, **kwargs)
@@ -345,8 +378,16 @@ class FakeAsyncCodex:
         self.next_result: Any = None
         self.next_results: list[Any] = []
         self.next_thread_read: Any = None
+        self.turn_handles: list[FakeTurnHandle] = []
+        # Task 7: an aclose() racing _ensure_client()'s own preflight-auth call
+        # (the one await inside its _client_lock) needs that call held open;
+        # None (the default) means account() answers immediately, as every
+        # pre-Task-7 test relies on.
+        self.account_hang: asyncio.Event | None = None
 
     async def account(self, *, refresh_token: bool = False) -> Any:
+        if self.account_hang is not None:
+            await self.account_hang.wait()
         if self.account_error is not None:
             raise self.account_error
         # GetAccountResponse.account is optional and ApiKeyAccount needs only its

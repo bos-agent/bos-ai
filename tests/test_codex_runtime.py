@@ -2,16 +2,20 @@
 
 Stage 4 of 4 over CodexAgent's turn path: construction, config resolution and
 lifecycle (Task 3), the client and thread lifecycle (Task 4), a turn that
-runs and persists itself (Task 5), and here — that turn streamed as
-TurnEvents (Task 6). Tasks 7-8 add interrupt/cooperative-stop/timeout and the
-approval handler on top of this.
+runs and persists itself (Task 5), that turn streamed as TurnEvents (Task 6),
+and here — interrupt, cooperative stop, timeout, per-chat concurrency, and a
+bounded-wait aclose() (Task 7). Task 8 adds the approval handler on top of
+this.
 """
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 from typing import Any
 
 import pytest
+from conftest import HANG
 from openai_codex import ImageInput, LocalImageInput, MentionInput, TextInput, TurnResult
 from openai_codex.generated.v2_all import (
     AgentMessageThreadItem,
@@ -958,6 +962,282 @@ async def test_a_turn_with_nothing_armed_raises_rather_than_answering_silently(t
     with pytest.raises(RuntimeError) as excinfo:
         await agent.run("chat-1", "do it", turn_id="t1")
     assert "turn completed event not received" in str(excinfo.value)
+
+
+# ── Task 7: interrupt, cooperative stop, timeout, concurrency (BEP 19 §3.10) ─
+
+
+async def _poll_until(predicate, *, timeout: float = 2.0) -> None:
+    """Wait for a synchronous predicate to go true, polling every event-loop
+    tick rather than guessing how many turns the code under test needs."""
+
+    async def _wait() -> None:
+        while not predicate():
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(_wait(), timeout=timeout)
+
+
+async def _hanging_handle(fake_codex, *, expected_count: int = 1, timeout: float = 2.0):
+    """Wait for the `expected_count`-th turn handle (in creation order) to
+    exist and reach its armed HANG, then return it.
+
+    Indexed by count rather than always grabbing turn_handles[-1] the moment
+    the list is non-empty: once a test has two turns in flight, a handle
+    already sitting in the list from an earlier, still-hanging turn must not
+    be mistaken for the new one that hasn't been created yet.
+    """
+
+    def _handles() -> list:
+        return fake_codex.instances[-1].turn_handles if fake_codex.instances else []
+
+    await _poll_until(lambda: len(_handles()) >= expected_count, timeout=timeout)
+    handle = _handles()[expected_count - 1]
+    await asyncio.wait_for(handle.hang_reached.wait(), timeout=timeout)
+    return handle
+
+
+@pytest.mark.asyncio
+async def test_interrupt_callback_is_polled_and_calls_handle_interrupt(tmp_path, fake_codex, mem_store):
+    """BEP 19 §3.9's `interrupt` row: AgentActor passes a poll-style callback
+    (Callable[[], dict | None]); CodexAgent polls it between streamed
+    notifications — exactly as Agent._interrupt reads the same callback in
+    agent.py, a truthy return "fires" — and asks the vendor to stop as soon as
+    it does, rather than waiting for the rest of the armed notifications to
+    end the turn on their own.
+
+    The resulting TurnStatus.interrupted is BOS's own doing (the actor's
+    interrupt vocabulary, not a timeout and not an unexplained vendor status),
+    so run()'s answer is the kept partial content, not a raise — see
+    test_request_stop_interrupts_the_turn_and_keeps_the_partial_answer for the
+    request_stop() route to the same outcome.
+    """
+    agent = _agent(tmp_path, fake_codex, chat_store=mem_store)
+    _arm_notifications(
+        fake_codex,
+        [
+            _item_completed(_agent_message_item("msg-1", "partial")),
+            _item_completed(_agent_message_item("msg-2", "still going")),
+            _turn_completed(status=TurnStatus.interrupted),
+        ],
+    )
+    calls = 0
+
+    def interrupt():
+        nonlocal calls
+        calls += 1
+        return {"role": "user", "content": "stop"} if calls >= 2 else None
+
+    result = await agent.run("chat-1", "do it", turn_id="t1", interrupt=interrupt)
+
+    handle = fake_codex.instances[-1].turn_handles[-1]
+    assert handle.interrupted is True
+    assert calls == 2, "polled once per notification, stopped calling once it fired"
+    assert result.output == "still going"
+    messages = await mem_store.get_messages("chat-1")
+    assert messages[-1].llm_message["content"] == "still going"
+
+
+@pytest.mark.asyncio
+async def test_interrupt_callback_firing_survives_a_failed_interrupt_request(
+    tmp_path, fake_codex, mem_store, monkeypatch
+):
+    """The same best-effort courtesy as _settle_interrupted's (see
+    test_a_failed_interrupt_request_does_not_abort_the_stop): _emit_stream's
+    own handle.interrupt() call, made when the interrupt callback fires, is
+    wrapped in contextlib.suppress too — a network blip sending it must not
+    be mistaken for a real turn failure while the stream is still perfectly
+    capable of draining into its own turn/completed."""
+    import conftest
+
+    async def _broken_interrupt(self) -> None:
+        self.interrupted = True
+        raise RuntimeError("app-server hung up")
+
+    monkeypatch.setattr(conftest.FakeTurnHandle, "interrupt", _broken_interrupt)
+    agent = _agent(tmp_path, fake_codex, chat_store=mem_store)
+    _arm_notifications(
+        fake_codex,
+        [_item_completed(_agent_message_item("msg-1", "still going")), _turn_completed(status=TurnStatus.interrupted)],
+    )
+
+    result = await agent.run("chat-1", "do it", turn_id="t1", interrupt=lambda: {"role": "user", "content": "stop"})
+
+    assert result.output == "still going"
+
+
+@pytest.mark.asyncio
+async def test_request_stop_interrupts_the_turn_and_keeps_the_partial_answer(tmp_path, fake_codex, mem_store):
+    """The decision Task 5 left open (BEP 19 §3.10.2): a cooperative stop is
+    BOS taking the turn away, not the caller's own deadline — Agent's own
+    contract for the same situation (agent.py:648-657, :831-836) is to keep
+    what the turn produced rather than raise and discard it. Mirrored here for
+    a stop landing mid-stream, on a *different* status (interrupted) than the
+    unexplained-interrupted test above raises on (Task 5/6) — the difference
+    is entirely in *why* this call itself asked for the interrupt."""
+    agent = _agent(tmp_path, fake_codex, chat_store=mem_store)
+    _arm_notifications(
+        fake_codex,
+        [
+            _item_completed(_agent_message_item("msg-1", "partial answer")),
+            HANG,
+            _turn_completed(status=TurnStatus.interrupted),
+        ],
+    )
+
+    task = asyncio.ensure_future(agent.run("chat-1", "do it", turn_id="t1"))
+    handle = await _hanging_handle(fake_codex)
+    agent.request_stop()
+    await _poll_until(lambda: handle.interrupted)
+    handle.release.set()  # the vendor confirming the interrupt, as a real turn eventually would
+    result = await asyncio.wait_for(task, timeout=2)
+
+    assert result.output == "partial answer"
+    assert result.finish_reason == "interrupted"
+    messages = await mem_store.get_messages("chat-1")
+    assert messages[-1].llm_message["content"] == "partial answer", "the partial answer is kept, not discarded"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_interrupt_request_does_not_abort_the_stop(tmp_path, fake_codex, mem_store):
+    """handle.interrupt() is a best-effort courtesy to the vendor, not
+    something the outcome of a stop depends on: _settle_interrupted's own
+    call is wrapped in contextlib.suppress so a transient failure sending it
+    (a network blip talking to the app-server) is not mistaken for a real
+    turn failure — the stream may still finish on its own regardless, and
+    that is what must decide the outcome, not the interrupt request."""
+    agent = _agent(tmp_path, fake_codex, chat_store=mem_store)
+    _arm_notifications(
+        fake_codex,
+        [
+            _item_completed(_agent_message_item("msg-1", "partial answer")),
+            HANG,
+            _turn_completed(status=TurnStatus.interrupted),
+        ],
+    )
+
+    task = asyncio.ensure_future(agent.run("chat-1", "do it", turn_id="t1"))
+    handle = await _hanging_handle(fake_codex)
+
+    async def _broken_interrupt() -> None:
+        handle.interrupted = True
+        raise RuntimeError("app-server hung up")
+
+    handle.interrupt = _broken_interrupt
+    agent.request_stop()
+    await _poll_until(lambda: handle.interrupted)
+    handle.release.set()  # the stream finishes on its own despite the interrupt request failing
+    result = await asyncio.wait_for(task, timeout=2)
+
+    assert result.output == "partial answer"
+
+
+@pytest.mark.asyncio
+async def test_timeout_seconds_expiry_interrupts_then_raises(tmp_path, fake_codex, mem_store, monkeypatch):
+    """BEP 19 §3.10.2 / §7 criterion 20: on expiry the native turn is
+    interrupted, then the error is raised. Unlike a cooperative stop, a
+    timeout is the caller's own deadline: nothing is kept, and this holds even
+    when the native turn never confirms the interrupt at all (it doesn't,
+    here) — a timeout must not be left waiting on that confirmation."""
+    import bos.extensions.runtimes.codex as codex_mod
+
+    monkeypatch.setattr(codex_mod, "_INTERRUPT_GRACE_SECONDS", 0.05)
+    agent = _agent(tmp_path, fake_codex, chat_store=mem_store, timeout_seconds=0.02)
+    _arm_notifications(fake_codex, [HANG])  # never yields on its own, and ignores interrupt() too
+
+    with pytest.raises(TimeoutError) as excinfo:
+        await agent.run("chat-1", "do it", turn_id="t1")
+    message = str(excinfo.value)
+    assert "codex" in message and "george" in message and "chat-1" in message
+
+    handle = fake_codex.instances[-1].turn_handles[-1]
+    assert handle.interrupted is True, "the native turn is asked to stop even though nothing confirms it"
+    assert await mem_store.get_messages("chat-1") == [], "a timed-out turn commits nothing"
+
+
+@pytest.mark.asyncio
+async def test_busy_rejects_a_second_turn_on_the_same_chat_but_not_a_different_one(tmp_path, fake_codex, mem_store):
+    """Review Focus 3 / BEP 19 §3.10.1: a Codex thread is single-threaded, so a
+    second run() on a chat_id already running one is refused rather than
+    queued. Tested in both directions: a *different* chat_id must not be
+    blocked by it either, or a guard that simply rejects everything would
+    pass the first half for free."""
+    agent = _agent(tmp_path, fake_codex, chat_store=mem_store)
+    # Each FakeTurnHandle only recognizes a turn/completed notification whose
+    # turn_id matches its own handle.id (mirroring the real subscription's
+    # scoping, guarded again defensively in _emit_stream); FakeThread.turn()
+    # names an unarmed handle "turn-<call count>", so chat-1's turn (the first
+    # .turn() call) is "turn-1" and chat-2's (the second — the rejected retry
+    # on chat-1 never reaches .turn() at all) is "turn-2". Armed explicitly,
+    # per chat, rather than relying on _default_turn_notifications, since HANG
+    # has no synthesized form.
+    _arm_notifications(fake_codex, [HANG, _turn_completed(turn_id="turn-1")])
+
+    first = asyncio.ensure_future(agent.run("chat-1", "do it", turn_id="t1"))
+    await _hanging_handle(fake_codex, expected_count=1)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await agent.run("chat-1", "do it again", turn_id="t2")
+    assert "chat-1" in str(excinfo.value)
+
+    _arm_notifications(fake_codex, [HANG, _turn_completed(turn_id="turn-2")])
+    second = asyncio.ensure_future(agent.run("chat-2", "do it too", turn_id="t3"))
+    handle2 = await _hanging_handle(fake_codex, expected_count=2)
+    handle1 = fake_codex.instances[-1].turn_handles[0]
+    assert handle2 is not handle1, "a different chat_id must run against its own turn, not reuse chat-1's"
+
+    handle1.release.set()
+    handle2.release.set()
+    await asyncio.wait_for(first, timeout=2)
+    await asyncio.wait_for(second, timeout=2)
+
+
+@pytest.mark.asyncio
+async def test_aclose_mid_turn_returns_promptly_and_closes_the_client(tmp_path, fake_codex, mem_store, monkeypatch):
+    """BEP 19 §3.10.2 / Review Focus 4: aclose() interrupts an in-flight turn
+    and must not hang on one that ignores it — a bounded wait, then close
+    regardless, so harness teardown cannot block on a model still thinking."""
+    import bos.extensions.runtimes.codex as codex_mod
+
+    monkeypatch.setattr(codex_mod, "_INTERRUPT_GRACE_SECONDS", 0.05)
+    agent = _agent(tmp_path, fake_codex, chat_store=mem_store)
+    _arm_notifications(fake_codex, [HANG])  # never confirms — aclose() must not wait it out
+
+    turn = asyncio.ensure_future(agent.run("chat-1", "do it", turn_id="t1"))
+    handle = await _hanging_handle(fake_codex)
+
+    await asyncio.wait_for(agent.aclose(), timeout=1)
+
+    assert handle.interrupted is True
+    assert fake_codex.instances[0].closed is True
+    turn.cancel()
+    with contextlib.suppress(BaseException):
+        await turn
+
+
+@pytest.mark.asyncio
+async def test_aclose_racing_client_construction_does_not_leak_a_client(tmp_path, fake_codex):
+    """Task 4's hole, closed by Task 7: aclose() did not take _client_lock, so
+    it could decide there was no client to close while _ensure_client() was
+    still building one — which would then finish, unclosed, after aclose()
+    had already returned. Both now take the lock, so aclose() either finds no
+    client yet or waits for the one being built and closes that."""
+    fake_codex.arm(account_hang=asyncio.Event())
+    agent = _agent(tmp_path, fake_codex)  # auth defaults to "subscription" -> _ensure_client awaits account()
+
+    build = asyncio.ensure_future(agent._ensure_client())
+    await _poll_until(lambda: bool(fake_codex.instances))
+    instance = fake_codex.instances[0]
+
+    closer = asyncio.ensure_future(agent.aclose())
+    await asyncio.sleep(0.01)  # let aclose() start waiting on _client_lock, still held by _ensure_client
+    assert instance.account_hang is not None
+    instance.account_hang.set()  # let _ensure_client's preflight finish and release the lock
+
+    client = await asyncio.wait_for(build, timeout=2)
+    await asyncio.wait_for(closer, timeout=2)
+
+    assert client.closed is True, "the client built while aclose() was waiting must still get closed"
 
 
 def test_unwrap_thread_item_falls_back_when_root_is_absent():
