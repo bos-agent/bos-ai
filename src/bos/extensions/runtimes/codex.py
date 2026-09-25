@@ -26,8 +26,10 @@ and an unexplained vendor-side interruption (raised, as before), even though
 all three reach here as the same ``TurnStatus.interrupted``; ``run()``'s
 ``self._in_flight`` busy guard rejects a second turn on a chat_id already
 running one; and ``aclose()`` interrupts every in-flight turn with a bounded
-wait before closing the client regardless (BEP 19 §3.10.2) (Task 7). Task 8
-adds the approval handler on top of this.
+wait before closing the client regardless (BEP 19 §3.10.2) (Task 7); and
+finally ``_deny_approval``, installed over the vendor's auto-accepting
+default so an escalation past the sandbox is refused rather than granted
+(BEP 19 §3.5.4) (Task 8).
 """
 
 from __future__ import annotations
@@ -63,7 +65,7 @@ from openai_codex.generated.v2_all import (
     McpToolCallThreadItem,
     MessagePhase,
 )
-from openai_codex.models import ItemCompletedNotification, ItemStartedNotification, Notification
+from openai_codex.models import ItemCompletedNotification, ItemStartedNotification, JsonObject, Notification
 from openai_codex.types import (
     ThreadItem,
     ThreadTokenUsage,
@@ -104,14 +106,59 @@ _T = TypeVar("_T")
 _CODEX_FACTORY: Callable[..., Any] = AsyncCodex
 
 # BEP 19 §3.5: Codex's confinement is an OS sandbox the vendor enforces, so the
-# whole permission story is these two enums — no BOS-side tool interception
-# like Claude Code needs (§3.5.2 vs §3.5.3). `full-access` still uses
-# `auto_review`, not because approvals matter once the sandbox is open, but
-# because `deny_all` would block turns from proceeding at all.
+# permission story is these two enums plus `_APPROVAL_DENIALS` below — no
+# BOS-side tool interception like Claude Code needs (§3.5.2 vs §3.5.3).
+# `full-access` still uses `auto_review`, not because approvals matter once the
+# sandbox is open, but because `deny_all` would block turns from proceeding at
+# all.
 _SANDBOX_AND_APPROVAL: dict[str, tuple[Sandbox, ApprovalMode]] = {
     "read-only": (Sandbox.read_only, ApprovalMode.deny_all),
     "workspace-write": (Sandbox.workspace_write, ApprovalMode.auto_review),
     "full-access": (Sandbox.full_access, ApprovalMode.auto_review),
+}
+
+# BEP 19 §3.5.4: the refusal for every approval request the protocol defines,
+# and the whole of BOS's Codex approval policy. Keyed only by method, with no
+# `permission` branch, because there is no level at which BOS can say yes:
+#
+# - The sandbox above is the real boundary and is already set per turn from
+#   `permission`. An approval request only ever arrives to escalate *past* it,
+#   and BOS has no channel that carries the question to a human and an answer
+#   back (§2.2.2), so "no" is the only answer it can honestly give — under
+#   `full-access` too, where full access is what the *sandbox* grants and a
+#   request to go beyond it is still unanswerable.
+# - Refusing them all does not disarm a working agent: `auto_review` maps to
+#   `AskForApproval(on_request)` (`openai_codex/_approval_mode.py:29-33`), so
+#   the server asks only when the agent asks to escalate; `deny_all` maps to
+#   `AskForApproval(never)` (:34-35), where it does not ask at all and these
+#   are a backstop that should never fire.
+#
+# There is no `"deny"` decision in this protocol — each method spells refusal
+# its own way, and returning one would be a protocol violation, since
+# `CodexClient._reader_loop` writes whatever the handler returns straight back
+# as the JSON-RPC `result`. Values below read out of the schema the shipped
+# binary generates (`codex app-server generate-json-schema`):
+#
+# - The two `requestApproval` methods share a vocabulary where `decline` is
+#   "refused, the agent continues the turn" and `cancel` is "refused, and the
+#   turn is immediately interrupted". A refused escalation is not a turn
+#   failure, so `decline` — the same reasoning as `Agent._call_tool`
+#   (agent.py:900-911) returning the error string rather than raising.
+# - `item/permissions/requestApproval` answers with a granted-permission
+#   profile rather than a decision. `GrantedPermissionProfile` has only the
+#   optional, nullable `fileSystem` and `network`, so `{}` is a valid profile
+#   that grants nothing.
+# - The two legacy methods use the older `ReviewDecision`, which has two
+#   refusals: `abort` ("the agent should not do anything until the user's next
+#   command") and `{"denied": {"rejection": …}}` ("should continue the session
+#   and try something else"). `abort` is sent here as the stricter of the two;
+#   note it is the legacy analogue of `cancel`, not of `decline`.
+_APPROVAL_DENIALS: dict[str, JsonObject] = {
+    "item/commandExecution/requestApproval": {"decision": "decline"},
+    "item/fileChange/requestApproval": {"decision": "decline"},
+    "item/permissions/requestApproval": {"permissions": {}},
+    "execCommandApproval": {"decision": "abort"},
+    "applyPatchApproval": {"decision": "abort"},
 }
 
 # How long a turn (or aclose(), across all of them) waits for the native side
@@ -172,6 +219,13 @@ _PREFLIGHT_AUTH_SECONDS = 30.0
 #   busy-guard slot is still None while setup runs, so aclose() waits on no
 #   task, takes the uncontended _client_lock and closes the client — which
 #   fails the pending RPC.
+# - `_deny_approval` (Task 8) adds no await to any of the above — it is
+#   synchronous and returns a dict lookup. It does add the one place BOS code
+#   runs on the vendor's stdout reader thread rather than the event loop, and
+#   nothing above can bound *that*: the reader thread is the sole consumer of
+#   the child's stdout, so anything slow there stalls every notification and
+#   every response for every turn, with no deadline in reach. The bound is
+#   that it cannot be slow — see the constraint recorded on the method.
 
 
 def _content_to_codex_input(content: MessageContent) -> Input | str:
@@ -394,10 +448,61 @@ class CodexAgent:
         async with self._client_lock:
             if self._client is None:
                 client: AsyncCodex = _CODEX_FACTORY(CodexConfig())
+                # BEP 19 §3.5.4, and before _preflight_auth below, because that
+                # is the first call that can spawn the child and so the first
+                # moment a server request can arrive. The SDK's default handler
+                # auto-accepts escalations and AsyncCodex offers no way to pass
+                # a replacement down (AsyncCodexClient.__init__ takes only a
+                # config), so reach the sync client that owns the transport.
+                #
+                # No getattr guard and no try/except on purpose: if a future
+                # openai-codex moves this attribute, construction must fail
+                # loudly rather than silently leave the auto-accepting default
+                # installed — that silent restoration is the whole hazard.
+                # test_codex_approval_handler_attribute_exists pins both the
+                # attribute path and the absence of a supported alternative.
+                client._client._sync._approval_handler = self._deny_approval
                 if self._config.auth == "subscription":
                     await self._preflight_auth(client)
                 self._client = client
             return self._client
+
+    def _deny_approval(self, method: str, params: JsonObject | None) -> JsonObject:
+        """Refuse every escalation ``codex app-server`` asks for (BEP 19 §3.5.4).
+
+        Installed over ``CodexClient._default_approval_handler``, which accepts
+        command-execution and file-change escalations outright. The policy, and
+        why it needs no ``permission`` argument, is on ``_APPROVAL_DENIALS``.
+
+        Synchronous and non-blocking by contract, not by preference: the vendor
+        calls this from ``CodexClient._handle_server_request``, on the single
+        stdout reader thread (``_reader_loop``, client.py:863-871), and writes
+        what it returns straight back as the JSON-RPC ``result``. Blocking here
+        stalls the whole transport — every notification and every response, for
+        every turn — and there is no event loop on that thread, so nothing here
+        may touch asyncio. A dict lookup and ``logger.warning`` is all it does.
+
+        It is handed *every* server-to-client request, not only approvals. The
+        other five in the ``ServerRequest`` union (``item/tool/call``,
+        ``item/tool/requestUserInput``, ``mcpServer/elicitation/request``,
+        ``attestation/generate``, ``account/chatgptAuthTokens/refresh``) fall
+        through to ``{}``, which is exactly what the vendor default answers
+        them with. Changing that is out of scope here.
+        """
+        denial = _APPROVAL_DENIALS.get(method)
+        if denial is None:
+            return {}
+        # Never silent: a denied escalation and a model that simply chose not
+        # to try look identical from the outside, and only one of them is a
+        # reason the agent could not finish the job.
+        logger.warning(
+            "%s runtime %r: denied Codex escalation request %r — BOS decides approvals by policy "
+            "and has no channel to ask a human (BEP 19 §3.5.4)",
+            self._config.runtime,
+            self._kind,
+            method,
+        )
+        return denial
 
     async def _preflight_auth(self, client: AsyncCodex) -> None:
         """BEP 19 §3.10.3: with ``auth="subscription"``, fail loudly here —

@@ -3,15 +3,16 @@
 Stage 4 of 4 over CodexAgent's turn path: construction, config resolution and
 lifecycle (Task 3), the client and thread lifecycle (Task 4), a turn that
 runs and persists itself (Task 5), that turn streamed as TurnEvents (Task 6),
-and here — interrupt, cooperative stop, timeout, per-chat concurrency, and a
-bounded-wait aclose() (Task 7). Task 8 adds the approval handler on top of
-this.
+interrupt, cooperative stop, timeout, per-chat concurrency and a
+bounded-wait aclose() (Task 7), and here — the approval handler that refuses
+every escalation past the sandbox (Task 8).
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
 import logging
 import time
 from typing import Any
@@ -1704,3 +1705,114 @@ def test_unwrap_thread_item_falls_back_when_root_is_absent():
 
     bare = _NoRoot()
     assert _unwrap_thread_item(bare) is bare
+
+
+# --- Task 8: approvals are decided by policy, never awaited (BEP 19 §3.5.4) ---
+
+
+def test_codex_approval_handler_attribute_exists():
+    """The tripwire that makes `_ensure_client`'s private reach-in acceptable,
+    run against the REAL openai_codex rather than the double — the double
+    mirrors this shape, so on its own it would only prove the double.
+
+    Both halves matter. The first pins the attribute path and the hazard: the
+    vendor's default is installed there and it auto-accepts, so an
+    openai-codex that renames or moves the attribute must break CI rather than
+    quietly restore auto-accept. The second fires in the good direction — if a
+    future release adds a supported `approval_handler` parameter, this fails
+    and tells us to stop reaching in.
+
+    Offline: AsyncCodex.__init__ only builds the sync client (api.py:316-320),
+    which only assigns fields; the `codex app-server` child is spawned by
+    start(), so nothing here needs a process or a login.
+    """
+    from openai_codex import AsyncCodex, CodexConfig
+    from openai_codex.async_client import AsyncCodexClient
+    from openai_codex.client import CodexClient
+
+    codex = AsyncCodex(CodexConfig())
+    handler = codex._client._sync._approval_handler
+
+    assert handler.__func__ is CodexClient._default_approval_handler
+    assert handler.__self__ is codex._client._sync
+    assert "approval_handler" not in inspect.signature(AsyncCodexClient.__init__).parameters, (
+        "openai-codex grew a supported way to pass a handler; use it instead of reaching into _sync"
+    )
+
+
+@pytest.mark.parametrize(
+    "method, expected",
+    [
+        ("item/commandExecution/requestApproval", {"decision": "decline"}),
+        ("item/fileChange/requestApproval", {"decision": "decline"}),
+        ("item/permissions/requestApproval", {"permissions": {}}),
+        ("execCommandApproval", {"decision": "abort"}),
+        ("applyPatchApproval", {"decision": "abort"}),
+    ],
+)
+def test_every_codex_approval_request_is_refused_on_the_wire(tmp_path, fake_codex, method, expected):
+    """All five approval methods in the ServerRequest union, and the exact dict
+    the reader thread writes back as the JSON-RPC `result` for each.
+
+    The expected values are literals here on purpose, not `_APPROVAL_DENIALS`
+    imported from the source: a test that imports the constant it checks
+    cannot catch the constant being wrong, and being wrong here is a protocol
+    violation on the wire — there is no `"deny"` decision in this protocol,
+    which is exactly the plausible guess these literals exist to catch.
+    """
+    agent = _agent(tmp_path, fake_codex)
+
+    assert agent._deny_approval(method, {"anything": "at all"}) == expected
+
+
+def test_a_non_approval_server_request_falls_through_to_an_empty_answer(tmp_path, fake_codex, caplog):
+    """The handler is handed EVERY server-to-client request, not just the five
+    approvals. The other five (item/tool/call here) keep the vendor default's
+    `{}`, and keep it silently: none of them is an escalation being refused —
+    item/tool/call asks the client to run a tool it never registered — so
+    there is nothing to report. Widening those answers is out of Task 8's
+    scope; this test pins that Task 8 did not narrow them either."""
+    agent = _agent(tmp_path, fake_codex)
+
+    with caplog.at_level(logging.WARNING, logger="bos.extensions.runtimes.codex"):
+        assert agent._deny_approval("item/tool/call", {"name": "grep"}) == {}
+
+    assert not [r for r in caplog.records if r.name == "bos.extensions.runtimes.codex"]
+
+
+@pytest.mark.asyncio
+async def test_the_approval_handler_is_installed_before_the_auth_preflight(tmp_path, fake_codex):
+    """Installed on the client the agent actually builds, and installed before
+    account() — the first call that can spawn the child and so the first
+    moment the server can ask for anything. Arriving one await late would mean
+    the vendor's auto-accepting default answered it."""
+    agent = _agent(tmp_path, fake_codex)  # auth defaults to "subscription" -> _ensure_client awaits account()
+
+    client = await agent._ensure_client()
+
+    assert client.approval_handler_at_account == agent._deny_approval, (
+        "installed too late: the first RPC went out before the handler was in place"
+    )
+    assert client._client._sync._approval_handler == agent._deny_approval
+
+
+def test_a_refused_escalation_is_logged_at_warning(tmp_path, fake_codex, caplog):
+    """A silently refused escalation looks exactly like a model that decided
+    not to try, and only one of those explains why the agent could not finish.
+    The method, the runtime and the agent kind are all in the line."""
+    agent = _agent(tmp_path, fake_codex)
+
+    with caplog.at_level(logging.WARNING, logger="bos.extensions.runtimes.codex"):
+        agent._deny_approval("item/commandExecution/requestApproval", {"command": ["sudo", "rm", "-rf", "/"]})
+
+    # Filtered by logger name as well as level, for the same reason as
+    # test_a_failed_steer_request_is_logged_and_does_not_abort_the_turn: an
+    # unrelated WARNING elsewhere in the session lands in caplog.records too.
+    warnings = [
+        r for r in caplog.records
+        if r.levelno == logging.WARNING and r.name == "bos.extensions.runtimes.codex"
+    ]
+    assert len(warnings) == 1
+    message = warnings[0].getMessage()
+    assert "item/commandExecution/requestApproval" in message
+    assert "codex" in message and "george" in message

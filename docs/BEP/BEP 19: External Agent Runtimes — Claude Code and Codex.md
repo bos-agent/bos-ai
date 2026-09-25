@@ -312,8 +312,10 @@ This is the section to read before trusting anything else in this BEP. The two r
 | `permission` | Codex | Claude Code |
 |---|---|---|
 | `read-only` | `Sandbox.read_only` + `ApprovalMode.deny_all` | `permission_mode="plan"`, `can_use_tool` denies every write tool |
-| `workspace-write` | `Sandbox.workspace_write` + `ApprovalMode.auto_review` + §3.5.4 handler | `permission_mode="acceptEdits"`, `can_use_tool` path check, `sandbox={"enabled": True}` |
-| `full-access` | `Sandbox.full_access` | `permission_mode="bypassPermissions"`, no path check |
+| `workspace-write` | `Sandbox.workspace_write` + `ApprovalMode.auto_review` | `permission_mode="acceptEdits"`, `can_use_tool` path check, `sandbox={"enabled": True}` |
+| `full-access` | `Sandbox.full_access` + `ApprovalMode.auto_review` | `permission_mode="bypassPermissions"`, no path check |
+
+The §3.5.4 approval handler is installed on the Codex client at **every** level, not only `workspace-write`: it is the answer to a request to escalate past whichever sandbox the row above set, and there is no level at which BOS can grant one.
 
 #### 3.5.1 `cwd`
 
@@ -347,17 +349,33 @@ For Claude Code that is what `can_use_tool` does by construction.
 
 For Codex there is a hazard that must be handled rather than documented away: `CodexClient._default_approval_handler` **auto-accepts** — it returns `{"decision": "accept"}` for both `item/commandExecution/requestApproval` and `item/fileChange/requestApproval`. `AsyncCodex.__init__` takes only a `CodexConfig` and passes no handler down through `AsyncCodexClient` to `CodexClient`, so with `ApprovalMode.auto_review` every escalation past the sandbox is granted silently. Left alone, `permission = "workspace-write"` would mean "anything that asks is allowed", contradicting its own config key.
 
-`CodexAgent` therefore installs its own handler on the constructed client and records why:
+`CodexAgent` therefore installs its own handler on the constructed client, in `_ensure_client` and **before** the auth preflight — the first call that can spawn the child, and so the first moment a server request can arrive:
 
 ```python
 # BEP 19 §3.5.4. The SDK's default handler auto-accepts every escalation and
 # AsyncCodex exposes no way to replace it, so we reach the sync client that owns
 # the transport. test_codex_approval_handler_attribute_exists fails loudly if a
 # future openai-codex renames this, rather than silently restoring auto-accept.
-codex._client._sync._approval_handler = self._approve
+client._client._sync._approval_handler = self._deny_approval
 ```
 
-`_approve` denies anything the configured `permission` level does not already allow, and never blocks. The pinned test is what makes the private reach-in acceptable: an SDK upgrade that moves the attribute breaks CI instead of quietly re-opening the hole.
+There is no `permission` argument and no per-level branch: `_deny_approval` refuses every approval request at every level. The sandbox is the real boundary and is already set per turn from `permission`; an approval request only ever arrives to escalate *past* it, and with no channel to a human, "no" is the only answer BOS can honestly give — under `full-access` too, where full access is what the *sandbox* grants and a request to go beyond it is still unanswerable. Refusing them all does not disarm a working agent: `auto_review` maps to `AskForApproval(on_request)`, so the server asks only when the agent asks to escalate, and `deny_all` (`read-only`) does not ask at all. Each refusal is logged at WARNING with the method, the runtime and the agent kind, because a silently refused escalation and a model that simply chose not to try look identical from the outside.
+
+**There is no `"deny"` decision in this protocol.** Each method spells refusal its own way, and `CodexClient._reader_loop` writes whatever the handler returns straight back as the JSON-RPC `result`, so a plausible-looking guess is a protocol violation on the wire. The five approval methods in the `ServerRequest` union, with the values read out of the schema the shipped binary generates (`codex app-server generate-json-schema`):
+
+| method | refusal | notes |
+|---|---|---|
+| `item/commandExecution/requestApproval` | `{"decision": "decline"}` | `decline` = refused, the agent continues the turn; `cancel` would refuse *and* interrupt the turn |
+| `item/fileChange/requestApproval` | `{"decision": "decline"}` | same vocabulary |
+| `item/permissions/requestApproval` | `{"permissions": {}}` | not a `decision` at all — the response is a granted-permission profile, whose `fileSystem` and `network` are both optional, so `{}` grants nothing |
+| `execCommandApproval` (legacy) | `{"decision": "abort"}` | the older `ReviewDecision`, which has two refusals: `abort` ("do nothing until the user's next command") and `{"denied": {"rejection": …}}` ("continue the session and try something else"). `abort` is sent as the stricter; note it is the legacy analogue of `cancel`, not of `decline` |
+| `applyPatchApproval` (legacy) | `{"decision": "abort"}` | same |
+
+A refused escalation is not a turn failure, which is why the two `decision`-based current methods get `decline` rather than `cancel` — the agent is told no and left to finish with what it can do.
+
+Two further properties of the seam constrain the handler. It is handed **every** server-to-client request, not only approvals: the other five (`item/tool/call`, `item/tool/requestUserInput`, `mcpServer/elicitation/request`, `attestation/generate`, `account/chatgptAuthTokens/refresh`) fall through to `{}`, exactly as the vendor default answers them, and widening that is out of this section's scope. And it is **synchronous**, called on the vendor's single stdout reader thread rather than the event loop, so it must never block — that thread is the sole consumer of the child's stdout, and stalling it stalls every notification and every response for every turn.
+
+The pinned test is what makes the private reach-in acceptable, and it is pinned in both directions: an SDK upgrade that moves the attribute breaks CI instead of quietly re-opening the hole, and one that adds a supported `approval_handler` parameter breaks CI to say the reach-in can stop. There is deliberately no `getattr` guard — a silently restored auto-accepting default is the entire hazard. That these refusals are *accepted* by a live `codex app-server` is only confirmable by a real run — a normal run reaches the two `requestApproval` methods; the legacy pair and the permissions profile are backstops a live run may never exercise. Asserted in §7 criterion 18 rather than claimed from CI.
 
 #### 3.5.5 Verification is behavioural
 
@@ -651,7 +669,7 @@ Two new optional dependencies, each pinned exactly, each carrying a vendor CLI b
 15. A turn starts, streams `TurnEvent`s that a host renders, and returns an `AgentResult` with non-empty `usage`.
 16. A second `ask()` on the same `chat_id` continues the same native session — asserted by the native session/thread id, not by the model's reply.
 17. After a BOS process restart, a third `ask()` on that `chat_id` resumes it, recovered from `ChatStore` metadata alone.
-18. Under `permission = "workspace-write"`, a write inside `cwd` succeeds and a write outside it **fails** — observed, per §3.5.5. Under `read-only`, every write fails.
+18. Under `permission = "workspace-write"`, a write inside `cwd` succeeds and a write outside it **fails** — observed, per §3.5.5. Under `read-only`, every write fails. And when the agent asks to escalate past the sandbox, the request is **refused, the agent continues the turn**, and a WARNING naming the method appears in the log — no auto-accept. This is the only way to confirm that §3.5.4's refusal values are accepted by a live `codex app-server`; CI cannot.
 19. `request_stop()` mid-turn interrupts the native turn, which stops writing to the workspace, and the turn returns what it had produced with `finish_reason = "interrupted"`. Preconditions: the child confirms the interrupt within the grace — one that does not is abandoned (§3.10.2) and keeps writing until the client closes. Reaping the child is `aclose()`'s job, not `request_stop()`'s; `request_stop()` only sets the flag each in-flight turn races.
 20. `timeout_seconds` expiry raises. Precondition: it bounds one turn *attempt*, not the whole call — each schema retry gets a fresh window. Expiry while the turn is streaming interrupts the native turn first. Expiry during setup interrupts nothing and says which phase it was: for `thread_start`/`thread_resume` nothing had started, but for the turn request the child may have started the turn anyway and BOS has no id with which to stop it — the §8.2 orphan limitation, observable only on a live server (§6 step 13).
 21. `schema=` returns validated structured output through each runtime's native mechanism.

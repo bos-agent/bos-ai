@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -472,8 +473,26 @@ class FakeAsyncCodex:
         self.thread_start_hang: asyncio.Event | None = None
         self.thread_resume_hang: asyncio.Event | None = None
         self.turn_hang: asyncio.Event | None = None
+        # Task 8: _ensure_client replaces the approval handler through this
+        # exact attribute path, with no getattr guard, so the double has to
+        # carry the same shape or every test here would sail past the line
+        # under test. Mirrors the vendor's AsyncCodex._client
+        # (AsyncCodexClient, api.py:317) -> ._sync (CodexClient,
+        # async_client.py:62) -> ._approval_handler (client.py:223).
+        #
+        # Seeded None, which the vendor's never is — there it defaults to the
+        # bound CodexClient._default_approval_handler. Deliberate, and the one
+        # divergence in this attribute: None makes "replaced" distinguishable
+        # from "never installed", and the vendor's actual default is pinned
+        # against the real package by
+        # test_codex_approval_handler_attribute_exists instead.
+        self._client = SimpleNamespace(_sync=SimpleNamespace(_approval_handler=None))
+        # The handler in place when account() was called, so a test can assert
+        # the install happens BEFORE the first RPC that can spawn the child.
+        self.approval_handler_at_account: Any = "account() not called"
 
     async def account(self, *, refresh_token: bool = False) -> Any:
+        self.approval_handler_at_account = self._client._sync._approval_handler
         if self.account_hang is not None:
             await self.account_hang.wait()
         if self.account_error is not None:
