@@ -19,8 +19,8 @@ logger = logging.getLogger(__name__)
 
 PERMISSIONS = ("read-only", "workspace-write", "full-access")
 
-# Keys an external runtime honours. Anything else in the agent config is either
-# dropped (below) or an error.
+# Keys both external runtimes honour. Anything else in the agent config is one
+# runtime's own key, dropped, or an error (the two sets below).
 _KNOWN_KEYS = {
     "cwd", "permission", "system_prompt", "base_instructions", "model",
     "auth", "timeout_seconds", "mcp_tools", "native_options",
@@ -29,10 +29,18 @@ _KNOWN_KEYS = {
     "external_runtime",
 }
 
-# BOS-agent keys with no counterpart in either runtime (BEP 19 §3.9). Dropped with
-# one log line rather than rejected: they arrive from [agents.*] and agent files
-# that a project may legitimately share, and failing on them would make an
-# external agent unable to sit alongside normal ones in the same config shape.
+# Claude Code's alone: which of the CLI's settings files load (BEP 19 §3.5.3). Known
+# to that runtime only, so a Codex config naming it still fails as unknown instead of
+# being silently ignored; `ClaudeCodeAgent` reads and validates the value itself.
+_CLAUDE_CODE_KEYS = {"setting_sources"}
+
+# BOS-agent keys with no counterpart in either runtime (BEP 19 §3.9) — except
+# `max_iterations`, which Claude Code honours as `max_turns`: `ClaudeCodeAgent` takes
+# it out of its config before calling `parse_external_config`, so the drop below
+# reaches only Codex. Dropped with one log line rather than rejected: they arrive
+# from [agents.*] and agent files that a project may legitimately share, and failing
+# on them would make an external agent unable to sit alongside normal ones in the
+# same config shape.
 _DROPPED_KEYS = {
     "max_tokens", "max_iterations", "max_iteration_handoff", "shutdown_handoff",
     "tool_noise_filter", "history_attribution", "reasoning_effort",
@@ -70,11 +78,11 @@ def parse_external_config(
     reserved key has to fail at construction rather than at the first turn. An
     entry may be `"key"` or one level of `"key.subkey"`.
     """
-    unknown = set(cfg) - _KNOWN_KEYS - _DROPPED_KEYS
+    known = (_KNOWN_KEYS | _CLAUDE_CODE_KEYS) if runtime == "claude-code" else _KNOWN_KEYS
+    unknown = set(cfg) - known - _DROPPED_KEYS
     if unknown:
         raise ValueError(
-            f"Unknown config key(s) for the {runtime!r} runtime: {sorted(unknown)}. "
-            f"Known: {sorted(_KNOWN_KEYS)}."
+            f"Unknown config key(s) for the {runtime!r} runtime: {sorted(unknown)}. Known: {sorted(known)}."
         )
 
     if dropped := sorted(set(cfg) & _DROPPED_KEYS):
