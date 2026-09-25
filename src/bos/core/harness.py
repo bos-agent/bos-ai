@@ -209,10 +209,11 @@ def _resolve_agent_cfg_parent(kind: str | None, agent_cfg: dict[str, Any]) -> di
     base: dict[str, Any] = {"external_runtime": parent} if reserved else {}
     if registered:
         inherited = copy.deepcopy(AgentRegistry.get_defaults(parent))
-        # `kind` in registered defaults is the parent's own name, which is also the
-        # identity per-agent plugin state is keyed by (`_bind_plugins_for_agent`).
-        # Replace it with the child's, as `register()` does for a config child;
-        # dropping it would key every such child as "default" and share one store.
+        # `kind` in registered defaults is the parent's own name. Per-agent plugin
+        # state is keyed by `agent_name or kind` (`_bind_plugins_for_agent`), so
+        # replace it with the child's, as `register()` does for a config child;
+        # dropping it would key every child without an `agent_name` as "default".
+        # An `agent_name` the parent sets is inherited, on this route as in config.
         inherited.pop("kind", None)
         if kind is not None:
             inherited["kind"] = kind
