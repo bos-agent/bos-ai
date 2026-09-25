@@ -77,6 +77,92 @@ async def test_an_external_runtime_key_dispatches_and_is_not_passed_on(tmp_path,
 
 
 @pytest.mark.asyncio
+async def test_a_reserved_parent_in_agent_cfg_dispatches_like_one_in_config(tmp_path, fake_runtimes):
+    """`agent_cfg` bypasses the workspace resolver, so a `_parent` arriving here
+    used to be dropped without a word — `_apply` filters it out of `Agent`'s
+    kwargs — and a caller asking for a Codex agent got a BOS one, its
+    `permission` ignored."""
+    from bos.core.harness import AgentHarness
+
+    async with AgentHarness(bos_dir=tmp_path, workspace=tmp_path) as harness:
+        agent = await harness.create_agent("martha", agent_cfg={"_parent": "codex", "permission": "read-only"})
+        assert isinstance(agent, _FakeRuntime)
+        assert agent.name == "martha"
+        assert agent.cfg["external_runtime"] == "codex"
+        assert agent.cfg["permission"] == "read-only"
+        assert "_parent" not in agent.cfg, "an inheritance directive, not runtime config"
+
+
+@pytest.mark.asyncio
+async def test_a_reserved_parents_own_config_reaches_an_agent_cfg_child(tmp_path, fake_runtimes):
+    """Same inheritance as `test_a_reserved_parents_own_config_reaches_the_child`,
+    through `agent_cfg` instead of a config table."""
+    ws = _write_workspace(tmp_path, '[agents.codex]\ncwd = "services"\npermission = "read-only"\n')
+    ws.resolve_agents()
+    ws.bootstrap_platform()
+
+    async with ws.harness() as harness:
+        agent = await harness.create_agent(
+            "martha", agent_cfg={"_parent": "codex", "permission": "workspace-write"}
+        )
+    assert agent.cfg["cwd"] == "services", "inherited from [agents.codex]"
+    assert agent.cfg["permission"] == "workspace-write", "agent_cfg wins"
+
+
+@pytest.mark.asyncio
+async def test_a_null_parent_in_agent_cfg_is_no_parent(tmp_path, fake_runtimes):
+    from bos.core.agent import Agent
+    from bos.core.harness import AgentHarness
+
+    async with AgentHarness(bos_dir=tmp_path, workspace=tmp_path) as harness:
+        agent = await harness.create_agent(agent_cfg={"_parent": None, "system_prompt": "hi", "tools": []})
+        assert isinstance(agent, Agent)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("parent", ["BOS", "george", ["codex"]])
+async def test_a_non_reserved_parent_in_agent_cfg_is_refused_not_dropped(tmp_path, fake_runtimes, parent):
+    """Only the reserved runtimes are resolved here; any other parent needs the
+    workspace resolver, and quietly building an unparented agent is the defect."""
+    from bos.core.harness import AgentHarness
+
+    async with AgentHarness(bos_dir=tmp_path, workspace=tmp_path) as harness:
+        with pytest.raises(ValueError) as excinfo:
+            await harness.create_agent("martha", agent_cfg={"_parent": parent, "system_prompt": "hi"})
+    message = str(excinfo.value)
+    assert repr(parent) in message
+    assert "agents/" in message, "names the route that does resolve _parent"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("kind", "agent_cfg"),
+    [
+        ("martha", {"_parent": "codex", "external_runtime": "claude-code"}),
+        ("claude-code", {"_parent": "codex"}),
+    ],
+)
+async def test_a_reserved_parent_that_contradicts_the_runtime_is_refused(tmp_path, fake_runtimes, kind, agent_cfg):
+    from bos.core.harness import AgentHarness
+
+    async with AgentHarness(bos_dir=tmp_path, workspace=tmp_path) as harness:
+        with pytest.raises(ValueError, match="codex"):
+            await harness.create_agent(kind, agent_cfg={**agent_cfg, "permission": "read-only"})
+
+
+@pytest.mark.asyncio
+async def test_agent_cfg_cannot_reparent_a_configured_agent(tmp_path, fake_runtimes):
+    ws = _write_workspace(tmp_path, '[agents.plain]\nsystem_prompt = "hi"\n')
+    ws.resolve_agents()
+    ws.bootstrap_platform()
+
+    async with ws.harness() as harness:
+        with pytest.raises(ValueError) as excinfo:
+            await harness.create_agent("plain", agent_cfg={"_parent": "codex", "permission": "read-only"})
+    assert "'plain'" in str(excinfo.value)
+
+
+@pytest.mark.asyncio
 async def test_the_runtime_is_closed_with_the_harness(tmp_path, fake_runtimes):
     from bos.core.harness import AgentHarness
 

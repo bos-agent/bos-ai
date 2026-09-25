@@ -150,8 +150,9 @@ class BosApp:
         earlier `build_agent` call did — cannot take new config: passing
         *agent_cfg* for one raises rather than silently discarding it. Call
         `build_agent(kind)` with no *agent_cfg* to get the cached agent
-        unchanged; give an override its own kind (e.g. a named `_parent`
-        instance, BEP 19 §3.4) for a second configuration of the same runtime.
+        unchanged; give an override its own kind for a second configuration
+        of the same runtime — `build_agent("martha", agent_cfg={"_parent":
+        "codex", ...})`, or a `_parent` instance in config (BEP 19 §3.4).
         """
         harness = self._require_open()
         if kind in self._agents:
@@ -162,7 +163,8 @@ class BosApp:
                     f"`build_agent({kind!r}, ...)` call cached it. A cached agent cannot "
                     f"take new config: {agent_cfg!r} would be silently discarded. Call "
                     f"`build_agent({kind!r})` with no `agent_cfg` for the cached agent, or "
-                    "give the override its own kind (e.g. a `_parent`-inheriting agent file)."
+                    "give the override its own kind — a new name with `agent_cfg={'_parent': ...}`, "
+                    "or a `_parent`-inheriting agent file."
                 )
             return self._agents[kind]
         self._agents[kind] = await harness.create_agent(kind=kind, agent_cfg=agent_cfg)

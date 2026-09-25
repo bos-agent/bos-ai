@@ -168,6 +168,48 @@ class AgentRegistry:
         return {name: entry["description"] for name, entry in cls._registry.items()}
 
 
+def _resolve_agent_cfg_parent(kind: str | None, agent_cfg: dict[str, Any]) -> dict[str, Any]:
+    """Resolve a ``_parent`` that arrives in ``agent_cfg`` (BEP 19 §3.4).
+
+    ``_parent`` is normally resolved by the workspace resolver, for agents
+    declared in config. ``agent_cfg`` bypasses that resolver, so a ``_parent``
+    here used to be dropped without a word — ``_apply`` filters it out of
+    ``Agent``'s kwargs — and a caller asking for a Codex agent got a BOS one
+    with its ``permission`` ignored. A reserved runtime is resolved exactly as
+    the resolver's ``_EXTERNAL_RUNTIME_SPECS`` does it, including the parent's
+    own ``[agents.<runtime>]`` config if there is one; any other parent is
+    refused, because resolving it needs the full inheritance chain only the
+    workspace resolver walks. A ``None`` parent is no parent, as in config.
+    """
+    cfg = dict(agent_cfg)
+    parent = cfg.pop("_parent")
+    if parent is None:
+        return cfg
+    if not isinstance(parent, str) or parent not in EXTERNAL_AGENT_KINDS:
+        known = ", ".join(sorted(EXTERNAL_AGENT_KINDS))
+        raise ValueError(
+            f"agent_cfg sets `_parent = {parent!r}`, which is not resolved here: agent_cfg only honours "
+            f"a reserved runtime ({known}) as a parent. Declare the agent in `[agents.<name>]` or "
+            f"`<bos_dir>/agents/<name>.md`, where `_parent` inheritance is resolved."
+        )
+    if kind is not None and AgentRegistry.has_registered(kind):
+        raise ValueError(
+            f"agent_cfg sets `_parent = {parent!r}` for {kind!r}, which has config of its own; agent_cfg "
+            f"cannot re-parent it. Change `_parent` where {kind!r} is declared, or build a new name."
+        )
+    declared = cfg.get("external_runtime", parent)
+    if kind in EXTERNAL_AGENT_KINDS and kind != parent:
+        declared = kind
+    if declared != parent:
+        raise ValueError(
+            f"agent_cfg sets `_parent = {parent!r}` but asks for the {declared!r} runtime; they must agree."
+        )
+    base: dict[str, Any] = {"external_runtime": parent}
+    if AgentRegistry.has_registered(parent):
+        base = _deep_merge(base, copy.deepcopy(AgentRegistry.get_defaults(parent)))
+    return _deep_merge(base, cfg)
+
+
 class ResolvedToolSet:
     """A live, filtered view over one or more source tool collections.
 
@@ -453,6 +495,9 @@ class AgentHarness:
                 "system_prompt": "You are a helpful assistant.",
                 "tools": [],
             }
+
+        if agent_cfg and "_parent" in agent_cfg:
+            agent_cfg = _resolve_agent_cfg_parent(kind, agent_cfg)
 
         # Deep-copy the defaults: _deep_merge mutates its base in place, and a
         # shallow copy would let per-agent overrides write through the shared

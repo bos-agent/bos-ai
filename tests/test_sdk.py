@@ -289,6 +289,20 @@ async def test_build_agent_applies_agent_cfg(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_build_agent_honours_a_reserved_parent_in_agent_cfg(tmp_path, fake_runtimes):
+    """The embedding route for a second named runtime instance from code. It used
+    to build a plain BOS `Agent` and drop `permission` without a word."""
+    from bos.core.agent import Agent
+    from bos.sdk import BosApp
+
+    async with BosApp({}, bos_dir=tmp_path) as app:
+        agent = await app.build_agent("martha", agent_cfg={"_parent": "codex", "permission": "read-only"})
+        assert not isinstance(agent, Agent)
+        assert agent.resolved_config["external_runtime"] == "codex"
+        assert agent.resolved_config["permission"] == "read-only"
+
+
+@pytest.mark.asyncio
 async def test_build_agent_rejects_agent_cfg_on_an_already_cached_kind(tmp_path):
     """Final review, item 1: a second call passing `agent_cfg` for an already-cached
     kind used to return the first agent unchanged, discarding the override with no
