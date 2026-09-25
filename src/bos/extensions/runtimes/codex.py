@@ -40,7 +40,7 @@ import uuid
 from collections.abc import AsyncGenerator, Callable, Mapping
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Awaitable, cast
+from typing import Any, Awaitable, TypeVar, cast
 
 from openai_codex import (
     ApprovalMode,
@@ -98,6 +98,8 @@ from bos.extensions.runtimes._shared import (
 
 logger = logging.getLogger(__name__)
 
+_T = TypeVar("_T")
+
 # Patched in tests to inject FakeAsyncCodex — the only seam the double needs.
 _CODEX_FACTORY: Callable[..., Any] = AsyncCodex
 
@@ -152,14 +154,18 @@ _PREFLIGHT_AUTH_SECONDS = 30.0
 #   `asyncio.timeout(timeout_seconds)` AND are raced against _stop_requested,
 #   so _settle_interrupted's cancel bounds them even when timeout_seconds is
 #   None.
-# - `thread_start` / `thread_resume` / `thread.turn` are **not** bounded. They
-#   are awaited in run() *outside* that timeout window, so `timeout_seconds`
-#   does not cover thread setup and a wedged child hangs that one turn. They
-#   cannot hang aclose(): the busy-guard slot is still None while they run, so
-#   aclose() waits on no task, takes the uncontended _client_lock and closes
-#   the client — which fails the pending RPC. Widening timeout_seconds to
-#   cover setup is a real change with its own error-message and stop-path
-#   consequences, so it is named here rather than smuggled into a fix round.
+# - `thread_start` / `thread_resume` / `thread.turn` are awaited *outside*
+#   that timeout window — they run before _run_turn exists — so each carries
+#   its own `wait_for(..., timeout_seconds)` instead (_bounded_setup, fix
+#   round 4). Per *attempt*, which is what timeout_seconds already means
+#   here: the schema-retry loop gives every attempt a fresh asyncio.timeout,
+#   so a turn with retries can already take a multiple of it. It is not a
+#   whole-call deadline, and round 4 did not make it one.
+# - With `timeout_seconds = None` nothing above is bounded by it, because the
+#   caller declined a deadline. A wedged setup is still recoverable: the
+#   busy-guard slot is still None while setup runs, so aclose() waits on no
+#   task, takes the uncontended _client_lock and closes the client — which
+#   fails the pending RPC.
 
 
 def _content_to_codex_input(content: MessageContent) -> Input | str:
@@ -422,7 +428,44 @@ class CodexAgent:
                 f'logged in. Run `codex login`, or set auth="api_key" to opt out of this check.'
             )
 
-    async def _thread_for(self, chat_id: str) -> tuple[AsyncThread, bool]:
+    async def _bounded_setup(self, awaitable: Awaitable[_T], *, phase: str, chat_id: str, turn_id: str) -> _T:
+        """Bound one vendor *setup* RPC with ``timeout_seconds`` (fix round 4).
+
+        ``thread_start`` / ``thread_resume`` / ``thread.turn`` are awaited
+        before :meth:`_run_turn` exists to wrap them in ``asyncio.timeout``,
+        so without this a child that wedges during setup hangs the turn with
+        the caller's own deadline never firing.
+
+        Bounded per *attempt*, which is what ``timeout_seconds`` already means
+        here — the schema-retry loop gives every attempt its own fresh
+        ``asyncio.timeout``, so a turn with retries can already take a
+        multiple of it. This does **not** make it a whole-call deadline; that
+        would be a real semantic change and is not what this is.
+
+        Nothing is interrupted on expiry, unlike :meth:`_settle_interrupted`'s
+        paths. During setup there is nothing to tell the vendor about: no
+        stream task exists, no handle exists yet, and the busy-guard slot is
+        still ``None``. ``wait_for`` cancelling the RPC is the whole teardown.
+
+        ``timeout_seconds=None`` means the caller declined a deadline, and
+        this declines one too rather than inventing a fallback. A wedge is
+        still recoverable in that case, for the same reason there is nothing
+        to interrupt: no turn task is registered, so ``aclose()`` waits on
+        none, takes the uncontended ``_client_lock`` and closes the client —
+        which fails the pending RPC.
+
+        The message names the phase, so a setup timeout is never mistaken for
+        a turn that timed out while streaming.
+        """
+        try:
+            return await asyncio.wait_for(awaitable, self._config.timeout_seconds)
+        except TimeoutError as exc:
+            raise TimeoutError(
+                f"{self._config.runtime} runtime {self._kind!r}: {phase} for turn {turn_id!r} on "
+                f"chat {chat_id!r} exceeded timeout_seconds={self._config.timeout_seconds!r}"
+            ) from exc
+
+    async def _thread_for(self, chat_id: str, *, turn_id: str) -> tuple[AsyncThread, bool]:
         """Map *chat_id* onto a Codex thread (BEP 19 §3.6): resume the thread on
         record for this chat, or start a fresh one when there is none.
 
@@ -449,10 +492,27 @@ class CodexAgent:
             "base_instructions": self._config.base_instructions,
         }
         if native_session_id is None:
-            thread = await client.thread_start(**thread_kwargs)
+            thread = await self._bounded_setup(
+                client.thread_start(**thread_kwargs),
+                phase="thread setup (thread_start)",
+                chat_id=chat_id,
+                turn_id=turn_id,
+            )
             return thread, True
         try:
-            thread = await client.thread_resume(native_session_id, **thread_kwargs)
+            thread = await self._bounded_setup(
+                client.thread_resume(native_session_id, **thread_kwargs),
+                phase="thread setup (thread_resume)",
+                chat_id=chat_id,
+                turn_id=turn_id,
+            )
+        except TimeoutError:
+            # Deliberately ahead of the wrap below: a child that never answers
+            # is not a thread BOS can no longer resume. Re-labelling it as the
+            # session-continuity error would send an operator hunting for a
+            # corrupt or expired session when the real answer is a wedged
+            # child.
+            raise
         except Exception as exc:
             raise RuntimeError(
                 f"{self._config.runtime} runtime {self._kind!r}: thread {native_session_id!r} for "
@@ -934,7 +994,10 @@ class CodexAgent:
           :meth:`_run_turn` interrupts the native turn and raises a fresh
           ``TimeoutError`` (BEP 19 §7 criterion 20: "... raises"). Nothing is
           committed: an answer cut off by the caller's own deadline is a
-          failure, not turn history.
+          failure, not turn history. The same key also bounds the setup RPCs
+          that run *before* there is a turn to interrupt
+          (:meth:`_bounded_setup`, fix round 4); that flavour names its phase
+          in the message, has nothing to interrupt, and is equally uncommitted.
         - **A cooperative stop** — ``request_stop()`` racing the turn — is
           BOS taking the turn away, not the model or the caller failing.
           ``Agent``'s own contract for the same situation
@@ -988,7 +1051,7 @@ class CodexAgent:
             )
         self._in_flight[chat_id] = None  # reserved synchronously — no await before this line
         try:
-            thread, _ = await self._thread_for(chat_id)
+            thread, _ = await self._thread_for(chat_id, turn_id=turn_id)
             turn_kwargs = _compact(
                 model=(llm_args or {}).get("model"),
                 effort=(llm_args or {}).get("reasoning_effort"),
@@ -1001,7 +1064,12 @@ class CodexAgent:
             retries = 0
             while True:
                 try:
-                    handle = await thread.turn(codex_input, **turn_kwargs)
+                    handle = await self._bounded_setup(
+                        thread.turn(codex_input, **turn_kwargs),
+                        phase="the turn request (thread.turn)",
+                        chat_id=chat_id,
+                        turn_id=turn_id,
+                    )
                     result, interrupted_by_host = await self._run_turn(
                         handle,
                         event_sink,
@@ -1011,6 +1079,12 @@ class CodexAgent:
                         interrupt=interrupt,
                     )
                 except TimeoutError:
+                    # Both flavours pass straight through, unwrapped: the
+                    # streaming deadline from _run_turn, and the setup
+                    # deadline from _bounded_setup above. Each already carries
+                    # its own runtime/kind/turn/chat message, and re-wrapping
+                    # either as a generic turn failure would bury which one
+                    # fired.
                     raise
                 except AbortTurn:
                     # Agent CATCHES AbortTurn and returns (agent.py:837-840);

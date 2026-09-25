@@ -213,7 +213,7 @@ async def test_subscription_auth_preflight_fails_loudly_without_an_account(tmp_p
 @pytest.mark.asyncio
 async def test_a_new_chat_starts_a_thread_with_the_resolved_config(tmp_path, fake_codex, mem_store):
     agent = _agent(tmp_path, fake_codex, permission="workspace-write", cwd="services")
-    thread, started = await agent._thread_for("chat-1")
+    thread, started = await agent._thread_for("chat-1", turn_id="t1")
 
     assert started is True
     (kwargs,) = fake_codex.instances[0].thread_start_calls
@@ -228,7 +228,7 @@ async def test_a_known_chat_resumes_its_thread(tmp_path, fake_codex, mem_store):
     await commit_external_turn(mem_store, "chat-1", turn_id="t1", user_content="a", response="b",
                                runtime="codex", native_session_id="thread_abc")
     agent = _agent(tmp_path, fake_codex, chat_store=mem_store)
-    thread, started = await agent._thread_for("chat-1")
+    thread, started = await agent._thread_for("chat-1", turn_id="t1")
 
     assert started is False
     assert thread.id == "thread_abc"
@@ -248,7 +248,7 @@ async def test_an_unresumable_thread_is_reported_not_silently_replaced(tmp_path,
     fake_codex.arm(resume_error=CodexError("thread_gone: no such thread"))
 
     with pytest.raises(RuntimeError) as excinfo:
-        await agent._thread_for("chat-1")
+        await agent._thread_for("chat-1", turn_id="t1")
     message = str(excinfo.value)
     assert "thread_gone" in message and "codex" in message
     assert fake_codex.instances[0].thread_start_calls == [], "no silent replacement"
@@ -1383,6 +1383,105 @@ async def test_timeout_seconds_still_raises_when_the_interrupt_rpc_never_returns
     assert elapsed < 1, f"bounded by the interrupt grace, not by the child: {elapsed:.2f}s"
     assert fake_codex.instances[-1].turn_handles[-1].interrupted is True
     assert await mem_store.get_messages("chat-1") == [], "a timed-out turn commits nothing"
+
+
+@pytest.mark.asyncio
+async def test_timeout_seconds_bounds_thread_start(tmp_path, fake_codex, mem_store):
+    """Fix round 4: thread_start / thread_resume / thread.turn are awaited
+    before _run_turn exists to wrap them in asyncio.timeout, so until now a
+    child that wedged during setup hung the turn forever with the caller's
+    own deadline never firing. Each now carries its own wait_for.
+
+    Per *attempt*, not a whole-call deadline: that is already what
+    timeout_seconds means here, since the schema-retry loop gives every
+    attempt a fresh asyncio.timeout and a retried turn can already take a
+    multiple of it."""
+    agent = _agent(tmp_path, fake_codex, chat_store=mem_store, timeout_seconds=0.05)
+    fake_codex.arm(thread_start_hang=asyncio.Event())  # never set: the child never answers
+
+    started = time.perf_counter()
+    with pytest.raises(TimeoutError) as excinfo:
+        await asyncio.wait_for(agent.run("chat-1", "do it", turn_id="t1"), timeout=5)
+    elapsed = time.perf_counter() - started
+
+    message = str(excinfo.value)
+    assert "thread setup (thread_start)" in message, "the phase is named, not just 'timed out'"
+    assert "t1" in message and "chat-1" in message and "george" in message
+    assert elapsed < 1, f"{elapsed:.2f}s"
+    assert await mem_store.get_messages("chat-1") == []
+
+
+@pytest.mark.asyncio
+async def test_timeout_seconds_bounds_thread_resume_without_the_session_continuity_error(
+    tmp_path, fake_codex, mem_store
+):
+    """The resume path's timeout must NOT come out wearing Task 4's
+    "this thread could not be resumed, and BOS does not silently start a
+    fresh session" message. A child that never answers is not a corrupt or
+    expired session, and that wording would send an operator hunting for the
+    wrong thing — so the TimeoutError is re-raised ahead of that wrap."""
+    from bos.extensions.runtimes._shared import commit_external_turn
+
+    await commit_external_turn(mem_store, "chat-1", turn_id="t0", user_content="a", response="b",
+                               runtime="codex", native_session_id="thread_abc")
+    agent = _agent(tmp_path, fake_codex, chat_store=mem_store, timeout_seconds=0.05)
+    fake_codex.arm(thread_resume_hang=asyncio.Event())  # never set
+
+    started = time.perf_counter()
+    with pytest.raises(TimeoutError) as excinfo:
+        await asyncio.wait_for(agent.run("chat-1", "do it", turn_id="t1"), timeout=5)
+    elapsed = time.perf_counter() - started
+
+    message = str(excinfo.value)
+    assert "thread setup (thread_resume)" in message
+    assert "could not be resumed" not in message, "a wedged child is not an unresumable session"
+    assert "thread_abc" not in message, "nor is the session id the thing to go looking at"
+    assert elapsed < 1, f"{elapsed:.2f}s"
+
+
+@pytest.mark.asyncio
+async def test_timeout_seconds_bounds_the_turn_request(tmp_path, fake_codex, mem_store):
+    """The third setup RPC: thread.turn() returns the handle _run_turn needs,
+    so it too runs before any asyncio.timeout window exists."""
+    agent = _agent(tmp_path, fake_codex, chat_store=mem_store, timeout_seconds=0.05)
+    fake_codex.arm(turn_hang=asyncio.Event())  # never set; thread setup itself answers fine
+
+    started = time.perf_counter()
+    with pytest.raises(TimeoutError) as excinfo:
+        await asyncio.wait_for(agent.run("chat-1", "do it", turn_id="t1"), timeout=5)
+    elapsed = time.perf_counter() - started
+
+    message = str(excinfo.value)
+    assert "the turn request (thread.turn)" in message
+    # Distinguishable from _run_turn's own streaming deadline, which is the
+    # whole point of naming the phase.
+    assert "and was interrupted" not in message
+    assert elapsed < 1, f"{elapsed:.2f}s"
+    assert fake_codex.instances[-1].thread_start_calls, "setup itself got through"
+
+
+@pytest.mark.asyncio
+async def test_slow_setup_still_completes_when_no_timeout_seconds_is_set(tmp_path, fake_codex, mem_store):
+    """timeout_seconds=None means the caller declined a deadline, and setup
+    declines one too rather than inventing a fallback. Asserted as a call that
+    *completes* after a slow setup — asserting a hang would only prove the
+    test can wait."""
+    agent = _agent(tmp_path, fake_codex, chat_store=mem_store, timeout_seconds=None)
+    gate = asyncio.Event()
+    fake_codex.arm(thread_start_hang=gate)
+    _arm_notifications(
+        fake_codex,
+        [_item_completed(_agent_message_item("msg-1", "done")), _turn_completed()],
+    )
+
+    task = asyncio.ensure_future(agent.run("chat-1", "do it", turn_id="t1"))
+    # Deterministic rather than timed: thread_start records its call before it
+    # blocks, so this waits for the RPC to actually be in flight.
+    await _poll_until(lambda: bool(fake_codex.instances) and bool(fake_codex.instances[-1].thread_start_calls))
+    gate.set()  # slow, but it does answer
+
+    result = await asyncio.wait_for(task, timeout=2)
+    assert result.output == "done"
 
 
 @pytest.mark.asyncio

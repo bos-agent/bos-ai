@@ -385,6 +385,8 @@ class FakeThread:
 
     async def turn(self, input: Any, **kwargs: Any) -> FakeTurnHandle:
         self._codex.turn_calls.append((self.id, input, kwargs))
+        if self._codex.turn_hang is not None:
+            await self._codex.turn_hang.wait()
         # A queued result (Task 5 fix round: schema-retry tests need a
         # *different* TurnResult per call within one run() invocation) takes
         # priority; next_result is the pre-existing single persistent slot,
@@ -445,6 +447,14 @@ class FakeAsyncCodex:
         # None (the default) means account() answers immediately, as every
         # pre-Task-7 test relies on.
         self.account_hang: asyncio.Event | None = None
+        # Fix round 4: the same shape as account_hang, for the three *setup*
+        # RPCs — the vendor path is identical (a to_thread'd request that
+        # blocks on a queue read with no timeout of its own), so a wedged
+        # child stalls these exactly as it stalls account() and interrupt().
+        # None means answer immediately, as every pre-round-4 test relies on.
+        self.thread_start_hang: asyncio.Event | None = None
+        self.thread_resume_hang: asyncio.Event | None = None
+        self.turn_hang: asyncio.Event | None = None
 
     async def account(self, *, refresh_token: bool = False) -> Any:
         if self.account_hang is not None:
@@ -459,13 +469,19 @@ class FakeAsyncCodex:
         return GetAccountResponse(account=Account(root=ApiKeyAccount(type="apiKey")), requires_openai_auth=False)
 
     async def thread_start(self, **kwargs: Any) -> FakeThread:
+        # Recorded before the wait, so a test can poll for "the RPC was
+        # reached" instead of guessing how many loop ticks run() needs.
         self.thread_start_calls.append(kwargs)
+        if self.thread_start_hang is not None:
+            await self.thread_start_hang.wait()
         return FakeThread(self, f"thread-{len(self.thread_start_calls)}")
 
     async def thread_resume(self, thread_id: str, **kwargs: Any) -> FakeThread:
         if self.resume_error is not None:
             raise self.resume_error
         self.thread_resume_calls.append((thread_id, kwargs))
+        if self.thread_resume_hang is not None:
+            await self.thread_resume_hang.wait()
         return FakeThread(self, thread_id)
 
     async def close(self) -> None:
