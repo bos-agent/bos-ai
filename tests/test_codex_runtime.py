@@ -304,7 +304,8 @@ async def test_a_failed_turn_with_no_error_detail_still_raises_with_bos_context(
     """Mirrors openai_codex._run._raise_for_failed_turn's *other* branch: no
     `error`, or an `error` with a blank `message`, falls back to a generic
     "turn failed with status ..." rather than KeyError-ing or going silent.
-    FakeTurnHandle.run() (fix round 2, Finding 2) reproduces this exactly."""
+    Reached through production's own mirror of it, `_raise_for_failed_turn`,
+    which `_emit_stream` calls on the completed turn."""
     agent = _agent(tmp_path, fake_codex, chat_store=mem_store)
     _arm_result(fake_codex, final_response=None, status=TurnStatus.failed)  # no error_message
 
@@ -2316,12 +2317,86 @@ async def test_it_carries_the_two_surfaces_bosapp_routes_on(tmp_path, fake_codex
     """`BosApp.get_messages(source="native")` finds this class by two names and
     nothing else: `resolved_config["external_runtime"]`, matched against the
     runtime in the chat's stored metadata, and a duck-typed `native_messages`.
-    Neither is on `AgentPort` or `ExternalRuntime`, so nothing but this test
-    fails if one is renamed — test_sdk.py routes against a stub, deliberately,
-    and a stub cannot notice.
+    `native_messages` and the `"external_runtime"` *key* are on neither
+    `AgentPort` nor `ExternalRuntime`, so nothing but this test fails if either
+    is renamed — test_sdk.py routes against a stub, deliberately, and a stub
+    cannot notice. `resolved_config` itself is not in that position: it is on
+    `ExternalRuntime`, so renaming it also fails
+    test_it_satisfies_the_external_runtime_protocol and `boscli inspect`.
     """
     agent = _agent(tmp_path, fake_codex)
 
     assert agent.resolved_config["external_runtime"] == "codex"
     assert inspect.iscoroutinefunction(agent.native_messages)
     assert list(inspect.signature(agent.native_messages).parameters) == ["chat_id"]
+
+
+# ── Task 10 fix: native_options, the escape hatch (BEP 19 §3.4) ─────────────
+
+
+@pytest.mark.asyncio
+async def test_native_options_reach_the_vendor_as_keywords(tmp_path, fake_codex):
+    """§3.4's own example is `personality`, which is a real `thread_start`
+    keyword. Parsed and reported since Layer 2, sent since now."""
+    agent = _agent(tmp_path, fake_codex, native_options={"personality": "concise", "ephemeral": True})
+    await agent._thread_for("chat-1", turn_id="t1")
+
+    (kwargs,) = fake_codex.instances[0].thread_start_calls
+    assert kwargs["personality"] == "concise"
+    assert kwargs["ephemeral"] is True
+
+
+@pytest.mark.asyncio
+async def test_native_options_config_merges_rather_than_replacing(tmp_path, fake_codex):
+    """§3.4.1.4's route: `project_doc_max_bytes` is a Codex *config.toml* key,
+    not a keyword, so it rides in the same `config=` slot the MCP egress uses.
+    With no `mcp_tools` there is nothing of BOS's in there to merge with — the
+    MCP half is pinned in test_codex_mcp_wiring.py, which has a server."""
+    agent = _agent(tmp_path, fake_codex, native_options={"config": {"project_doc_max_bytes": 0}})
+    await agent._thread_for("chat-1", turn_id="t1")
+
+    (kwargs,) = fake_codex.instances[0].thread_start_calls
+    from bos.extensions.runtimes.codex import _BOS_THREAD_KWARGS
+
+    assert kwargs["config"] == {"project_doc_max_bytes": 0}
+    # Popped, not also forwarded: `config` must not arrive as a stray keyword
+    # beside the slot it was merged into.
+    assert set(kwargs) == _BOS_THREAD_KWARGS
+
+
+@pytest.mark.asyncio
+async def test_native_options_may_not_override_what_bos_sets(tmp_path, fake_codex):
+    """The ruling: rejected at construction, naming the key — not last-write-wins
+    and not a warning. `sandbox` is derived from `permission`, and a config that
+    could quietly replace it would undo the confinement (§3.5)."""
+    with pytest.raises(ValueError) as excinfo:
+        _agent(tmp_path, fake_codex, native_options={"sandbox": "danger-full-access"})
+
+    message = str(excinfo.value)
+    assert "sandbox" in message and "native_options" in message
+
+
+@pytest.mark.asyncio
+async def test_native_options_may_not_reach_bos_own_mcp_servers_entry(tmp_path, fake_codex):
+    """`config` stays reachable — that is the point of §3.4.1.4 — so the reserved
+    thing is the one sub-key BOS writes there, not the table."""
+    with pytest.raises(ValueError) as excinfo:
+        _agent(tmp_path, fake_codex, native_options={"config": {"mcp_servers": {"bos-tools": {"url": "http://x"}}}})
+
+    assert "config.mcp_servers" in str(excinfo.value)
+
+
+@pytest.mark.asyncio
+async def test_the_bos_owned_thread_kwargs_constant_matches_what_is_sent(tmp_path, fake_codex):
+    """The anti-drift half of the rule above. `_RESERVED_NATIVE_OPTIONS` is
+    derived from `_BOS_THREAD_KWARGS`, and that constant is only as good as its
+    agreement with the literal in `_thread_for` — a kwarg added there and not
+    here silently becomes overridable by `native_options`.
+    """
+    from bos.extensions.runtimes.codex import _BOS_THREAD_KWARGS
+
+    agent = _agent(tmp_path, fake_codex)
+    await agent._thread_for("chat-1", turn_id="t1")
+
+    (kwargs,) = fake_codex.instances[0].thread_start_calls
+    assert set(kwargs) == _BOS_THREAD_KWARGS

@@ -292,27 +292,6 @@ class FakeTurnHandle:
         if self.steer_error is not None:
             raise self.steer_error
 
-    async def run(self) -> Any:
-        # Mirrors openai_codex._run._raise_for_failed_turn exactly: the real
-        # AsyncTurnHandle.run() raises a bare RuntimeError for a failed turn
-        # *before* ever constructing a TurnResult (that function runs inside
-        # _collect_async_turn_result, ahead of the `TurnResult(...)` call) —
-        # so a caller's `await thread.run(...)` never receives a TurnResult
-        # whose status is `failed`. CodexAgent itself has called only
-        # .stream() since Task 6 (its own codex.py has the same mirror,
-        # reached through _emit_stream instead) — this method is unreached by
-        # production code now, but kept as a faithful stand-in for the real
-        # AsyncThread.run()/AsyncTurnHandle.run() surface.
-        if self._result is not None:
-            from openai_codex.generated.v2_all import TurnStatus
-
-            if self._result.status is TurnStatus.failed:
-                error = self._result.error
-                if error is not None and error.message:
-                    raise RuntimeError(error.message)
-                raise RuntimeError(f"turn failed with status {self._result.status.value}")
-        return self._result
-
 
 def _default_turn_notifications(thread_id: str, turn_id: str, result: Any) -> list[Any]:
     """Task 5's tests arm a ``TurnResult`` via ``_arm_result`` and inspect only
@@ -413,11 +392,14 @@ class FakeThread:
         self._codex.turn_handles.append(handle)
         return handle
 
-    async def run(self, input: Any, **kwargs: Any) -> Any:
-        handle = await self.turn(input, **kwargs)
-        return await handle.run()
-
-    # Task 9 deliberately has no `read()` here. `CodexAgent.native_messages`
+    # Deliberately no `run()` here, and none on FakeTurnHandle either. The
+    # vendor has both, but production has driven `handle.stream()` since Task 6
+    # and nothing calls them — a faithful stand-in for a surface nothing uses is
+    # a second definition of correctness, free to drift where no test looks.
+    # (The failed-turn raise they used to mirror is production's own
+    # `_raise_for_failed_turn`, reached through `_emit_stream`.)
+    #
+    # Task 9 deliberately has no `read()` here either. `CodexAgent.native_messages`
     # does not go through a thread object the client handed it — it builds a
     # REAL `openai_codex.AsyncThread` over the client (BEP 19 §3.7; resuming
     # would be a write on a read), so the vendor's own `AsyncThread.read()`

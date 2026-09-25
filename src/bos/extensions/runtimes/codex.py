@@ -320,6 +320,13 @@ _UNKNOWN_FILE_MIME_TYPE = "application/octet-stream"
 #   `_client_lock` before returning it — so a wedged read blocks only its own
 #   caller; bounded anyway because "the host asked for a chat's history and
 #   never got an answer" is its own failure.
+# - `_mcp_egress_config`'s `await server.start()` (Task 10) is the one await
+#   in this class that crosses nothing vendor-side: it binds BOS's own uvicorn
+#   loopback socket, in this process. It is listed because the audit exists so
+#   the next reader does not redo it, and it does hold `_client_lock` while it
+#   runs — the same lock the account() note above calls out. It gets no bound:
+#   a bind to 127.0.0.1:0 does not depend on anything that can be slow, and a
+#   timeout around it would be a deadline on BOS waiting for itself.
 # - `_deny_approval` (Task 8) adds no await to any of the above — it is
 #   synchronous and returns a dict lookup. It does add the one place BOS code
 #   runs on the vendor's stdout reader thread rather than the event loop, and
@@ -354,6 +361,25 @@ _UNKNOWN_FILE_MIME_TYPE = "application/octet-stream"
 # is a good deal less likely than "bos" to be a table an operator already has.
 # Hyphens are fine — `mcp_servers.bos-tools` parses as a dotted override key.
 _MCP_SERVER_NAME = "bos-tools"
+
+# The Codex config table BOS writes its one server into.
+_MCP_SERVERS_KEY = "mcp_servers"
+
+# Every keyword `_thread_for` hands `thread_start`/`thread_resume` itself. Kept
+# as a constant so `native_options` can be checked against it at config-parse
+# time (BEP 19 §3.4) rather than colliding at the call; the pair is pinned
+# together by test_the_bos_owned_thread_kwargs_constant_matches_what_is_sent,
+# which fails the day a kwarg is added here and not there.
+_BOS_THREAD_KWARGS = frozenset(
+    {"sandbox", "approval_mode", "cwd", "model", "developer_instructions", "base_instructions", "config"}
+)
+
+# What `native_options` may therefore not name. Every owned kwarg, with `config`
+# as the one exception that names itself: BOS does not own that table outright,
+# it writes a single key into it and merges the host's own `config` underneath
+# (§3.4.1.4's `project_doc_max_bytes` is why the table has to stay reachable).
+# So only the sub-key BOS writes is reserved there.
+_RESERVED_NATIVE_OPTIONS = (_BOS_THREAD_KWARGS - {"config"}) | {f"config.{_MCP_SERVERS_KEY}"}
 
 
 def _content_to_codex_input(content: MessageContent) -> Input | str:
@@ -599,7 +625,12 @@ class CodexAgent:
         self._chat_store = chat_store
         self._mcp = mcp
         self._structured_validator = structured_validator
-        self._config = parse_external_config(dict(cfg), runtime="codex", workspace=Path(workspace))
+        self._config = parse_external_config(
+            dict(cfg),
+            runtime="codex",
+            workspace=Path(workspace),
+            reserved_native_options=_RESERVED_NATIVE_OPTIONS,
+        )
         self._client: AsyncCodex | None = None
         self._client_lock = asyncio.Lock()
         # The `[mcp_servers.<name>]` override every thread of this agent is
@@ -793,7 +824,8 @@ class CodexAgent:
         # Annotated, not inferred: `JsonObject` is `dict[str, JsonValue]` and
         # `dict` is invariant in its value type, so an unannotated nested literal
         # infers as `dict[str, dict[str, ...]]` and will not assign to it.
-        config: JsonObject = {"mcp_servers": {_MCP_SERVER_NAME: {"url": server.url, "bearer_token_env_var": env_var}}}
+        entry = {"url": server.url, "bearer_token_env_var": env_var}
+        config: JsonObject = {_MCP_SERVERS_KEY: {_MCP_SERVER_NAME: entry}}
         return config, {env_var: token}
 
     def _deny_approval(self, method: str, params: JsonObject | None) -> JsonObject:
@@ -939,6 +971,15 @@ class CodexAgent:
             else None
         )
         sandbox, approval_mode = _SANDBOX_AND_APPROVAL[self._config.permission]
+        # BEP 19 §3.4's escape hatch. `native_options` is handed to the vendor
+        # as keywords, minus its `config` table, which is merged into the one
+        # `config=` slot below instead of replacing it. Nothing here can
+        # overwrite a BOS-set keyword: `_RESERVED_NATIVE_OPTIONS` made that a
+        # config error at construction. A key the vendor does not have is a
+        # TypeError from `thread_start`, not a silent drop — an escape hatch
+        # that swallows typos would be worse than one that does not exist.
+        native = dict(self._config.native_options)
+        native_config = native.pop("config", None) or {}
         thread_kwargs: dict[str, Any] = {
             "sandbox": sandbox,
             "approval_mode": approval_mode,
@@ -946,11 +987,14 @@ class CodexAgent:
             "model": self._config.model,
             "developer_instructions": self._config.system_prompt,
             "base_instructions": self._config.base_instructions,
-            # BEP 19 §3.8. Both thread_start and thread_resume take it, so a
-            # resumed chat reaches the same tools a fresh one does. None is the
-            # vendor's own default for the parameter, and is what an agent with
-            # nothing servable passes — see `_mcp_egress_config`.
-            "config": self._mcp_config,
+            # BEP 19 §3.8 and §3.4.1.4 share this slot. Both thread_start and
+            # thread_resume take it, so a resumed chat reaches the same tools a
+            # fresh one does. The two cannot collide — `config.mcp_servers` is
+            # reserved — so the merge order is documentation, not a tie-break.
+            # `None` rather than `{}` when both are absent: the vendor's own
+            # default, and what this passed before either existed.
+            "config": {**native_config, **(self._mcp_config or {})} or None,
+            **native,
         }
         if native_session_id is None:
             thread = await self._bounded_setup(
@@ -1374,7 +1418,7 @@ class CodexAgent:
         # asyncio's default handler does not log an "exception was never
         # retrieved" warning for that straggler; it changes no observable
         # behavior (the RuntimeError below is raised regardless). Mirrors
-        # Agent._abandon's identical line (agent.py:358-360) verbatim.
+        # Agent._abandon's identical pair (agent.py:360-361) verbatim.
         if stream_task.done() and not stream_task.cancelled():
             stream_task.exception()  # consumed
         raise RuntimeError(
@@ -1429,9 +1473,10 @@ class CodexAgent:
         into ``TurnEvent``s for ``event_sink`` while racing the turn against a
         cooperative stop and ``timeout_seconds`` and polling the ``interrupt``
         callback, accumulating the same ``TurnResult`` a plain
-        ``await thread.run(...)`` would have produced. Still deliberately
-        plain otherwise (stage 4 of 4, see the module docstring): no approval
-        handling yet (Task 8).
+        ``await thread.run(...)`` would have produced. Escalations the
+        child asks for along the way are refused by :meth:`_deny_approval`,
+        installed in :meth:`_ensure_client` — that happens off this call
+        stack, on the vendor's reader thread, so nothing here waits on it.
 
         ``schema`` maps to ``thread.turn(output_schema=...)`` as a provider
         hint, but that hint is never trusted on its own: the reply is always

@@ -8,6 +8,7 @@ interface here to inherit — only work neither should write twice.
 from __future__ import annotations
 
 import logging
+from collections.abc import Collection, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -54,9 +55,21 @@ class ExternalAgentConfig:
 
 
 def parse_external_config(
-    cfg: dict[str, Any], *, runtime: str, workspace: Path
+    cfg: dict[str, Any],
+    *,
+    runtime: str,
+    workspace: Path,
+    reserved_native_options: Collection[str] = (),
 ) -> ExternalAgentConfig:
-    """Validate one external agent's config, strictly."""
+    """Validate one external agent's config, strictly.
+
+    *reserved_native_options* names the settings the calling runtime sets for
+    itself, which `native_options` may therefore not carry (BEP 19 §3.4). The
+    runtime supplies them because only it knows what it sends; the rejection
+    lives here because this is the layer that raises on a bad config, and a
+    reserved key has to fail at construction rather than at the first turn. An
+    entry may be `"key"` or one level of `"key.subkey"`.
+    """
     unknown = set(cfg) - _KNOWN_KEYS - _DROPPED_KEYS
     if unknown:
         raise ValueError(
@@ -150,6 +163,21 @@ def parse_external_config(
             f"{native_options_raw!r} ({type(native_options_raw).__name__}). Use "
             f'`native_options = {{ key = "value" }}`.'
         )
+    native_options = dict(native_options_raw or {})
+
+    # Rejected, not last-write-wins and not warned past. A runtime derives its
+    # sandbox, its approval mode and its working directory from `permission` and
+    # `cwd`, and a `native_options` that could quietly replace any of them would
+    # undo the confinement the whole design rests on (BEP 19 §3.5). An escape
+    # hatch is for the knobs BOS does not touch; this is what keeps that true.
+    if clashes := sorted(_reserved_clashes(native_options, reserved_native_options)):
+        raise ValueError(
+            f"`native_options` may not set {clashes}: the {runtime!r} runtime sets "
+            f"{'that' if len(clashes) == 1 else 'those'} itself, from `permission`, `cwd`, the "
+            f"prompt keys and the MCP egress. `native_options` is the escape hatch for settings "
+            f"BOS does not touch — letting it reach these would silently override the ones that "
+            f"decide what the runtime is allowed to do."
+        )
 
     return ExternalAgentConfig(
         runtime=runtime,
@@ -161,8 +189,25 @@ def parse_external_config(
         auth=auth,
         timeout_seconds=timeout_seconds,
         mcp_tools=mcp_tools,
-        native_options=dict(native_options_raw or {}),
+        native_options=native_options,
     )
+
+
+def _reserved_clashes(native_options: dict[str, Any], reserved: Collection[str]) -> Iterator[str]:
+    """Which of *reserved* the caller's `native_options` actually names.
+
+    One level of nesting, spelled `"key.subkey"`, because a runtime may own only
+    part of a table it also lets through — Codex's `config` is exactly that: BOS
+    writes `mcp_servers` into it and merges the rest of the host's own `config`
+    underneath, so the sub-key is reserved and the table is not.
+    """
+    for name in reserved:
+        head, _, tail = name.partition(".")
+        if not tail:
+            if head in native_options:
+                yield head
+        elif isinstance(nested := native_options.get(head), dict) and tail in nested:
+            yield name
 
 
 async def read_native_session_id(store: ChatStore, chat_id: str, *, runtime: str) -> str | None:

@@ -466,7 +466,7 @@ class AgentPort(Protocol):
 
 @runtime_checkable
 class ExternalRuntime(AgentPort, Protocol):
-    """What the *harness* requires of an agent backed by a vendor runtime (BEP 19 §8.2).
+    """What the *harness* requires of an agent backed by a vendor runtime (BEP 19 §3.3).
 
     ``AgentPort`` is what a host requires of any agent; this is the extra a
     vendor-backed one owes the harness that owns its lifetime.
@@ -483,7 +483,7 @@ class ExternalRuntime(AgentPort, Protocol):
 
     ``__init__`` is part of the contract too: ``AgentHarness.create_agent`` is
     the *only* call site that builds a vendor runtime, and it builds every kind
-    through these same six keyword arguments (BEP 19 §3.2). A runtime whose
+    through these same six keyword arguments (BEP 19 §3.2's sketch). A runtime whose
     constructor drifts from this shape should fail where it is written, not the
     first time the harness tries to build one.
 

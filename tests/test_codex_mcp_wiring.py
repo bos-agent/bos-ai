@@ -155,6 +155,35 @@ async def test_the_thread_config_opens_the_door_to_exactly_the_agents_tools(
 
 
 @pytest.mark.asyncio
+async def test_native_options_config_sits_beside_the_mcp_override(tmp_path, fake_codex, host_tools):
+    """§3.4.1.4 and §3.8 share the one `config=` slot, so this is the case where
+    the merge is load-bearing rather than a formality: a host's own Codex config
+    key and BOS's `mcp_servers` entry both have to survive.
+
+    They cannot collide — `config.mcp_servers` is reserved in `native_options`
+    (BEP 19 §3.4), which is what lets this be a merge and not a precedence rule.
+    """
+    from bos.extensions.runtimes.mcp_egress import BosToolMcpServer
+
+    server = BosToolMcpServer()
+    agent = _agent(
+        tmp_path,
+        fake_codex,
+        mcp=lambda: server,
+        mcp_tools=["WiringAlpha"],
+        native_options={"config": {"project_doc_max_bytes": 0}},
+    )
+    try:
+        await agent._thread_for("chat-1", turn_id="t1")
+    finally:
+        await server.aclose()
+
+    (kwargs,) = fake_codex.instances[0].thread_start_calls
+    assert kwargs["config"]["project_doc_max_bytes"] == 0, "the host's own key survived"
+    assert set(kwargs["config"]["mcp_servers"]) == {"bos-tools"}, "and so did BOS's egress"
+
+
+@pytest.mark.asyncio
 async def test_an_agent_with_no_mcp_tools_never_asks_for_a_server(tmp_path, fake_codex):
     """BEP 19 §3.1 and the lazy half of §7.7, on a real runtime for the first
     time: the difference between BOS binding a loopback port for every agent and
