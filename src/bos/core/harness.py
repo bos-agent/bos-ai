@@ -177,15 +177,17 @@ def _resolve_agent_cfg_parent(kind: str | None, agent_cfg: dict[str, Any]) -> di
     ignored. The parent is looked up where the resolver left its work: a
     registered agent's ``AgentRegistry`` defaults already hold its whole
     resolved chain, so deep-merging them under ``agent_cfg`` gives what the same
-    keys under ``[agents.<name>]`` with that ``_parent`` would. A reserved runtime
+    settings under ``[agents.<name>]`` with that ``_parent`` would — given in
+    ``agent_cfg``'s own shape, which is the harness's argument shape rather than
+    TOML's (``tools`` is a list, not a ``[tools]`` table). A reserved runtime
     is a parent even with no ``[agents.<runtime>]`` table, seeded with the
     marker ``_EXTERNAL_RUNTIME_SPECS`` writes. A ``None`` parent is no parent, as
     in config.
 
-    Refused: a parent that is neither; a ``kind`` with config of its own, whose
-    registered defaults already fold in its own lineage, so a second parent has
+    Refused: a parent that is neither; a ``kind`` that is already registered,
+    whose defaults already fold in a lineage of their own, so a second parent has
     no defined place in the merge; and a parent whose runtime contradicts the one
-    ``kind`` or ``external_runtime`` names.
+    ``kind`` or an ``external_runtime`` key (``None`` included) names.
     """
     cfg = dict(agent_cfg)
     parent = cfg.pop("_parent")
@@ -207,7 +209,13 @@ def _resolve_agent_cfg_parent(kind: str | None, agent_cfg: dict[str, Any]) -> di
     base: dict[str, Any] = {"external_runtime": parent} if reserved else {}
     if registered:
         inherited = copy.deepcopy(AgentRegistry.get_defaults(parent))
-        inherited.pop("kind", None)  # the parent's own name, not the child's
+        # `kind` in registered defaults is the parent's own name, which is also the
+        # identity per-agent plugin state is keyed by (`_bind_plugins_for_agent`).
+        # Replace it with the child's, as `register()` does for a config child;
+        # dropping it would key every such child as "default" and share one store.
+        inherited.pop("kind", None)
+        if kind is not None:
+            inherited["kind"] = kind
         base = _deep_merge(base, inherited)
     runtime = base.get("external_runtime")
     resolves_to = f"the {runtime!r} runtime" if runtime else "a BOS agent"
@@ -215,10 +223,10 @@ def _resolve_agent_cfg_parent(kind: str | None, agent_cfg: dict[str, Any]) -> di
         raise ValueError(
             f"{kind!r} is the {kind!r} runtime, but `_parent = {parent!r}` resolves to {resolves_to}."
         )
-    declared = cfg.get("external_runtime")
-    if declared is not None and declared != runtime:
+    if "external_runtime" in cfg and cfg["external_runtime"] != runtime:
         raise ValueError(
-            f"agent_cfg asks for the {declared!r} runtime, but `_parent = {parent!r}` resolves to {resolves_to}."
+            f"agent_cfg sets `external_runtime = {cfg['external_runtime']!r}`, but `_parent = {parent!r}` "
+            f"resolves to {resolves_to}."
         )
     return _deep_merge(base, cfg)
 

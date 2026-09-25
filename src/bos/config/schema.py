@@ -141,8 +141,9 @@ class ActorConfig(BaseModel):
     def _no_parent_in_actor_overrides(cls, value: AgentConfig) -> AgentConfig:
         # `_parent` belongs where an agent is declared: `[agents.<name>]`, an agent
         # file, or the SDK's `agent_cfg` (BEP 19 §3.4.1.1). An actor selects a
-        # declared agent with `agent`. A `_parent` here used to be dropped without
-        # a word; refusing it at load time names the actor.
+        # declared agent with `agent`. A `_parent` here passed validation and then
+        # was either dropped (a BOS agent) or failed at gateway start as an unknown
+        # key (an external runtime); refusing it at load time names the actor.
         if value.parent is not None:
             raise ValueError(
                 "`_parent` is not allowed in an actor's agent_cfg. Declare the agent in "

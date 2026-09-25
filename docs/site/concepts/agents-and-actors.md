@@ -58,7 +58,8 @@ max_restarts      = 5
 model = "openai/gpt-4o"         # per-actor model override (same shape as [agent.defaults])
 ```
 
-`agent_cfg` accepts the same fields as `[agent.defaults]` and layers on top of the
+`agent_cfg` accepts the same fields as `[agent.defaults]`, except `_parent` — declare a
+variant in `[agents.*]` and select it with `agent` — and layers on top of the
 agent spec, so you can run identical agent logic under two actors with different
 models or plugin bindings.
 

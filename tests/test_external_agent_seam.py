@@ -154,6 +154,31 @@ async def test_a_registered_runtime_instance_is_a_parent_in_agent_cfg(tmp_path, 
 
 
 @pytest.mark.asyncio
+async def test_bos_variants_bind_plugins_under_their_own_names(tmp_path, fake_runtimes, monkeypatch):
+    """Per-agent plugin state — MemoryPlugin's store — is keyed by
+    `agent_name or kind or "default"`. Two variants of one parent must not both
+    bind as "default" and share it, which is what dropping the parent's `kind`
+    without writing the child's did."""
+    from bos.core.harness import AgentHarness
+
+    ws = _write_workspace(tmp_path, '[agents.solo]\nsystem_prompt = "hi"\n')
+    ws.resolve_agents()
+    ws.bootstrap_platform()
+    identities: list[str] = []
+    original = AgentHarness._bind_plugins_for_agent
+
+    async def spy(self, agent_cfg):
+        identities.append(agent_cfg.get("agent_name") or agent_cfg.get("kind") or "default")
+        return await original(self, agent_cfg)
+
+    monkeypatch.setattr(AgentHarness, "_bind_plugins_for_agent", spy)
+    async with ws.harness() as harness:
+        await harness.create_agent("solo2", agent_cfg={"_parent": "solo"})
+        await harness.create_agent("solo3", agent_cfg={"_parent": "solo"})
+    assert identities == ["solo2", "solo3"]
+
+
+@pytest.mark.asyncio
 async def test_resolving_an_agent_cfg_parent_writes_through_to_nothing(tmp_path, fake_runtimes):
     """`_deep_merge` mutates its base in place: neither the parent's registry
     entry nor the caller's dict may change. Popping `_parent` from the caller's
@@ -177,7 +202,7 @@ async def test_resolving_an_agent_cfg_parent_writes_through_to_nothing(tmp_path,
     assert agent.cfg["native_options"]["config"] == {"x": 1, "y": 2}
     assert AgentRegistry.get_defaults("codex") == registry_before
     assert agent_cfg == caller_before
-    assert agent.cfg.get("kind") != "codex", "the parent's name is not the child's"
+    assert agent.cfg["kind"] == "martha", "the child's name, not the parent's"
 
 
 @pytest.mark.asyncio
@@ -208,7 +233,10 @@ async def test_an_unknown_parent_in_agent_cfg_is_refused_not_dropped(tmp_path, f
 @pytest.mark.parametrize(
     ("kind", "agent_cfg", "expected"),
     [
-        ("martha", {"_parent": "codex", "external_runtime": "claude-code"}, "asks for the 'claude-code' runtime"),
+        ("martha", {"_parent": "codex", "external_runtime": "claude-code"}, "external_runtime = 'claude-code'"),
+        # An explicit None used to slip past the check and build a plain Agent
+        # with `permission` dropped — the defect this whole path exists to stop.
+        ("martha", {"_parent": "codex", "external_runtime": None}, "external_runtime = None"),
         ("claude-code", {"_parent": "codex"}, "is the 'claude-code' runtime"),
     ],
 )
@@ -623,9 +651,11 @@ def test_a_parent_in_an_actors_agent_cfg_is_refused_at_load_naming_the_actor():
     """It used to pass validation and be dropped; with agent_cfg now resolving
     `_parent`, an actor's copy would otherwise start resolving (or failing) at
     gateway start. Refuse it where the config is read."""
+    from pydantic import ValidationError
+
     from bos.config import validate_config
 
-    with pytest.raises(Exception) as excinfo:
+    with pytest.raises(ValidationError) as excinfo:
         validate_config({"runtime": {"actors": {"coder": {"agent": "codex", "agent_cfg": {"_parent": "codex"}}}}})
     message = str(excinfo.value)
     assert "coder" in message
