@@ -72,9 +72,6 @@ model = "gemini/gemini-2.5-flash"
 # defautl model for all agent. the precedence is: <agent_name>.model > platform.agent_defaults.model > BOS_MODEL > platform.ep_provider.<provider name>.model
 #model = "gpt-4o"
 
-# the name of the agent, usually be used in the named agent / actor
-#agent_name = "bos"
-
 # other settings
 #reasoning_effort = "medium"           # low, medium, high
 #max_tokens = 131072
