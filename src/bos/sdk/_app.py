@@ -191,6 +191,18 @@ class BosApp:
         outright — none of which is a bug in BOS. ``"bos"`` is the only read
         BOS stands behind.
 
+        **It is the conversation, not the work: user and assistant messages
+        only, no tool activity.** A runtime's tool calls, results, reasoning
+        and file edits are not projected, because a BOS ``Message`` carries
+        tool activity as a *pair* — an assistant message advertising
+        ``tool_calls``, then a ``role="tool"`` message whose ``tool_call_id``
+        matches it — and a native transcript has no such pairing, so building
+        one would mean inventing call ids the runtime never issued. BOS has
+        that activity nowhere else either: it is streamed live to an
+        ``event_sink`` while BOS runs a turn and is never persisted, and for a
+        session BOS did not run there was no stream. If you need it, read the
+        runtime's own store with the runtime's own tools.
+
         Which runtime is asked is decided by the chat's stored metadata, and
         which *agent* speaks for that runtime is decided by matching
         ``resolved_config["external_runtime"]`` against it. That match is not

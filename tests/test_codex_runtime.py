@@ -14,6 +14,7 @@ import asyncio
 import contextlib
 import inspect
 import logging
+import mimetypes
 import time
 from datetime import datetime
 from typing import Any
@@ -25,6 +26,7 @@ from openai_codex.generated.v2_all import (
     AgentMessageThreadItem,
     CommandExecutionStatus,
     CommandExecutionThreadItem,
+    LegacyAppPathString,
     McpToolCallStatus,
     McpToolCallThreadItem,
     MessagePhase,
@@ -681,9 +683,13 @@ def _arm_notifications(fake_codex, notifications: list[Any]) -> None:
 
 
 def _command_item(item_id: str, command: str, *, status: CommandExecutionStatus) -> ThreadItem:
+    # `cwd` is a `LegacyAppPathString` RootModel, not a `str`; a bare literal
+    # validates at runtime but is a pyright error, so it is wrapped here once
+    # rather than at each of the five call sites.
     return ThreadItem(
         CommandExecutionThreadItem(
-            id=item_id, command=command, command_actions=[], cwd="/tmp", status=status, type="commandExecution"
+            id=item_id, command=command, command_actions=[],
+            cwd=LegacyAppPathString("/tmp"), status=status, type="commandExecution",
         )
     )
 
@@ -1915,11 +1921,7 @@ def _user_turn(turn_id: str, *content: Any, started_at: int | None = None, **tur
     )
 
 
-def _agent_item(item_id: str, text: str, phase: MessagePhase | None) -> ThreadItem:
-    return ThreadItem(AgentMessageThreadItem(id=item_id, type="agentMessage", text=text, phase=phase))
-
-
-async def _bound_chat(agent, mem_store, *, chat_id: str = "chat-1", session_id: str = "thread-1") -> None:
+async def _bind_chat(mem_store, *, chat_id: str = "chat-1", session_id: str = "thread-1") -> None:
     """Bind *chat_id* to *session_id* the only way BOS ever does — a committed
     external turn (BEP 19 §3.6) — so `native_messages` recovers it through the
     same `read_native_session_id` scan production uses."""
@@ -1969,7 +1971,7 @@ async def test_a_deleted_thread_surfaces_as_an_error_not_an_empty_list(tmp_path,
     from openai_codex.errors import CodexError, InvalidParamsError
 
     agent = _agent(tmp_path, fake_codex, chat_store=mem_store)
-    await _bound_chat(agent, mem_store, session_id="thread-gone")
+    await _bind_chat(mem_store, session_id="thread-gone")
     fake_codex.arm(thread_read_error=InvalidParamsError(-32602, "unknown thread: thread-gone"))
 
     with pytest.raises(RuntimeError) as excinfo:
@@ -1988,7 +1990,7 @@ async def test_the_read_does_not_resume_the_session(tmp_path, fake_codex, mem_st
     goes out on a bare `AsyncThread` built over the client instead — the
     vendor's own `AsyncThread.read()`, landing on `_client.thread_read`."""
     agent = _agent(tmp_path, fake_codex, chat_store=mem_store)
-    await _bound_chat(agent, mem_store, session_id="thread-7")
+    await _bind_chat(mem_store, session_id="thread-7")
     fake_codex.arm(next_thread_read=_wire_thread())
 
     assert await agent.native_messages("chat-1") == []
@@ -2007,7 +2009,7 @@ async def test_it_projects_user_and_final_answers_and_drops_commentary(tmp_path,
     from openai_codex.generated.v2_all import TextUserInput, UserInput, UserMessageThreadItem
 
     agent = _agent(tmp_path, fake_codex, chat_store=mem_store)
-    await _bound_chat(agent, mem_store)
+    await _bind_chat(mem_store)
     turn = Turn(
         id="native-1",
         items=[
@@ -2017,8 +2019,8 @@ async def test_it_projects_user_and_final_answers_and_drops_commentary(tmp_path,
                     content=[UserInput(TextUserInput(type="text", text="what is 2+2?"))],
                 )
             ),
-            _agent_item("i-commentary", "let me think about that", MessagePhase.commentary),
-            _agent_item("i-answer", "4", MessagePhase.final_answer),
+            _agent_message_item("i-commentary", "let me think about that", phase=MessagePhase.commentary),
+            _agent_message_item("i-answer", "4"),
         ],
         status=TurnStatus.completed,
     )
@@ -2043,8 +2045,9 @@ async def test_an_agent_message_with_no_phase_is_kept(tmp_path, fake_codex, mem_
     label — the same reason `_final_assistant_response_from_items` falls back
     to it."""
     agent = _agent(tmp_path, fake_codex, chat_store=mem_store)
-    await _bound_chat(agent, mem_store)
-    turn = Turn(id="native-1", items=[_agent_item("i-1", "unlabelled", None)], status=TurnStatus.completed)
+    await _bind_chat(mem_store)
+    item = _agent_message_item("i-1", "unlabelled", phase=None)
+    turn = Turn(id="native-1", items=[item], status=TurnStatus.completed)
     fake_codex.arm(next_thread_read=_wire_thread(turn))
 
     messages = await agent.native_messages("chat-1")
@@ -2061,27 +2064,17 @@ async def test_non_message_items_including_a_compaction_do_not_break_the_project
     transcript, marking where the vendor compacted, and it sits between two
     real messages here so a skip that took the rest of the turn with it would
     show."""
-    from openai_codex.generated.v2_all import (
-        ContextCompactionThreadItem,
-        LegacyAppPathString,
-        ReasoningThreadItem,
-        TextUserInput,
-    )
+    from openai_codex.generated.v2_all import ContextCompactionThreadItem, ReasoningThreadItem, TextUserInput
 
     agent = _agent(tmp_path, fake_codex, chat_store=mem_store)
-    await _bound_chat(agent, mem_store)
+    await _bind_chat(mem_store)
     turn = _user_turn("native-1", TextUserInput(type="text", text="hello"))
     turn.items.extend(
         [
             ThreadItem(ReasoningThreadItem(id="i-reason", type="reasoning")),
             ThreadItem(ContextCompactionThreadItem(id="i-compact", type="contextCompaction")),
-            ThreadItem(
-                CommandExecutionThreadItem(
-                    id="i-cmd", type="commandExecution", command="ls", command_actions=[],
-                    cwd=LegacyAppPathString("/tmp"), status=CommandExecutionStatus.completed,
-                )
-            ),
-            _agent_item("i-answer", "hi", MessagePhase.final_answer),
+            _command_item("i-cmd", "ls", status=CommandExecutionStatus.completed),
+            _agent_message_item("i-answer", "hi"),
         ]
     )
     # Guard against the fixture silently rotting into "one user item": the
@@ -2108,7 +2101,7 @@ async def test_a_turn_the_vendor_did_not_load_becomes_a_visible_gap(tmp_path, fa
     from openai_codex.generated.v2_all import TextUserInput, TurnItemsView
 
     agent = _agent(tmp_path, fake_codex, chat_store=mem_store)
-    await _bound_chat(agent, mem_store)
+    await _bind_chat(mem_store)
     before = _user_turn("native-1", TextUserInput(type="text", text="first"))
     hidden = Turn(id="native-2", items=[], status=TurnStatus.completed, items_view=TurnItemsView(view))
     after = _user_turn("native-3", TextUserInput(type="text", text="third"))
@@ -2140,8 +2133,13 @@ async def test_a_turn_that_omits_items_view_is_projected_not_marked(tmp_path, fa
     pins that against the real vendor model; an identity check in the
     projection would bury every such turn under a gap marker.
 
-    The enum form is asserted beside it so the rule covers both, and the
-    WARNING count is what tells a false marker from a real one.
+    The enum form and an explicit `None` are asserted beside it so the rule
+    covers all three entries of `_LOADED_ITEMS_VIEWS`, and the WARNING count
+    is what tells a false marker from a real one. `None` is the judgement
+    call of the three — the field is `TurnItemsView | None`, an explicit null
+    states nothing about loading, and this follows the vendor's own answer for
+    "not stated" (the `"full"` default) rather than inventing a third verdict.
+    Asserted because it is otherwise reversible with a green suite.
     """
     from openai_codex.generated.v2_all import TextUserInput, TurnItemsView
 
@@ -2151,18 +2149,20 @@ async def test_a_turn_that_omits_items_view_is_projected_not_marked(tmp_path, fa
     assert TurnItemsView.full != "full", "…and a plain Enum is not equal to its own value"
 
     agent = _agent(tmp_path, fake_codex, chat_store=mem_store)
-    await _bound_chat(agent, mem_store)
+    await _bind_chat(mem_store)
     omitted = _user_turn("native-1", TextUserInput(type="text", text="defaulted"))
     explicit = _user_turn(
         "native-2", TextUserInput(type="text", text="validated"), items_view=TurnItemsView.full
     )
+    nulled = _user_turn("native-3", TextUserInput(type="text", text="nulled"), items_view=None)
     assert omitted.items_view == "full" and explicit.items_view is TurnItemsView.full
-    fake_codex.arm(next_thread_read=_wire_thread(omitted, explicit))
+    assert nulled.items_view is None
+    fake_codex.arm(next_thread_read=_wire_thread(omitted, explicit, nulled))
 
     with caplog.at_level(logging.WARNING, logger="bos.extensions.runtimes.codex"):
         messages = await agent.native_messages("chat-1")
 
-    assert [m.llm_message["content"] for m in messages] == ["defaulted", "validated"]
+    assert [m.llm_message["content"] for m in messages] == ["defaulted", "validated", "nulled"]
     assert not [r for r in caplog.records if r.name == "bos.extensions.runtimes.codex"]
 
 
@@ -2174,8 +2174,10 @@ async def test_user_content_round_trips_through_the_inverse_mapping(tmp_path, fa
     the two cannot drift apart silently.
 
     `mime_type` is the one field that cannot survive: `MentionInput` has no
-    slot for it outbound, so the inverse guesses from the path — `.md` here,
-    which `mimetypes` knows.
+    slot for it outbound, so the inverse guesses from the path. Both halves of
+    that guess are exercised — `.md`, which `mimetypes` resolves from Python's
+    builtin map, and an extensionless path, which it cannot, and which is the
+    only thing keeping `FilePart`'s non-empty `mime_type` contract.
     """
     from openai_codex.generated.v2_all import (
         ImageUserInput,
@@ -2185,17 +2187,24 @@ async def test_user_content_round_trips_through_the_inverse_mapping(tmp_path, fa
         UserInput,
     )
 
-    from bos.extensions.runtimes.codex import _codex_input_to_content, _content_to_codex_input
+    from bos.extensions.runtimes.codex import (
+        _UNKNOWN_FILE_MIME_TYPE,
+        _codex_input_to_content,
+        _content_to_codex_input,
+    )
 
     sent: Any = [
         {"type": "text", "text": "look at this"},
         {"type": "image", "source": {"kind": "url", "value": "https://example.com/a.png"}},
         {"type": "image", "source": {"kind": "path", "value": "/tmp/b.png"}},
         {"type": "file", "mime_type": "text/markdown", "source": {"kind": "path", "value": "/tmp/notes.md"}},
+        {"type": "file", "mime_type": _UNKNOWN_FILE_MIME_TYPE, "source": {"kind": "path", "value": "/tmp/LICENSE"}},
     ]
     outbound = _content_to_codex_input(sent)
     assert isinstance(outbound, list)  # a list of parts in, a list of InputItems out
-    assert [type(i).__name__ for i in outbound] == ["TextInput", "ImageInput", "LocalImageInput", "MentionInput"]
+    assert [type(i).__name__ for i in outbound] == [
+        "TextInput", "ImageInput", "LocalImageInput", "MentionInput", "MentionInput",
+    ]
 
     # What the vendor stores for that input: the same four kinds, as the
     # UserInput members the wire round trip produces (`_to_wire_item`).
@@ -2204,12 +2213,17 @@ async def test_user_content_round_trips_through_the_inverse_mapping(tmp_path, fa
         UserInput(ImageUserInput(type="image", url="https://example.com/a.png")),
         UserInput(LocalImageUserInput(type="localImage", path="/tmp/b.png")),
         UserInput(MentionUserInput(type="mention", name="notes.md", path="/tmp/notes.md")),
+        # No extension, so `mimetypes.guess_type` returns None and the
+        # `_UNKNOWN_FILE_MIME_TYPE` fallback is what keeps `FilePart`'s
+        # non-empty `mime_type` contract.
+        UserInput(MentionUserInput(type="mention", name="LICENSE", path="/tmp/LICENSE")),
     ]
+    assert mimetypes.guess_type("/tmp/LICENSE")[0] is None, "the fallback branch is the one under test"
 
     assert _codex_input_to_content(stored) == sent
 
     agent = _agent(tmp_path, fake_codex, chat_store=mem_store)
-    await _bound_chat(agent, mem_store)
+    await _bind_chat(mem_store)
     fake_codex.arm(next_thread_read=_wire_thread(_user_turn("native-1", *[u.root for u in stored])))
     messages = await agent.native_messages("chat-1")
     assert messages[0].llm_message["content"] == sent
@@ -2249,10 +2263,15 @@ def test_a_user_input_with_no_bos_counterpart_becomes_text_rather_than_vanishing
     assert isinstance(content, list)
     assert [part["type"] for part in content] == ["text", "text", "text"], "three parts in, three out"
     # Rendered rather than indexed, so the placeholder wording stays free to
-    # improve while the thing that matters — the kind is named, not dropped —
-    # is still asserted.
+    # improve while the two things that matter are still asserted: the kind is
+    # named, and the member's own identifying field survives. Keeping only the
+    # kind would be a partial drop wearing a placeholder's clothes — the skill
+    # that was invoked and the audio that was attached are plain renderable
+    # text, and a host showing "[SkillUserInput]" has lost the message.
     rendered = content_to_plain_text(content)
-    assert "run it" in rendered and "SkillUserInput" in rendered and "AudioUserInput" in rendered
+    assert "run it" in rendered
+    assert "SkillUserInput" in rendered and "review" in rendered and "/skills/review" in rendered
+    assert "AudioUserInput" in rendered and "https://example.com/a.wav" in rendered
 
 
 @pytest.mark.asyncio
@@ -2263,7 +2282,7 @@ async def test_created_at_follows_the_turn_rather_than_defaulting_to_now(tmp_pat
     from openai_codex.generated.v2_all import TextUserInput
 
     agent = _agent(tmp_path, fake_codex, chat_store=mem_store)
-    await _bound_chat(agent, mem_store)
+    await _bind_chat(mem_store)
     dated = _user_turn("native-1", TextUserInput(type="text", text="old"), started_at=1_600_000_000)
     undated = _user_turn("native-2", TextUserInput(type="text", text="new"))
     fake_codex.arm(next_thread_read=_wire_thread(dated, undated))
@@ -2282,7 +2301,7 @@ async def test_the_read_is_bounded_by_timeout_seconds(tmp_path, fake_codex, mem_
     answer and no deadline. The message names the read, so it is not mistaken
     for a turn that timed out."""
     agent = _agent(tmp_path, fake_codex, chat_store=mem_store, timeout_seconds=0.05)
-    await _bound_chat(agent, mem_store, session_id="thread-wedged")
+    await _bind_chat(mem_store, session_id="thread-wedged")
     fake_codex.arm(thread_read_hang=asyncio.Event())
 
     with pytest.raises(TimeoutError) as excinfo:

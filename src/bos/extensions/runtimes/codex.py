@@ -33,9 +33,13 @@ default so an escalation past the sandbox is refused rather than granted
 
 Beside that turn path — not a stage of it — sits ``native_messages`` (Task 9,
 BEP 19 §3.7): the read that projects Codex's *own* thread back into BOS
-``Message``s, so a host can render a session BOS did not author. It runs no
-turn, starts nothing, and is the only method here that reads state BOS does
-not own.
+``Message``s, so a host can render a session BOS did not author. It is the
+only method here that reads state BOS does not own, and it runs no turn and
+resumes no session. It is not side-effect-free, though, and the docstring
+there says so: it goes through ``_ensure_client`` like everything else, so on
+a cold agent the read is what spawns the ``codex app-server`` child, and under
+the default ``auth="subscription"`` it can fail on the ``account()`` preflight
+— a failure about the login, not about the transcript.
 """
 
 from __future__ import annotations
@@ -250,8 +254,13 @@ _PREFLIGHT_AUTH_SECONDS = 30.0
 #   is the `"full"` default above, so this follows it rather than inventing a
 #   third verdict.
 #
-# Anything else (`notLoaded`, `summary`) means the items are absent or
-# summarized; see `native_messages` for what is emitted instead.
+# The complement is `notLoaded` and `summary`, both of which mean the items are
+# absent or summarized — see `native_messages` for what is emitted for them.
+# That complement is exhaustive *today*, not by construction, and the exception
+# is worth naming: `TurnItemsView` is a closed Enum, so a value a future
+# `openai-codex` adds never reaches the marker branch at all. It fails
+# `ThreadReadResponse` validation inside the vendor's own `thread_read`, which
+# kills the whole read rather than degrading one turn (BEP 19 §8.2).
 _LOADED_ITEMS_VIEWS: tuple[TurnItemsView | str | None, ...] = (TurnItemsView.full, TurnItemsView.full.value, None)
 
 # The mime type a `MentionUserInput` read back out of a Codex thread becomes
@@ -381,9 +390,11 @@ def _codex_input_to_content(content: list[UserInput]) -> MessageContent:
     ``FileIdUserInput``, ``AudioUserInput``, ``LocalAudioUserInput``,
     ``SkillUserInput`` — can still appear in a thread someone else authored
     (the `codex` CLI, another client), and BOS has no content part for any of
-    them. Each becomes a text placeholder naming its kind rather than being
-    dropped: a dropped part makes the message read as though the user never
-    sent it.
+    them. Each becomes a text placeholder naming its kind *and carrying its own
+    fields*, rather than being dropped: a dropped part makes the message read
+    as though the user never sent it, and a placeholder keeping only the kind
+    loses the skill that was invoked or the audio that was attached — a
+    partial drop by another name.
 
     A lone text part comes back as a plain ``str``, not a one-item list —
     the same normalization ``content_as_parts`` applies on the way out, so a
@@ -414,7 +425,15 @@ def _codex_input_to_content(content: list[UserInput]) -> MessageContent:
                 }
             )
         else:
-            parts.append({"type": "text", "text": f"[{type(item).__name__}: no BOS content part for this]"})
+            # Named AND carrying its payload: `SkillUserInput.name`,
+            # `AudioUserInput.url` and the rest are plain renderable text, and
+            # losing them is a partial drop dressed up as a placeholder. Which
+            # fields exist varies by member, so the model's own dump carries
+            # them — `by_alias` so the keys read as the wire spells them, and
+            # `mode="json"` so an enum field (`ImageDetail` on
+            # `FileIdUserInput`) renders as its value and not as a repr.
+            payload = item.model_dump(mode="json", by_alias=True, exclude_none=True)
+            parts.append({"type": "text", "text": f"[{type(item).__name__}: no BOS content part — {payload}]"})
     if len(parts) == 1:
         only = parts[0]
         if only["type"] == "text":
@@ -1497,20 +1516,39 @@ class CodexAgent:
           is ordinary, and raising would break the read for exactly the
           long-lived sessions someone wants to read. See
           ``_LOADED_ITEMS_VIEWS`` for why "full" is a membership test.
-        - **Messages only.** ``ThreadItem`` is a nineteen-member union and only
-          ``UserMessageThreadItem`` and ``AgentMessageThreadItem`` are
-          messages. The other seventeen — reasoning, command execution, file
-          change, MCP tool call, web search, plan, the inline
-          ``ContextCompactionThreadItem`` marking where Codex compacted, … —
-          are the turn's internal work. They have no faithful BOS ``Message``
-          equivalent, and ``Message`` is what a host renders as a
-          *conversation*, so they are skipped. Intra-turn activity reaches a
-          live UI through the event sink (§3.9) instead. Among agent messages,
-          ``commentary`` is skipped too and ``final_answer``/no-phase kept —
-          the same rule ``_final_assistant_response_from_items`` applies, and
-          for the same reason: commentary is not the answer. That helper is
-          not reused, because it returns the one final answer for a single
-          turn and every answer in the thread is wanted here.
+        - **Messages only — and the tool activity is not available from BOS at
+          all, not merely from here.** ``ThreadItem`` is a nineteen-member
+          union and only ``UserMessageThreadItem`` and
+          ``AgentMessageThreadItem`` are messages. The other seventeen —
+          reasoning, command execution, file change, MCP tool call, web
+          search, plan, the inline ``ContextCompactionThreadItem`` marking
+          where Codex compacted, … — are the turn's internal work, and they
+          are skipped because a BOS ``Message`` cannot carry them without
+          forging one. BOS tool activity is a *structural pair*: an assistant
+          message advertising ``tool_calls``, then a ``role="tool"`` message
+          whose ``tool_call_id`` matches it. Codex's transcript has no such
+          pairing, so rendering a ``CommandExecutionThreadItem`` as one would
+          mean inventing a call id and an assistant message Codex never
+          produced — which a host displays as authoritative, not as a
+          reconstruction. And there is no second place to look: ``event_sink``
+          (§3.9) is a live stream emitted while *BOS itself* runs a turn,
+          nothing under ``bos/core/`` persists it, and for the case this
+          method exists for — a session BOS did not author — none was ever
+          emitted.
+
+          Among agent messages, ``commentary`` is skipped too and
+          ``final_answer``/no-phase kept — the same rule
+          ``_final_assistant_response_from_items`` applies, and for the same
+          reason: commentary is not the answer. That helper is not reused,
+          because it returns the one final answer for a single turn and every
+          answer in the thread is wanted here.
+        - **A read can still spawn the child and fail on auth.** It goes
+          through :meth:`_ensure_client` like every other call here, so on a
+          cold agent the read is what starts ``codex app-server``, and with
+          the default ``auth="subscription"`` a missing login fails it in
+          :meth:`_preflight_auth` — an error about the login, not about the
+          thread. What it does not touch is the *session*: no
+          ``thread_start``, no ``thread_resume`` (see the comment in the body).
 
         ``Message.turn_id`` is left ``None``: BOS turn ids are minted by
         :meth:`run`, and a thread BOS did not author has none. The native ids
