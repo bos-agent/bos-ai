@@ -219,7 +219,7 @@ enabled = ["writer"]
 | --- | --- | --- |
 | `system_prompt` | `str` | Base prompt; plugins append sections at runtime. |
 | `model` | `str` | LiteLLM-style `provider/model`. |
-| `agent_name` | `str` | Identity used for memory scoping. |
+| `agent_name` | `str` | Identity used for memory scoping and as the name the agent speaks under. Not inherited through `_parent`. |
 | `reasoning_effort` | `low \| medium \| high` | Passed to the model if supported. |
 | `max_tokens` | `int` = `131072` | Context budget before compaction. |
 | `max_iterations` | `int` = `80` | Max tool-call iterations per turn. |

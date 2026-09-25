@@ -474,6 +474,11 @@ def _resolve_agent_inheritance(
             parent_spec = copy.deepcopy(factory_specs.get(parent, {}))
             if parent in specs:
                 parent_spec = _deep_merge(parent_spec, copy.deepcopy(resolve(parent, (*stack, name))))
+            # Identity is not inherited: `agent_name` keys the memory store and is
+            # the name an agent speaks under, so inheriting it made a child (and
+            # every descendant) share its parent's store and name. `parent_spec` is
+            # a deep copy, so the parent's own resolved spec keeps it.
+            parent_spec.pop("agent_name", None)
             spec = _deep_merge(parent_spec, spec)
         resolved[name] = spec
         return spec

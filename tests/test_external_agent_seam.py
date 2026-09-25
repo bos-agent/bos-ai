@@ -179,6 +179,20 @@ async def test_bos_variants_bind_plugins_under_their_own_names(tmp_path, fake_ru
 
 
 @pytest.mark.asyncio
+async def test_an_agent_cfg_child_does_not_inherit_agent_name(tmp_path, fake_runtimes):
+    """Same rule as a config child: the parent's `agent_name` stays the parent's."""
+    ws = _write_workspace(tmp_path, '[agents.solo]\nsystem_prompt = "hi"\nagent_name = "Solo"\n')
+    ws.resolve_agents()
+    ws.bootstrap_platform()
+
+    async with ws.harness() as harness:
+        agent = await harness.create_agent("solo2", agent_cfg={"_parent": "solo"})
+        own = await harness.create_agent("solo3", agent_cfg={"_parent": "solo", "agent_name": "Third"})
+    assert agent.name == "solo2"
+    assert own.name == "Third", "a child may still name itself"
+
+
+@pytest.mark.asyncio
 async def test_resolving_an_agent_cfg_parent_writes_through_to_nothing(tmp_path, fake_runtimes):
     """`_deep_merge` mutates its base in place: neither the parent's registry
     entry nor the caller's dict may change. Popping `_parent` from the caller's
