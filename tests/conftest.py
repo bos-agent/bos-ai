@@ -231,20 +231,51 @@ class FakeTurnHandle:
         # there; release is what ends it.
         self.hang_reached = asyncio.Event()
         self.release = asyncio.Event()
+        # Fix round 2: the three ways this double used to be *more reliable
+        # than the vendor*, which is what let round 1 delete a real safety
+        # bound as "dead code". A real interrupt()/steer() is an RPC to the
+        # app-server that can be slow or fail, and a real stream task is not
+        # guaranteed to die on cancel. All default to the old, always-fast,
+        # always-succeeds behaviour, so every pre-existing test is unchanged;
+        # a test opts in per handle (see FakeAsyncCodex.next_handle_attrs for
+        # arming one that does not exist yet).
+        self.interrupt_hang: asyncio.Event | None = None  # set -> interrupt() blocks on it
+        self.interrupt_error: Exception | None = None  # set -> interrupt() raises it
+        self.steer_error: Exception | None = None  # set -> steer() raises it (after recording)
+        self.swallow_cancel = False  # True -> the stream ignores cancellation and keeps hanging
+        self.cancels_swallowed = 0
 
     async def stream(self):
         for notification in self._notifications:
             if notification is HANG:
                 self.hang_reached.set()
-                await self.release.wait()
+                while True:
+                    try:
+                        await self.release.wait()
+                        break
+                    except asyncio.CancelledError:
+                        # A turn wedged below the cancellation point — the
+                        # vendor's stream sits on a queue fed by a thread, so
+                        # a cancel is a request, not a kill. This is the case
+                        # _settle_interrupted ABANDONS, which is why aclose()
+                        # needs a bound of its own.
+                        if not self.swallow_cancel:
+                            raise
+                        self.cancels_swallowed += 1
                 continue
             yield notification
 
     async def interrupt(self) -> None:
         self.interrupted = True
+        if self.interrupt_hang is not None:
+            await self.interrupt_hang.wait()
+        if self.interrupt_error is not None:
+            raise self.interrupt_error
 
     async def steer(self, input: Any) -> None:
         self.steered.append(input)
+        if self.steer_error is not None:
+            raise self.steer_error
 
     async def run(self) -> Any:
         # Mirrors openai_codex._run._raise_for_failed_turn exactly: the real
@@ -354,6 +385,12 @@ class FakeThread:
         turn_id = result.id if result is not None else f"turn-{len(self._codex.turn_calls)}"
         notifications = self._codex.next_notifications or _default_turn_notifications(self.id, turn_id, result)
         handle = FakeTurnHandle(self, turn_id, notifications, result)
+        # Fix round 2: the handle is built here, inside production code's own
+        # `await thread.turn(...)`, so a test that needs a slow or failing RPC
+        # from the very first notification has no seam to reach it afterwards
+        # — same staging problem (and same solution) as next_notifications.
+        for name, value in self._codex.next_handle_attrs.items():
+            setattr(handle, name, value)
         # Task 7: every handle ever created, in creation order, so a test can
         # reach into an in-flight turn (e.g. via HANG above) without CodexAgent
         # itself ever handing the handle back.
@@ -386,6 +423,9 @@ class FakeAsyncCodex:
         self.next_results: list[Any] = []
         self.next_thread_read: Any = None
         self.turn_handles: list[FakeTurnHandle] = []
+        # Applied to every FakeTurnHandle this client's threads create (see
+        # FakeThread.turn) — the knobs on FakeTurnHandle, armed up front.
+        self.next_handle_attrs: dict[str, Any] = {}
         # Task 7: an aclose() racing _ensure_client()'s own preflight-auth call
         # (the one await inside its _client_lock) needs that call held open;
         # None (the default) means account() answers immediately, as every

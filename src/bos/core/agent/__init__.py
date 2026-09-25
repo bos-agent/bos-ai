@@ -31,7 +31,7 @@ from ._utils import (
     _strip_think,
     _xml_attr,
 )
-from .agent import AbortTurn, Agent
+from .agent import ABORTED_TURN_CONTENT, AbortTurn, Agent
 from .contract import (
     LLM,
     AgentEventType,
@@ -66,6 +66,7 @@ from .contract import (
 )
 
 __all__ = [
+    "ABORTED_TURN_CONTENT",
     "LLM",
     "AbortTurn",
     "Agent",

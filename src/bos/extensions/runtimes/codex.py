@@ -74,6 +74,7 @@ from openai_codex.types import (
 )
 
 from bos.core.agent import (
+    ABORTED_TURN_CONTENT,
     AbortTurn,
     AgentEventType,
     AgentResult,
@@ -117,6 +118,12 @@ _SANDBOX_AND_APPROVAL: dict[str, tuple[Sandbox, ApprovalMode]] = {
 # app-server that delays or ignores the request must not be able to hold a
 # stop, a timeout, or aclose() open (BEP 19 §3.10.2).
 _INTERRUPT_GRACE_SECONDS = 2.0
+
+# The outer bound aclose() puts on draining every in-flight turn. Must stay
+# above _settle_interrupted's worst case (3 x the grace: the interrupt RPC,
+# the drain wait, the post-cancel wait), or aclose() reports turns that are
+# winding down normally as stuck.
+_ACLOSE_GRACE_SECONDS = 10.0
 
 
 def _content_to_codex_input(content: MessageContent) -> Input | str:
@@ -530,7 +537,12 @@ class CodexAgent:
 
         ``interrupt`` — ``AgentActor``'s poll-style callback (BEP 19 §3.9's
         `interrupt` row) — is polled once per notification, exactly as
-        ``Agent._interrupt`` reads the same callback in ``agent.py``:
+        ``Agent._interrupt`` reads the same callback in ``agent.py``, with one
+        exception: the terminal ``turn/completed`` notification. Polling is
+        destructive (``AgentActor._make_interrupt`` *pops* the pending
+        envelopes off the session), and once the turn has completed there is
+        nothing left to steer into — so a poll there would take the user's
+        message and have nowhere to put it (fix round 2, I3):
 
         - **A truthy return is a message to deliver, not a request to stop.**
           Fix round 1: Task 7's first cut read the brief's "`interrupt`
@@ -554,20 +566,23 @@ class CodexAgent:
           the same shape ``TurnContext.add_message``'s merge branch expects,
           not the whole ``dict`` — is converted with
           :func:`_content_to_codex_input` and handed to ``handle.steer()``.
-          The steer call itself is best-effort
-          (``contextlib.suppress``, matching every other ``handle.interrupt()``
-          call site in this module) — a failed steer RPC is a network blip,
-          not a turn failure, and the turn may still finish normally without
-          it.
-        - **Raising propagates.** ``Agent._interrupt`` does not catch
+          The steer call itself is best-effort — a failed steer RPC is a
+          network blip, not a turn failure, and the turn may still finish
+          normally without it — but it is **logged at WARNING**, not
+          swallowed: unlike a failed ``handle.interrupt()`` (a courtesy BOS
+          sends on its own behalf), what is lost here is a message a user
+          typed, and nothing else in the system records that it existed.
+        - **Raising unwinds the turn.** ``Agent._interrupt`` does not catch
           ``AbortTurn`` either — it is meant to unwind the turn, not be
-          absorbed here. Nothing in this method catches it (or anything
+          absorbed here. Nothing in *this* method catches it (or anything
           else the callback raises): it propagates out of the ``async for``
           (through the ``finally`` below, so the stream is still closed),
           out of this coroutine, and — via :meth:`_run_turn`'s
-          ``stream_task.result()`` — out of ``run()`` unwrapped (excluded
-          from its generic ``except Exception`` the same way ``TimeoutError``
-          is).
+          ``stream_task.result()`` — up to ``run()``, which is where the
+          unwinding stops: ``run()`` catches ``AbortTurn`` and returns the
+          aborted-turn marker, matching what ``Agent`` hands its own caller
+          (see ``run()``'s docstring; fix round 2, I4). Any *other* exception
+          the callback raises is wrapped by ``run()`` as a turn failure.
         - **A falsy return does nothing.** No steer, no interrupt, no
           state change — the turn is not even aware the callback fired.
 
@@ -609,15 +624,34 @@ class CodexAgent:
                         except Exception:
                             logger.debug("Codex event sink emit error", exc_info=True)
 
-                if interrupt is not None:
-                    # Not wrapped in try/except: a raise (AbortTurn or
-                    # anything else) is meant to propagate, per this method's
-                    # own docstring — only the steer RPC below is best-effort.
+                if interrupt is not None and completed is None:
+                    # Not polled once the terminal turn/completed has landed:
+                    # the callback drains destructively (AgentActor._make_interrupt
+                    # pops the pending message), and a steer against a finished
+                    # turn is rejected by the vendor — so polling here would
+                    # consume the user's message and throw it away.
+                    #
+                    # The poll itself is not wrapped in try/except: a raise
+                    # (AbortTurn or anything else) is meant to propagate, per
+                    # this method's own docstring — only the steer RPC below
+                    # is best-effort, and even that is logged, not silent.
                     steer_message = await _apply_async(interrupt, {})
                     if steer_message:
                         steer_input = _content_to_codex_input(steer_message.get("content", ""))
-                        with contextlib.suppress(Exception):
+                        try:
                             await handle.steer(steer_input)
+                        except Exception:
+                            # Best-effort, but never silent: this message came
+                            # from a user and is now lost.
+                            logger.warning(
+                                "%s runtime %r: steering turn %r on chat %r failed; "
+                                "the mid-turn message was dropped",
+                                self._config.runtime,
+                                self._kind,
+                                turn_id,
+                                chat_id,
+                                exc_info=True,
+                            )
         finally:
             await stream.aclose()
 
@@ -713,12 +747,23 @@ class CodexAgent:
         callers in :meth:`_run_turn` so "a native turn that ignores the
         interrupt" is one code path, not two that could drift.
 
-        Raises if the native side never confirms within
-        ``_INTERRUPT_GRACE_SECONDS``: there is no ``TurnResult`` to hand back
-        in that case, and manufacturing one would misreport what happened.
+        Raises if the native side never confirms: there is no ``TurnResult``
+        to hand back in that case, and manufacturing one would misreport what
+        happened. Worst case is three times ``_INTERRUPT_GRACE_SECONDS`` — the
+        interrupt RPC, the drain wait, and the post-cancel wait — and on that
+        path the task is **abandoned**, not killed: a stream that swallows
+        ``CancelledError`` goes on running, owned by the loop rather than by
+        this turn (the same doctrine as ``Agent._abandon``). :meth:`aclose`
+        bounds its own wait because of that.
         """
         with contextlib.suppress(Exception):
-            await handle.interrupt()
+            # Bounded, not merely guarded: the vendor's interrupt is an RPC
+            # over a blocking queue (asyncio.to_thread) that only wakes when
+            # the child answers or dies, and suppress() catches errors, not
+            # slowness. wait_for's TimeoutError is an Exception, so a wedged
+            # child falls through to the cancel path below like any other
+            # failure to confirm.
+            await asyncio.wait_for(handle.interrupt(), _INTERRUPT_GRACE_SECONDS)
         done, _ = await asyncio.wait({stream_task}, timeout=_INTERRUPT_GRACE_SECONDS)
         if stream_task in done:
             return stream_task.result()
@@ -837,11 +882,20 @@ class CodexAgent:
         fourth cause: since fix round 1, ``_emit_stream`` steers a truthy
         return into the running turn instead of ending it (see its own
         docstring), so it never produces ``interrupted``. It can still end a
-        turn a different way — a raised ``AbortTurn`` propagates uncaught,
-        excluded from the generic ``except Exception`` below exactly like
-        ``TimeoutError`` is, so a caller sees the same ``AbortTurn``
-        ``Agent`` would raise for the identical signal, not a wrapped
-        ``RuntimeError``.
+        turn a different way — a raised ``AbortTurn`` — and that is
+        **caught here and returned, not propagated** (fix round 2, I4).
+        ``Agent`` does the same with the identical signal
+        (``agent.py:837-840``): it sets ``turn_status = "aborted"``, puts
+        ``ABORTED_TURN_CONTENT`` in ``ctx.final_content``, and returns a
+        normal ``AgentResult``. Propagating instead would make ``AgentActor``
+        report ``status="error"`` and send ``"Turn failed: "`` with no text,
+        where a BOS agent sends the marker as an ordinary reply — so this
+        returns ``ABORTED_TURN_CONTENT`` with ``finish_reason="aborted"``.
+        It commits **nothing**, and that is not an inconsistency with
+        ``Agent``: ``Agent`` persists the marker to shape the *model's* own
+        history so the next turn does not re-answer a dead request, and
+        ``CodexAgent`` never replays BOS history into Codex — the native
+        thread is the model's history — so that purpose does not transfer.
 
         Two concurrent turns on the same ``chat_id`` are rejected with a busy
         ``RuntimeError`` rather than queued — the native session is
@@ -881,11 +935,19 @@ class CodexAgent:
                 except TimeoutError:
                     raise
                 except AbortTurn:
-                    # The interrupt callback's own hard-stop signal (fix round
-                    # 1): Agent._interrupt doesn't catch it either, so this
-                    # doesn't — it propagates to run()'s caller unwrapped,
-                    # rather than being reported as a generic turn failure.
-                    raise
+                    # Agent CATCHES AbortTurn and returns (agent.py:837-840);
+                    # propagating would make AgentActor report status="error"
+                    # and send "Turn failed: " with no text, where a BOS agent
+                    # sends the marker as an ordinary reply. Commits nothing:
+                    # ABORTED_TURN_CONTENT shapes the MODEL's history, and
+                    # CodexAgent never replays BOS history into Codex, so the
+                    # marker is the caller's answer here, not stored context.
+                    return external_agent_result(
+                        output=ABORTED_TURN_CONTENT,
+                        turn_id=turn_id,
+                        usage=None,
+                        finish_reason="aborted",
+                    )
                 except Exception as exc:
                     # A native TurnStatus.failed is raised before a TurnResult is
                     # ever built, on both the plain and the streaming path:
@@ -987,15 +1049,14 @@ class CodexAgent:
         Setting ``_stop_requested`` is enough to make each in-flight
         :meth:`run` call interrupt its own turn and race it, exactly as
         ``request_stop()`` does; this only adds waiting for them and the
-        client close. No *second* bound is layered on top of that wait: every
-        tracked task is already, by construction, racing ``_stop_requested``
-        through :meth:`_run_turn`, which itself never waits past
-        ``_INTERRUPT_GRACE_SECONDS`` past this line before giving up on a turn
-        that ignores the interrupt (:meth:`_settle_interrupted`) — an extra
-        ``timeout=`` here would only ever fire after that has already
-        happened, so it would be dead weight, not a second safety net. That
-        inner bound is what actually keeps harness teardown from blocking for
-        minutes on a model that is still thinking.
+        client close. That wait is bounded by ``_ACLOSE_GRACE_SECONDS``
+        because :meth:`_settle_interrupted`'s own inner bound does **not**
+        guarantee the task is finished — it *abandons* a task it cannot kill,
+        which then outlives the turn that owned it. A turn still winding down
+        after the bound is reported and left behind; the client is closed
+        anyway, since that is the only thing that reaps the child process.
+        So this is a bounded drain, not a clean one: a wedged turn is given a
+        window, not waited out.
 
         Also closes Task 4's hole: an ``aclose()`` racing an ``_ensure_client()``
         still in flight no longer leaks a client. Both now take
@@ -1005,7 +1066,20 @@ class CodexAgent:
         self._stop_requested.set()
         tasks = [task for task in self._in_flight.values() if task is not None]
         if tasks:
-            await asyncio.wait(tasks)
+            # Bounded because _settle_interrupted ABANDONS a task it cannot
+            # kill (it cancels, waits out _INTERRUPT_GRACE_SECONDS, then
+            # raises) — so a task can outlive the turn that owned it, and an
+            # unbounded wait here would never reach the client.close() below,
+            # which is the only thing that reaps the child process.
+            _, pending = await asyncio.wait(tasks, timeout=_ACLOSE_GRACE_SECONDS)
+            if pending:
+                logger.warning(
+                    "%s runtime %r: %d turn(s) still running after %ss; closing the client anyway",
+                    self._config.runtime,
+                    self._kind,
+                    len(pending),
+                    _ACLOSE_GRACE_SECONDS,
+                )
         async with self._client_lock:
             if self._client is not None:
                 await self._client.close()

@@ -441,7 +441,9 @@ Tool execution stays in the BOS process, under BOS's own tool implementations. T
 | `llm_args["reasoning_effort"]` | `options.effort` (`low`…`max`) | `thread.turn(effort=…)` |
 | `schema` | `options.output_format={"type": "json_schema", "schema": …}` → `ResultMessage.structured_output` | `thread.turn(output_schema=…)` |
 | `max_schema_retries` | the injected `StructuredValidator` validates; on failure, one correction message per retry (BEP 12 semantics preserved) | same |
-| `interrupt` callback | `ClaudeSDKClient.interrupt()` | `AsyncTurnHandle.interrupt()` |
+| `interrupt` callback — **truthy return** (a *message*, `agent.py:600-602`) | must be delivered *into* the running turn, which then continues; the exact primitive is pinned in Layer 4b against the installed `claude-agent-sdk` | `AsyncTurnHandle.steer(input)` — "Send additional user input to this active turn"; the same handle keeps streaming afterwards |
+| `interrupt` callback — **raised `AbortTurn`** (the *stop*) | `ClaudeSDKClient.interrupt()` is reserved for this path | the turn is unwound BOS-side; no `steer` is sent |
+| ↳ what the caller gets on an abort | `ABORTED_TURN_CONTENT` with `finish_reason="aborted"`, as `Agent` does (`agent.py:837-840`) — **not** a re-raise | same |
 | `request_stop()` | same, raced against the native turn | same |
 | `event_sink` | `receive_response()`: `ToolUseBlock`→`tool`/`start`, `ToolResultBlock`→`tool`/`finish`, `TextBlock`→`response`, `ResultMessage`→`turn`/`finish` | `AsyncTurnHandle.stream()`: `item/started`·`item/completed`→`tool`, `turn/completed`→`turn`/`finish` |
 | `turn_id`, `ctx_metadata`, `commit_observer` | BOS-side, unchanged | same |
@@ -450,6 +452,8 @@ Tool execution stays in the BOS process, under BOS's own tool implementations. T
 | *neither set* | `system_prompt={"type": "preset", "preset": "claude_code"}` — **never left at `None`**, §3.4.1.3 | both omitted; runtime defaults stand |
 | cfg `cwd` | `options.cwd` | `thread_start(cwd=…)` |
 | cfg `max_iterations` | `options.max_turns` — see note below | **no counterpart — dropped** |
+
+The `interrupt` rows are split because the callback's **name is not its meaning**, and conflating the two is a live source of inverted implementations. It is a poll, and its *return value* is a message to merge into the turn that is still running (`Agent._interrupt`: `ctx.add_message(llm_message, merge=True)`); `AgentActor._make_interrupt` returns exactly that for a queued `INTERRUPT_MESSAGE`, a user's follow-up sent mid-turn. Stopping is a different signal entirely — a raised `AbortTurn`, or `request_stop()` — never a truthy return. Two consequences the earlier one-row form hid: reading the row as "fires → stop" kills the user's follow-up instead of delivering it (Codex Layer 4a shipped that and had to be fixed), and the poll is **destructive** — it pops the pending envelopes — so a runtime must not poll once its turn has terminated, or it takes a message it can no longer deliver.
 
 `AgentResult` is populated from `ResultMessage` (`usage`, `total_cost_usd`, `num_turns`, `terminal_reason`) or `TurnResult` (`usage`, `status`, `error`, `duration_ms`). `finish_reason` carries the native terminal reason verbatim.
 
@@ -470,7 +474,9 @@ Two concurrent turns on one `chat_id` are rejected with a busy error rather than
 
 #### 3.10.2 Timeouts and shutdown
 
-`timeout_seconds` wraps the turn in `asyncio.timeout`; on expiry the native turn is interrupted, then the error is raised. `aclose()` interrupts any in-flight turn, closes the client, and reaps the child. Cancellation never leaves a child writing to the workspace after the turn has been given up on.
+`timeout_seconds` wraps the turn in `asyncio.timeout`; on expiry the native turn is interrupted, then the error is raised. Every wait on the native side is bounded, including the interrupt request itself — it is an RPC to the child, so guarding it against *errors* is not the same as bounding it against *slowness*, and a child that never answers must not be able to hold a timeout, a stop, or a shutdown open.
+
+`aclose()` asks every in-flight turn to stop, gives them a bounded window to drain, then closes the client regardless — closing the client is what reaps the child, so it must not be reachable only on the happy path. This is a bounded drain, not a guaranteed one: a turn that ignores both the interrupt and the cancel is abandoned to the event loop (the same doctrine as `Agent._abandon`) and reported in a warning naming how many were left. What the child is doing does end, because the client closes; what BOS cannot promise is that the in-process task tracking it has finished first.
 
 #### 3.10.3 Auth
 

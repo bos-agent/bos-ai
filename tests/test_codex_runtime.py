@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
+import time
 from typing import Any
 
 import pytest
@@ -998,6 +1000,17 @@ async def _hanging_handle(fake_codex, *, expected_count: int = 1, timeout: float
     return handle
 
 
+def _arm_handle(fake_codex, **attrs: Any) -> None:
+    """Mirrors `_arm_notifications` for the FakeTurnHandle knobs (fix round 2):
+    a handle is created inside production code's own `await thread.turn(...)`,
+    so a slow or failing vendor RPC has to be armed before that call, not
+    after — there is no seam in between."""
+    if fake_codex.instances:
+        fake_codex.instances[-1].next_handle_attrs.update(attrs)
+    else:
+        fake_codex.arm(next_handle_attrs=dict(attrs))
+
+
 @pytest.mark.asyncio
 async def test_interrupt_callback_steering_message_reaches_handle_steer(tmp_path, fake_codex, mem_store):
     """Fix round 1 (BEP 19 §3.9's `interrupt` row, corrected): AgentActor's
@@ -1033,7 +1046,10 @@ async def test_interrupt_callback_steering_message_reaches_handle_steer(tmp_path
     # _content_to_codex_input a new turn's own content goes through — a
     # plain string content passes through unchanged.
     assert handle.steered == ["actually, do X instead"]
-    assert calls == 3, "polled on every notification, steering does not stop the poll"
+    # Two, not three: polled on every notification *except* the terminal
+    # turn/completed (fix round 2, I3 — see the dedicated test below).
+    # Steering itself does not stop the poll.
+    assert calls == 2, "polled on every non-terminal notification, steering does not stop the poll"
     assert result.output == "done"
     assert result.finish_reason == "completed"
     messages = await mem_store.get_messages("chat-1")
@@ -1059,49 +1075,105 @@ async def test_interrupt_callback_falsy_return_changes_nothing(tmp_path, fake_co
 
 
 @pytest.mark.asyncio
-async def test_interrupt_callback_abort_turn_propagates(tmp_path, fake_codex, mem_store):
-    """Agent._interrupt does not catch AbortTurn either — `if interrupt and
-    (llm_message := await _apply_async(interrupt, {})):` only inspects a
-    *returned* value, so a raise skips that check entirely and unwinds the
-    turn. _emit_stream's poll is the same: nothing there catches it, so it
-    propagates through _run_turn's stream_task.result() and out of run()
-    itself, excluded from the generic `except Exception` wrap (like
-    TimeoutError) so a caller sees AbortTurn, not a RuntimeError."""
+async def test_interrupt_callback_is_not_polled_after_the_terminal_notification(tmp_path, fake_codex, mem_store):
+    """Fix round 2 (I3): polling is DESTRUCTIVE. AgentActor._make_interrupt
+    pops the queued INTERRUPT_MESSAGE envelopes off the session as it reads
+    them, so a poll is a take, not a peek. Polled on the terminal
+    turn/completed the turn is already over: handle.steer()'s expectedTurnId
+    no longer names an active turn, the vendor rejects it, and the user's
+    mid-turn message is gone with nothing anywhere recording that it existed.
+
+    Asserted on the callback's call count and on the pending message still
+    being pending — not merely on steer() not being called, because the bug
+    is the *consumption*, which happens before steer() is ever reached."""
+    agent = _agent(tmp_path, fake_codex, chat_store=mem_store)
+    _arm_notifications(
+        fake_codex,
+        [_item_completed(_agent_message_item("msg-1", "done")), _turn_completed()],
+    )
+    # Stands in for AgentActor's session.interrupts buffer: a follow-up that
+    # arrives late — after the only non-terminal notification has gone by.
+    pending = ["the user's follow-up"]
+    calls = 0
+
+    def interrupt():
+        nonlocal calls
+        calls += 1
+        return {"role": "user", "content": pending.pop(0)} if calls == 2 else None
+
+    result = await agent.run("chat-1", "do it", turn_id="t1", interrupt=interrupt)
+
+    handle = fake_codex.instances[-1].turn_handles[-1]
+    assert calls == 1, "the terminal turn/completed must not be polled"
+    assert pending == ["the user's follow-up"], "the message is left for the next turn, not eaten"
+    assert handle.steered == []
+    assert result.output == "done"
+
+
+@pytest.mark.asyncio
+async def test_interrupt_callback_abort_turn_returns_the_marker_and_commits_nothing(
+    tmp_path, fake_codex, mem_store
+):
+    """Fix round 2 (I4): Agent._interrupt does not catch AbortTurn — `if
+    interrupt and (llm_message := await _apply_async(interrupt, {})):` only
+    inspects a *returned* value, so a raise skips that check and unwinds the
+    turn — and _emit_stream's poll is the same. But `Agent.run` itself DOES
+    catch it (agent.py:837-840): turn_status="aborted",
+    ctx.final_content=ABORTED_TURN_CONTENT, and a normal AgentResult comes
+    back. Round 1 made CodexAgent propagate instead, which turns the same
+    signal into AgentActor's status="error" / "Turn failed: " with no text.
+    Match Agent's caller-facing contract: catch, and return the marker.
+
+    Nothing is committed, and that is not a contradiction: Agent persists the
+    marker to shape the *model's* history, and CodexAgent never replays BOS
+    history into Codex."""
+    from bos.core.agent import ABORTED_TURN_CONTENT
+
     agent = _agent(tmp_path, fake_codex, chat_store=mem_store)
     _arm_notifications(fake_codex, [_item_completed(_agent_message_item("msg-1", "unused"))])
 
     def interrupt():
         raise AbortTurn()
 
-    with pytest.raises(AbortTurn):
-        await agent.run("chat-1", "do it", turn_id="t1", interrupt=interrupt)
+    result = await agent.run("chat-1", "do it", turn_id="t1", interrupt=interrupt)
 
+    assert result.output == ABORTED_TURN_CONTENT
+    assert result.finish_reason == "aborted"
+    assert result.turn_id == "t1"
     assert await mem_store.get_messages("chat-1") == [], "an aborted turn commits nothing"
+    # The `return` sits inside run()'s outer try, so the busy-guard entry is
+    # still released by its `finally` — an abort must not wedge the chat.
+    assert agent._in_flight == {}
 
 
 @pytest.mark.asyncio
-async def test_a_failed_steer_request_does_not_abort_the_turn(tmp_path, fake_codex, mem_store, monkeypatch):
-    """The same best-effort courtesy as the interrupt-request call sites (see
-    test_a_failed_interrupt_request_does_not_abort_the_stop): handle.steer()
-    is wrapped in contextlib.suppress too — a network blip delivering the
-    steering message must not be mistaken for a real turn failure while the
-    stream is still perfectly capable of finishing normally."""
-    import conftest
-
-    async def _broken_steer(self, input) -> None:
-        self.steered.append(input)
-        raise RuntimeError("app-server hung up")
-
-    monkeypatch.setattr(conftest.FakeTurnHandle, "steer", _broken_steer)
+async def test_a_failed_steer_request_is_logged_and_does_not_abort_the_turn(tmp_path, fake_codex, mem_store, caplog):
+    """Best-effort, but not silent (fix round 2, I3). The turn survives — a
+    network blip delivering the steering message must not be mistaken for a
+    real turn failure while the stream is still perfectly capable of
+    finishing — but unlike a failed handle.interrupt() (a courtesy BOS sends
+    on its own behalf), what is lost here is a message a *user* typed, and
+    the poll that produced it already drained it out of AgentActor's session.
+    Swallowing it leaves no record anywhere that it existed, so it is logged
+    at WARNING with the chat and turn id."""
     agent = _agent(tmp_path, fake_codex, chat_store=mem_store)
+    _arm_handle(fake_codex, steer_error=RuntimeError("app-server hung up"))
     _arm_notifications(
         fake_codex,
         [_item_completed(_agent_message_item("msg-1", "still going")), _turn_completed()],
     )
 
-    result = await agent.run("chat-1", "do it", turn_id="t1", interrupt=lambda: {"role": "user", "content": "stop"})
+    with caplog.at_level(logging.WARNING, logger="bos.extensions.runtimes.codex"):
+        result = await agent.run(
+            "chat-1", "do it", turn_id="t1", interrupt=lambda: {"role": "user", "content": "stop"}
+        )
 
-    assert result.output == "still going"
+    assert result.output == "still going", "a failed steer is not a turn failure"
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    message = warnings[0].getMessage()
+    assert "chat-1" in message and "t1" in message and "dropped" in message
+    assert warnings[0].exc_info is not None, "the underlying RPC failure is kept, not just summarized"
 
 
 @pytest.mark.asyncio
@@ -1156,12 +1228,7 @@ async def test_a_failed_interrupt_request_does_not_abort_the_stop(tmp_path, fake
 
     task = asyncio.ensure_future(agent.run("chat-1", "do it", turn_id="t1"))
     handle = await _hanging_handle(fake_codex)
-
-    async def _broken_interrupt() -> None:
-        handle.interrupted = True
-        raise RuntimeError("app-server hung up")
-
-    handle.interrupt = _broken_interrupt
+    handle.interrupt_error = RuntimeError("app-server hung up")
     agent.request_stop()
     await _poll_until(lambda: handle.interrupted)
     handle.release.set()  # the stream finishes on its own despite the interrupt request failing
@@ -1190,6 +1257,39 @@ async def test_timeout_seconds_expiry_interrupts_then_raises(tmp_path, fake_code
 
     handle = fake_codex.instances[-1].turn_handles[-1]
     assert handle.interrupted is True, "the native turn is asked to stop even though nothing confirms it"
+    assert await mem_store.get_messages("chat-1") == [], "a timed-out turn commits nothing"
+
+
+@pytest.mark.asyncio
+async def test_timeout_seconds_still_raises_when_the_interrupt_rpc_never_returns(
+    tmp_path, fake_codex, mem_store, monkeypatch
+):
+    """Fix round 2 (I2/C1b): the timeout branch asks the native turn to stop
+    before raising, and that request used to be guarded by
+    contextlib.suppress alone — which catches errors, not slowness. The
+    vendor's interrupt is an RPC over a blocking queue on asyncio.to_thread
+    with no timeout of its own: it wakes when the child answers or dies. A
+    wedged child therefore hung the await *below* which the `raise
+    TimeoutError` lives, and timeout_seconds silently stopped being a
+    timeout. Bounding the interrupt is what makes the deadline real."""
+    import bos.extensions.runtimes.codex as codex_mod
+
+    monkeypatch.setattr(codex_mod, "_INTERRUPT_GRACE_SECONDS", 0.05)
+    agent = _agent(tmp_path, fake_codex, chat_store=mem_store, timeout_seconds=0.02)
+    _arm_notifications(fake_codex, [HANG])
+    _arm_handle(fake_codex, interrupt_hang=asyncio.Event())  # never set: the child never answers
+
+    started = time.perf_counter()
+    task = asyncio.ensure_future(agent.run("chat-1", "do it", turn_id="t1"))
+    with pytest.raises(TimeoutError) as excinfo:
+        await asyncio.wait_for(task, timeout=5)
+    elapsed = time.perf_counter() - started
+
+    # The outer wait_for raises a *bare* TimeoutError, so checking the message
+    # is what tells "timeout_seconds fired" apart from "the test gave up".
+    assert "exceeded timeout_seconds" in str(excinfo.value), "run() hung; the outer wait_for fired instead"
+    assert elapsed < 1, f"bounded by the interrupt grace, not by the child: {elapsed:.2f}s"
+    assert fake_codex.instances[-1].turn_handles[-1].interrupted is True
     assert await mem_store.get_messages("chat-1") == [], "a timed-out turn commits nothing"
 
 
@@ -1248,6 +1348,84 @@ async def test_aclose_mid_turn_returns_promptly_and_closes_the_client(tmp_path, 
 
     assert handle.interrupted is True
     assert fake_codex.instances[0].closed is True
+    turn.cancel()
+    with contextlib.suppress(BaseException):
+        await turn
+
+
+@pytest.mark.asyncio
+async def test_aclose_is_bounded_when_the_turn_swallows_its_cancel(
+    tmp_path, fake_codex, mem_store, monkeypatch, caplog
+):
+    """Fix round 2 (C1a): _settle_interrupted does NOT guarantee the task is
+    finished. When the turn ignores both the interrupt and the cancel it
+    *abandons* it and raises — the same doctrine as Agent._abandon: what is
+    still unwinding is left to the loop. An abandoned task outlives the turn
+    that owned it, and aclose()'s wait then never returns, so client.close()
+    — the only thing that reaps the codex child process — is never reached.
+
+    The double had to learn to swallow a cancel before this was reachable at
+    all: round 1 deleted this very bound because a mutation test showed it
+    never fired, and it never fired because the fake always died on cancel."""
+    import bos.extensions.runtimes.codex as codex_mod
+
+    monkeypatch.setattr(codex_mod, "_INTERRUPT_GRACE_SECONDS", 0.05)
+    monkeypatch.setattr(codex_mod, "_ACLOSE_GRACE_SECONDS", 0.3)
+    agent = _agent(tmp_path, fake_codex, chat_store=mem_store)
+    _arm_notifications(fake_codex, [HANG])
+    _arm_handle(fake_codex, swallow_cancel=True)
+
+    turn = asyncio.ensure_future(agent.run("chat-1", "do it", turn_id="t1"))
+    handle = await _hanging_handle(fake_codex)
+    stream_task = agent._in_flight["chat-1"]  # the task aclose() will have to give up on
+
+    started = time.perf_counter()
+    with caplog.at_level(logging.WARNING, logger="bos.extensions.runtimes.codex"):
+        await asyncio.wait_for(agent.aclose(), timeout=5)
+    elapsed = time.perf_counter() - started
+
+    assert handle.cancels_swallowed >= 1, "the abandon path was never reached; the test proves nothing"
+    assert 0.25 <= elapsed < 1.5, f"aclose() is bounded by _ACLOSE_GRACE_SECONDS, not by the turn: {elapsed:.2f}s"
+    assert fake_codex.instances[0].closed is True, "the child is reaped even though the turn never let go"
+    assert any("still running after" in r.getMessage() for r in caplog.records), "giving up is reported, not silent"
+
+    # Retire the abandoned task: it is the loop's now, and would otherwise
+    # outlive the test with an unretrieved exception.
+    handle.swallow_cancel = False
+    stream_task.cancel()
+    for pending in (turn, stream_task):
+        with contextlib.suppress(BaseException):
+            await pending
+
+
+@pytest.mark.asyncio
+async def test_aclose_is_bounded_when_the_interrupt_rpc_never_returns(tmp_path, fake_codex, mem_store, monkeypatch):
+    """The other unbounded path (C1b): aclose() reaches client.close() only
+    after every in-flight turn's _settle_interrupted has returned, and that
+    call awaited handle.interrupt() under contextlib.suppress — which catches
+    errors, not slowness. A child that never answers the interrupt RPC held
+    aclose() open forever and the child process was never terminated, so one
+    wedged agent blocked the whole harness shutdown (core/_utils._aclose
+    catches exceptions but sets no timeout of its own)."""
+    import bos.extensions.runtimes.codex as codex_mod
+
+    monkeypatch.setattr(codex_mod, "_INTERRUPT_GRACE_SECONDS", 0.05)
+    monkeypatch.setattr(codex_mod, "_ACLOSE_GRACE_SECONDS", 0.5)
+    agent = _agent(tmp_path, fake_codex, chat_store=mem_store)
+    _arm_notifications(fake_codex, [HANG])
+    _arm_handle(fake_codex, interrupt_hang=asyncio.Event())  # never set: the child never answers
+
+    turn = asyncio.ensure_future(agent.run("chat-1", "do it", turn_id="t1"))
+    handle = await _hanging_handle(fake_codex)
+
+    started = time.perf_counter()
+    await asyncio.wait_for(agent.aclose(), timeout=5)
+    elapsed = time.perf_counter() - started
+
+    assert handle.interrupted is True, "the interrupt was still attempted, just not waited out"
+    assert elapsed < 1.5, f"the wedged interrupt RPC must not hold aclose() open: {elapsed:.2f}s"
+    assert fake_codex.instances[0].closed is True, "the child is reaped regardless"
+
     turn.cancel()
     with contextlib.suppress(BaseException):
         await turn
