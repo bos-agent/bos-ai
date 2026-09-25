@@ -2393,18 +2393,47 @@ async def test_native_options_may_not_widen_the_sandbox_permission_chose(tmp_pat
     `sandbox_mode` and `approval_policy` placed in `config` lose to the typed
     kwargs BOS sends — measured against the real child — but the chosen mode's
     own sub-table is not a typed parameter, so under `workspace-write` a
-    `writable_roots`/`network_access` here is resolved verbatim. Reserved
-    wholesale, so this asserts the *table* is refused, not two key names.
+    `writable_roots`/`network_access` here is resolved verbatim.
+
+    Both spellings, because the first fix caught only one and the hole stayed
+    open. A dotted key inside `config` is not a different key to Codex, it is
+    its own documented override path into the same table, and the measured
+    widening is reachable through either. The table is what is reserved.
     """
-    with pytest.raises(ValueError) as excinfo:
+    nested = {"sandbox_workspace_write": {"writable_roots": ["/etc"], "network_access": True}}
+    dotted = {"sandbox_workspace_write.writable_roots": ["/etc"], "sandbox_workspace_write.network_access": True}
+    for spelling in (nested, dotted):
+        with pytest.raises(ValueError) as excinfo:
+            _agent(tmp_path, fake_codex, permission="workspace-write", native_options={"config": spelling})
+        assert "config.sandbox_workspace_write" in str(excinfo.value)
+
+    # The table is reserved, not two key names: a sub-setting that widens
+    # nothing is refused too, and a lookalike key is not.
+    with pytest.raises(ValueError):
         _agent(
             tmp_path,
             fake_codex,
             permission="workspace-write",
-            native_options={"config": {"sandbox_workspace_write": {"exclude_slash_tmp": False}}},
+            native_options={"config": {"sandbox_workspace_write": {"exclude_slash_tmp": True}}},
         )
+    _agent(tmp_path, fake_codex, native_options={"config": {"sandbox_workspace_write_lookalike": 1}})
 
-    assert "config.sandbox_workspace_write" in str(excinfo.value)
+
+@pytest.mark.asyncio
+async def test_a_dotted_path_cannot_reach_bos_own_mcp_servers_entry_either(tmp_path, fake_codex):
+    """The same hole was open on the credential table, and whether it was
+    *exploitable* there is a question about Codex's merge that this repo cannot
+    answer: probing a dotted key against a nested table of the same name gave
+    neither "nested wins" nor "dotted wins" — on `sandbox_workspace_write` the
+    narrower value won from either spelling and `writable_roots` unioned. So
+    the credential may have been shadowed by that merge or may not have been;
+    what is certain is that it was not this reservation shadowing it. One rule
+    now refuses both spellings on both tables, which makes the question moot.
+    """
+    with pytest.raises(ValueError) as excinfo:
+        _agent(tmp_path, fake_codex, native_options={"config": {"mcp_servers.bos-tools.url": "http://x"}})
+
+    assert "config.mcp_servers" in str(excinfo.value)
 
 
 @pytest.mark.asyncio

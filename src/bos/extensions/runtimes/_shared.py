@@ -208,20 +208,31 @@ def parse_external_config(
 
 
 def _reserved_clashes(native_options: dict[str, Any], reserved: Collection[str]) -> Iterator[str]:
-    """Which of *reserved* the caller's `native_options` actually names.
+    """Which of *reserved* the caller's `native_options` actually reaches, named
+    as the caller spelled it.
 
     One level of nesting, spelled `"key.subkey"`, because a runtime may own only
     part of a table it also lets through — Codex's `config` is exactly that: BOS
     writes `mcp_servers` into it and merges the rest of the host's own `config`
     underneath, so the sub-key is reserved and the table is not.
+
+    A reserved `X.y` matches a `y` key inside `X` **and** any `y.…` key inside
+    it. That second form is not defensive: a dotted key *is* a path into the
+    table for the vendors this guards, and Codex documents it as such
+    (``codex --help``: "Use a dotted path (`foo.bar.baz`) to override nested
+    values"), so `{"sandbox_workspace_write.writable_roots": [...]}` reaches the
+    same setting as the nested spelling and has to be refused the same way.
+    Matching only the exact key looked like a guard on the setting and was a
+    guard on one spelling of it — a difference visible only by sending both to
+    a real child, which is how it was found.
     """
     for name in reserved:
         head, _, tail = name.partition(".")
         if not tail:
             if head in native_options:
                 yield head
-        elif isinstance(nested := native_options.get(head), dict) and tail in nested:
-            yield name
+        elif isinstance(nested := native_options.get(head), dict):
+            yield from (f"{head}.{k}" for k in nested if k == tail or k.startswith(f"{tail}."))
 
 
 async def read_native_session_id(store: ChatStore, chat_id: str, *, runtime: str) -> str | None:

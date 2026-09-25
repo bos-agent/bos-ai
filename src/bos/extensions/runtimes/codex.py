@@ -390,10 +390,14 @@ _RESERVED_CONFIG_KEYS = frozenset(
         # the chosen mode's own sub-table is not a typed parameter, so under
         # `permission = "workspace-write"` a `{"writable_roots": ["/etc"],
         # "network_access": true}` here is resolved by the server verbatim and
-        # BOS forwards it. Reserved WHOLESALE, not by the two keys measured:
-        # over-reserving fails loudly and can be relaxed on request, while
-        # under-reserving widens the confinement in silence, and three
-        # incomplete enumerations on this branch have earned the default.
+        # BOS forwards it. Reserved WHOLESALE in both directions — every
+        # sub-key, and every spelling of them, since `_reserved_clashes` also
+        # matches Codex's own dotted override paths; the first version of this
+        # entry reserved only the literal key and the widening walked past it
+        # through `{"sandbox_workspace_write.writable_roots": [...]}`.
+        # Over-reserving fails loudly and can be relaxed on request, while
+        # under-reserving widens the confinement in silence — as it just did,
+        # under a comment claiming it did not.
         "sandbox_workspace_write",
     }
 )
