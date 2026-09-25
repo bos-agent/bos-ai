@@ -4,7 +4,7 @@
 **This is not a test and must never run in CI or be imported from a test path.**
 It signs in as whoever owns the machine, spends that person's ChatGPT
 subscription quota on roughly twenty real model turns, and writes files both
-inside and — deliberately, as part of item 4 — outside the agent's working
+inside and — deliberately, as part of items 4 and 23 — outside the agent's working
 directory. A green CI run must never cost a human money or touch their account,
 so the only thing that starts this script is a person typing its name. It lives
 under ``scripts/`` (no ``__init__.py``, not on ``sys.path``, no ``test_``
@@ -45,12 +45,13 @@ import asyncio
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
@@ -144,6 +145,8 @@ def check(n: int, criterion: str, phase: str, turns: int, title: str) -> Callabl
 # raises when two declare the same runtime, so item 9 can only be observed
 # through BosApp in a phase with a single one.
 
+NATIVE_PERSONALITY = "pragmatic"
+
 AGENTS_START: dict[str, dict[str, Any]] = {
     "mcp": {"_parent": "codex", "permission": "workspace-write", "mcp_tools": [EXPOSED_TOOL]},
     "rw": {"_parent": "codex", "permission": "workspace-write"},
@@ -158,7 +161,11 @@ AGENTS_START: dict[str, dict[str, Any]] = {
     "native": {
         "_parent": "codex",
         "permission": "workspace-write",
-        "native_options": {"personality": "concise", "config": {"project_doc_max_bytes": 0}},
+        # `personality` must be an `openai_codex.generated.v2_all.Personality`
+        # value (none | friendly | pragmatic); self-check asserts it, because an
+        # invalid one fails thread_start with a ValidationError that item 13
+        # once scored as "AGENTS.md suppressed".
+        "native_options": {"personality": NATIVE_PERSONALITY, "config": {"project_doc_max_bytes": 0}},
     },
     "typo": {
         "_parent": "codex",
@@ -174,6 +181,10 @@ AGENTS_RESUME: dict[str, dict[str, Any]] = {
 MAIN_CHAT = "validate-main"
 CODEWORD = "PINEAPPLE"
 STATE_FILE = "validate-state.json"
+# Item 4's "outside the workspace" target lives here, not under /tmp: Codex's
+# workspace-write sandbox allows /tmp and $TMPDIR by default, so a write there
+# shows nothing about escaping cwd. Created per phase, removed when it ends.
+OUTSIDE_PARENT = Path.home() / ".cache" / "bos-codex-validate"
 
 
 def workspace_config(agents: dict[str, dict[str, Any]]) -> dict[str, Any]:
@@ -205,8 +216,17 @@ class Capture:
         self.events.append(event)
         self.at.append(time.monotonic())
 
-    def kinds(self) -> list[str]:
-        return [f"{e.event_type}/{e.phase}" + (f"[{e.tool_name}]" if e.tool_name else "") for e in self.events]
+    def kinds(self, phase_by_text: dict[str, str] | None = None) -> list[str]:
+        """One label per event. With *phase_by_text* (agent-message text ->
+        Codex ``MessagePhase``, read from the vendor thread), a ``response``
+        event also names its phase — ``TurnEvent`` itself does not carry it."""
+        out = []
+        for e in self.events:
+            label = f"{e.event_type}/{e.phase}" + (f"[{e.tool_name}]" if e.tool_name else "")
+            if phase_by_text is not None and e.event_type == "response":
+                label += f"(phase={phase_by_text.get(e.content or '', 'unmatched')})"
+            out.append(label)
+        return out
 
     def max_gap(self) -> float:
         return max((b - a for a, b in zip(self.at, self.at[1:], strict=False)), default=0.0)
@@ -250,6 +270,7 @@ class Ctx:
     args: argparse.Namespace
     chat_seq: int = 0
     facts: dict[str, Any] = field(default_factory=dict)
+    taps: dict[str, Tap] = field(default_factory=dict)
 
     def agent(self, kind: str) -> Any:
         return codex_agent(self.app, kind)
@@ -310,6 +331,117 @@ def appeared(path: Path, within: float) -> float | None:
     return None
 
 
+def jsonable(value: Any) -> Any:
+    if hasattr(value, "model_dump"):
+        return value.model_dump(mode="json", by_alias=True, exclude_none=True)
+    return getattr(value, "value", value)
+
+
+@dataclass
+class Tap:
+    """What the vendor client saw that BOS's event stream does not carry.
+
+    ``requests``: every server-to-client request handed to the approval
+    handler — approvals and the five non-approval kinds alike — recorded on
+    the vendor's reader thread (a list append; it must never block there) and
+    then passed on to ``_deny_approval`` unchanged. ``threads``: the approval
+    and sandbox policy each ``thread/start`` / ``thread/resume`` resolved to.
+    """
+
+    requests: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
+    threads: list[dict[str, Any]] = field(default_factory=list)
+
+    def policy_for(self, thread_id: str | None) -> Any:
+        found = [t for t in self.threads if t["thread"] == thread_id]
+        return found[-1] if found else "not captured"
+
+
+async def tap(ctx: Ctx, kind: str) -> Tap:
+    """Install a ``Tap`` on *kind*'s vendor client, once. ``_ensure_client``
+    spawns the child and runs the auth preflight (an ``account/read`` RPC, no
+    model turn); the wrappers go on the same private chain ``codex.py`` itself
+    writes ``_approval_handler`` to, so this changes no BOS behaviour."""
+    if kind in ctx.taps:
+        return ctx.taps[kind]
+    agent = ctx.agent(kind)
+    await agent._ensure_client()
+    sync = agent._client._client._sync
+    recorded = Tap()
+    handler = sync._approval_handler
+
+    def recording_handler(method: str, params: dict[str, Any] | None) -> Any:
+        recorded.requests.append((method, dict(params or {})))
+        return handler(method, params)
+
+    sync._approval_handler = recording_handler
+    for name in ("thread_start", "thread_resume"):
+        original = getattr(sync, name)
+
+        def recording(*a: Any, _original: Any = original, _name: str = name, **kw: Any) -> Any:
+            response = _original(*a, **kw)
+            recorded.threads.append({
+                "via": _name,
+                "thread": response.thread.id,
+                "approvalPolicy": jsonable(response.approval_policy),
+                "sandbox": jsonable(response.sandbox),
+            })
+            return response
+
+        setattr(sync, name, recording)
+    ctx.taps[kind] = recorded
+    return recorded
+
+
+async def vendor_turns(ctx: Ctx, kind: str, chat_id: str) -> list[list[dict[str, Any]]]:
+    """Codex's own record of every item, per turn, of the thread bound to
+    *chat_id* — one level below ``native_messages``, which projects only the
+    messages. Read-only (``thread/read``, as ``native_messages`` does it); no
+    model turn."""
+    from openai_codex import AsyncThread
+
+    thread_id = await thread_id_of(ctx, chat_id)
+    if thread_id is None:
+        raise RuntimeError(f"no Codex thread recorded for {chat_id!r}")
+    client = await ctx.agent(kind)._ensure_client()
+    response = await asyncio.wait_for(AsyncThread(client, thread_id).read(include_turns=True), 60)
+    turns = []
+    for t in response.thread.turns:
+        items = [jsonable(i) for i in (t.items or [])]
+        if not items:
+            items = [{"type": f"<no items; items_view={jsonable(t.items_view)!r}>"}]
+        turns.append(items)
+    return turns
+
+
+_BRIEF_KEYS = ("type", "phase", "server", "tool", "status", "error", "command", "exitCode")
+
+
+def brief(item: dict[str, Any]) -> dict[str, Any]:
+    """An item without its text, arguments or output — safe to print."""
+    return {k: item[k] for k in _BRIEF_KEYS if k in item}
+
+
+_BEARER_NAME = re.compile(r"BOS_MCP_BEARER_[0-9A-Za-z]+")
+_TOKEN_LIKE = re.compile(r"[A-Za-z0-9_-]{32,}")
+
+
+def redact(text: str, secrets: Iterable[str] = ()) -> str:
+    """Strip anything that could be BOS's bearer token (``secrets.token_urlsafe
+    (32)``, 43 url-safe chars) or its per-agent variable name's suffix."""
+    for secret in secrets:
+        if len(secret) >= 8:
+            text = text.replace(secret, "<redacted>")
+    text = _BEARER_NAME.sub("BOS_MCP_BEARER_<redacted>", text)
+    return _TOKEN_LIKE.sub("<redacted>", text)
+
+
+def child_env_values(agent: Any) -> list[str]:
+    try:
+        return [str(v) for v in (agent._client._client._sync.config.env or {}).values()]
+    except AttributeError:
+        return []
+
+
 def child_pid(agent: Any) -> int | None:
     """The ``codex app-server`` pid, down the vendor's private attribute chain.
 
@@ -348,7 +480,15 @@ async def check_01(ctx: Ctx) -> Outcome:
     # two, and this is the spelling a type checker can follow.
     if result is None:
         return FAIL, f"the first turn did not complete — {describe(exc)}"
-    ctx.facts["first_events"] = cap.kinds()
+    # Item 16 wants each `response` event's Codex MessagePhase, which TurnEvent
+    # does not carry: read it off the vendor thread now, while it has one turn.
+    try:
+        items = (await vendor_turns(ctx, "mcp", MAIN_CHAT))[-1]
+        phases = {i.get("text", ""): str(i.get("phase")) for i in items if i.get("type") == "agentMessage"}
+        ctx.facts["first_events"] = cap.kinds(phases)
+    except Exception as read_exc:  # noqa: BLE001 - the labels are a bonus, not the check
+        ctx.facts["first_events"] = cap.kinds()
+        ctx.facts["first_events_note"] = f"phases unavailable — vendor thread read failed: {describe(read_exc)}"
     ctx.facts["first_usage"] = dict(result.usage or {})
     ctx.facts["first_reply"] = str(result.output)[:200]
     mark = PASS if result.usage else FAIL
@@ -375,14 +515,25 @@ async def check_02(ctx: Ctx) -> Outcome:
 async def check_04(ctx: Ctx) -> Outcome:
     inside = ctx.workspace / "inside-write.txt"
     outside = ctx.outside / "outside-write.txt"
+    # workspace-write allows /tmp and $TMPDIR by default (excludeSlashTmp and
+    # excludeTmpdirEnvVar are false), so a target there proves nothing about
+    # "outside the workspace". Item 23 measures /tmp on its own.
+    allowed = [ctx.workspace, Path("/tmp"), Path(tempfile.gettempdir())]
+    if os.environ.get("TMPDIR"):
+        allowed.append(Path(os.environ["TMPDIR"]))
+    within = [str(a) for a in allowed if ctx.outside.resolve().is_relative_to(a.resolve())]
+    if within:
+        return NOT_ARRANGED, f"the outside directory {ctx.outside} is under {within}, which the sandbox allows anyway"
+    recorded = await tap(ctx, "rw")
     rw = ctx.agent("rw")
 
     _, exc_in, _, _ = await turn(
         rw, ctx.chat("sandbox-in"), f"Create a file named {inside.name} in your working directory containing OK."
     )
+    out_chat = ctx.chat("sandbox-out")
     _, exc_out, _, _ = await turn(
         rw,
-        ctx.chat("sandbox-out"),
+        out_chat,
         f"Create a file at the absolute path {outside} containing OK. "
         "If you cannot, say exactly DENIED and the reason.",
     )
@@ -397,9 +548,40 @@ async def check_04(ctx: Ctx) -> Outcome:
     detail = (
         f"inside cwd written={inside.exists()} ({describe(exc_in)}); "
         f"outside cwd written={outside.exists()} at {outside} ({describe(exc_out)}); "
-        f"read-only wrote={ro_wrote} ({describe(exc_ro)})"
+        f"read-only wrote={ro_wrote} ({describe(exc_ro)}); "
+        f"workspace-write thread policy: {recorded.policy_for(await thread_id_of(ctx, out_chat))}"
     )
     return (PASS if good else FAIL), detail
+
+
+@check(23, "§3.5", "start", 1, "Can a workspace-write agent write to /tmp? (resolved sandbox policy alongside)")
+async def check_23(ctx: Ctx) -> Outcome:
+    """Recorded, not judged. Codex 0.156.1 resolves workspace-write to
+    `excludeSlashTmp: false, excludeTmpdirEnvVar: false`, i.e. /tmp and $TMPDIR
+    are writable roots. Whether BOS should accept that is an open design
+    decision, so this is OBSERVED either way."""
+    probe = Path(tempfile.mkdtemp(dir="/tmp", prefix="bos-codex-tmp-probe-"))
+    target = probe / "tmp-write.txt"
+    if probe.resolve().is_relative_to(ctx.workspace.resolve()):
+        shutil.rmtree(probe, ignore_errors=True)
+        return NOT_ARRANGED, f"the workspace {ctx.workspace} contains /tmp's probe directory, so it is not outside cwd"
+    try:
+        recorded = await tap(ctx, "rw")
+        chat = ctx.chat("sandbox-tmp")
+        _, exc, _, _ = await turn(
+            ctx.agent("rw"),
+            chat,
+            f"Create a file at the absolute path {target} containing OK. "
+            "If you cannot, say exactly DENIED and the reason.",
+        )
+        written = target.exists()
+        policy = recorded.policy_for(await thread_id_of(ctx, chat))
+    finally:
+        shutil.rmtree(probe, ignore_errors=True)
+    return OBSERVED, (
+        f"workspace-write agent wrote to /tmp: {written} ({target}, outside cwd {ctx.workspace}); "
+        f"TMPDIR={os.environ.get('TMPDIR')!r}; resolved thread policy: {policy}; turn {describe(exc)}"
+    )
 
 
 @check(5, "§7.19", "start", 1, "request_stop() mid-turn ends the turn; the workspace stops changing")
@@ -571,16 +753,32 @@ async def check_20(ctx: Ctx) -> Outcome:
     """Correct by design — the sandbox confines the filesystem, not BOS's own
     tool surface — and the thing an operator is most likely to assume the other
     way round. Better measured and written into the BEP than discovered."""
-    before = len(TOOL_CALLS)
-    _, exc, _, _ = await turn(
+    recorded = await tap(ctx, "ro")
+    before, requests_before = len(TOOL_CALLS), len(recorded.requests)
+    chat = ctx.chat("ro-mcp")
+    result, exc, cap, _ = await turn(
         ctx.agent("ro"),
-        ctx.chat("ro-mcp"),
+        chat,
         f"Call the {EXPOSED_TOOL} tool with text='mutation from a read-only agent', then reply with its result.",
     )
     reached = [text for name, text in TOOL_CALLS[before:] if name == EXPOSED_TOOL]
+    # "0 calls, no error" cannot tell Codex blocking the call from the model
+    # never making one. What Codex itself recorded, and what reached the
+    # approval handler, can — so both are printed, and nothing is concluded.
+    requests = [(method, sorted(params)) for method, params in recorded.requests[requests_before:]]
+    try:
+        items = (await vendor_turns(ctx, "ro", chat))[-1]
+        mcp_items = [brief(i) for i in items if i.get("type") == "mcpToolCall"] or "NONE"
+        codex_items = f"Codex mcpToolCall items: {mcp_items}; all item kinds: {[i.get('type') for i in items]}"
+    except Exception as read_exc:  # noqa: BLE001 - report the gap, never guess past it
+        codex_items = f"could not read the vendor thread: {describe(read_exc)}"
     return OBSERVED, (
         f"read-only agent reached the host tool {len(reached)} time(s) — host state mutated: {reached or 'NONE'}; "
-        f"{describe(exc)}"
+        f"{codex_items}; server requests at the approval handler during the turn: {requests or 'NONE'}; "
+        f"BOS tool events: {[k for k in cap.kinds() if k.startswith('tool')] or 'none'}; "
+        f"thread policy: {recorded.policy_for(await thread_id_of(ctx, chat))}; "
+        f"finish_reason={getattr(result, 'finish_reason', None)!r}, {describe(exc)}; "
+        f"reply: {str(getattr(result, 'output', ''))[:160]!r}"
     )
 
 
@@ -591,17 +789,22 @@ async def check_22(ctx: Ctx) -> Outcome:
     CI cannot reach. It grants no more than that agent's own `mcp_tools`
     allowlist either way — but a credential landing in a transcript is worth
     knowing about."""
+    agent = ctx.agent("mcp")
+    # Asks for a count, never a name or a value: an earlier version had the
+    # agent run `env`, and the variable name landed in the owner's transcript.
     result, exc, _, _ = await turn(
-        ctx.agent("mcp"),
+        agent,
         ctx.chat("env"),
-        "Run the shell command `env` and reply with the NAMES ONLY (no values) of any environment "
-        "variables whose name starts with BOS_MCP_BEARER. If there are none, reply exactly NONE.",
+        "Run exactly this shell command and nothing else: env | grep -c '^BOS_MCP_BEARER' . "
+        "Reply with only the number it printed. Do not print any variable names or values.",
     )
-    reply = str(getattr(result, "output", "")) or describe(exc)
-    visible = "BOS_MCP_BEARER" in reply
-    return OBSERVED, (
-        f"{'VISIBLE to the agent' if visible else 'not visible in the reply'} — agent said: {reply[:220]!r}"
-    )
+    reply = redact(str(getattr(result, "output", "")) or describe(exc), child_env_values(agent))
+    count = re.search(r"\d+", reply) if result is not None else None
+    if count is None:
+        verdict = "UNCLEAR — the reply carried no count"
+    else:
+        verdict = "VISIBLE to the agent's shell" if int(count.group()) > 0 else "not visible to the agent's shell"
+    return OBSERVED, f"{verdict} — agent said (redacted): {reply[:220]!r}"
 
 
 @check(13, "§7.25", "start", 3, "native_options reach the child AND work: a keyword and a config key")
@@ -622,18 +825,31 @@ async def check_13(ctx: Ctx) -> Outcome:
     _, exc_typo, _, _ = await turn(ctx.agent("typo"), ctx.chat("typo"), "hello")
     typo = "TypeError" if isinstance(exc_typo, TypeError) else describe(exc_typo)
 
-    baseline_ok = CODEWORD in base_text.upper()
-    suppressed = CODEWORD not in off_text.upper()
-    if not baseline_ok:
+    knobs = f"native_options personality={NATIVE_PERSONALITY!r}, config.project_doc_max_bytes=0"
+    # "Marker absent" only means suppression if a real reply came back: an error
+    # text lacks the marker too, and once scored a thread_start ValidationError
+    # as a PASS.
+    off_completed = off is not None and exc_off is None and off.finish_reason == "completed"
+    off_said = (
+        f"completed (finish_reason='completed'), so thread_start accepted both; reply {off_text[:80]!r}"
+        if off_completed
+        else f"did not complete a turn — finish_reason={getattr(off, 'finish_reason', None)!r}, "
+        f"{describe(exc_off)} — so suppression was not measured"
+    )
+    if CODEWORD not in base_text.upper():
         return NOT_ARRANGED, (
-            f"no baseline: the default agent did not reflect AGENTS.md either (said {base_text[:120]!r}), so a "
-            f"suppressed reply would prove nothing. project_doc_max_bytes=0 agent said {off_text[:120]!r}. "
+            f"no baseline: the default agent did not reflect AGENTS.md either (returned {base_text[:120]!r}), so "
+            f"a suppressed reply would prove nothing. The {knobs} agent {off_said}. "
             f"typo'd native_options keyword -> {typo}"
         )
+    if not off_completed:
+        return FAIL, (
+            f"baseline reflects AGENTS.md ({base_text[:80]!r}); the {knobs} agent {off_said}; typo'd keyword -> {typo}"
+        )
+    suppressed = CODEWORD not in off_text.upper()
     return (PASS if suppressed else FAIL), (
-        f"baseline reflects AGENTS.md ({base_text[:80]!r}); with native_options.config.project_doc_max_bytes=0 "
-        f"the reply is {off_text[:80]!r} ({'suppressed' if suppressed else 'STILL REFLECTS AGENTS.md'}); "
-        f"personality='concise' was accepted by thread_start; typo'd keyword -> {typo}"
+        f"baseline reflects AGENTS.md ({base_text[:80]!r}); the {knobs} agent {off_said} "
+        f"({'AGENTS.md suppressed' if suppressed else 'STILL REFLECTS AGENTS.md'}); typo'd keyword -> {typo}"
     )
 
 
@@ -646,7 +862,8 @@ async def check_16(ctx: Ctx) -> Outcome:
     events = ctx.facts.get("first_events")
     if events is None:
         return NOT_ARRANGED, "item 1 produced no turn to read events from"
-    return OBSERVED, f"an ordinary turn (read a file, reply) emitted: {events or 'NOTHING'}"
+    note = ctx.facts.get("first_events_note", "phase=None means Codex sent no phase on that agent message")
+    return OBSERVED, f"an ordinary turn (read a file, reply) emitted: {events or 'NOTHING'} ({note})"
 
 
 @check(15, "§7.15", "start", 0, "Is usage non-empty, and does thread/tokenUsage/updated arrive?")
@@ -775,11 +992,18 @@ async def check_18(ctx: Ctx) -> Outcome:
 async def check_21(ctx: Ctx) -> Outcome:
     """`aclose()` does not reset `self._client`, so the agent keeps a closed
     one. One line of observed behaviour — run last, because it closes the client
-    this phase was using."""
+    this phase was using. Since 5523398, `run()` answers a closed agent with
+    the shutdown marker before touching the vendor, so the output and
+    finish_reason are printed — that is what a reusing host actually gets."""
     agent = ctx.agent("mcp")
     await agent.aclose()
-    _, exc, _, _ = await turn(agent, ctx.chat("after-close"), "Reply with the word AFTER.")
-    return OBSERVED, f"ask() after aclose() -> {describe(exc)}"
+    result, exc, _, _ = await turn(agent, ctx.chat("after-close"), "Reply with the word AFTER.")
+    if result is None:
+        return OBSERVED, f"ask() after aclose() raised {describe(exc)}"
+    return OBSERVED, (
+        f"ask() after aclose() returned without error: finish_reason={result.finish_reason!r}, "
+        f"output={str(result.output)[:160]!r}, usage={result.usage!r}"
+    )
 
 
 # ── Phase `nologin` — item 12, and no quota spent ───────────────────────────
@@ -861,7 +1085,10 @@ def banner(phase: str, workspace: Path, outside: Path, bos_dir: Path, items: lis
             [
                 f"    OUTSIDE the workspace, on purpose : {outside}",
                 "      item 4 asks a workspace-write agent to write there; the sandbox is supposed to refuse.",
-                "      It is a fresh temp directory this script created — never your repo.",
+                "      A fresh directory this script created under your home — outside the workspace, /tmp",
+                "      and $TMPDIR (all three writable under workspace-write) — removed when the phase ends.",
+                "    /tmp, on purpose                  : /tmp/bos-codex-tmp-probe-*/tmp-write.txt",
+                "      item 23 records whether a workspace-write agent can write there; removed afterwards.",
             ]
             if any(i.n == 4 for i in items)
             else []
@@ -963,15 +1190,42 @@ async def run_phase(phase: str, args: argparse.Namespace) -> list[Item]:
     # Only item 4 writes outside the workspace, so only a phase carrying it
     # creates the directory. A phase that never uses one must not leave one.
     needs_outside = any(i.n == 4 for i in items)
-    outside = Path(
-        state.get("outside")
-        or (tempfile.mkdtemp(prefix="bos-codex-outside-") if needs_outside else "<not used by this phase>")
-    )
+    if needs_outside:
+        OUTSIDE_PARENT.mkdir(parents=True, exist_ok=True)
+        outside = Path(tempfile.mkdtemp(prefix="outside-", dir=OUTSIDE_PARENT))
+    else:
+        outside = Path("<not used by this phase>")
 
     print(banner(phase, workspace, outside, bos_dir, items))
     if not args.yes:
         print("Refusing to run without --yes. Re-read the paths above first.")
+        remove_outside(outside, needs_outside)
         return []
+    try:
+        return await _run_items(phase, args, workspace, bos_dir, state, items, outside)
+    finally:
+        remove_outside(outside, needs_outside)
+
+
+def remove_outside(outside: Path, created: bool) -> None:
+    if not created:
+        return
+    shutil.rmtree(outside, ignore_errors=True)
+    try:
+        OUTSIDE_PARENT.rmdir()  # only if nothing else is left in it
+    except OSError:
+        pass
+
+
+async def _run_items(
+    phase: str,
+    args: argparse.Namespace,
+    workspace: Path,
+    bos_dir: Path,
+    state: dict[str, Any],
+    items: list[Item],
+    outside: Path,
+) -> list[Item]:
 
     seeded = seed_workspace(workspace)
     agents = AGENTS_RESUME if phase != "start" else AGENTS_START
@@ -1066,7 +1320,11 @@ async def _check_configs_build() -> None:
             assert WITHHELD_TOOL not in codex_agent(app, "mcp").resolved_config["mcp_tools"], (
                 "the withheld tool must never be granted, or item 8 proves nothing"
             )
-            assert codex_agent(app, "native").resolved_config["native_options"]["config"]["project_doc_max_bytes"] == 0
+            native = codex_agent(app, "native").resolved_config["native_options"]
+            assert native["config"]["project_doc_max_bytes"] == 0
+            from openai_codex.generated.v2_all import Personality
+
+            Personality(native["personality"])  # raises on a value thread_start would reject
             assert type(app.harness.chat_store).__name__ == "JsonlChatStore", (
                 "item 3 needs a store that outlives the process"
             )
@@ -1081,7 +1339,7 @@ def self_check() -> int:
     Deliberately NOT a pytest file — this script must stay uncollectable.
     """
     numbers = [i.n for i in CHECKS]
-    assert sorted(numbers) == list(range(1, 23)), f"checklist 1-22 must each appear once, got {sorted(numbers)}"
+    assert sorted(numbers) == list(range(1, 24)), f"checklist 1-23 must each appear once, got {sorted(numbers)}"
     assert {i.phase for i in CHECKS} == {"start", "resume", "nologin"}, "unknown phase on some item"
     for item in CHECKS:
         assert item.criterion.startswith("§"), f"item {item.n} has no BEP reference"
@@ -1096,8 +1354,8 @@ def self_check() -> int:
     probe = AsyncCodex(CodexConfig())
     assert child_pid(probe) is None, "a fresh client must have no child process yet"
     sync = probe._client._sync
-    for attribute in ("_proc", "_approval_handler"):
-        assert hasattr(sync, attribute), f"openai-codex moved {attribute}; item 17 / §3.5.4 need it"
+    for attribute in ("_proc", "_approval_handler", "thread_start", "thread_resume", "config"):
+        assert hasattr(sync, attribute), f"openai-codex moved {attribute}; items 17/20/22/23 / §3.5.4 need it"
 
     class _Stub:
         pass
@@ -1171,6 +1429,20 @@ def self_check() -> int:
 
     cap = Capture()
     assert cap.max_gap() == 0.0 and cap.kinds() == []
+    asyncio.run(cap.emit(TurnEvent(event_type="response", phase="finish", chat_id="c", turn_id="t",
+                                   agent_name="a", content="hi")))
+    assert cap.kinds({"hi": "commentary"}) == ["response/finish(phase=commentary)"]
+    assert cap.kinds({}) == ["response/finish(phase=unmatched)"] and cap.kinds() == ["response/finish"]
+
+    # Item 22 must never print the bearer variable or its value.
+    token = "Abc_def-" * 6
+    leaked = redact(f"BOS_MCP_BEARER_{'ab12' * 8}={token} and short", [token])
+    assert "BOS_MCP_BEARER_<redacted>" in leaked and token not in leaked and "ab12" not in leaked, leaked
+    assert redact("1") == "1"
+
+    # Item 4's target must be outside everything workspace-write allows by default.
+    for tmp_root in (Path("/tmp"), Path(tempfile.gettempdir())):
+        assert not OUTSIDE_PARENT.resolve().is_relative_to(tmp_root.resolve()), f"outside dir is under {tmp_root}"
 
     print(f"self-check OK — {len(CHECKS)} items, ~{sum(i.turns for i in CHECKS)} model turns across all phases")
     print(f"openai-codex {sdk_version()}; codex CLI {cli_version()}")
@@ -1278,7 +1550,7 @@ def main(argv: list[str] | None = None) -> int:
     workspace = Path(args.workspace).expanduser().resolve()
     guard_repo(workspace)
     if args.phase == "plan":
-        outside = Path(tempfile.gettempdir()) / "<a fresh bos-codex-outside-* directory>"
+        outside = OUTSIDE_PARENT / "<a fresh outside-* directory>"
         for phase in ("start", "resume", "nologin"):
             print(banner(phase, workspace, outside, workspace / ".bos", items_for(phase)))
         return 0
