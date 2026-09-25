@@ -502,6 +502,27 @@ def test_parent_inheritance_multilevel(tmp_path):
     assert c["max_iterations"] == 5  # c's own
 
 
+def test_agent_name_is_not_inherited_through_parent(tmp_path):
+    """`agent_name` is an agent's identity — it keys its memory store and is the
+    name it speaks under — so a child that inherited it shared its parent's store
+    and name, and so did every descendant down the chain. Everything else is
+    still inherited."""
+    config = {
+        "agents": {
+            "a": {"system_prompt": "A", "agent_name": "Alice"},
+            "b": {"_parent": "a"},
+            "c": {"_parent": "b"},
+            "d": {"_parent": "c", "agent_name": "Dave"},
+            "e": {"_parent": "d"},
+        }
+    }
+    ws = Workspace(tmp_path, tmp_path / ".bos", config)
+    ws.bootstrap_platform()
+    names = {k: AgentRegistry.get_defaults(k).get("agent_name") for k in "abcde"}
+    assert names == {"a": "Alice", "b": None, "c": None, "d": "Dave", "e": None}
+    assert all(AgentRegistry.get_defaults(k)["system_prompt"] == "A" for k in "abcde")
+
+
 def test_parent_inheritance_defaults_remain_floor(tmp_path):
     """[agent.defaults] stays the global base under the _parent chain."""
     config = {

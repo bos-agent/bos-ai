@@ -213,10 +213,12 @@ def _resolve_agent_cfg_parent(kind: str | None, agent_cfg: dict[str, Any]) -> di
         # state is keyed by `agent_name or kind` (`_bind_plugins_for_agent`), so
         # replace it with the child's, as `register()` does for a config child;
         # dropping it would key every child without an `agent_name` as "default".
-        # An `agent_name` the parent sets is inherited, on this route as in config.
+        # The parent's `agent_name` is dropped too: identity is not inherited
+        # through `_parent`, on this route as in config.
         inherited.pop("kind", None)
         if kind is not None:
             inherited["kind"] = kind
+        inherited.pop("agent_name", None)  # identity is not inherited, as in config
         base = _deep_merge(base, inherited)
     runtime = base.get("external_runtime")
     resolves_to = f"the {runtime!r} runtime" if runtime else "a BOS agent"
