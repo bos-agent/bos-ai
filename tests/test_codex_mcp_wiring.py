@@ -237,9 +237,13 @@ async def test_the_real_codex_child_reads_the_override_and_lists_the_tool(tmp_pa
     So: a real child, reading a real override, authenticating against a real
     `BosToolMcpServer` with the token out of its own environment, and listing
     exactly the granted tool. No login is needed — `thread_start` does not
-    authenticate, which is why the first two thirds of §7.22 can live in CI
-    while the model actually *calling* the tool stays on Task 11's checklist.
-    Measured at well under a second; it is not on a slow path.
+    authenticate, which is why §7.22's first clause can live in CI while the
+    two that need a model stay on Task 11's checklist.
+
+    It is the only test here that spawns a process, so it is the slowest, but
+    not by enough to move off the default path: 0.8s and 1.4s on the two
+    machines it has been measured on. Both numbers, because one of them is not
+    a property of the test.
 
     It is also the only test that can pin *which auth key* (F1): the throwaway
     `config.toml` below holds a colliding operator entry carrying its own

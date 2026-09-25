@@ -338,12 +338,15 @@ _UNKNOWN_FILE_MIME_TYPE = "application/octet-stream"
 # Measured against the shipped codex-cli 0.156.1 with a throwaway CODEX_HOME:
 #
 # - the credential half of that hazard is closed by the key
-#   `_mcp_egress_config` picks: whichever auth key the operator's colliding
-#   entry carries, the token the child actually sends is BOS's. It used not to
-#   be, which is what made this name urgent.
-# - a collision with a *stdio* server of the same name is what remains, and it
-#   is loud: the whole config fails to load ("url is not supported for stdio in
-#   `mcp_servers.<name>`"), failing the turn rather than degrading it.
+#   `_mcp_egress_config` picks: whichever credential key the operator's
+#   colliding entry carries, the token the child actually sends is BOS's. It
+#   used not to be, which is what made this name urgent.
+# - what remains is two ways a collision fails the config *load*, and both take
+#   every turn with them rather than degrading one. A same-named *stdio* entry:
+#   "url is not supported for stdio in `mcp_servers.<name>`". A same-named HTTP
+#   entry carrying `bearer_token`: that key is rejected for streamable HTTP
+#   wherever it comes from, and the operator's copy of it is merged in beside
+#   ours. Both are loud and name the table.
 #
 # Hence "bos-tools" rather than the bare project name: it is the name the
 # server already reports for itself over MCP (`Server("bos-tools", …)` in
@@ -720,20 +723,33 @@ class CodexAgent:
         environment. Which key carries it is the one security-relevant choice
         here, because the override is *merged* into the operator's own
         ``~/.codex/config.toml`` (see ``_MCP_SERVER_NAME``) and the two sides
-        can name different auth keys for the same server. Measured against the
-        shipped codex-cli 0.156.1 (``codex_cli_bin/bin/codex``, the binary
-        ``bos-ai[codex]`` installs), by driving the real ``app-server`` through
-        this very ``config=`` argument against a spying loopback server and
-        reading the ``Authorization`` it actually arrived with:
+        can name different keys for the same server. Everything below is from
+        the shipped codex-cli 0.156.1 (``codex_cli_bin/bin/codex``, the binary
+        ``bos-ai[codex]`` installs), by two methods kept apart on purpose: what
+        the set of keys *is* comes from the binary's own rendering of a loaded
+        entry, and what each one *does* comes from driving the real
+        ``app-server`` through this very ``config=`` argument against a spying
+        loopback server and reading the ``Authorization`` that arrived.
 
-        - ``bearer_token_env_var`` wins against each of the three auth keys
-          Codex offers, which is the whole set: an operator entry carrying
-          ``http_headers``, one carrying ``env_http_headers``, and one carrying
-          ``bearer_token_env_var`` (the same key, so the per-key merge replaces
-          it) all end with the child sending *BOS's* token. So does no operator
-          entry at all. The variable name is freshly generated per client so
-          BOS's token cannot be read by some *other* ``[mcp_servers.*]`` entry
-          that happens to name the same var.
+        - ``bearer_token_env_var`` wins against every credential key an
+          operator's colliding entry can carry. The enumeration is the binary's
+          own, not the list of things tried: ``codex mcp get <name> --json``
+          renders a loaded streamable-HTTP entry's ``transport`` as exactly
+          ``url``, ``bearer_token_env_var``, ``http_headers``,
+          ``env_http_headers``, ``http_headers_helper``. Each of the four
+          credential keys was planted on an operator entry of *this* server's
+          name and the child still sent *BOS's* token; so did no operator entry
+          at all. **Not** enumerated and **not** measured: OAuth, which is a
+          different mechanism rather than a key — ``codex mcp add`` takes
+          ``--oauth-client-id`` / ``--oauth-client-registration`` /
+          ``--oauth-resource``, credentials arrive by ``codex mcp login``, and
+          none of it shows up in the ``transport`` view above. Measuring it
+          needs a provider.
+        - The variable name is freshly generated per client, because the
+          environment is shared with every *other* MCP server the operator
+          configured: a fixed name is one their own ``[mcp_servers.*]`` entry
+          could put in its ``bearer_token_env_var`` to have Codex hand BOS's
+          token to their server. A name nothing can guess cannot be named.
         - **Not** ``http_headers``, which is what an earlier round of this shipped.
           It is a recognized key (``codex mcp list`` reports ``Auth: Bearer
           token``) and it wins a same-key collision — but against an operator
@@ -742,16 +758,17 @@ class CodexAgent:
           would silently have had no BOS tools at all.
         - **Not** ``bearer_token``. Not a literal-token key, and not ignored
           either: it fails the whole config load with "bearer_token is not
-          supported for streamable_http" — the same message, character for
-          character, whether it arrives through ``config=`` or the CLI's
-          ``-c``, which is how the two were shown to be one channel.
+          supported for streamable_http". That inner sentence is identical
+          whether the key arrives through ``config=`` or the CLI's ``-c`` —
+          the wrapping differs — which is one of the things that showed the
+          two to be one channel.
 
         The cost of the move is where the token rests: in the child's
         environment, readable by the same user through ``/proc/<pid>/environ``,
         rather than inside a JSON-RPC message. That is worse than the message
         and better than ``CodexConfig(config_overrides=…)``, which would put it
         on the command line for anyone's ``ps``. ``CodexConfig(env=…)`` is
-        additive, not a replacement (``client.py:257-259`` copies ``os.environ``
+        additive, not a replacement (``client.py:258-260`` copies ``os.environ``
         and updates it), so the child keeps everything else it needs to run.
         """
         unavailable = unregistered_tools(self._config.mcp_tools)
