@@ -85,16 +85,22 @@ def _hooks(hook: Any) -> dict[str, Any]:
 def _sandboxed(sandbox: dict[str, Any]) -> dict[str, Any]:
     """``sandbox``, plus inline settings no other CLI shares.
 
-    The SDK sends ``sandbox`` inside inline ``--settings`` JSON, and the CLI writes that
-    to ``/tmp/claude-<uid>/claude-settings-<sha256 of the content, 16 hex>.json``
-    (``GPo``/``h9`` in CLI 2.1.281) — a path the bash sandbox binds. That file is gone
-    once the CLI exits: observed after every run, though the removal code itself was not
-    found in the CLI source. Two CLIs started with byte-identical settings therefore share
-    one file, and when the first exits, the other's sandboxed commands fail for the rest
-    of its turn with ``bwrap: Can't find source path …`` (without the nonce, fact 6b
-    failed 5 and 7 times in two samples of 24 under 4-way parallel runs). A nonce makes
-    each call's settings, and so its file, its own. Nothing about this is test-specific:
-    BOS's own clients share the race unless their settings differ too.
+    The SDK sends ``sandbox`` inside inline ``--settings`` JSON. The CLI names a path after
+    it — ``/tmp/claude-<uid>/claude-settings-<16 hex>.json``, the hex the start of the
+    sha256 of the settings re-serialised as compact JSON (``GPo``/``h9`` in CLI 2.1.281) —
+    and its bash sandbox guards that path against writes. The file there is an empty bwrap
+    mount point, not the settings. Read from the source: a CLI that finds the path missing
+    has bwrap mount ``/dev/null`` on it, which leaves the empty file, and removes that file
+    once its own sandboxed commands are done; a CLI that finds it present binds the file
+    that is there. Measured: the file exists while a sandboxed command runs and is gone
+    once that CLI has exited. So CLIs started with byte-identical settings share one file,
+    and a sandboxed command fails with ``bwrap: Can't find source path …`` when another CLI
+    removes the file between this CLI finding it and its bwrap starting — a narrow window,
+    per command, and a later command re-creates the file. Under concurrency it is real:
+    without the nonce, fact 6b failed 5 and 7 times in two samples of 24 under 4-way
+    parallel runs. A nonce makes each call's settings, and so its file, its own. Nothing
+    about this is test-specific: BOS's own clients share the race unless their settings
+    differ too.
     """
     return {"sandbox": sandbox, "settings": json.dumps({"env": {"BOS_TEST_NONCE": uuid.uuid4().hex}})}
 
