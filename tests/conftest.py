@@ -222,6 +222,10 @@ class FakeTurnHandle:
         self._thread, self.id = thread, turn_id
         self._notifications, self._result = notifications, result
         self.interrupted = False
+        # Fix round 1: every input handed to steer(), in call order — a
+        # truthy interrupt-callback return delivers into the running turn via
+        # steer(), not interrupt(), so a test asserts on this instead.
+        self.steered: list[Any] = []
         # See HANG. hang_reached lets a test `wait_for()` the pause reliably
         # instead of guessing how many event-loop turns run() needs to get
         # there; release is what ends it.
@@ -238,6 +242,9 @@ class FakeTurnHandle:
 
     async def interrupt(self) -> None:
         self.interrupted = True
+
+    async def steer(self, input: Any) -> None:
+        self.steered.append(input)
 
     async def run(self) -> Any:
         # Mirrors openai_codex._run._raise_for_failed_turn exactly: the real

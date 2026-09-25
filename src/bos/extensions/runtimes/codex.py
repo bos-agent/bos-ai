@@ -49,10 +49,10 @@ from openai_codex import (
     AsyncTurnHandle,
     CodexConfig,
     ImageInput,
+    Input,
     InputItem,
     LocalImageInput,
     MentionInput,
-    RunInput,
     Sandbox,
     TextInput,
     TurnResult,
@@ -74,6 +74,7 @@ from openai_codex.types import (
 )
 
 from bos.core.agent import (
+    AbortTurn,
     AgentEventType,
     AgentResult,
     ChatStore,
@@ -118,10 +119,17 @@ _SANDBOX_AND_APPROVAL: dict[str, tuple[Sandbox, ApprovalMode]] = {
 _INTERRUPT_GRACE_SECONDS = 2.0
 
 
-def _content_to_codex_input(content: MessageContent) -> RunInput:
-    """BOS ``MessageContent`` -> a Codex ``RunInput`` (BEP 19 §3.9).
+def _content_to_codex_input(content: MessageContent) -> Input | str:
+    """BOS ``MessageContent`` -> a Codex ``Input`` (BEP 19 §3.9).
 
-    A plain string is already a valid ``RunInput`` (the SDK wraps it in a
+    Typed ``Input | str`` rather than the wider ``RunInput`` (``Input | str |
+    ExternalMessage``) that ``thread.turn()`` accepts: this never produces an
+    ``ExternalMessage``, and the narrower type is what ``AsyncTurnHandle.steer()``
+    (Task 7 fix round 1) requires, so the same conversion serves both a new
+    turn's content and a steering message's, honestly — not by widening
+    ``steer()``'s accepted type with a ``cast``.
+
+    A plain string is already valid input (the SDK wraps it in a
     ``TextInput`` itself) and passes straight through unchanged. A list of BOS
     parts is mapped item by item:
 
@@ -239,14 +247,20 @@ class TurnNotCompletedError(RuntimeError):
     ``run()``), so it never reaches this exception. Carries ``turn_result`` so
     a caller has more than a message to work with.
 
-    Not every ``interrupted`` turn raises this since Task 7 (BEP 19 §3.10.2).
-    A cooperative stop — ``request_stop()``, or the actor's own ``interrupt``
-    callback firing — returns the kept partial answer instead, mirroring
-    ``Agent``'s own contract for the same situation; a ``timeout_seconds``
-    expiry raises a plain ``TimeoutError`` instead, so a caller can catch a
-    deadline it imposed itself without also catching this. What is left for
-    this exception is an ``interrupted`` status this runtime never itself
-    asked for — see ``run()``'s own docstring for the full three-way split.
+    Not every ``interrupted`` turn raises this since Task 7 (BEP 19 §3.10.2). A
+    cooperative stop — ``request_stop()`` racing the turn — returns the kept
+    partial answer instead, mirroring ``Agent``'s own contract for the same
+    situation; a ``timeout_seconds`` expiry raises a plain ``TimeoutError``
+    instead, so a caller can catch a deadline it imposed itself without also
+    catching this. What is left for this exception is an ``interrupted``
+    status this runtime never itself asked for — see ``run()``'s own
+    docstring for the full three-way split.
+
+    The actor's own per-chat ``interrupt`` callback (BEP 19 §3.9's
+    ``interrupt`` row) is not one of the three: since fix round 1, a truthy
+    return steers the running turn (``AsyncTurnHandle.steer()``) rather than
+    ending it, so it never produces ``interrupted`` at all — see
+    ``_emit_stream``'s docstring.
     """
 
     def __init__(self, message: str, *, turn_result: TurnResult) -> None:
@@ -285,7 +299,7 @@ class CodexAgent:
         # entered, before any await can interleave a second call for the same
         # chat_id; filled in once _run_turn creates the real task, so aclose()
         # has something to wait on and a concurrent run() has something to see.
-        self._in_flight: dict[str, asyncio.Task[tuple[TurnResult, bool]] | None] = {}
+        self._in_flight: dict[str, asyncio.Task[TurnResult] | None] = {}
 
     @property
     def name(self) -> str:
@@ -500,13 +514,13 @@ class CodexAgent:
         turn_id: str,
         ctx_metadata: dict[str, Any] | None,
         interrupt: Callable[[], dict[str, Any] | Awaitable[dict[str, Any]] | None] | None = None,
-    ) -> tuple[TurnResult, bool]:
+    ) -> TurnResult:
         """Consume ``handle.stream()``, translating each ``Notification`` into a
         ``TurnEvent`` for ``sink`` while accumulating exactly what
         ``openai_codex._run._collect_async_turn_result`` does, so the
-        ``TurnResult`` half of what this returns is what a plain ``await
-        handle.run()`` would have produced (BEP 19 §3.9) — the only difference
-        is that the caller also got to watch it happen.
+        ``TurnResult`` this returns is what a plain ``await handle.run()``
+        would have produced (BEP 19 §3.9) — the only difference is that the
+        caller also got to watch it happen.
 
         ``sink`` may be ``None`` (the common case for ``_HarnessAgentRunner``):
         the turn still streams and collects, translation is just skipped.
@@ -516,22 +530,57 @@ class CodexAgent:
 
         ``interrupt`` — ``AgentActor``'s poll-style callback (BEP 19 §3.9's
         `interrupt` row) — is polled once per notification, exactly as
-        ``Agent._interrupt`` reads the same callback in ``agent.py``: a truthy
-        return "fires". Firing calls ``handle.interrupt()`` at most once (later
-        notifications are still consumed, so the stream can drain into its own
-        ``turn/completed`` instead of being abandoned mid-flight) and is
-        reported back via the second return value, so ``run()`` (Task 7) can
-        tell "BOS itself asked for this" apart from an interruption it never
-        requested, even though both end up as the same ``TurnStatus.interrupted``.
-        Unlike ``Agent``, a truthy return is not merged into any context —
-        there is no local turn context to merge it into — so a callback built
-        for steering (BOS's ``INTERRUPT_MESSAGE``) ends this turn rather than
-        injecting mid-turn; out of scope for Task 7, which only wires the stop.
+        ``Agent._interrupt`` reads the same callback in ``agent.py``:
+
+        - **A truthy return is a message to deliver, not a request to stop.**
+          Fix round 1: Task 7's first cut read the brief's "`interrupt`
+          callback -> ``AsyncTurnHandle.interrupt()``" table row (BEP 19
+          §3.9) as "fires -> stop", but ``Agent._interrupt`` itself —
+          ``if interrupt and (llm_message := await _apply_async(interrupt, {})):
+          ctx.add_message(llm_message, merge=True)`` — merges the returned
+          LLM message dict into the *running* turn's context; the turn
+          continues. `AgentActor._make_interrupt` (`agent_actor.py:543`)
+          returns exactly that shape for a queued ``INTERRUPT_MESSAGE`` (a
+          user's follow-up sent while the turn is still going). Ending the
+          turn instead — what this used to do — killed that follow-up rather
+          than delivering it. Codex's own primitive for "deliver input to the
+          turn that's already running" is ``AsyncTurnHandle.steer()``
+          ("Send additional user input to this active turn"); only ``review``
+          and ``compact`` turn kinds refuse it
+          (``NonSteerableTurnKind``/``ActiveTurnNotSteerable``), an ordinary
+          chat turn is always steerable, and it does not end or replace the
+          turn — the same ``handle``/``turn_id`` keeps streaming afterward.
+          So a truthy return's ``"content"`` value — a BOS ``MessageContent``,
+          the same shape ``TurnContext.add_message``'s merge branch expects,
+          not the whole ``dict`` — is converted with
+          :func:`_content_to_codex_input` and handed to ``handle.steer()``.
+          The steer call itself is best-effort
+          (``contextlib.suppress``, matching every other ``handle.interrupt()``
+          call site in this module) — a failed steer RPC is a network blip,
+          not a turn failure, and the turn may still finish normally without
+          it.
+        - **Raising propagates.** ``Agent._interrupt`` does not catch
+          ``AbortTurn`` either — it is meant to unwind the turn, not be
+          absorbed here. Nothing in this method catches it (or anything
+          else the callback raises): it propagates out of the ``async for``
+          (through the ``finally`` below, so the stream is still closed),
+          out of this coroutine, and — via :meth:`_run_turn`'s
+          ``stream_task.result()`` — out of ``run()`` unwrapped (excluded
+          from its generic ``except Exception`` the same way ``TimeoutError``
+          is).
+        - **A falsy return does nothing.** No steer, no interrupt, no
+          state change — the turn is not even aware the callback fired.
+
+        None of this produces ``TurnStatus.interrupted`` (steering keeps the
+        turn running; raising unwinds it some other way), so the callback
+        plays no part in the three-way ``interrupted`` split ``run()``'s
+        docstring and :class:`TurnNotCompletedError` describe — that split is
+        ``request_stop()`` / `timeout_seconds` / unexplained, unchanged from
+        before this fix.
         """
         items: list[ThreadItem] = []
         usage: ThreadTokenUsage | None = None
         completed: TurnCompletedNotification | None = None
-        interrupted_by_host = False
 
         # `AsyncTurnHandle.stream()` is annotated `-> AsyncIterator[Notification]`,
         # but its body is an `async def ... yield ...` function, so calling it
@@ -560,10 +609,15 @@ class CodexAgent:
                         except Exception:
                             logger.debug("Codex event sink emit error", exc_info=True)
 
-                if interrupt is not None and not interrupted_by_host and (await _apply_async(interrupt, {})):
-                    interrupted_by_host = True
-                    with contextlib.suppress(Exception):
-                        await handle.interrupt()
+                if interrupt is not None:
+                    # Not wrapped in try/except: a raise (AbortTurn or
+                    # anything else) is meant to propagate, per this method's
+                    # own docstring — only the steer RPC below is best-effort.
+                    steer_message = await _apply_async(interrupt, {})
+                    if steer_message:
+                        steer_input = _content_to_codex_input(steer_message.get("content", ""))
+                        with contextlib.suppress(Exception):
+                            await handle.steer(steer_input)
         finally:
             await stream.aclose()
 
@@ -572,19 +626,16 @@ class CodexAgent:
         turn = completed.turn
         _raise_for_failed_turn(turn)
 
-        return (
-            TurnResult(
-                id=turn.id,
-                status=turn.status,
-                error=turn.error,
-                started_at=turn.started_at,
-                completed_at=turn.completed_at,
-                duration_ms=turn.duration_ms,
-                final_response=_final_assistant_response_from_items(items),
-                items=items,
-                usage=usage,
-            ),
-            interrupted_by_host,
+        return TurnResult(
+            id=turn.id,
+            status=turn.status,
+            error=turn.error,
+            started_at=turn.started_at,
+            completed_at=turn.completed_at,
+            duration_ms=turn.duration_ms,
+            final_response=_final_assistant_response_from_items(items),
+            items=items,
+            usage=usage,
         )
 
     async def _run_turn(
@@ -599,20 +650,22 @@ class CodexAgent:
     ) -> tuple[TurnResult, bool]:
         """Consume one native turn, racing it against a cooperative stop and
         ``timeout_seconds`` (BEP 19 §3.10.2) on top of ``_emit_stream``'s own
-        per-notification interrupt-callback poll.
+        per-notification interrupt-callback poll (which, since fix round 1,
+        steers rather than stops — see ``_emit_stream``'s docstring; it never
+        causes the branch below to be taken).
 
         Returns ``(result, interrupted_by_host)``. ``interrupted_by_host`` is
-        True when *this call* is why the turn ended early — a stop landing
-        here, or ``_emit_stream``'s own callback poll firing — as opposed to a
-        `timeout_seconds` expiry (raised, never returned) or a vendor-reported
-        `interrupted` this method never asked for. ``run()`` uses it to decide
-        between keeping a partial answer and raising, since the vendor's own
-        `TurnStatus.interrupted` cannot tell those apart by itself.
+        True only when ``self._stop_requested`` is why the turn ended early —
+        as opposed to a `timeout_seconds` expiry (raised, never returned) or a
+        vendor-reported `interrupted` this method never asked for. ``run()``
+        uses it to decide between keeping a partial answer and raising, since
+        the vendor's own `TurnStatus.interrupted` cannot tell those apart by
+        itself.
 
         Registers the streaming task in ``self._in_flight[chat_id]`` for the
         busy guard and for ``aclose()`` to find and wait on.
         """
-        stream_task: asyncio.Task[tuple[TurnResult, bool]] = asyncio.ensure_future(
+        stream_task: asyncio.Task[TurnResult] = asyncio.ensure_future(
             self._emit_stream(
                 handle, sink, chat_id=chat_id, turn_id=turn_id, ctx_metadata=ctx_metadata, interrupt=interrupt
             )
@@ -640,8 +693,10 @@ class CodexAgent:
 
         if stream_task.done():
             # Either it finished on its own, or it raced stop_task to the
-            # finish line and won — either way, nothing was abandoned.
-            return stream_task.result()
+            # finish line and won — either way, nothing was abandoned. (A
+            # raise from the callback — see _emit_stream's docstring —
+            # surfaces here too: stream_task.result() re-raises it.)
+            return stream_task.result(), False
 
         # self._stop_requested fired before the stream finished on its own:
         # a cooperative stop landed mid-turn.
@@ -649,7 +704,7 @@ class CodexAgent:
         return result, True
 
     async def _settle_interrupted(
-        self, handle: AsyncTurnHandle, stream_task: asyncio.Task[tuple[TurnResult, bool]]
+        self, handle: AsyncTurnHandle, stream_task: asyncio.Task[TurnResult]
     ) -> TurnResult:
         """Ask the vendor to stop, then give the stream a bounded window to
         drain into the ``TurnResult`` that produces — rather than waiting it
@@ -666,12 +721,19 @@ class CodexAgent:
             await handle.interrupt()
         done, _ = await asyncio.wait({stream_task}, timeout=_INTERRUPT_GRACE_SECONDS)
         if stream_task in done:
-            result, _ = stream_task.result()
-            return result
+            return stream_task.result()
         stream_task.cancel()
         await asyncio.wait({stream_task}, timeout=_INTERRUPT_GRACE_SECONDS)
+        # Not independently mutation-tested: this only fires in the narrow
+        # window where stream_task finishes on its own — with a result or an
+        # exception — in the instant between the cancel() above landing and
+        # this check running, so cancel() did not "win". It exists purely so
+        # asyncio's default handler does not log an "exception was never
+        # retrieved" warning for that straggler; it changes no observable
+        # behavior (the RuntimeError below is raised regardless). Mirrors
+        # Agent._abandon's identical line (agent.py:358-360) verbatim.
         if stream_task.done() and not stream_task.cancelled():
-            stream_task.exception()  # consumed, so the loop does not log it as unretrieved
+            stream_task.exception()  # consumed
         raise RuntimeError(
             f"{self._config.runtime} runtime {self._kind!r}: turn {handle.id!r} did not respond to "
             f"interrupt within {_INTERRUPT_GRACE_SECONDS}s"
@@ -720,12 +782,13 @@ class CodexAgent:
 
         Every native turn — including each schema-validation retry — is
         started with ``thread.turn()`` and consumed through
-        :meth:`_emit_stream`, which streams ``handle.stream()`` into
-        ``TurnEvent``s for ``event_sink`` while accumulating the same
-        ``TurnResult`` a plain ``await thread.run(...)`` would have produced.
-        Still deliberately plain otherwise (stage 4 of 4, see the module
-        docstring): no ``interrupt``/timeout wiring (Task 7), no approval
-        handling (Task 8).
+        :meth:`_run_turn`/:meth:`_emit_stream`, which stream ``handle.stream()``
+        into ``TurnEvent``s for ``event_sink`` while racing the turn against a
+        cooperative stop and ``timeout_seconds`` and polling the ``interrupt``
+        callback, accumulating the same ``TurnResult`` a plain
+        ``await thread.run(...)`` would have produced. Still deliberately
+        plain otherwise (stage 4 of 4, see the module docstring): no approval
+        handling yet (Task 8).
 
         ``schema`` maps to ``thread.turn(output_schema=...)`` as a provider
         hint, but that hint is never trusted on its own: the reply is always
@@ -750,9 +813,7 @@ class CodexAgent:
           ``TimeoutError`` (BEP 19 §7 criterion 20: "... raises"). Nothing is
           committed: an answer cut off by the caller's own deadline is a
           failure, not turn history.
-        - **A cooperative stop** — ``request_stop()`` racing the turn, or
-          ``AgentActor``'s own per-chat ``interrupt`` callback firing
-          (BEP 19 §3.9's `interrupt` row; polled inside ``_emit_stream``) — is
+        - **A cooperative stop** — ``request_stop()`` racing the turn — is
           BOS taking the turn away, not the model or the caller failing.
           ``Agent``'s own contract for the same situation
           (``src/bos/core/agent/agent.py:648-657``, ``:831-836``) is to keep
@@ -771,6 +832,16 @@ class CodexAgent:
           nothing. Nothing today produces this (the native session is private
           to this one ``CodexAgent``), but a status this method did not ask
           for is not one it should silently reinterpret as a stop.
+
+        The ``interrupt`` callback (BEP 19 §3.9's `interrupt` row) is not a
+        fourth cause: since fix round 1, ``_emit_stream`` steers a truthy
+        return into the running turn instead of ending it (see its own
+        docstring), so it never produces ``interrupted``. It can still end a
+        turn a different way — a raised ``AbortTurn`` propagates uncaught,
+        excluded from the generic ``except Exception`` below exactly like
+        ``TimeoutError`` is, so a caller sees the same ``AbortTurn``
+        ``Agent`` would raise for the identical signal, not a wrapped
+        ``RuntimeError``.
 
         Two concurrent turns on the same ``chat_id`` are rejected with a busy
         ``RuntimeError`` rather than queued — the native session is
@@ -808,6 +879,12 @@ class CodexAgent:
                         interrupt=interrupt,
                     )
                 except TimeoutError:
+                    raise
+                except AbortTurn:
+                    # The interrupt callback's own hard-stop signal (fix round
+                    # 1): Agent._interrupt doesn't catch it either, so this
+                    # doesn't — it propagates to run()'s caller unwrapped,
+                    # rather than being reported as a generic turn failure.
                     raise
                 except Exception as exc:
                     # A native TurnStatus.failed is raised before a TurnResult is

@@ -40,6 +40,7 @@ from openai_codex.models import (
     UnknownNotification,
 )
 
+from bos.core.agent import AbortTurn
 from bos.extensions.chat_stores.in_memory import InMemChatStore
 
 
@@ -998,27 +999,22 @@ async def _hanging_handle(fake_codex, *, expected_count: int = 1, timeout: float
 
 
 @pytest.mark.asyncio
-async def test_interrupt_callback_is_polled_and_calls_handle_interrupt(tmp_path, fake_codex, mem_store):
-    """BEP 19 §3.9's `interrupt` row: AgentActor passes a poll-style callback
-    (Callable[[], dict | None]); CodexAgent polls it between streamed
-    notifications — exactly as Agent._interrupt reads the same callback in
-    agent.py, a truthy return "fires" — and asks the vendor to stop as soon as
-    it does, rather than waiting for the rest of the armed notifications to
-    end the turn on their own.
-
-    The resulting TurnStatus.interrupted is BOS's own doing (the actor's
-    interrupt vocabulary, not a timeout and not an unexplained vendor status),
-    so run()'s answer is the kept partial content, not a raise — see
-    test_request_stop_interrupts_the_turn_and_keeps_the_partial_answer for the
-    request_stop() route to the same outcome.
-    """
+async def test_interrupt_callback_steering_message_reaches_handle_steer(tmp_path, fake_codex, mem_store):
+    """Fix round 1 (BEP 19 §3.9's `interrupt` row, corrected): AgentActor's
+    poll-style callback is polled once per streamed notification — exactly as
+    Agent._interrupt reads the same callback in agent.py — but a truthy
+    return is a message to *deliver*, not a request to stop: Agent._interrupt
+    merges it into the live context (`ctx.add_message(llm_message, merge=True)`),
+    so the turn keeps going. Codex has no local context to merge into, so the
+    equivalent is AsyncTurnHandle.steer() — the turn is not ended, interrupted,
+    or even paused; it runs to its own normal completion."""
     agent = _agent(tmp_path, fake_codex, chat_store=mem_store)
     _arm_notifications(
         fake_codex,
         [
-            _item_completed(_agent_message_item("msg-1", "partial")),
-            _item_completed(_agent_message_item("msg-2", "still going")),
-            _turn_completed(status=TurnStatus.interrupted),
+            _item_completed(_agent_message_item("msg-1", "working")),
+            _item_completed(_agent_message_item("msg-2", "done")),
+            _turn_completed(),  # status=completed — steering does not interrupt anything
         ],
     )
     calls = 0
@@ -1026,39 +1022,81 @@ async def test_interrupt_callback_is_polled_and_calls_handle_interrupt(tmp_path,
     def interrupt():
         nonlocal calls
         calls += 1
-        return {"role": "user", "content": "stop"} if calls >= 2 else None
+        return {"role": "user", "content": "actually, do X instead"} if calls == 1 else None
 
     result = await agent.run("chat-1", "do it", turn_id="t1", interrupt=interrupt)
 
     handle = fake_codex.instances[-1].turn_handles[-1]
-    assert handle.interrupted is True
-    assert calls == 2, "polled once per notification, stopped calling once it fired"
-    assert result.output == "still going"
+    assert handle.interrupted is False, "steering is not interrupting"
+    # The LLM-message dict's "content" (a BOS MessageContent, per
+    # TurnContext.add_message's merge branch) converted through the same
+    # _content_to_codex_input a new turn's own content goes through — a
+    # plain string content passes through unchanged.
+    assert handle.steered == ["actually, do X instead"]
+    assert calls == 3, "polled on every notification, steering does not stop the poll"
+    assert result.output == "done"
+    assert result.finish_reason == "completed"
     messages = await mem_store.get_messages("chat-1")
-    assert messages[-1].llm_message["content"] == "still going"
+    assert messages[-1].llm_message["content"] == "done"
 
 
 @pytest.mark.asyncio
-async def test_interrupt_callback_firing_survives_a_failed_interrupt_request(
-    tmp_path, fake_codex, mem_store, monkeypatch
-):
-    """The same best-effort courtesy as _settle_interrupted's (see
-    test_a_failed_interrupt_request_does_not_abort_the_stop): _emit_stream's
-    own handle.interrupt() call, made when the interrupt callback fires, is
-    wrapped in contextlib.suppress too — a network blip sending it must not
-    be mistaken for a real turn failure while the stream is still perfectly
-    capable of draining into its own turn/completed."""
-    import conftest
-
-    async def _broken_interrupt(self) -> None:
-        self.interrupted = True
-        raise RuntimeError("app-server hung up")
-
-    monkeypatch.setattr(conftest.FakeTurnHandle, "interrupt", _broken_interrupt)
+async def test_interrupt_callback_falsy_return_changes_nothing(tmp_path, fake_codex, mem_store):
+    """The other half of the callback contract: no steer, no interrupt, no
+    state change at all — the turn cannot even tell the callback was there."""
     agent = _agent(tmp_path, fake_codex, chat_store=mem_store)
     _arm_notifications(
         fake_codex,
-        [_item_completed(_agent_message_item("msg-1", "still going")), _turn_completed(status=TurnStatus.interrupted)],
+        [_item_completed(_agent_message_item("msg-1", "done")), _turn_completed()],
+    )
+
+    result = await agent.run("chat-1", "do it", turn_id="t1", interrupt=lambda: None)
+
+    handle = fake_codex.instances[-1].turn_handles[-1]
+    assert handle.steered == []
+    assert handle.interrupted is False
+    assert result.output == "done"
+
+
+@pytest.mark.asyncio
+async def test_interrupt_callback_abort_turn_propagates(tmp_path, fake_codex, mem_store):
+    """Agent._interrupt does not catch AbortTurn either — `if interrupt and
+    (llm_message := await _apply_async(interrupt, {})):` only inspects a
+    *returned* value, so a raise skips that check entirely and unwinds the
+    turn. _emit_stream's poll is the same: nothing there catches it, so it
+    propagates through _run_turn's stream_task.result() and out of run()
+    itself, excluded from the generic `except Exception` wrap (like
+    TimeoutError) so a caller sees AbortTurn, not a RuntimeError."""
+    agent = _agent(tmp_path, fake_codex, chat_store=mem_store)
+    _arm_notifications(fake_codex, [_item_completed(_agent_message_item("msg-1", "unused"))])
+
+    def interrupt():
+        raise AbortTurn()
+
+    with pytest.raises(AbortTurn):
+        await agent.run("chat-1", "do it", turn_id="t1", interrupt=interrupt)
+
+    assert await mem_store.get_messages("chat-1") == [], "an aborted turn commits nothing"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_steer_request_does_not_abort_the_turn(tmp_path, fake_codex, mem_store, monkeypatch):
+    """The same best-effort courtesy as the interrupt-request call sites (see
+    test_a_failed_interrupt_request_does_not_abort_the_stop): handle.steer()
+    is wrapped in contextlib.suppress too — a network blip delivering the
+    steering message must not be mistaken for a real turn failure while the
+    stream is still perfectly capable of finishing normally."""
+    import conftest
+
+    async def _broken_steer(self, input) -> None:
+        self.steered.append(input)
+        raise RuntimeError("app-server hung up")
+
+    monkeypatch.setattr(conftest.FakeTurnHandle, "steer", _broken_steer)
+    agent = _agent(tmp_path, fake_codex, chat_store=mem_store)
+    _arm_notifications(
+        fake_codex,
+        [_item_completed(_agent_message_item("msg-1", "still going")), _turn_completed()],
     )
 
     result = await agent.run("chat-1", "do it", turn_id="t1", interrupt=lambda: {"role": "user", "content": "stop"})
