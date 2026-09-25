@@ -169,44 +169,57 @@ class AgentRegistry:
 
 
 def _resolve_agent_cfg_parent(kind: str | None, agent_cfg: dict[str, Any]) -> dict[str, Any]:
-    """Resolve a ``_parent`` that arrives in ``agent_cfg`` (BEP 19 §3.4).
+    """Resolve a ``_parent`` that arrives in ``agent_cfg`` (BEP 19 §3.4.1.1).
 
-    ``_parent`` is normally resolved by the workspace resolver, for agents
-    declared in config. ``agent_cfg`` bypasses that resolver, so a ``_parent``
-    here used to be dropped without a word — ``_apply`` filters it out of
-    ``Agent``'s kwargs — and a caller asking for a Codex agent got a BOS one
-    with its ``permission`` ignored. A reserved runtime is resolved exactly as
-    the resolver's ``_EXTERNAL_RUNTIME_SPECS`` does it, including the parent's
-    own ``[agents.<runtime>]`` config if there is one; any other parent is
-    refused, because resolving it needs the full inheritance chain only the
-    workspace resolver walks. A ``None`` parent is no parent, as in config.
+    ``agent_cfg`` bypasses the workspace resolver, so a ``_parent`` here used to
+    be dropped without a word — ``_apply`` filters it out of ``Agent``'s kwargs
+    — and a caller asking for a Codex agent got a BOS one, its ``permission``
+    ignored. The parent is looked up where the resolver left its work: a
+    registered agent's ``AgentRegistry`` defaults already hold its whole
+    resolved chain, so deep-merging them under ``agent_cfg`` gives what the same
+    keys under ``[agents.<name>]`` with that ``_parent`` would. A reserved runtime
+    is a parent even with no ``[agents.<runtime>]`` table, seeded with the
+    marker ``_EXTERNAL_RUNTIME_SPECS`` writes. A ``None`` parent is no parent, as
+    in config.
+
+    Refused: a parent that is neither; a ``kind`` with config of its own, whose
+    registered defaults already fold in its own lineage, so a second parent has
+    no defined place in the merge; and a parent whose runtime contradicts the one
+    ``kind`` or ``external_runtime`` names.
     """
     cfg = dict(agent_cfg)
     parent = cfg.pop("_parent")
     if parent is None:
         return cfg
-    if not isinstance(parent, str) or parent not in EXTERNAL_AGENT_KINDS:
-        known = ", ".join(sorted(EXTERNAL_AGENT_KINDS))
-        raise ValueError(
-            f"agent_cfg sets `_parent = {parent!r}`, which is not resolved here: agent_cfg only honours "
-            f"a reserved runtime ({known}) as a parent. Declare the agent in `[agents.<name>]` or "
-            f"`<bos_dir>/agents/<name>.md`, where `_parent` inheritance is resolved."
-        )
     if kind is not None and AgentRegistry.has_registered(kind):
         raise ValueError(
-            f"agent_cfg sets `_parent = {parent!r}` for {kind!r}, which has config of its own; agent_cfg "
-            f"cannot re-parent it. Change `_parent` where {kind!r} is declared, or build a new name."
+            f"agent_cfg sets `_parent = {parent!r}` for {kind!r}, which is already registered with a lineage of "
+            f"its own; agent_cfg cannot give it another. Build the variant under a new name."
         )
-    declared = cfg.get("external_runtime", parent)
-    if kind in EXTERNAL_AGENT_KINDS and kind != parent:
-        declared = kind
-    if declared != parent:
+    reserved = isinstance(parent, str) and parent in EXTERNAL_AGENT_KINDS
+    registered = isinstance(parent, str) and AgentRegistry.has_registered(parent)
+    if not (reserved or registered):
+        known = ", ".join(sorted({*EXTERNAL_AGENT_KINDS, *AgentRegistry.describe()}))
         raise ValueError(
-            f"agent_cfg sets `_parent = {parent!r}` but asks for the {declared!r} runtime; they must agree."
+            f"agent_cfg sets `_parent = {parent!r}`, which is neither a reserved runtime nor a registered "
+            f"agent. Known: {known}."
         )
-    base: dict[str, Any] = {"external_runtime": parent}
-    if AgentRegistry.has_registered(parent):
-        base = _deep_merge(base, copy.deepcopy(AgentRegistry.get_defaults(parent)))
+    base: dict[str, Any] = {"external_runtime": parent} if reserved else {}
+    if registered:
+        inherited = copy.deepcopy(AgentRegistry.get_defaults(parent))
+        inherited.pop("kind", None)  # the parent's own name, not the child's
+        base = _deep_merge(base, inherited)
+    runtime = base.get("external_runtime")
+    resolves_to = f"the {runtime!r} runtime" if runtime else "a BOS agent"
+    if kind in EXTERNAL_AGENT_KINDS and kind != runtime:
+        raise ValueError(
+            f"{kind!r} is the {kind!r} runtime, but `_parent = {parent!r}` resolves to {resolves_to}."
+        )
+    declared = cfg.get("external_runtime")
+    if declared is not None and declared != runtime:
+        raise ValueError(
+            f"agent_cfg asks for the {declared!r} runtime, but `_parent = {parent!r}` resolves to {resolves_to}."
+        )
     return _deep_merge(base, cfg)
 
 

@@ -120,33 +120,105 @@ async def test_a_null_parent_in_agent_cfg_is_no_parent(tmp_path, fake_runtimes):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("parent", ["BOS", "george", ["codex"]])
-async def test_a_non_reserved_parent_in_agent_cfg_is_refused_not_dropped(tmp_path, fake_runtimes, parent):
-    """Only the reserved runtimes are resolved here; any other parent needs the
-    workspace resolver, and quietly building an unparented agent is the defect."""
+async def test_a_registered_bos_parent_in_agent_cfg_is_inherited(tmp_path, fake_runtimes):
+    """A registered agent's defaults already hold its resolved chain, so a BOS
+    parent resolves through agent_cfg the way it does in config."""
+    from bos.core.agent import Agent
+
+    ws = _write_workspace(tmp_path, '[agents.solo]\nsystem_prompt = "solo prompt"\n')
+    ws.resolve_agents()
+    ws.bootstrap_platform()
+
+    async with ws.harness() as harness:
+        agent = await harness.create_agent("solo2", agent_cfg={"_parent": "solo"})
+        assert isinstance(agent, Agent)
+        assert agent._system_prompt == "solo prompt"
+
+
+@pytest.mark.asyncio
+async def test_a_registered_runtime_instance_is_a_parent_in_agent_cfg(tmp_path, fake_runtimes):
+    """A variant of a named runtime instance, e.g. the same agent in another cwd."""
+    ws = _write_workspace(
+        tmp_path, '[agents.george]\n_parent = "codex"\npermission = "read-only"\ncwd = "a"\n'
+    )
+    ws.resolve_agents()
+    ws.bootstrap_platform()
+
+    async with ws.harness() as harness:
+        agent = await harness.create_agent("george2", agent_cfg={"_parent": "george", "cwd": "b"})
+    assert isinstance(agent, _FakeRuntime)
+    assert agent.name == "george2"
+    assert agent.cfg["external_runtime"] == "codex"
+    assert agent.cfg["permission"] == "read-only", "inherited from george"
+    assert agent.cfg["cwd"] == "b", "agent_cfg wins"
+
+
+@pytest.mark.asyncio
+async def test_resolving_an_agent_cfg_parent_writes_through_to_nothing(tmp_path, fake_runtimes):
+    """`_deep_merge` mutates its base in place: neither the parent's registry
+    entry nor the caller's dict may change. Popping `_parent` from the caller's
+    own dict would make its next reuse build a plain Agent again."""
+    import copy
+
+    from bos.core import AgentRegistry
+
+    ws = _write_workspace(
+        tmp_path,
+        '[agents.codex]\npermission = "read-only"\n\n[agents.codex.native_options.config]\ny = 2\n',
+    )
+    ws.resolve_agents()
+    ws.bootstrap_platform()
+    registry_before = copy.deepcopy(AgentRegistry.get_defaults("codex"))
+    agent_cfg = {"_parent": "codex", "native_options": {"config": {"x": 1}}}
+    caller_before = copy.deepcopy(agent_cfg)
+
+    async with ws.harness() as harness:
+        agent = await harness.create_agent("martha", agent_cfg=agent_cfg)
+    assert agent.cfg["native_options"]["config"] == {"x": 1, "y": 2}
+    assert AgentRegistry.get_defaults("codex") == registry_before
+    assert agent_cfg == caller_before
+    assert agent.cfg.get("kind") != "codex", "the parent's name is not the child's"
+
+
+@pytest.mark.asyncio
+async def test_a_null_parent_is_stripped_on_the_runtime_path(tmp_path, fake_runtimes):
     from bos.core.harness import AgentHarness
 
     async with AgentHarness(bos_dir=tmp_path, workspace=tmp_path) as harness:
+        agent = await harness.create_agent("codex", agent_cfg={"_parent": None, "permission": "read-only"})
+    assert "_parent" not in agent.cfg
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("parent", ["no-such-parent", ["codex"]])
+async def test_an_unknown_parent_in_agent_cfg_is_refused_not_dropped(tmp_path, fake_runtimes, parent):
+    ws = _write_workspace(tmp_path, '[agents.solo]\nsystem_prompt = "hi"\n')
+    ws.resolve_agents()
+    ws.bootstrap_platform()
+
+    async with ws.harness() as harness:
         with pytest.raises(ValueError) as excinfo:
             await harness.create_agent("martha", agent_cfg={"_parent": parent, "system_prompt": "hi"})
     message = str(excinfo.value)
     assert repr(parent) in message
-    assert "agents/" in message, "names the route that does resolve _parent"
+    assert "solo" in message and "codex" in message, "lists what it could have been"
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("kind", "agent_cfg"),
+    ("kind", "agent_cfg", "expected"),
     [
-        ("martha", {"_parent": "codex", "external_runtime": "claude-code"}),
-        ("claude-code", {"_parent": "codex"}),
+        ("martha", {"_parent": "codex", "external_runtime": "claude-code"}, "asks for the 'claude-code' runtime"),
+        ("claude-code", {"_parent": "codex"}, "is the 'claude-code' runtime"),
     ],
 )
-async def test_a_reserved_parent_that_contradicts_the_runtime_is_refused(tmp_path, fake_runtimes, kind, agent_cfg):
+async def test_a_reserved_parent_that_contradicts_the_runtime_is_refused(
+    tmp_path, fake_runtimes, kind, agent_cfg, expected
+):
     from bos.core.harness import AgentHarness
 
     async with AgentHarness(bos_dir=tmp_path, workspace=tmp_path) as harness:
-        with pytest.raises(ValueError, match="codex"):
+        with pytest.raises(ValueError, match=expected):
             await harness.create_agent(kind, agent_cfg={**agent_cfg, "permission": "read-only"})
 
 
@@ -545,3 +617,16 @@ def test_external_runtime_rejects_a_runtime_without_aclose():
     instance = NoClose()
     assert isinstance(instance, AgentPort), "still a valid host-facing agent"
     assert not isinstance(instance, ExternalRuntime), "but not a valid external runtime"
+
+
+def test_a_parent_in_an_actors_agent_cfg_is_refused_at_load_naming_the_actor():
+    """It used to pass validation and be dropped; with agent_cfg now resolving
+    `_parent`, an actor's copy would otherwise start resolving (or failing) at
+    gateway start. Refuse it where the config is read."""
+    from bos.config import validate_config
+
+    with pytest.raises(Exception) as excinfo:
+        validate_config({"runtime": {"actors": {"coder": {"agent": "codex", "agent_cfg": {"_parent": "codex"}}}}})
+    message = str(excinfo.value)
+    assert "coder" in message
+    assert "_parent" in message

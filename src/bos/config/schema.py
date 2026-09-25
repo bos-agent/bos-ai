@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, RootModel, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, RootModel, ValidationError, field_validator
 
 from bos.core.contract import ReasoningEffort, ToolNoiseFilter
 
@@ -135,6 +135,20 @@ class ActorConfig(BaseModel):
     restart_on_error: bool = True
     max_restarts: int = 5
     agent_cfg: AgentConfig = Field(default_factory=AgentConfig)
+
+    @field_validator("agent_cfg")
+    @classmethod
+    def _no_parent_in_actor_overrides(cls, value: AgentConfig) -> AgentConfig:
+        # `_parent` belongs where an agent is declared: `[agents.<name>]`, an agent
+        # file, or the SDK's `agent_cfg` (BEP 19 §3.4.1.1). An actor selects a
+        # declared agent with `agent`. A `_parent` here used to be dropped without
+        # a word; refusing it at load time names the actor.
+        if value.parent is not None:
+            raise ValueError(
+                "`_parent` is not allowed in an actor's agent_cfg. Declare the agent in "
+                '`[agents.<name>]` with its `_parent`, and select it with `agent = "<name>"`.'
+            )
+        return value
 
 
 class GatewayConfig(BaseModel):

@@ -150,9 +150,11 @@ class BosApp:
         earlier `build_agent` call did — cannot take new config: passing
         *agent_cfg* for one raises rather than silently discarding it. Call
         `build_agent(kind)` with no *agent_cfg* to get the cached agent
-        unchanged; give an override its own kind for a second configuration
-        of the same runtime — `build_agent("martha", agent_cfg={"_parent":
-        "codex", ...})`, or a `_parent` instance in config (BEP 19 §3.4).
+        unchanged; give a variant its own kind instead — a new name whose
+        *agent_cfg* carries `_parent`, naming a reserved runtime or any
+        registered agent (`build_agent("martha", agent_cfg={"_parent":
+        "codex", ...})`), or a `_parent` instance in config (BEP 19
+        §3.4.1.1).
         """
         harness = self._require_open()
         if kind in self._agents:
