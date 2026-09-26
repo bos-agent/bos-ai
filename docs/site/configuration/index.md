@@ -159,7 +159,7 @@ extension's defaults and passed to it as keyword arguments when it runs.
 
 ```toml
 [exts.ep_consolidator.LLMConsolidator]
-model = "gemini/gemini-2.5-flash"
+model = "deepseek/deepseek-flash"
 
 [exts.ep_chat_store.JsonlChatStore]
 store_dir = "./messages"
@@ -195,7 +195,7 @@ max_tokens = 131072
 max_iterations = 80
 # max_iteration_handoff = true       # summarize the turn into a handoff when the budget runs out
 # shutdown_handoff = true            # …and when the host stops the agent mid-turn
-# reasoning_effort = "medium"        # low | medium | high
+# reasoning_effort = "medium"        # none | minimal | low | medium | high | xhigh | max | ultra
 # tool_noise_filter = "strip_all"    # strip_all | keep_all
 
 [agent.defaults.tools]
@@ -221,7 +221,7 @@ enabled = ["writer"]
 | `system_prompt` | `str` | Base prompt; plugins append sections at runtime. |
 | `model` | `str` | LiteLLM-style `provider/model`. |
 | `agent_name` | `str` | Identity used for memory scoping and as the name the agent speaks under. Not inherited through `_parent`. |
-| `reasoning_effort` | `low \| medium \| high` | Passed to the model if supported. |
+| `reasoning_effort` | `none \| minimal \| low \| medium \| high \| xhigh \| max \| ultra` | Passed to the model as is; which levels a model takes is the vendor's call. |
 | `max_tokens` | `int` = `131072` | Context budget before compaction. |
 | `max_iterations` | `int` = `80` | Max tool-call iterations per turn. |
 | `max_iteration_handoff` | `bool` = `true` | On hitting `max_iterations`, summarize the turn into a handoff response (goal / done / left / needs-you) instead of returning the bare `(max iterations reached)` marker. Costs one consolidator call on that path. |

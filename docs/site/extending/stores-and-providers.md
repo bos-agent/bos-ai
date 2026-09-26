@@ -98,7 +98,7 @@ class MyConsolidator:
 consolidator = "LLMConsolidator"
 
 [exts.ep_consolidator.LLMConsolidator]
-model = "gemini/gemini-2.5-flash"
+model = "deepseek/deepseek-flash"
 ```
 
 **Default:** `LLMConsolidator`.

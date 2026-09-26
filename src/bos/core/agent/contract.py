@@ -20,7 +20,10 @@ from ._utils import _as_parts
 
 ToolNoiseFilter = Literal["strip_all", "keep_all"]
 TokenEstimateSource = Literal["litellm", "fallback", "fallback-error"]
-ReasoningEffort = Literal["low", "medium", "high"]
+# Every level any runtime BOS drives accepts — litellm's providers, Claude Code,
+# Codex. Which levels a given model takes is the vendor's call, not BOS's: the
+# model catalog behind ``BosApp.list_models`` lists them, and nothing checks them.
+ReasoningEffort = Literal["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
 InterceptorStage = Literal[
     "prepare", "before_llm", "after_llm", "after_tool", "final_response", "max_iteration", "shutdown", "error"
 ]

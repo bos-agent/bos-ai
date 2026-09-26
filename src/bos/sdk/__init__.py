@@ -56,11 +56,14 @@ from bos.core.contract import MessageContent, PromptProvider, ToolAttributes, To
 from ._app import BosApp
 from ._bootstrap import bootstrap as bootstrap
 from ._bootstrap import open_harness
+from ._model_catalog import ModelInfo
 
 # `bootstrap` is deliberately absent from __all__: BEP 18 §3.8 does not promise it.
 # It stays importable — bos.cli uses it — but __all__ is the embedder's contract.
 __all__ = [
     "BosApp",
+    # BosApp.list_models' return value type.
+    "ModelInfo",
     "open_harness",
     "Agent",
     "AgentHarness",

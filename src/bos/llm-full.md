@@ -176,6 +176,12 @@ async with BosApp(config_dict, bos_dir="/var/lib/myapp/.bos") as app:
   forever or push callers down a layer. `app.harness` / `app.workspace` expose
   that lower layer as the *same* objects.
 - Chat continuity is one `chat_id`, not a session object.
+- **Per-turn model and thinking level:** `agent.run(..., llm_args={"model": ..., "reasoning_effort": ...})`;
+  BOS keeps no selection between turns. `app.list_models(kind=None) -> dict[str, ModelInfo]` lists
+  what to offer, keyed by `llm_args["model"]`, each `{display_name, efforts, is_default}`: for BOS's
+  own `Agent`, the LiteLLM ids of every provider whose API key env var is set; for an external
+  runtime, its native names. Hard-coded in `bos/sdk/_model_catalog.py`; nothing is validated
+  against it, so an unlisted model still runs and a wrong one fails with the provider's error.
 - **One live `BosApp` per process.** A second raises: `bootstrap_platform()`
   writes `os.environ` and rebuilds `AgentRegistry`, both process-global.
 - **The two modes do not co-exist in one process** — mount a gateway *or* hold a
@@ -198,7 +204,7 @@ callable because a restart re-reads config. Routes under the mount path:
 
 Set `[platform] extensions = []` and import only the adapters you want, instead
 of `bos.exts` which loads every built-in. The contract is **`bos.sdk.__all__`**
-(39 names): `BosApp`, `open_harness`, the agent surface (`AgentPort`, `Agent`, …), the ports plus every
+(40 names): `BosApp`, `ModelInfo`, `open_harness`, the agent surface (`AgentPort`, `Agent`, …), the ports plus every
 type their own method signatures use, the nine `ep_*` points, and `Workspace` /
 `RootConfig` / `validate_config`. A test enforces that every promised port is
 implementable from promised names alone. `bos.sdk` re-exports rather than
@@ -322,7 +328,7 @@ logged and ignored. Examples:
 
 ```toml
 [exts.ep_consolidator.LLMConsolidator]
-model = "gemini/gemini-2.5-flash"
+model = "deepseek/deepseek-flash"
 
 [exts.ep_chat_store.JsonlChatStore]
 store_dir = "./messages"
@@ -350,7 +356,7 @@ named agent (its `AgentConfig`). Both use the same `AgentConfig` schema (`extra=
 # system_prompt = "..."        # usually set per-agent instead
 # model = "openai/gpt-4o"      # precedence below
 # agent_name = "bos"
-# reasoning_effort = "medium"  # low | medium | high
+# reasoning_effort = "medium"  # none | minimal | low | medium | high | xhigh | max | ultra
 max_tokens = 131072
 max_iterations = 80
 # tool_noise_filter = "strip_all"   # strip_all | keep_all
@@ -383,7 +389,7 @@ enabled = ["ReadFile", "GrepSearch", "WebSearch"]
 | `system_prompt` | `str` | The agent's base prompt. Plugins append sections at runtime. |
 | `model` | `str` | LiteLLM-style `provider/model`. |
 | `agent_name` | `str` | Identity used for memory scoping etc. |
-| `reasoning_effort` | `low\|medium\|high` | Passed to the model if supported. |
+| `reasoning_effort` | `none\|minimal\|low\|medium\|high\|xhigh\|max\|ultra` | Passed to the model as is; which levels a model takes is the vendor's call (`BosApp.list_models`). |
 | `max_tokens` | `int` = 131072 | Context budget before compaction. |
 | `max_iterations` | `int` = 80 | Max tool-call iterations per turn. |
 | `tool_noise_filter` | `strip_all\|keep_all` | How prior tool output is kept in context. |

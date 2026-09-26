@@ -54,7 +54,7 @@ extend_ignore = ["*.generated.py"]
 
 # Configure which model the consolidator uses
 [exts.ep_consolidator.LLMConsolidator]
-model = "gemini/gemini-2.5-flash"
+model = "deepseek/deepseek-flash"
 
 # Pass a region default to a custom agent factory
 [exts.ep_agent.weather_agent]

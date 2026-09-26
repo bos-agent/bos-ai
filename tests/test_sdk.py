@@ -170,7 +170,7 @@ def test_the_contract_surface_is_importable_and_identical():
     import bos.sdk
 
     expected = {
-        "BosApp", "open_harness",
+        "BosApp", "ModelInfo", "open_harness",
         "Agent", "AgentPort", "AgentHarness", "AgentResult", "Message", "TurnContext",
         "LLM", "LLMResponse", "ChatStore", "ChatCommit", "ChatMeta",
         "ContextResult", "TokenEstimate", "Consolidator", "ToolSet",
@@ -522,3 +522,52 @@ async def test_get_messages_auto_routes_to_native_after_a_summary(tmp_path):
         bos_messages = await app.get_messages("chat-1", source="bos")
         assert len(bos_messages) == 1
         assert bos_messages[0].is_summary
+
+
+def _clear_provider_keys(monkeypatch) -> None:
+    from bos.sdk._model_catalog import LITELLM_MODELS
+
+    for env in [*LITELLM_MODELS, "BOS_MODEL"]:
+        monkeypatch.delenv(env, raising=False)
+
+
+@pytest.mark.asyncio
+async def test_list_models_offers_the_providers_whose_key_is_set(tmp_path, monkeypatch):
+    from bos.sdk import BosApp
+    from bos.sdk._model_catalog import LITELLM_MODELS
+
+    _clear_provider_keys(monkeypatch)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setenv("BOS_MODEL", "anthropic/claude-haiku-4-5")
+    config = {"agents": {"pinned": {"model": "anthropic/claude-sonnet-5"}, "unpinned": {}}}
+    async with BosApp(config, bos_dir=tmp_path) as app:
+        pinned, unpinned = app.list_models("pinned"), app.list_models("unpinned")
+
+    assert list(pinned) == list(LITELLM_MODELS["ANTHROPIC_API_KEY"])
+    assert [m for m, info in pinned.items() if info["is_default"]] == ["anthropic/claude-sonnet-5"]
+    # No configured model: the provider falls back to BOS_MODEL, and so does the mark.
+    assert [m for m, info in unpinned.items() if info["is_default"]] == ["anthropic/claude-haiku-4-5"]
+
+
+@pytest.mark.asyncio
+async def test_list_models_gives_an_external_runtime_its_native_names(tmp_path, monkeypatch, fake_runtimes):
+    from bos.sdk import BosApp
+    from bos.sdk._model_catalog import RUNTIME_MODELS
+
+    _clear_provider_keys(monkeypatch)  # a runtime's own list needs no litellm key
+    async with BosApp({}, bos_dir=tmp_path) as app:
+        await app.build_agent("coder", agent_cfg={"_parent": "codex", "model": "gpt-5.5"})
+        await app.build_agent("claude", agent_cfg={"_parent": "claude-code"})
+        codex, claude = app.list_models("coder"), app.list_models("claude")
+
+    assert list(codex) == list(RUNTIME_MODELS["codex"])
+    assert [m for m, info in codex.items() if info["is_default"]] == ["gpt-5.5"]
+    assert [m for m, info in claude.items() if info["is_default"]] == ["default"]
+
+
+def test_every_runtime_has_a_catalog_that_lists_its_default():
+    from bos.core.harness import EXTERNAL_AGENT_KINDS
+    from bos.sdk._model_catalog import RUNTIME_DEFAULTS, RUNTIME_MODELS
+
+    assert set(RUNTIME_MODELS) == set(RUNTIME_DEFAULTS) == set(EXTERNAL_AGENT_KINDS)
+    assert all(RUNTIME_DEFAULTS[runtime] in RUNTIME_MODELS[runtime] for runtime in RUNTIME_MODELS)
