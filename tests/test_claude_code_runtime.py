@@ -1293,15 +1293,13 @@ _MAPPED_USAGE = {
 }
 
 
-def _turn(text: str = "done", *, session_id: str = "session-1", **result: Any) -> list[Any]:
+def _turn(text: str = "done", *, session_id: str = "session-1", uuid: str = "assistant-1", **result: Any) -> list[Any]:
     """One turn as the CLI streams it (measured against the fake Messages API): the init
-    ``SystemMessage``, the model's ``AssistantMessage``, then the ``ResultMessage`` — the SDK's
-    own dataclasses. *result* overrides ``ResultMessage`` fields."""
+    ``SystemMessage``, the model's ``AssistantMessage`` (*uuid* its transcript id), then the
+    ``ResultMessage`` — the SDK's own dataclasses. *result* overrides ``ResultMessage`` fields."""
     return [
         SystemMessage(subtype="init", data={"type": "system", "subtype": "init", "session_id": session_id}),
-        AssistantMessage(
-            content=[TextBlock(text=text)], model="claude-opus-4-5", session_id=session_id, uuid="assistant-1"
-        ),
+        AssistantMessage(content=[TextBlock(text=text)], model="claude-opus-4-5", session_id=session_id, uuid=uuid),
         ResultMessage(**{
             "subtype": "success",
             "duration_ms": 1,
@@ -1768,7 +1766,7 @@ async def test_a_schema_validation_failure_sends_one_correction_message_per_retr
     winning attempt's raw text is what gets committed; its validated object is what ``run()``
     returns, with ``structured=True``."""
     agent = _agent(tmp_path, chat_store=mem_store)
-    fake_claude.arm(messages=[*_turn("not json"), *_turn('{"answer": "42"}')])
+    fake_claude.arm(messages=[*_turn("not json", uuid="attempt-1"), *_turn('{"answer": "42"}', uuid="attempt-2")])
 
     result = await agent.run("chat-1", "go", turn_id="t1", schema=_ANSWER_SCHEMA, max_schema_retries=1)
 
@@ -1782,6 +1780,7 @@ async def test_a_schema_validation_failure_sends_one_correction_message_per_retr
     assert client.connected and client.disconnected, "one CLI child served both attempts"
     messages = await mem_store.get_messages("chat-1")
     assert messages[1].llm_message["content"] == '{"answer": "42"}', "the committed text is the winning attempt's"
+    assert messages[1].metadata["native_turn_id"] == "attempt-2", "and so is the committed native_turn_id"
 
 
 @pytest.mark.asyncio
