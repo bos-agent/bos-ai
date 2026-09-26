@@ -91,6 +91,7 @@ _SUBSCRIPTION_BYPASS = (
 )
 _FIELDS = sorted(field.name for field in dataclasses.fields(ClaudeAgentOptions))
 _REAL_API_KEY_FILE = claude_code._WELL_KNOWN_API_KEY_FILE  # before the autouse fixture moves it
+_REAL_MANAGED_MCP_FILE = claude_code._MANAGED_MCP_FILE  # likewise
 
 
 @pytest.fixture(autouse=True)
@@ -102,6 +103,7 @@ def _clean_environment(monkeypatch, tmp_path):
     for name in {*_SUBSCRIPTION_BYPASS, *claude_code._SUBSCRIPTION_BYPASS_VARS, *claude_code._CLAUDE_MD_SWITCHES}:
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(claude_code, "_WELL_KNOWN_API_KEY_FILE", tmp_path / "no-well-known-api-key")
+    monkeypatch.setattr(claude_code, "_MANAGED_MCP_FILE", tmp_path / "no-managed-mcp.json")
 
 
 @pytest.fixture
@@ -1234,6 +1236,22 @@ def test_subscription_auth_refuses_the_well_known_api_key_file(tmp_path, monkeyp
     assert "sk-ant-not-a-real-key" not in str(excinfo.value)
     _agent(tmp_path, auth="api_key")
     assert _REAL_API_KEY_FILE == Path("/home/claude/.claude/remote/.api_key")
+
+
+@pytest.mark.parametrize("auth", ["subscription", "api_key"])
+def test_an_enterprise_mcp_config_is_refused_at_construction(tmp_path, monkeypatch, auth):
+    """While the administrator's managed-mcp.json exists, the CLI refuses the `--strict-mcp-config`
+    BOS sends on every client (read from the CLI 2.1.281 source), so every turn would fail at
+    startup; BOS refuses once, at construction, whatever `auth` is, naming the file."""
+    managed = tmp_path / "managed-mcp.json"
+    managed.write_text("{}")
+    monkeypatch.setattr(claude_code, "_MANAGED_MCP_FILE", managed)
+
+    with pytest.raises(ValueError) as excinfo:
+        _agent(tmp_path, auth=auth)
+    assert str(managed) in str(excinfo.value) and "--strict-mcp-config" in str(excinfo.value)
+    if sys.platform.startswith("linux"):
+        assert _REAL_MANAGED_MCP_FILE == Path("/etc/claude-code/managed-mcp.json")
 
 
 @pytest.mark.skipif(sys.platform == "win32" or os.geteuid() == 0, reason="POSIX permissions, which root ignores")

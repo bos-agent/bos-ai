@@ -559,6 +559,14 @@ _SUBSCRIPTION_BYPASS_VARS: Mapping[str, str] = MappingProxyType({
 # CLAUDE_CODE_OAUTH_TOKEN is.
 _WELL_KNOWN_API_KEY_FILE = Path("/home/claude/.claude/remote/.api_key")
 
+# BEP 19 §8.2: the administrator's enterprise MCP config, beside managed settings. While a valid
+# one exists the CLI refuses `--strict-mcp-config`, which BOS sends on every client, and while a
+# broken one exists it drops every server BOS passes (read from the CLI 2.1.281 source: `Jdr`,
+# `CYt`, and `_f` for the directory; not measured — that means writing the administrator's
+# directory).
+_MANAGED_SETTINGS_DIRS = {"darwin": "/Library/Application Support/ClaudeCode", "win32": r"C:\Program Files\ClaudeCode"}
+_MANAGED_MCP_FILE = Path(_MANAGED_SETTINGS_DIRS.get(sys.platform, "/etc/claude-code")) / "managed-mcp.json"
+
 # BEP 19 §3.4.1.4: the root CLAUDE.md BOS reads and appends when the CLI would not load it —
 # that is, when `setting_sources` has no `project`. The cap is where Claude Code itself calls
 # a memory file large: it warns once one passes about 5% of the context window, with a floor
@@ -1217,6 +1225,16 @@ class ClaudeCodeAgent:
             raise ValueError(
                 f'`permission = "workspace-write"` is refused on this host: {reason}. It needs Claude Code\'s bash '
                 f"sandbox, and BOS refuses rather than let bash run unsandboxed (BEP 19 §3.5.3)."
+            )
+
+        # BEP 19 §8.2: with an enterprise MCP config present every turn would fail at the CLI's own
+        # startup, so it is refused once, here. `os.path.exists`, as for the key file above.
+        if os.path.exists(_MANAGED_MCP_FILE):
+            raise ValueError(
+                f"{_MANAGED_MCP_FILE} exists: this host's administrator gives an enterprise MCP config exclusive "
+                f"control of MCP servers, and the Claude Code CLI then refuses `--strict-mcp-config`, which BOS "
+                f"sends on every client to keep a repository's MCP servers out (BEP 19 §3.5.3, §8.2). BOS does not "
+                f"work around the administrator's policy; run this agent on a host without that file."
             )
 
         # Last, so that a config refused above does not also warn about an agent never built.
