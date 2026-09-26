@@ -32,8 +32,14 @@ arrives, one attempt (a schema retry included) at a time (§3.9) — and the con
 message the ``interrupt`` poll returns is delivered into the running turn, ``AbortTurn`` and
 ``request_stop()`` interrupt it, ``timeout_seconds`` bounds the CLI's start and each attempt, and
 ``aclose()`` stops every turn, drains them within a bound and closes their clients (§3.9, §3.10.2;
-the audit of every wait that crosses to the CLI sits above ``_Turn``). The hook and
-``can_use_tool`` are not built, so nothing in this module confines anything yet.
+the audit of every wait that crosses to the CLI sits above ``_Turn``) — and the confinement
+(§3.5.3): a deny-by-default ``tools=`` allowlist per ``permission`` (``_TOOL_LEVELS``), a
+``PreToolUse`` hook that path-checks the file tools to ``cwd`` and denies anything outside the
+level's allowlist (``_hook``), a ``can_use_tool`` backstop for the prompts the hook lets through
+(``_can_use_tool``), and a stderr tripwire that ends a ``workspace-write`` turn if the CLI reports
+its bash sandbox disabled (``_sandbox_tripwire``). The MCP egress (§3.8) is the one seam left: its
+tools pass the hook and are allowed by ``can_use_tool``, but ``mcp_servers``/``allowed_tools`` are
+not wired yet (Task 10).
 """
 
 from __future__ import annotations
@@ -58,7 +64,10 @@ from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
     ClaudeSDKClient,
+    HookMatcher,
     PermissionMode,
+    PermissionResultAllow,
+    PermissionResultDeny,
     ResultError,
     ResultMessage,
     SandboxSettings,
@@ -68,7 +77,14 @@ from claude_agent_sdk import (
     ToolUseBlock,
     UserMessage,
 )
-from claude_agent_sdk.types import SystemPromptPreset
+from claude_agent_sdk.types import (
+    CanUseTool,
+    HookCallback,
+    HookContext,
+    HookInput,
+    HookJSONOutput,
+    SystemPromptPreset,
+)
 
 from bos.core.agent import (
     ABORTED_TURN_CONTENT,
@@ -138,6 +154,108 @@ _WORKSPACE_WRITE_SANDBOX: dict[str, Any] = {
     "allowUnsandboxedCommands": False,
     "failIfUnavailable": True,
 }
+
+# BEP 19 §3.5.3: the confinement is deny-by-default per permission level, over the CLI's own
+# offered tool list — not an enumeration of "mutating tools". CLI 2.1.281 offers twenty tools with
+# no permission handler and three more (the interactive trio below) when one is set; the whole set is
+# classified here into the levels at which BOS offers it, pinned by
+# test_the_offered_tools_are_all_classified (from the `tools` of the first model request). A CLI
+# release that adds, renames or drops a tool fails that test until someone classifies it — the same
+# pattern as `native_options`' allowlist.
+#
+# Two mechanisms enforce it: `tools=` is the CLI-level allowlist, so an excluded tool is never
+# offered and is not callable even when the model asks ("No such tool available … disabled for this
+# session", pinned) — and not re-addable through a trusted repo's `permissions.allow` either
+# (measured while building the hook, not pinned); and the PreToolUse hook is the per-call gate
+# (`_hook`), which denies anything outside the level's allowlist as a backstop and path-checks the
+# file tools, and whose deny holds against a trusted repo's own allow rule (fact 4, pinned). The
+# classification, per level:
+#
+# - Read is offered at every level; the hook path-checks it to `cwd` (reads outside are denied,
+#   BEP §3.5.5). Write/Edit/NotebookEdit (the file-mutating tools) and Bash are offered at
+#   `workspace-write` and `full-access` only — Bash is confined by the OS sandbox at
+#   `workspace-write` and off at `full-access`; the file writers are path-checked to `cwd`. Under
+#   `read-only` none of the four is offered, which is how "read-only writes nothing" holds.
+# - ListAgents and SendMessage reach "other local Claude sessions on this machine" (the tools' own
+#   descriptions to the model), which no `permission` level grants — `permission` bounds the
+#   filesystem, not the operator's other sessions — so they are excluded at EVERY level,
+#   `full-access` included (R10).
+# - The tools that persist beyond the turn or move/branch the session are excluded below
+#   `full-access`, because BOS has not measured them safe under a permission bound (deny-by-default):
+#   CronCreate/CronDelete/CronList (a durable CronCreate persists to `.claude/scheduled_tasks.json`),
+#   EnterWorktree/ExitWorktree (create a git worktree and switch the session into it),
+#   Workflow (persists its script under the session directory), Agent (launches subagents, and can
+#   create a worktree), ScheduleWakeup and TaskStop. Whether the hook sees a subagent's own tool
+#   calls is not measured (§8.2), but it does not need to be: Agent is excluded below full-access on
+#   the deny-by-default ground above, so no confined agent spawns a subagent in the first place.
+# - WebFetch and WebSearch are network egress (WebFetch reaches the local network too). Both reach
+#   the hook and `can_use_tool` (measured while building the hook, not pinned), so BOS could gate them
+#   either way; their policy is an open question (§8.2(a)), so under deny-by-default they are excluded
+#   below `full-access`
+#   until it is decided.
+# - Skill (loads packaged instructions into the turn) and ReportFindings (reports to a host review
+#   UI) are neither confinement-bounded nor needed by a confined agent, so deny-by-default excludes
+#   them below `full-access` too.
+# - AskUserQuestion, EnterPlanMode and ExitPlanMode are excluded at EVERY level: BOS drives turns
+#   programmatically and has no user to prompt (§2.2.2) and never enters the CLI's plan-mode UX, so a
+#   tool that asks the user or toggles plan mode can only hang or misfire, at any level. The CLI
+#   offers these three only when a permission handler (`can_use_tool`) is present — which BOS sets at
+#   read-only and workspace-write (where `tools=` excludes them) and not at full-access (where the CLI
+#   does not offer them at all), so `test_the_offered_tools_are_all_classified` measures them at
+#   read-only.
+#
+# `full-access` confines nothing on the filesystem, so it offers every tool EXCEPT the cross-session
+# pair and the interactive trio, none of which any level grants.
+_TOOL_LEVELS: Mapping[str, frozenset[str]] = MappingProxyType({
+    "Read": frozenset({"read-only", "workspace-write", "full-access"}),
+    "Write": frozenset({"workspace-write", "full-access"}),
+    "Edit": frozenset({"workspace-write", "full-access"}),
+    "NotebookEdit": frozenset({"workspace-write", "full-access"}),
+    "Bash": frozenset({"workspace-write", "full-access"}),
+    "ListAgents": frozenset(),
+    "SendMessage": frozenset(),
+    "AskUserQuestion": frozenset(),
+    "EnterPlanMode": frozenset(),
+    "ExitPlanMode": frozenset(),
+    "Agent": frozenset({"full-access"}),
+    "CronCreate": frozenset({"full-access"}),
+    "CronDelete": frozenset({"full-access"}),
+    "CronList": frozenset({"full-access"}),
+    "EnterWorktree": frozenset({"full-access"}),
+    "ExitWorktree": frozenset({"full-access"}),
+    "Workflow": frozenset({"full-access"}),
+    "ScheduleWakeup": frozenset({"full-access"}),
+    "TaskStop": frozenset({"full-access"}),
+    "WebFetch": frozenset({"full-access"}),
+    "WebSearch": frozenset({"full-access"}),
+    "Skill": frozenset({"full-access"}),
+    "ReportFindings": frozenset({"full-access"}),
+})
+
+# BEP 19 §3.5.3: the offered tools that take a path argument, and which key names it. Enumerated
+# from what the CLI offers the model (the param names are `file_path` for Read/Write/Edit and
+# `notebook_path` for NotebookEdit; the offered set itself is pinned by
+# test_the_offered_tools_are_all_classified). MultiEdit/Glob/Grep — named by an earlier draft — are
+# not offered by CLI 2.1.281, so they are absent here. EnterWorktree (`path`) and
+# Workflow (`scriptPath`) also take a path, but both are offered only at `full-access`, where the
+# hook path-checks nothing, so neither needs an entry. A tool not in this map is not path-checked.
+_FILE_TOOL_PATH_ARG: Mapping[str, str] = MappingProxyType({
+    "Read": "file_path",
+    "Write": "file_path",
+    "Edit": "file_path",
+    "NotebookEdit": "notebook_path",
+})
+
+# BEP 19 §3.5.3, fact 6 (§3.5.3's numbering): the CLI's own "Sandbox disabled" warning on stderr,
+# the substring the tripwire watches for under `workspace-write` (`_sandbox_tripwire`).
+_SANDBOX_DISABLED = "Sandbox disabled"
+
+
+class _SandboxDisabledError(RuntimeError):
+    """Raised when the tripwire sees the CLI's "Sandbox disabled" warning under ``workspace-write``
+    (BEP 19 §3.5.3). Its own type, so ``run()`` reports it as the confinement failure it is rather
+    than wrapping it as a generic vendor failure."""
+
 
 # BEP 19 §3.5.3: the variable that makes each client's settings its own. The CLI's bash
 # sandbox guards the path of the inline `--settings` against writes: <temp dir>/claude-
@@ -415,11 +533,11 @@ _BOS_OWNED: Mapping[str, str] = MappingProxyType({
     "system_prompt": "set by BOS from `system_prompt` or `base_instructions` (BEP 19 §3.4.1)",
     "max_turns": "set by BOS from `max_iterations` (BEP 19 §3.9)",
     "model": "set by BOS from `model` (BEP 19 §3.4)",
-    "hooks": "reserved for BOS's file-tool confinement, a PreToolUse hook (BEP 19 §3.5.3)",
-    "can_use_tool": "reserved for BOS's answer to a permission prompt (BEP 19 §3.5.3)",
-    "stderr": "reserved for BOS's sandbox tripwire on the CLI's stderr (BEP 19 §3.5.3)",
-    "tools": "reserved for BOS, to restrict the tools offered to the model per `permission` (BEP 19 §3.5.3)",
-    "disallowed_tools": "reserved for BOS, to restrict the tools offered to the model per `permission` (BEP 19 §3.5.3)",
+    "hooks": "set by BOS: the PreToolUse hook that gates every tool call per `permission` (BEP 19 §3.5.3)",
+    "can_use_tool": "set by BOS: the backstop answer to a permission prompt (BEP 19 §3.5.3)",
+    "stderr": "set by BOS per turn: the sandbox tripwire on the CLI's stderr under workspace-write (BEP 19 §3.5.3)",
+    "tools": "set by BOS: the deny-by-default allowlist of tools offered to the model per `permission` (BEP 19 §3.5.3)",
+    "disallowed_tools": "reserved for BOS: `tools` is the allowlist BOS uses instead (BEP 19 §3.5.3)",
     "allowed_tools": "reserved for BOS: an entry pre-approves a tool before `can_use_tool` is asked "
     "(BEP 19 §3.5.3, §3.8)",
     "mcp_servers": "reserved for BOS's MCP egress, which `mcp_tools` selects for (BEP 19 §3.8)",
@@ -521,6 +639,40 @@ def _refuse_native_options(native_options: Mapping[str, Any]) -> None:
             f"`native_options` for the {_RUNTIME!r} runtime may carry only {sorted(_ALLOWED)}, an allowlist over "
             f"the SDK's own ClaudeAgentOptions fields. Refused: {'; '.join(refused)}."
         )
+
+
+def _within(path: Path, root: Path) -> bool:
+    """True when *path* is *root* itself or sits under it. Both must already be resolved."""
+    return path == root or root in path.parents
+
+
+def _cli_config_dir() -> Path:
+    """The CLI's own config directory, resolved, as the child will compute it: ``CLAUDE_CONFIG_DIR``
+    or ``<HOME>/.claude`` (BEP 19 §3.12; read from the CLI 2.1.281 source, `ko`). BOS never
+    overrides either variable (both are on §3.12's left-alone list), so the child inherits this
+    process's environment for them, which is what the hook reads. Its ``projects/<slug>/memory/``
+    is the directory the CLI carves out of the permission check — a `read-only` agent's `Write`
+    there landed unasked when it was offered (measured in review; BEP 19 §3.5.3, §8.2(g)) — so the
+    hook denies the whole directory, which matters when it sits inside `cwd` (e.g. `cwd` is ``$HOME``);
+    when it sits outside `cwd`, the out-of-root check already denies a write there. Pinned by
+    ``test_the_hook_denies_the_config_dir_even_inside_cwd``."""
+    config = os.environ.get("CLAUDE_CONFIG_DIR")
+    base = Path(config) if config else Path(os.environ.get("HOME") or Path.home()) / ".claude"
+    return base.resolve()
+
+
+def _pretooluse_deny(reason: str) -> HookJSONOutput:
+    """A PreToolUse hook result that denies the call and shows the model *reason* (BEP 19 §3.5.3).
+    Never an *allow* decision: an allow would skip ``can_use_tool``, so a call the hook does not
+    deny returns ``{}`` (no decision) instead (the SDK's ``types.py`` documents that an allow
+    shadows ``can_use_tool``)."""
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": reason,
+        }
+    }
 
 
 def _system_prompt(config: ExternalAgentConfig, claude_md: str | None) -> str | SystemPromptPreset:
@@ -839,6 +991,11 @@ class _Turn:
         self.answer_uuid: str | None = None
         self.last_text: str | None = None
         self.usage: dict[str, int] | None = None
+        # BEP 19 §3.5.3: the "Sandbox disabled" stderr lines the tripwire caught (workspace-write
+        # only). The stderr callback appends here from the SDK's stderr reader task; `_stream` checks
+        # it once per message and ends the turn if it is non-empty. A list, not a flag, so the raise
+        # can quote the CLI's own line.
+        self.sandbox_tripped: list[str] = []
 
 
 class ClaudeCodeAgent:
@@ -961,11 +1118,161 @@ class ClaudeCodeAgent:
             "native_options": dict(self._config.native_options),
         })
 
+    def _offered_tools(self) -> list[str]:
+        """The built-in tools BOS offers the model at this agent's ``permission``, the CLI-level
+        allowlist ``tools=`` carries (BEP 19 §3.5.3). Deny-by-default over the CLI's offered list
+        (``_TOOL_LEVELS``): an excluded tool is never offered and is not callable even if the model
+        asks (pinned), nor re-addable through a trusted repo's ``permissions.allow`` (measured while
+        building the hook, not pinned)."""
+        return sorted(name for name, levels in _TOOL_LEVELS.items() if self._config.permission in levels)
+
+    def _hook(self) -> HookCallback:
+        """The ``PreToolUse`` gate on ``HookMatcher(matcher=None)`` (BEP 19 §3.5.3). It fires once
+        per tool call in every permission mode, and its deny holds even where ``can_use_tool`` is
+        never asked — under ``bypassPermissions`` and against a trusted repo's own allow rules
+        (facts 2 and 4) — which is why the confinement rests on it and not on ``can_use_tool``.
+
+        It never blocks or awaits anything slow: it runs inside the CLI's tool path. It returns a
+        decision synchronously, from data captured when the turn's options were built.
+
+        - BOS's own MCP tools (``mcp__…``) pass with no decision: the MCP egress (§3.8) and
+          ``can_use_tool`` gate those, not this hook.
+        - A built-in tool outside this level's allowlist is denied — the per-call half of
+          deny-by-default, a backstop should ``tools=`` ever fail to exclude it (e.g. a subagent, or
+          a future CLI). This is what denies the cross-session tools at every level (R10) and every
+          mutating tool under ``read-only``.
+        - Under ``full-access`` nothing else is checked: it confines nothing on the filesystem.
+        - For a file tool (``_FILE_TOOL_PATH_ARG``) the path argument is resolved — relative to
+          ``cwd``, then through ``Path.resolve()``, so ``..``, a symlink and ``~`` (already
+          expanded by the CLI, but resolved again here) cannot escape — and the call is denied when
+          the result leaves ``cwd``, sits inside the CLI's config directory (``read-only`` and
+          ``workspace-write``; the memory-dir carve-out, §8.2(g)), or, when a host has opted into the
+          repo's settings, sits inside ``<cwd>/.claude`` (so an agent cannot plant settings for its
+          own next turn). Each deny carries a model-facing reason.
+        """
+        permission = self._config.permission
+        cwd = self._config.cwd
+        allowed = frozenset(self._offered_tools())
+        config_dir = _cli_config_dir()
+        dot_claude = (cwd / ".claude") if any(s in _REPO_SETTING_SOURCES for s in self._setting_sources) else None
+        may_still = {
+            "read-only": "You can still read files inside the workspace with Read.",
+            "workspace-write": "You can still read, write and edit files inside the workspace, and run sandboxed Bash.",
+            "full-access": "",
+        }[permission]
+
+        async def hook(input_data: HookInput, tool_use_id: str | None, context: HookContext) -> HookJSONOutput:
+            data = cast(Mapping[str, Any], input_data)
+            tool = data.get("tool_name", "")
+            # No decision for BOS's own MCP tools (§3.8; can_use_tool/allowed_tools gate them, Task 10)
+            # or for the CLI's synthetic StructuredOutput tool, which the CLI offers from
+            # `output_format` and answers itself (§3.9) — not a tool the agent chose, and its input is
+            # re-validated by BOS locally (BEP 12), so it is not the confinement's business.
+            if tool.startswith("mcp__") or tool == _STRUCTURED_OUTPUT_TOOL:
+                return {}
+            if tool not in allowed:
+                return _pretooluse_deny(
+                    f"The {tool!r} tool is not available to this Claude Code agent, which BOS runs under "
+                    f"{permission!r} permission. {may_still}".rstrip()
+                )
+            if permission == "full-access":
+                return {}
+            arg = _FILE_TOOL_PATH_ARG.get(tool)
+            if arg is None:
+                return {}
+            raw = (data.get("tool_input") or {}).get(arg)
+            if not isinstance(raw, str) or not raw:
+                return {}
+            target = Path(raw)
+            target = (target if target.is_absolute() else cwd / target).resolve()
+            if not _within(target, cwd):
+                return _pretooluse_deny(
+                    f"{tool} of {str(target)!r} was denied: it is outside the workspace root {str(cwd)!r}. {may_still}"
+                )
+            if _within(target, config_dir):
+                return _pretooluse_deny(
+                    f"{tool} of {str(target)!r} was denied: it is inside the CLI's own configuration directory "
+                    f"{str(config_dir)!r}, which is off-limits. Work inside the workspace {str(cwd)!r} instead."
+                )
+            if dot_claude is not None and _within(target, dot_claude):
+                return _pretooluse_deny(
+                    f"{tool} of {str(target)!r} was denied: it is inside {str(dot_claude)!r}, which configures the "
+                    f"agent itself and is off-limits. Work elsewhere inside the workspace {str(cwd)!r}."
+                )
+            return {}
+
+        return hook
+
+    def _can_use_tool(self) -> CanUseTool | None:
+        """The answer to a permission prompt, never the gate (BEP 19 §3.5.3, fact 3). The CLI asks
+        it only where it would otherwise prompt a user — a subset the mode, the sandbox and a trusted
+        repo's allow rules decide first (the matrix in §3.5.3). The confinement is the hook and the OS
+        sandbox, both of which run *before* this callback: the hook fires on every tool call and
+        denies anything outside the level's allowlist or outside ``cwd`` (facts 2, 4), and where it
+        denies, the CLI never asks this callback. So anything that reaches here has already been
+        vetted — an allowlisted tool whose path (for a file tool) the hook confined to ``cwd`` — and
+        this only answers, at once and without awaiting anyone (§3.5.4):
+
+        - BOS's own MCP tools (``mcp__…``) are allowed — the host chose them and gated them by
+          ``mcp_tools`` and a bearer token (§3.8); Task 10 scopes the name.
+        - A tool in this level's allowlist is allowed: the hook already confined it (a file tool's
+          path to ``cwd``), and ``Bash`` under ``workspace-write`` is confined by the OS sandbox
+          (fact 6b). Answering "yes" here is what lets an in-root edit the mode did not auto-allow,
+          or a sandboxed ``Bash`` command, go ahead.
+        - Anything else is denied — a defensive backstop, since the hook should have denied a
+          non-allowlisted tool before it ever reached here; BOS has no one to ask.
+
+        Under ``full-access`` (``bypassPermissions``) the CLI never consults it (facts 2, 6b; the
+        SDK's own advisory), so BOS sets it to ``None`` there rather than install a callback the SDK
+        would warn is shadowed.
+        """
+        permission = self._config.permission
+        if permission == "full-access":
+            return None
+        allowed = frozenset(self._offered_tools())
+
+        async def can_use_tool(tool_name: str, tool_input: dict[str, Any], context: Any) -> Any:
+            if tool_name.startswith("mcp__") or tool_name in allowed:
+                return PermissionResultAllow()
+            return PermissionResultDeny(
+                message=(
+                    f"{tool_name} is not permitted for this Claude Code agent, which BOS runs under "
+                    f"{permission!r} permission. This decision is fixed by policy and no one can be asked to change it."
+                )
+            )
+
+        return can_use_tool
+
+    def _sandbox_tripwire(self, tripped: list[str], chat_id: str, turn_id: str) -> Callable[[str], None]:
+        """A ``stderr`` callback that watches for the CLI's "Sandbox disabled" warning under
+        ``workspace-write`` (BEP 19 §3.5.3). It is the third layer behind Task 3's construction
+        check and ``failIfUnavailable`` (fact 6c turns a missing dependency into a startup refusal),
+        for a degrade path the key does not cover — the day the CLI's dependency list changes and it
+        warns-and-runs-unsandboxed (fact 6) rather than refusing. It only records the line and logs;
+        ``_stream`` ends the turn (interrupt, then raise). Synchronous and fast, because it runs on
+        the SDK's stderr reader task (``subprocess_cli.py``'s ``_handle_stderr``), which is the sole
+        consumer of the child's stderr and must not be blocked."""
+
+        def stderr(line: str) -> None:
+            if _SANDBOX_DISABLED in line:
+                tripped.append(line)
+                logger.error(
+                    "%s runtime %r: the CLI reported the bash sandbox disabled under workspace-write during turn %r "
+                    "on chat %r; ending the turn. Line: %s",
+                    self._config.runtime,
+                    self._kind,
+                    turn_id,
+                    chat_id,
+                    line.strip(),
+                )
+
+        return stderr
+
     def _options(self) -> ClaudeAgentOptions:
         """The options for one client of this agent, apart from the per-turn fields
-        (``resume``, a turn's own model or effort, ``output_format``). The hook,
-        ``can_use_tool``, the stderr tripwire and the MCP egress are not built yet, so
-        nothing sets them.
+        (``resume``, a turn's own model or effort, ``output_format``, and the stderr tripwire, which
+        needs the turn's own state so ``run()`` sets it). The MCP egress is not wired here yet
+        (§3.8, Task 10), so ``mcp_servers``/``allowed_tools`` stay at their defaults.
 
         Built afresh for every client, never cached: each call's settings carry a new nonce
         (``_SETTINGS_NONCE_VAR``), and each call reads the working directory's CLAUDE.md again
@@ -1003,6 +1310,13 @@ class ClaudeCodeAgent:
             max_turns=self._max_turns,
             model=config.model,
             strict_mcp_config=True,
+            # BEP 19 §3.5.3: the deny-by-default confinement. `tools=` is the CLI-level allowlist per
+            # `permission`; the PreToolUse hook is the per-call gate (path checks; deny anything
+            # outside the allowlist); `can_use_tool` answers what `permission` already decided, and
+            # is None under full-access (bypassPermissions never consults it).
+            tools=self._offered_tools(),
+            hooks={"PreToolUse": [HookMatcher(matcher=None, hooks=[self._hook()])]},
+            can_use_tool=self._can_use_tool(),
             env=dict(_INHERITED_ENV_OVERRIDES),
             # BEP 19 §3.9: the CLI echoes each user message BOS sends it, with the uuid BOS put on
             # it, when it takes that message into a turn — how BOS tells a mid-turn message folded
@@ -1270,8 +1584,13 @@ class ClaudeCodeAgent:
             turn.answer_uuid = turn.last_text = turn.usage = None
             await turn.client.query(prompt if isinstance(prompt, str) else _user_message(prompt))
         while True:
+            await self._raise_if_sandbox_tripped(turn, chat_id=chat_id, turn_id=turn_id)
             result: ResultMessage | None = None
             async for message in turn.client.receive_response():
+                # BEP 19 §3.5.3: the tripwire (`_sandbox_tripwire`) may have caught the CLI's "Sandbox
+                # disabled" warning on its stderr task while this message streamed. Checked once per
+                # message so the turn ends promptly (interrupt, then raise).
+                await self._raise_if_sandbox_tripped(turn, chat_id=chat_id, turn_id=turn_id)
                 if isinstance(message, AssistantMessage) and message.parent_tool_use_id is None:
                     # Recorded as `native_turn_id`, since the stream names no turn: the turn's last
                     # top-level assistant message, a transcript entry, which `get_session_messages`
@@ -1298,6 +1617,9 @@ class ClaudeCodeAgent:
                 if interrupt is not None and result is None and not turn.stopping:
                     if message_for_the_turn := await _apply_async(interrupt, {}):
                         await self._steer(turn, message_for_the_turn, chat_id=chat_id, turn_id=turn_id)
+            # Also after the stream ends: the warning can arrive while the CLI is between messages (a
+            # tool running), so the per-message check above may not see it before the round closes.
+            await self._raise_if_sandbox_tripped(turn, chat_id=chat_id, turn_id=turn_id)
             if result is None:
                 raise RuntimeError("the CLI ended the turn without a result")
             turn.usage = _add_usage(turn.usage, _usage(result.usage))
@@ -1334,6 +1656,20 @@ class ClaudeCodeAgent:
             chat_id,
             why,
             exc_info=exc_info,
+        )
+
+    async def _raise_if_sandbox_tripped(self, turn: _Turn, *, chat_id: str, turn_id: str) -> None:
+        """End the turn if the tripwire caught the CLI's "Sandbox disabled" warning under
+        ``workspace-write`` (BEP 19 §3.5.3): interrupt the CLI (Task 7's machinery), then raise
+        ``_SandboxDisabledError``. A no-op otherwise, so it is cheap to call once per message. The
+        interrupt clears ``turn.busy``, so ``run()``'s teardown does not interrupt a second time."""
+        if not turn.sandbox_tripped:
+            return
+        await self._interrupt(turn)
+        raise _SandboxDisabledError(
+            f"{self._config.runtime} runtime {self._kind!r}: turn {turn_id!r} for chat {chat_id!r} was ended because "
+            f"the CLI reported its bash sandbox disabled under workspace-write, where BOS requires it and refuses to "
+            f"run bash unsandboxed (BEP 19 §3.5.3): {turn.sandbox_tripped[0].strip()}"
         )
 
     async def _interrupt(self, turn: _Turn) -> None:
@@ -1588,12 +1924,23 @@ class ClaudeCodeAgent:
                 else None
             )
             llm = llm_args or {}
+            # BEP 19 §3.5.3: the sandbox tripwire's stderr callback appends to `tripped`, which the
+            # turn reads. Built before the client, since the client is built from these options and
+            # the callback must close over a list that outlives the turn. Only under workspace-write,
+            # the one level with a bash sandbox to degrade; `_compact` drops the None otherwise.
+            tripped: list[str] = []
+            stderr_cb = (
+                self._sandbox_tripwire(tripped, chat_id, turn_id)
+                if self._config.permission == "workspace-write"
+                else None
+            )
             options = replace(
                 self._options(),
                 **_compact(
                     resume=native_session_id,
                     model=llm.get("model"),
                     effort=llm.get("reasoning_effort"),
+                    stderr=stderr_cb,
                     # BEP 19 §3.9: the CLI's own structured-output flag (`run()`'s docstring says
                     # what it makes the CLI do). `_compact` drops this when `schema` is None, so an
                     # unstructured turn's options are unaffected.
@@ -1605,6 +1952,7 @@ class ClaudeCodeAgent:
             # ponytail: a client per turn costs one CLI spawn (~1s). A per-chat_id session pool
             # is the upgrade if that latency shows up; resume= makes the stateless version correct.
             turn = _Turn(_CLIENT_FACTORY(options))
+            turn.sandbox_tripped = tripped  # the list the tripwire appends to (BEP 19 §3.5.3)
             phase = "at startup"  # connect(): the CLI starting, the resumed session loading
             structured_output: Any = None
             structured_ok = False
@@ -1687,6 +2035,11 @@ class ClaudeCodeAgent:
                     except TimeoutError:
                         # Unwrapped: it names its phase already, and a vendor-failure wrap would
                         # bury which deadline fired.
+                        raise
+                    except _SandboxDisabledError:
+                        # BEP 19 §3.5.3: the tripwire ended the turn. Its own message already names the
+                        # confinement failure; a vendor-failure wrap would bury it. The turn was
+                        # interrupted before it raised, so teardown does not interrupt again.
                         raise
                     except AbortTurn:
                         # Ahead of the broad except, or a cooperative stop would be reported as a

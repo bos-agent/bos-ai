@@ -1031,7 +1031,13 @@ async def test_an_inherited_variable_that_loads_what_the_default_leaves_out_is_s
     ws = tmp_path / "ws"
     ws.mkdir()
     script, took_effect = _inherited_route(route, tmp_path, monkeypatch)
-    options = _agent(tmp_path, cwd="ws")._options()
+    # This test isolates BOS's env overrides (BEP 19 §3.12). Task 8's confinement (§3.5.3) now ALSO
+    # blocks the tool-call routes — the CLAUDE_BG_SESSION_PERMISSION_RULES Write and the
+    # CLAUDE_RELAUNCH_SESSION_ADD_DIRS out-of-root Read are denied by the PreToolUse hook and the
+    # `tools=` allowlist regardless of the variable — which would mask the env override as the cause
+    # and, worse, make the control pass vacuously. So the tool gate is stripped here; it is tested on
+    # its own in tests/test_claude_code_confinement.py. The env overrides are what this asserts.
+    options = replace(_agent(tmp_path, cwd="ws")._options(), tools=None, hooks=None, can_use_tool=None)
     loads_from_the_added_dir = route == "CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD"
     keep_dirs = {"CLAUDE_RELAUNCH_SESSION_ADD_DIRS"} if loads_from_the_added_dir else set()
 
