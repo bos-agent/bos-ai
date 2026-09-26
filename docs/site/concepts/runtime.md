@@ -78,7 +78,7 @@ Configure any service's implementation details via `[exts.<ep_name>.<impl_name>]
 store_dir = "./messages"            # path relative to bos_dir
 
 [exts.ep_consolidator.LLMConsolidator]
-model = "gemini/gemini-2.5-flash"  # cheaper model for consolidation work
+model = "deepseek/deepseek-flash"  # cheaper model for consolidation work
 ```
 
 ---

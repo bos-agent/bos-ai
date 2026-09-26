@@ -40,7 +40,7 @@ mail_route = "JsonlMailRoute"
 # [exts.ep_provider.litellm]
 
 [exts.ep_consolidator.LLMConsolidator]
-model = "gemini/gemini-2.5-flash"
+model = "deepseek/deepseek-flash"
 
 # [exts.ep_chat_store.JsonlChatStore]
 # store_dir = "./messages"
@@ -73,7 +73,7 @@ model = "gemini/gemini-2.5-flash"
 #model = "gpt-4o"
 
 # other settings
-#reasoning_effort = "medium"           # low, medium, high
+#reasoning_effort = "medium"           # none, minimal, low, medium, high, xhigh, max, ultra
 #max_tokens = 131072
 #max_iterations = 60
 #tool_noise_filter = "strip_all" # strip_all, keep_all
@@ -98,7 +98,7 @@ enabled = [
 # retention_days = 30
 # model for the off-turn memory consolidation agent. precedence:
 #   consolidation.model > env:BOS_CONSOLIDATOR_MODEL > BOS_MODEL (provider default)
-# model = "gemini/gemini-2.5-flash"
+# model = "deepseek/deepseek-flash"
 
 [agent.defaults.plugin-bindings.SubagentPlugin]
 task_template = """

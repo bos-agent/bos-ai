@@ -106,6 +106,38 @@ or reject the second turn, the way your application already handles two requests
 for one resource. (Mode 2 does this for you: the gateway's chat coordinator
 refuses a second turn on a busy chat with `active_turn`.)
 
+### Letting the user pick the model and thinking level
+
+A turn can run on another model, or at another thinking level, than the agent's
+config names: pass them in `llm_args`. BOS keeps no selection between turns —
+remembering what the user picked is your app's job, as the `chat_id` is.
+
+```python
+result = await agent.run(
+    "chat-42", "refactor this",
+    llm_args={"model": "anthropic/claude-opus-5-5", "reasoning_effort": "high"},
+)
+```
+
+`app.list_models(kind=None)` says what to offer, for building those pickers:
+
+```python
+for model, info in app.list_models().items():
+    print(model, info["display_name"], info["efforts"], info["is_default"])
+```
+
+Keys are what `llm_args["model"]` takes; `efforts` are the
+`llm_args["reasoning_effort"]` values that model accepts (empty: it has no
+thinking level to pick); `is_default` marks what the agent runs when a turn names
+no model. BOS's own agent lists the models of every provider whose API key is set
+— `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY` and so on, your
+config's `envs` and `envfile` included — in LiteLLM's ids. A Claude Code or Codex
+agent lists that runtime's native names instead.
+
+The list is hard-coded in BOS and refreshed with its releases, and nothing is
+validated against it: a model it does not list yet still runs when you pass it,
+and a wrong one fails with the provider's own error.
+
 ### No extras required
 
 The base install has no LLM client. Register your own provider and you need
@@ -310,7 +342,7 @@ not, it may move:
 python -c "import bos.sdk; print(len(bos.sdk.__all__))"
 ```
 
-It holds 39 names: `BosApp` and `open_harness`; the agent surface (`AgentPort`,
+It holds 40 names: `BosApp`, `ModelInfo` (what `list_models` returns) and `open_harness`; the agent surface (`AgentPort`,
 `Agent`, `AgentHarness`, `AgentResult`, `Message`, `TurnContext`); the ports you
 can implement (`LLM`, `ChatStore`, `Consolidator`, `ToolSet`, `TurnInterceptor`,
 `PromptProvider`, `TurnEventSink`) together with every type those ports' own

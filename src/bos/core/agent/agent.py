@@ -324,6 +324,11 @@ class Agent:
         return self._name
 
     @property
+    def model(self) -> str | None:
+        """The configured model; a turn's ``llm_args["model"]`` overrides it."""
+        return self._model
+
+    @property
     def stop_requested(self) -> bool:
         return self._stop_requested.is_set()
 

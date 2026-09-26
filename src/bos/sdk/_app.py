@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 from bos.config import Workspace
 
 from ._bootstrap import open_harness
+from ._model_catalog import LITELLM_MODELS, RUNTIME_DEFAULTS, RUNTIME_MODELS, ModelInfo, to_model_infos
 
 if TYPE_CHECKING:
     from bos.config import RootConfig
@@ -172,6 +174,44 @@ class BosApp:
             return self._agents[kind]
         self._agents[kind] = await harness.create_agent(kind=kind, agent_cfg=agent_cfg)
         return self._agents[kind]
+
+    def list_models(self, kind: str | None = None) -> dict[str, ModelInfo]:
+        """The models an agent can be asked for per turn, for a chat UI's pickers.
+
+        Keyed by what a turn passes as ``llm_args["model"]``; each entry's
+        ``efforts`` are the values its ``llm_args["reasoning_effort"]`` takes.
+        With no *kind*, the workspace's default, as :meth:`agent`.
+
+        BOS's own ``Agent`` gets the models of every provider whose API key is
+        set in the environment — the workspace's ``envs`` and ``envfile``
+        included — in litellm's ids. An external runtime gets its own native
+        names, whichever keys are set. ``is_default`` marks what the agent runs
+        when a turn names no model: its configured ``model``, else
+        ``BOS_MODEL`` for an ``Agent`` or the runtime's own default — and marks
+        nothing when that model is not listed.
+
+        The list is hard-coded, not asked of each vendor, and nothing is
+        checked against it: a model it lacks still runs when passed, and a
+        wrong one fails with the provider's own error.
+        """
+        agent = self.agent(kind)
+        # `resolved_config` names the vendor behind an external runtime; see
+        # get_messages for why it is reached with `getattr`.
+        resolved = getattr(agent, "resolved_config", None) or {}
+        runtime = resolved.get("external_runtime")
+        if runtime is None:
+            # ponytail: a set key counts, valid or not; nothing here calls a vendor.
+            catalog = {
+                model: entry
+                for env, models in LITELLM_MODELS.items()
+                if os.environ.get(env)
+                for model, entry in models.items()
+            }
+            default = getattr(agent, "model", None) or os.environ.get("BOS_MODEL")
+        else:
+            catalog = RUNTIME_MODELS.get(runtime, {})
+            default = resolved.get("model") or RUNTIME_DEFAULTS.get(runtime)
+        return to_model_infos(catalog, default)
 
     async def get_messages(
         self, chat_id: str, *, source: Literal["auto", "bos", "native"] = "auto"

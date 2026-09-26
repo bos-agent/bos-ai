@@ -2229,8 +2229,8 @@ class ClaudeCodeAgent:
         :meth:`_options` — pointed at BOS's MCP server when :meth:`_mcp_egress` has one for this
         agent (§3.8), which it builds on the agent's first turn — plus the turn's own fields —
         ``resume`` when the chat has a native session on record (§3.6), ``llm_args["model"]`` as
-        ``model`` and ``llm_args["reasoning_effort"]`` as ``effort``, whose values BOS's ``low``/
-        ``medium``/``high`` are among — and disconnected however the turn ends, schema retries
+        ``model`` and ``llm_args["reasoning_effort"]`` as ``effort``, verbatim (the CLI takes
+        ``low`` through ``max``) — and disconnected however the turn ends, schema retries
         included.
 
         The answer is ``ResultMessage.result``. ``usage`` is mapped by :func:`_usage` and summed

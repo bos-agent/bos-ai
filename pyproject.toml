@@ -18,7 +18,7 @@ Homepage = "https://github.com/bos-agent/bos-ai"
 
 
 [project.optional-dependencies]
-litellm = ["litellm==1.84.0"]
+litellm = ["litellm==1.102.1"]
 gateway = [
     "starlette==1.6.0",
     "uvicorn==0.53.0",
