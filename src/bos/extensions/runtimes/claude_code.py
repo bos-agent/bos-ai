@@ -26,16 +26,20 @@ allowlist, and the fail-closed preflights; every check that reads the host runs 
 none starts the CLI — a turn: ``run()`` resumes the chat's native session, runs one CLI
 child to the end of the turn and commits the two-message record (BEP 19 §3.6, §3.7, §3.9) —
 structured output: a ``schema`` turn validates the CLI's answer locally and retries with a
-correction message on failure, up to ``max_schema_retries`` (§3.9, BEP 12) — and the turn
+correction message on failure, up to ``max_schema_retries`` (§3.9, BEP 12) — the turn
 streamed live: ``receive_response()`` is translated into ``TurnEvent``s for ``event_sink`` as it
-arrives, one attempt (a schema retry included) at a time (§3.9). A turn is not yet polled for an
-``interrupt`` or bounded by ``timeout_seconds``, and the hook and ``can_use_tool`` are not built,
-so nothing in this module confines anything yet.
+arrives, one attempt (a schema retry included) at a time (§3.9) — and the control surface: a
+message the ``interrupt`` poll returns is delivered into the running turn, ``AbortTurn`` and
+``request_stop()`` interrupt it, ``timeout_seconds`` bounds the CLI's start and each attempt, and
+``aclose()`` stops every turn, drains them within a bound and closes their clients (§3.9, §3.10.2;
+the audit of every wait that crosses to the CLI sits above ``_Turn``). The hook and
+``can_use_tool`` are not built, so nothing in this module confines anything yet.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
 import json
 import logging
@@ -67,7 +71,9 @@ from claude_agent_sdk import (
 from claude_agent_sdk.types import SystemPromptPreset
 
 from bos.core.agent import (
+    ABORTED_TURN_CONTENT,
     SHUTDOWN_CONTENT,
+    AbortTurn,
     AgentEventType,
     AgentResult,
     ChatStore,
@@ -79,6 +85,7 @@ from bos.core.agent import (
     TurnEventPhase,
     TurnEventSink,
     TurnEventStage,
+    _apply_async,
     _compact,
     content_as_parts,
     image_source_to_model_url,
@@ -423,6 +430,8 @@ _BOS_OWNED: Mapping[str, str] = MappingProxyType({
     "effort": "reserved for BOS, to set per turn from `llm_args['reasoning_effort']` (BEP 19 §3.9)",
     "resume": "reserved for BOS, to resume the chat's own native session (BEP 19 §3.6)",
     "output_format": "reserved for BOS, to set per turn from `schema=` (BEP 19 §3.9)",
+    "extra_args": "set by BOS, to have the CLI echo each message BOS sends it (`--replay-user-messages`, BEP 19 "
+    "§3.9); a host's flags would ride on the same CLI command, `--dangerously-skip-permissions` among them",
 })
 
 _SESSION = "decides which native session a turn continues, or its id, and BOS owns that mapping (BEP 19 §3.6)"
@@ -431,7 +440,6 @@ _STREAM = "changes what BOS reads back from the CLI, which is BOS's end of the c
 
 # Neither set by BOS nor safe to forward.
 _REFUSED: Mapping[str, str] = MappingProxyType({
-    "extra_args": "appends arbitrary flags, `--dangerously-skip-permissions` among them, to the CLI command BOS builds",
     "cli_path": "replaces the bundled CLI 2.1.281, the version BOS's confinement was measured against (BEP 19 §3.5.3)",
     "add_dirs": "widens what the agent may reach beyond `cwd` (BEP 19 §3.5.3)",
     "plugins": "loads commands, agents, skills and hooks into the session",
@@ -678,10 +686,21 @@ def _image_source(source: Mapping[str, Any]) -> dict[str, Any]:
     return {"type": "base64", "media_type": header.removeprefix("data:").split(";")[0], "data": data}
 
 
-async def _user_message(blocks: list[dict[str, Any]]) -> AsyncIterator[dict[str, Any]]:
-    """*blocks* as one user message, shaped as ``ClaudeSDKClient.query`` sends a str prompt:
-    ``query`` takes content blocks only as a stream of such messages."""
-    yield {"type": "user", "message": {"role": "user", "content": blocks}, "parent_tool_use_id": None}
+async def _user_message(
+    content: str | list[dict[str, Any]], message_uuid: str | None = None
+) -> AsyncIterator[dict[str, Any]]:
+    """*content* as one user message, shaped as ``ClaudeSDKClient.query`` sends a str prompt:
+    ``query`` takes content blocks, and a uuid, only as a stream of such messages. The CLI's
+    ``--replay-user-messages`` echo of the message carries *message_uuid* back (measured against
+    CLI 2.1.281), which is how BOS follows a mid-turn message (``ClaudeCodeAgent._stream``)."""
+    message: dict[str, Any] = {
+        "type": "user",
+        "message": {"role": "user", "content": content},
+        "parent_tool_use_id": None,
+    }
+    if message_uuid is not None:
+        message["uuid"] = message_uuid
+    yield message
 
 
 def _usage(usage: Mapping[str, Any] | None) -> dict[str, int] | None:
@@ -721,12 +740,105 @@ def _usage(usage: Mapping[str, Any] | None) -> dict[str, int] | None:
     return mapped
 
 
+def _add_usage(total: dict[str, int] | None, usage: dict[str, int] | None) -> dict[str, int] | None:
+    """Two of :func:`_usage`'s dicts added key by key, for an attempt that ran more than one
+    native turn: a mid-turn message the CLI answered in a turn of its own (``ClaudeCodeAgent._stream``).
+    A key is the sum over the native turns that reported it."""
+    if total is None or usage is None:
+        return total or usage
+    return {key: total.get(key, 0) + usage.get(key, 0) for key in total.keys() | usage.keys()}
+
+
 # BEP 19 §3.9: the name of the CLI's own synthetic tool for `output_format` (measured against
 # CLI 2.1.281; pinned by test_structured_output_arrives_from_the_synthetic_tool_against_the_real_cli
 # in tests/test_claude_code_runtime.py). Its `ToolUseBlock`/`ToolResultBlock` are the CLI answering
 # itself, not a tool the agent chose, so `_events_for_message` excludes them from the `tool` event
 # stream rather than reporting a call BOS never dispatched and a result BOS never received.
 _STRUCTURED_OUTPUT_TOOL = "StructuredOutput"
+
+# How long a turn (or aclose(), across all of them) waits for the CLI to answer an interrupt, and
+# then for the interrupted turn to stream its last message, before giving up on it — mirrors
+# codex._INTERRUPT_GRACE_SECONDS and Agent._ABANDON_TEARDOWN_SECONDS (agent.py), for the same
+# reason: a CLI that delays or ignores the request must not hold a stop, a timeout or aclose() open
+# (BEP 19 §3.10.2). Measured against CLI 2.1.281, not pinned: it answers in milliseconds, and the
+# interrupted turn's ResultMessage follows at once.
+_INTERRUPT_GRACE_SECONDS = 2.0
+
+# The outer bound aclose() puts on draining every in-flight turn. Must stay above `_settle`'s worst
+# case (3 x the grace: the interrupt, the drain, the wait after the cancel), or aclose() reports
+# turns that are winding down normally as stuck.
+_ACLOSE_GRACE_SECONDS = 10.0
+
+# BEP 19 §3.10.2: the `terminal_reason` of a turn the CLI ended because it was interrupted —
+# "aborted_tools" while a tool ran, "aborted_streaming" while the model answered (both measured
+# against CLI 2.1.281; the first pinned against the real CLI by
+# test_request_stop_mid_turn_stops_the_cli_and_its_tool_against_the_real_cli). The SDK's own
+# `ResultMessage.terminal_reason` docstring names the same two. Such a turn ends as an error result
+# — subtype "error_during_execution", `is_error`, no `result` (measured) — so it is kept as a
+# partial answer only when BOS itself asked for the stop; any other is raised like every error.
+_INTERRUPTED = frozenset({"aborted_tools", "aborted_streaming"})
+
+# Every await in this module that crosses to the CLI, and what bounds it, stated once so the next
+# reader does not redo the audit:
+#
+# - `client.connect()` — the CLI starting and, on a resumed chat, loading its session — carries
+#   `timeout_seconds` itself (the TimeoutError names the phase, "at startup"). The SDK bounds it
+#   too (read from the claude-agent-sdk 0.2.159 source): its version probe under
+#   `anyio.fail_after(2)`, its initialize handshake under
+#   `fail_after(max(CLAUDE_CODE_STREAM_CLOSE_TIMEOUT / 1000, 60))` seconds. It is not raced against
+#   a stop: a stop that lands while it runs ends the call with the shutdown marker once it returns,
+#   before any turn starts.
+# - Each attempt's `query()`, every `receive_response()` round and each mid-turn message's
+#   `query()` run in the attempt's stream task (`_stream`), inside `_run_attempt`'s
+#   `asyncio.timeout(timeout_seconds)` AND raced against the stop flag, so `_settle`'s cancel bounds
+#   them even when `timeout_seconds` is None. Per attempt: a schema retry gets a window of its own,
+#   so a call with retries can take a multiple of it.
+# - The interrupt (`_interrupt`) is a control request the CLI answers at its leisure, and the
+#   SDK's own wait for the answer is 60 seconds, so the whole of it — the lock ahead of it
+#   included — is bounded by `_INTERRUPT_GRACE_SECONDS`. `_settle`, which sends it and then waits
+#   for the stream, takes three graces at worst, then abandons a stream task that will not end.
+# - `client.disconnect()` bounds itself for the options BOS sends, which name no session store and
+#   no in-process MCP server (read from source, not measured): `Query.close()` cancels its reader
+#   and awaits `SubprocessCLITransport.close()`, which bounds every await in it — the write lock
+#   (5s), the CLI's exit once stdin closes (5s), SIGTERM and a wait (5s), SIGKILL and a wait (5s) —
+#   ~20s at worst, the SDK's own figure. BOS never wraps it in a timeout, because an asyncio
+#   cancellation delivered inside it skips that escalation (the SDK's docstring says so), and
+#   `_close` runs it in a task of its own, shielded, so a caller's cancellation cannot land there.
+# - `aclose()` waits for the in-flight turns for `_ACLOSE_GRACE_SECONDS`, then closes their clients
+#   with `_close` regardless, all at once, so the SDK's bound is paid once, not per turn.
+# - With `timeout_seconds = None` nothing above is bounded by it, because the caller declined a
+#   deadline; the stop flag, `aclose()` and the SDK's own bounds still hold.
+# - Host code the stream task awaits, the event sink and the interrupt callback, is not the CLI's
+#   and has no bound of its own; a stream task parked there that swallows `_settle`'s cancel is
+#   abandoned, which is why `aclose()` bounds its own wait.
+
+
+class _Turn:
+    """One turn's client and what BOS knows of the turn, shared by ``run()``, the task streaming
+    the attempt, and ``aclose()`` (BEP 19 §3.10.1: one client per turn)."""
+
+    def __init__(self, client: Any) -> None:
+        self.client = client
+        self.task: asyncio.Task[ResultMessage] | None = None  # the attempt streaming now
+        self.closing: asyncio.Task[None] | None = None  # the one disconnect, see `_close`
+        # uuids of the mid-turn messages sent and not yet echoed back (`_stream`).
+        self.pending: set[str] = set()
+        # The CLI may be running a turn, or holding a message BOS sent: set by each query(), and
+        # cleared by a ResultMessage with nothing pending or by an interrupt.
+        self.busy = False
+        # BOS is ending the turn: the stream task polls and sends nothing more, and returns at the
+        # next ResultMessage whatever is pending.
+        self.stopping = False
+        # Orders a mid-turn message's write ahead of an interrupt's, see `_interrupt`.
+        self.lock = asyncio.Lock()
+        # BEP 19 §3.9: `tool_use_id` -> name, for every `ToolUseBlock` not yet matched by its
+        # `ToolResultBlock` — see `_events_for_message`. One map for the whole call, a schema
+        # retry's rounds included, since it is the same connected client and ids do not repeat.
+        self.pending_tools: dict[str, str] = {}
+        # Per attempt, from its top-level AssistantMessages (`_stream`).
+        self.answer_uuid: str | None = None
+        self.last_text: str | None = None
+        self.usage: dict[str, int] | None = None
 
 
 class ClaudeCodeAgent:
@@ -815,9 +927,10 @@ class ClaudeCodeAgent:
 
         self._stop_requested = asyncio.Event()
         self._claude_md_warned: set[tuple[Path, str]] = set()  # `_root_claude_md`'s once-only WARNINGs
-        # The chat_ids with a turn running (BEP 19 §3.10.1's busy guard), taken the instant
-        # run() is entered, before any await could let a second call for the chat_id in.
-        self._in_flight: set[str] = set()
+        # chat_id -> its running turn (BEP 19 §3.10.1's busy guard). Reserved (None) the instant
+        # run() is entered, before any await could let a second call for the chat_id in; filled in
+        # once the turn's CLI has started, so aclose() has a turn to wait on and a client to close.
+        self._in_flight: dict[str, _Turn | None] = {}
 
     @property
     def name(self) -> str:
@@ -891,6 +1004,11 @@ class ClaudeCodeAgent:
             model=config.model,
             strict_mcp_config=True,
             env=dict(_INHERITED_ENV_OVERRIDES),
+            # BEP 19 §3.9: the CLI echoes each user message BOS sends it, with the uuid BOS put on
+            # it, when it takes that message into a turn — how BOS tells a mid-turn message folded
+            # into the running turn from one the CLI will run as a turn of its own (`_stream`). The
+            # SDK documents this flag as an `extra_args` value (`ClaudeSDKClient.rewind_files`).
+            extra_args={"replay-user-messages": None},
             **config.native_options,
         )
 
@@ -1101,6 +1219,268 @@ class ClaudeCodeAgent:
         except Exception:
             logger.debug("Claude Code event sink emit error", exc_info=True)
 
+    async def _stream(
+        self,
+        turn: _Turn,
+        prompt: str | list[dict[str, Any]],
+        *,
+        chat_id: str,
+        turn_id: str,
+        event_sink: TurnEventSink | None,
+        ctx_metadata: dict[str, Any] | None,
+        interrupt: Callable[[], dict[str, Any] | Awaitable[dict[str, Any]] | None] | None,
+    ) -> ResultMessage:
+        """One native turn attempt: send *prompt*, then read ``receive_response()`` until a
+        ``ResultMessage`` that leaves no mid-turn message pending, emitting §3.9's ``TurnEvent``s
+        on the way and polling ``interrupt`` (BEP 19 §3.9, §3.10.2), and return that
+        ``ResultMessage``.
+
+        ``interrupt`` is polled once per message, as ``Agent._interrupt`` reads it once per
+        iteration, but never on a ``ResultMessage``: the poll is destructive (``AgentActor`` pops
+        what it returns) and after the ``ResultMessage`` there is no turn to put a message into.
+
+        - **A truthy return is a message for the running turn**, not a stop (``agent.py``: ``Agent``
+          merges it into the live context). It goes to the CLI with ``query()`` (:meth:`_steer`),
+          and what the CLI does with it was measured against CLI 2.1.281 with the fake Messages
+          API: it queues it and folds it into its next model request after a tool call — "within
+          the running turn, often alongside the next tool result, rather than as a separate
+          conversation turn", in the CLI's own words to the model — but a message that misses the
+          turn's last model call is not dropped: the CLI runs it as a native turn of its own right
+          after the ``ResultMessage``. So this reads on past a ``ResultMessage`` while a message
+          is pending, and that turn becomes part of this one: its events stream, its answer and
+          its session entry are the ones ``run()`` reports, and its usage is added. Which case a
+          message is in shows in the stream: under ``--replay-user-messages`` (:meth:`_options`)
+          the CLI echoes it, carrying the uuid BOS put on it, when it takes it into a turn — before
+          the ``ResultMessage`` when folded in, after it when it runs as its own turn (measured).
+        - **Raising ends the turn.** Nothing here catches what the callback raises: it propagates
+          out of this task, ``run()``'s teardown tells the CLI to stop, and ``run()`` returns the
+          aborted-turn marker for ``AbortTurn``, as ``Agent`` does, and fails the turn for
+          anything else.
+        - **A falsy return does nothing.**
+
+        With ``turn.stopping`` set BOS is ending the turn, so nothing is polled or sent any more,
+        and the next ``ResultMessage`` ends the read whatever is pending: the interrupt
+        :meth:`_interrupt` sent carries ``cancel_queued``, so once the CLI has it, it holds nothing
+        to run.
+        """
+        async with turn.lock:  # ahead of any interrupt, which then stops the turn this starts
+            turn.busy = True
+            turn.answer_uuid = turn.last_text = turn.usage = None
+            await turn.client.query(prompt if isinstance(prompt, str) else _user_message(prompt))
+        while True:
+            result: ResultMessage | None = None
+            async for message in turn.client.receive_response():
+                if isinstance(message, AssistantMessage) and message.parent_tool_use_id is None:
+                    # Recorded as `native_turn_id`, since the stream names no turn: the turn's last
+                    # top-level assistant message, a transcript entry, which `get_session_messages`
+                    # returns under this uuid (pinned by
+                    # test_a_second_turn_resumes_the_first_by_session_id_against_the_real_cli).
+                    # `ResultMessage.uuid` is in no transcript, and the prompt's own entry is not in
+                    # the stream (both measured, not pinned).
+                    turn.answer_uuid = message.uuid
+                    if text := "".join(block.text for block in message.content if isinstance(block, TextBlock)):
+                        turn.last_text = text  # what a stopped turn keeps (`run()`)
+                elif isinstance(message, UserMessage) and message.uuid in turn.pending:
+                    turn.pending.discard(message.uuid)  # the CLI took this mid-turn message into a turn
+                elif isinstance(message, ResultMessage):
+                    result = message
+                # BEP 19 §3.9: every attempt streams its own events, by being run through this same
+                # per-message loop. No sink, as CodexAgent._emit_stream also checks, means nothing
+                # to build.
+                if event_sink is not None:
+                    for event in self._events_for_message(
+                        message, turn.pending_tools, chat_id=chat_id, turn_id=turn_id, metadata=ctx_metadata
+                    ):
+                        await self._emit(event_sink, event)
+                if interrupt is not None and result is None and not turn.stopping:
+                    if message_for_the_turn := await _apply_async(interrupt, {}):
+                        await self._steer(turn, message_for_the_turn, chat_id=chat_id, turn_id=turn_id)
+            if result is None:
+                raise RuntimeError("the CLI ended the turn without a result")
+            turn.usage = _add_usage(turn.usage, _usage(result.usage))
+            if not turn.pending:
+                turn.busy = False
+                return result
+            if turn.stopping:
+                return result
+
+    async def _steer(self, turn: _Turn, message: dict[str, Any], *, chat_id: str, turn_id: str) -> None:
+        """Send a message the ``interrupt`` poll returned into the running turn (BEP 19 §3.9; see
+        :meth:`_stream` for what the CLI does with it). Best-effort, but never silent: the poll
+        already took the message from the caller's queue and it came from a user, so a message
+        BOS cannot send is logged at WARNING, where nothing else records that it existed. The
+        message's ``"content"`` is a BOS ``MessageContent``, converted as a turn's own is."""
+        content = _content_to_claude_prompt(message.get("content", ""))
+        async with turn.lock:
+            if turn.stopping:
+                why, exc_info = "the turn is being stopped", False
+            else:
+                message_uuid = str(uuid.uuid4())
+                turn.pending.add(message_uuid)
+                try:
+                    await turn.client.query(_user_message(content, message_uuid))
+                    return
+                except Exception:
+                    turn.pending.discard(message_uuid)
+                    why, exc_info = "sending it to the CLI failed", True
+        logger.warning(
+            "%s runtime %r: a mid-turn message for turn %r on chat %r was dropped: %s",
+            self._config.runtime,
+            self._kind,
+            turn_id,
+            chat_id,
+            why,
+            exc_info=exc_info,
+        )
+
+    async def _interrupt(self, turn: _Turn) -> None:
+        """Tell the CLI to stop the turn and to drop every message BOS sent that it has not yet
+        taken into a turn — bounded by ``_INTERRUPT_GRACE_SECONDS`` and best-effort, since a
+        stop's outcome must not depend on it (BEP 19 §3.9, §3.10.2).
+
+        It is the CLI's ``interrupt`` control request with ``cancel_queued``. Without that flag a
+        mid-turn message still queued in the CLI outlives the interrupt and runs as a turn of its
+        own — right after the interrupted one, and on stdin closing too, when the client is closed
+        (both measured against CLI 2.1.281) — which nothing would read. The CLI takes the flag
+        (read from its source, where the SDK client bundled with it sends it as
+        ``interrupt({cancelQueued: true})``), but claude-agent-sdk 0.2.159's
+        ``ClaudeSDKClient.interrupt()`` cannot, so the request goes through the SDK's private
+        ``Query._send_control_request``, the method every one of the client's own control
+        requests goes through.
+        ``test_the_interrupt_reaches_the_cli_through_an_sdk_path_that_still_exists`` fails when
+        that path moves, and when ``interrupt()`` gains an argument, which would be the supported
+        way instead.
+
+        Under ``turn.lock``, so a mid-turn message already on its way to the CLI is written first
+        and dropped with the rest, while one after it finds ``turn.stopping`` set and is not sent.
+        """
+        turn.stopping = True
+        turn.busy = False
+        with contextlib.suppress(Exception):
+            async with asyncio.timeout(_INTERRUPT_GRACE_SECONDS), turn.lock:
+                await turn.client._query._send_control_request({"subtype": "interrupt", "cancel_queued": True})
+
+    async def _settle(self, turn: _Turn, task: asyncio.Task[ResultMessage]) -> ResultMessage:
+        """Stop the attempt *task* streams, then give it a bounded window to stream the
+        ``ResultMessage`` the CLI ends the turn with, rather than waiting it out (BEP 19 §3.10.2).
+        Shared by a stop and a timeout, as ``CodexAgent._settle_interrupted`` is, so a CLI that
+        ignores the interrupt is one code path.
+
+        Raises if the stream does not end: there is no result to hand back, and making one up would
+        misreport the turn. At worst that is three graces — the interrupt, the drain, and the wait
+        after the cancel — and on that path the task is abandoned, not killed, as
+        ``Agent._abandon`` does: a stream task parked in host code, the sink or the interrupt
+        callback, can swallow a cancel.
+        """
+        await self._interrupt(turn)
+        done, _ = await asyncio.wait({task}, timeout=_INTERRUPT_GRACE_SECONDS)
+        if task in done:
+            return task.result()
+        task.cancel()
+        await asyncio.wait({task}, timeout=_INTERRUPT_GRACE_SECONDS)
+        # Only so asyncio does not log "exception was never retrieved" for a task that finished in
+        # the instant after the cancel, as codex.py and Agent._abandon do; the raise follows anyway.
+        if task.done() and not task.cancelled():
+            task.exception()
+        raise RuntimeError(f"the CLI did not respond to interrupt within {_INTERRUPT_GRACE_SECONDS}s")
+
+    async def _run_attempt(
+        self,
+        turn: _Turn,
+        prompt: str | list[dict[str, Any]],
+        *,
+        chat_id: str,
+        turn_id: str,
+        event_sink: TurnEventSink | None,
+        ctx_metadata: dict[str, Any] | None,
+        interrupt: Callable[[], dict[str, Any] | Awaitable[dict[str, Any]] | None] | None,
+    ) -> tuple[ResultMessage, bool]:
+        """Run one attempt (:meth:`_stream`) as a task, raced against the stop flag and bounded by
+        ``timeout_seconds`` (BEP 19 §3.10.2), as ``CodexAgent._run_turn`` races a Codex turn.
+
+        Returns ``(result, stopped)``: *stopped* is True only when the stop flag is why the attempt
+        ended — as opposed to a ``timeout_seconds`` expiry (raised, never returned) or a turn that
+        ended on its own. ``run()`` decides from it whether an interrupted result is a kept partial
+        answer or a failure. However the attempt ends early the CLI is told to stop: a stop or a
+        timeout through :meth:`_settle`, and a stream that raised — ``AbortTurn`` or anything else
+        from the callback, or a vendor failure — through ``run()``'s teardown (:meth:`_teardown`),
+        which interrupts a CLI the stream left busy. An interrupt clears ``turn.busy``, so no turn
+        is interrupted twice.
+        """
+        task = asyncio.ensure_future(
+            self._stream(
+                turn,
+                prompt,
+                chat_id=chat_id,
+                turn_id=turn_id,
+                event_sink=event_sink,
+                ctx_metadata=ctx_metadata,
+                interrupt=interrupt,
+            )
+        )
+        turn.task = task
+        stop = asyncio.ensure_future(self._stop_requested.wait())
+        try:
+            try:
+                async with asyncio.timeout(self._config.timeout_seconds):
+                    await asyncio.wait({task, stop}, return_when=asyncio.FIRST_COMPLETED)
+            except TimeoutError as exc:
+                # A timeout raises whatever _settle comes back with (BEP 19 §3.10.2); it waits only
+                # so the CLI is told to stop before this returns.
+                with contextlib.suppress(Exception):
+                    await self._settle(turn, task)
+                raise TimeoutError(
+                    f"{self._config.runtime} runtime {self._kind!r}: turn {turn_id!r} for chat {chat_id!r} exceeded "
+                    f"timeout_seconds={self._config.timeout_seconds!r} during the turn and was interrupted"
+                ) from exc
+        finally:
+            stop.cancel()
+        if task.done():
+            # It finished on its own, or raced the stop and won: nothing was abandoned. A raise from
+            # the stream surfaces here, through task.result(), and `run()`'s teardown then tells the
+            # CLI to stop, the stream having left it busy.
+            return task.result(), False
+        return await self._settle(turn, task), True
+
+    async def _close(self, turn: _Turn) -> None:
+        """Disconnect *turn*'s client once, whoever asks first — ``run()`` as the turn ends, or
+        ``aclose()`` giving up on it. In a task of its own and shielded: ``disconnect()`` bounds
+        itself, and a cancellation delivered inside it would skip the SDK's terminate-then-kill of
+        the CLI (see the audit above ``_Turn``)."""
+        closing = turn.closing
+        if closing is None:
+            closing = turn.closing = asyncio.ensure_future(turn.client.disconnect())
+        await asyncio.shield(closing)
+
+    async def _teardown(self, turn: _Turn, *, chat_id: str, turn_id: str) -> None:
+        """Leave the CLI running nothing and close the client, however ``run()`` is ending."""
+        if turn.task is not None and not turn.task.done():
+            turn.task.cancel()  # run() itself is unwinding: cancelled, or past a stream it gave up on
+        if turn.busy:
+            await self._interrupt(turn)
+        if turn.pending:
+            logger.warning(
+                "%s runtime %r: %d mid-turn message(s) for turn %r on chat %r were dropped: the turn ended before "
+                "the CLI took them into it",
+                self._config.runtime,
+                self._kind,
+                len(turn.pending),
+                turn_id,
+                chat_id,
+            )
+        await self._close(turn)
+
+    def _shutdown_result(self, chat_id: str, turn_id: str) -> AgentResult:
+        """``Agent``'s own marker for a turn a stop came before, so a host needs no second string;
+        nothing is committed (BEP 19 §3.10.2)."""
+        logger.info(
+            "%s runtime %r: chat %r has a stop requested; returning the shutdown marker without starting a turn",
+            self._config.runtime,
+            self._kind,
+            chat_id,
+        )
+        return external_agent_result(output=SHUTDOWN_CONTENT, turn_id=turn_id, usage=None, finish_reason="shutdown")
+
     async def run(
         self,
         chat_id: str,
@@ -1123,9 +1503,10 @@ class ClaudeCodeAgent:
         ``llm_args["reasoning_effort"]`` as ``effort``, whose values BOS's ``low``/``medium``/
         ``high`` are among — and disconnected however the turn ends, schema retries included.
 
-        The answer is ``ResultMessage.result``. ``usage`` is mapped by :func:`_usage`, and
-        ``finish_reason`` is the CLI's ``terminal_reason``, or its ``stop_reason`` when it
-        reports none, verbatim. The turn is committed as two messages, the assistant's carrying
+        The answer is ``ResultMessage.result``. ``usage`` is mapped by :func:`_usage` and summed
+        over the attempt's native turns — more than one when a mid-turn message ran as a turn of
+        its own (:meth:`_stream`) — and ``finish_reason`` is the CLI's ``terminal_reason``, or its
+        ``stop_reason`` when it reports none, verbatim. The turn is committed as two messages, the assistant's carrying
         the session id the CLI answered from. A turn that spends its ``max_turns`` closes as
         BOS's own ``Agent`` closes at ``max_iterations``, answering ``MAX_ITERATION_CONTENT``,
         and is committed too (§3.9). Any other error result raises and commits nothing — a
@@ -1153,38 +1534,50 @@ class ClaudeCodeAgent:
         per_retry`` pins the retry). Each retry is a new ``query()`` on the *same* connected client
         and native session — not a new CLI child — and, measured, ``max_turns`` is a budget that
         resets for every ``query()``, so a retry gets the same fresh budget the first attempt did,
-        the way a fresh ``timeout_seconds`` window will once Task 7 adds one (§3.10.2). A turn that
+        as it gets a ``timeout_seconds`` window of its own (§3.10.2). A turn that
         spends ``max_turns`` — first attempt or retry — is never schema-checked: like BOS's own
         ``Agent`` when a schema turn hits ``max_iterations`` (``_close_with_handoff`` never sets
         its ``structured_ok``), it closes unstructured, answering ``MAX_ITERATION_CONTENT``.
+
+        Ending early has the three causes ``CodexAgent.run`` tells apart, decided as each happens
+        (§3.10.2):
+
+        - **``timeout_seconds``** is the caller's own deadline. It bounds ``connect()`` and each
+          attempt, a window apiece; on expiry during an attempt the turn is interrupted, then a
+          ``TimeoutError`` naming the phase is raised. Nothing is committed: an answer cut off by
+          the caller's deadline is a failure, not history.
+        - **A stop** — :meth:`request_stop` or :meth:`aclose` racing the turn — is BOS taking the
+          turn away, and ``Agent`` keeps what a stopped turn established: the turn is interrupted,
+          and the text of its last top-level assistant message, or ``""``, is returned and
+          committed with its session, ``finish_reason`` the CLI's own — ``aborted_tools`` or
+          ``aborted_streaming``, never Codex's ``interrupted`` (measured). A stop that lands while
+          the CLI is starting starts no turn and returns ``SHUTDOWN_CONTENT``; one that lands
+          before a schema retry raises the validation failure rather than starting another turn.
+        - **An interrupted result BOS never asked for** raises, as every other error result does.
+
+        The ``interrupt`` callback is not a fourth. A truthy return is a message delivered into the
+        running turn (:meth:`_stream`), and a raised ``AbortTurn`` returns ``ABORTED_TURN_CONTENT``
+        with ``finish_reason="aborted"`` once the CLI is told to stop, as ``Agent`` returns it
+        (``agent.py``) — not a raise, which would make ``AgentActor`` report a failed turn. That
+        commits nothing: ``Agent`` persists the marker to shape the model's history, and the native
+        session is this model's history, which BOS never replays into the CLI.
 
         Two concurrent turns on one ``chat_id`` are refused rather than queued: a native session
         is single-threaded (§3.10.1). A turn started after :meth:`request_stop` or
         :meth:`aclose` returns ``SHUTDOWN_CONTENT`` before any client is built.
         """
-        # Accepted but not acted on yet, each until its task lands: `interrupt` (Task 7, §3.9),
-        # which is not polled, so a message a caller queues mid-turn stays in its queue; and the
-        # config's `timeout_seconds` (Task 7, §3.10.2), so nothing bounds a turn yet.
         turn_id = turn_id or uuid.uuid4().hex
         # Before anything that costs, as `CodexAgent.run` does and for its reason: a turn
         # started after `request_stop()` cannot succeed, so it starts no CLI and no billable
-        # turn. `Agent`'s own marker, so a host needs no second string; nothing is committed;
-        # and the flag is never cleared, as `Agent`'s is not.
+        # turn. The flag is never cleared, as `Agent`'s is not.
         if self._stop_requested.is_set():
-            logger.info(
-                "%s runtime %r: chat %r asked for a turn after request_stop(); returning the shutdown marker "
-                "without starting one",
-                self._config.runtime,
-                self._kind,
-                chat_id,
-            )
-            return external_agent_result(output=SHUTDOWN_CONTENT, turn_id=turn_id, usage=None, finish_reason="shutdown")
+            return self._shutdown_result(chat_id, turn_id)
         if chat_id in self._in_flight:
             raise RuntimeError(
                 f"Agent {self._kind!r} already has a turn running on chat {chat_id!r}. A Claude Code session is "
                 f"single-threaded; wait for the turn to finish."
             )
-        self._in_flight.add(chat_id)  # taken synchronously: no await before this line
+        self._in_flight[chat_id] = None  # reserved synchronously: no await before this line
         try:
             native_session_id = (
                 await read_native_session_id(self._chat_store, chat_id, runtime=self._config.runtime)
@@ -1208,19 +1601,13 @@ class ClaudeCodeAgent:
 
             # ponytail: a client per turn costs one CLI spawn (~1s). A per-chat_id session pool
             # is the upgrade if that latency shows up; resume= makes the stateless version correct.
-            client = _CLIENT_FACTORY(options)
-            result: ResultMessage | None = None
-            answer_uuid: str | None = None
+            turn = _Turn(_CLIENT_FACTORY(options))
             phase = "at startup"  # connect(): the CLI starting, the resumed session loading
             structured_output: Any = None
             structured_ok = False
             ran_out = False
+            kept = False
             retries = 0
-            # BEP 19 §3.9: `tool_use_id` -> name, for every `ToolUseBlock` not yet matched by its
-            # `ToolResultBlock` — see `_events_for_message`. One map for the whole call, a schema
-            # retry's fresh `receive_response()` round included, since it is the same connected
-            # client and ids do not repeat across rounds.
-            pending_tools: dict[str, str] = {}
 
             def _vendor_failure(exc: Exception) -> RuntimeError:
                 # Every vendor failure on the turn path gets the runtime, agent, chat and turn, the
@@ -1245,9 +1632,9 @@ class ClaudeCodeAgent:
                 # which the session check below catches — because reporting it as a lost session
                 # sends an operator looking for one (§3.10.2).
                 #
-                # Shared between `connect()` and every retry's `query()` (both call this), since a
-                # schema retry can fail natively too — a new native failure, not one more
-                # validation attempt to retry.
+                # Shared between `connect()` and every attempt (both call this), since a schema
+                # retry can fail natively too — a new native failure, not one more validation
+                # attempt to retry — and so can the interrupt callback, which is wrapped the same.
                 refusal = f"No conversation found with session ID: {native_session_id}"
                 if (
                     native_session_id is not None
@@ -1266,42 +1653,67 @@ class ClaudeCodeAgent:
 
             try:
                 try:
-                    await client.connect()
+                    async with asyncio.timeout(self._config.timeout_seconds):
+                        await turn.client.connect()
+                except TimeoutError as exc:
+                    # Named, so a CLI that never finishes starting is not reported as a turn that
+                    # timed out, nor — on a resumed chat — as §3.6's lost session. No turn had
+                    # started, so there is nothing to interrupt; the SDK's connect() closes the
+                    # half-started CLI itself on the cancellation.
+                    raise TimeoutError(
+                        f"{self._config.runtime} runtime {self._kind!r}: turn {turn_id!r} for chat {chat_id!r} "
+                        f"exceeded timeout_seconds={self._config.timeout_seconds!r} at startup (connect)"
+                    ) from exc
                 except Exception as exc:
                     raise _vendor_failure(exc) from exc
                 phase = "during the turn"
+                self._in_flight[chat_id] = turn
+                if self._stop_requested.is_set():  # it landed while the CLI started: start no turn
+                    return self._shutdown_result(chat_id, turn_id)
                 while True:
                     try:
-                        await client.query(prompt if isinstance(prompt, str) else _user_message(prompt))
-                        result = None
-                        async for message in client.receive_response():
-                            if isinstance(message, AssistantMessage) and message.parent_tool_use_id is None:
-                                # Recorded as `native_turn_id`, since the stream names no turn: the
-                                # turn's last top-level assistant message, a transcript entry, which
-                                # `get_session_messages` returns under this uuid (pinned by
-                                # test_a_second_turn_resumes_the_first_by_session_id_against_the_real_cli).
-                                # `ResultMessage.uuid` is in no transcript, and the prompt's own entry
-                                # is not in the stream (both measured, not pinned). On a schema retry
-                                # this is overwritten by the winning attempt's own message.
-                                answer_uuid = message.uuid
-                            elif isinstance(message, ResultMessage):
-                                result = message
-                            # BEP 19 §3.9: every attempt streams its own events, this one included,
-                            # by nothing more than being run through this same per-message loop. No
-                            # sink, as CodexAgent._emit_stream also checks, means nothing to build.
-                            if event_sink is not None:
-                                for event in self._events_for_message(
-                                    message, pending_tools, chat_id=chat_id, turn_id=turn_id, metadata=ctx_metadata
-                                ):
-                                    await self._emit(event_sink, event)
+                        result, stopped = await self._run_attempt(
+                            turn,
+                            prompt,
+                            chat_id=chat_id,
+                            turn_id=turn_id,
+                            event_sink=event_sink,
+                            ctx_metadata=ctx_metadata,
+                            interrupt=interrupt,
+                        )
+                    except TimeoutError:
+                        # Unwrapped: it names its phase already, and a vendor-failure wrap would
+                        # bury which deadline fired.
+                        raise
+                    except AbortTurn:
+                        # Ahead of the broad except, or a cooperative stop would be reported as a
+                        # vendor failure. Agent CATCHES AbortTurn and returns (agent.py); see the
+                        # docstring for why nothing is committed.
+                        return external_agent_result(
+                            output=ABORTED_TURN_CONTENT, turn_id=turn_id, usage=None, finish_reason="aborted"
+                        )
                     except Exception as exc:
                         raise _vendor_failure(exc) from exc
 
-                    if result is None:
+                    if native_session_id is not None and result.session_id != native_session_id:
+                        # Never a silent new session under the same chat_id (BEP 19 §3.6). A resumed
+                        # turn answers from the session it resumed — measured: the ResultMessage
+                        # carries that id — and the SDK documents a new id only under
+                        # `fork_session`, which `native_options` refuses. So this fires only if the
+                        # CLI stops doing so, or resumed another session by that name; the turn ran,
+                        # and is not committed.
                         raise RuntimeError(
-                            f"{self._config.runtime} runtime {self._kind!r}: turn {turn_id!r} for chat "
-                            f"{chat_id!r} ended without a result"
+                            f"{self._config.runtime} runtime {self._kind!r}: turn {turn_id!r} resumed session "
+                            f"{native_session_id!r} for chat {chat_id!r}, but the CLI answered from session "
+                            f"{result.session_id!r}. BOS does not move a chat to another session silently "
+                            f"(BEP 19 §3.6), so it committed nothing."
                         )
+                    if stopped and result.terminal_reason in _INTERRUPTED:
+                        # BOS stopped this turn itself (see the docstring's "a stop"): keep what it
+                        # produced, never schema-checked — it did not finish, so a validation failure
+                        # would only swap one negative outcome for another that says nothing truer.
+                        kept = True
+                        break
                     # BEP 19 §3.9: `max_iterations` is a budget, not an error. The CLI ends a turn
                     # that spends `max_turns` as an error result, subtype "error_max_turns" (pinned
                     # by test_a_turn_that_spends_max_iterations_closes_like_bos_agent_against_the_
@@ -1327,19 +1739,6 @@ class ClaudeCodeAgent:
                             f"{chat_id!r} failed: subtype={result.subtype!r}, errors={result.errors!r}, "
                             f"api_error_status={result.api_error_status!r}, result={result.result!r}"
                         )
-                    if native_session_id is not None and result.session_id != native_session_id:
-                        # Never a silent new session under the same chat_id (BEP 19 §3.6). A resumed
-                        # turn answers from the session it resumed — measured: the ResultMessage
-                        # carries that id — and the SDK documents a new id only under
-                        # `fork_session`, which `native_options` refuses. So this fires only if the
-                        # CLI stops doing so, or resumed another session by that name; the turn ran,
-                        # and is not committed.
-                        raise RuntimeError(
-                            f"{self._config.runtime} runtime {self._kind!r}: turn {turn_id!r} resumed session "
-                            f"{native_session_id!r} for chat {chat_id!r}, but the CLI answered from session "
-                            f"{result.session_id!r}. BOS does not move a chat to another session silently "
-                            f"(BEP 19 §3.6), so it committed nothing."
-                        )
                     if schema is None or ran_out:
                         break
                     try:
@@ -1352,8 +1751,9 @@ class ClaudeCodeAgent:
                         structured_ok = True
                         break
                     except StructuredOutputError as e:
-                        if retries >= max_schema_retries:
-                            # Exhausted: commits nothing, same as a native failure above — an
+                        if retries >= max_schema_retries or self._stop_requested.is_set():
+                            # Exhausted, or stopped: a correction would start another native turn
+                            # after the stop. Commits nothing, same as a native failure above — an
                             # unvalidated reply is not the answer `schema=` promised, so it is not
                             # turn history either.
                             raise
@@ -1362,17 +1762,21 @@ class ClaudeCodeAgent:
                         # the session id does not change) — not a new CLI child — and `max_turns`
                         # is a per-query() budget that resets for it (measured: a client already at
                         # its limit still completes a later query() cleanly), so this retry gets the
-                        # same fresh budget the first attempt did, mirroring the per-attempt
-                        # `timeout_seconds` window BEP 19 §3.10.2 gives Codex's own retries.
+                        # same fresh budget the first attempt did, as it gets a `timeout_seconds`
+                        # window of its own from `_run_attempt` (BEP 19 §3.10.2).
                         prompt = (
                             f"Your previous response failed schema validation: {e}. "
                             "Reply ONLY with JSON matching the schema."
                         )
             finally:
-                await client.disconnect()
+                await self._teardown(turn, chat_id=chat_id, turn_id=turn_id)
 
-            text = MAX_ITERATION_CONTENT if ran_out else (result.result or "")
-            usage = _usage(result.usage)
+            if ran_out:
+                text = MAX_ITERATION_CONTENT
+            elif kept:
+                text = turn.last_text or ""
+            else:
+                text = result.result or ""
             if self._chat_store is not None:
                 commit = await commit_external_turn(
                     self._chat_store,
@@ -1382,8 +1786,8 @@ class ClaudeCodeAgent:
                     response=text,
                     runtime=self._config.runtime,
                     native_session_id=result.session_id,
-                    native_turn_id=answer_uuid,
-                    usage=usage,
+                    native_turn_id=turn.answer_uuid,
+                    usage=turn.usage,
                 )
                 if commit_observer is not None:
                     observed = commit_observer(commit)
@@ -1394,15 +1798,42 @@ class ClaudeCodeAgent:
                 output=structured_output if structured_ok else text,
                 structured=structured_ok,
                 turn_id=turn_id,
-                usage=usage,
+                usage=turn.usage,
                 finish_reason=result.terminal_reason or result.stop_reason,
             )
         finally:
-            self._in_flight.discard(chat_id)
+            self._in_flight.pop(chat_id, None)
 
     async def aclose(self) -> None:
-        """Set the same one-way stop flag :meth:`request_stop` sets (BEP 19 §3.10.2), so a
-        turn started afterwards returns the shutdown marker. The agent keeps no client to
-        close: each turn disconnects its own when it ends (§3.10.1). A turn already running is
-        not interrupted, and aclose() does not wait for it."""
+        """Stop every in-flight turn, wait for them within a bound, then close their clients
+        regardless (BEP 19 §3.10.2).
+
+        Setting the stop flag — the one :meth:`request_stop` sets, so a turn started afterwards
+        returns the shutdown marker — is what makes each running turn interrupt itself and race
+        that, as a stop does (:meth:`run`); this adds the waiting and the closing. The wait is
+        bounded by ``_ACLOSE_GRACE_SECONDS`` because :meth:`_settle` abandons a stream task it
+        cannot cancel, which then outlives its turn; a turn still winding down after the bound is
+        reported and its client closed anyway, since closing the client is what reaps the CLI. So
+        this is a bounded drain, not a clean one. Each client is closed through :meth:`_close`, the
+        same once-only disconnect the turn's own teardown uses. A turn whose CLI is still starting
+        has no client registered yet — closing one mid-start could leave the CLI running — so it
+        closes its own client when ``connect()`` returns, which ``timeout_seconds`` or the SDK's
+        own initialize timeout bounds.
+        """
         self._stop_requested.set()
+        turns = [turn for turn in self._in_flight.values() if turn is not None]
+        tasks = [turn.task for turn in turns if turn.task is not None and not turn.task.done()]
+        if tasks:
+            _, pending = await asyncio.wait(tasks, timeout=_ACLOSE_GRACE_SECONDS)
+            if pending:
+                logger.warning(
+                    "%s runtime %r: %d turn(s) still running after %ss; closing their clients anyway",
+                    self._config.runtime,
+                    self._kind,
+                    len(pending),
+                    _ACLOSE_GRACE_SECONDS,
+                )
+        # Concurrently and to the end: each close is bounded by the SDK, and one that raises must not
+        # leave another turn's CLI running. Its error surfaces from that turn's own teardown, which
+        # awaits the same close.
+        await asyncio.gather(*(self._close(turn) for turn in turns), return_exceptions=True)

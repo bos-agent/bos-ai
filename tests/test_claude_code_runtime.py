@@ -2,20 +2,24 @@
 
 So far: construction (BEP 19 §3.4, §3.5, §3.5.3, §3.10.3) — the config, the permission
 mapping, the per-client settings nonce, the ``native_options`` allowlist, and the
-fail-closed preflights — and one turn (§3.6, §3.7, §3.9): ``run()``, session continuity and
-the two-message commit.
+fail-closed preflights — one turn (§3.6, §3.7, §3.9): ``run()``, session continuity and
+the two-message commit — structured output and the streamed ``TurnEvent``s (§3.9), and the
+control surface (§3.9, §3.10.2): a mid-turn message, ``AbortTurn``, a stop, ``timeout_seconds``
+and ``aclose()``.
 
 Most tests here build options, or run a turn against ``FakeClaudeClient`` (conftest), and
 never start the CLI. Where the CLI's own behaviour is the point — the settings file its bash
-sandbox binds, what a hostile repository's own configuration can do, and whether a turn
-resumes a session — the test drives the real bundled CLI against the fake Messages API
-(tests/fake_anthropic.py), as the vendor-fact tests do.
+sandbox binds, what a hostile repository's own configuration can do, whether a turn resumes a
+session, and what the CLI does with a mid-turn message and an interrupt — the test drives the
+real bundled CLI against the fake Messages API (tests/fake_anthropic.py), as the vendor-fact
+tests do.
 """
 
 from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import dataclasses
 import hashlib
 import json
@@ -26,6 +30,7 @@ import shutil
 import sys
 import tempfile
 import threading
+import time
 import uuid
 from dataclasses import replace
 from pathlib import Path
@@ -46,12 +51,12 @@ from claude_agent_sdk import (
     get_session_messages,
 )
 from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport
-from conftest import BlockImport, claude_cli_env
+from conftest import ECHO, HANG, BlockImport, Pause, claude_cli_env
 from fake_anthropic import FakeAnthropic
 from test_claude_code_vendor_facts import _bash, _tool_results
 from test_external_agent_seam import _write_workspace
 
-from bos.core.agent import SHUTDOWN_CONTENT, StructuredOutputError
+from bos.core.agent import ABORTED_TURN_CONTENT, SHUTDOWN_CONTENT, AbortTurn, StructuredOutputError
 from bos.core.agent.agent import MAX_ITERATION_CONTENT
 from bos.extensions.chat_stores.in_memory import InMemChatStore
 from bos.extensions.runtimes import claude_code
@@ -1614,8 +1619,16 @@ async def test_a_resumed_turn_that_comes_back_on_another_session_is_refused(tmp_
         {"subtype": "success", "errors": [], "result": "API Error: 529 overloaded", "api_error_status": 529},
         # A terminal error the CLI raises itself, under the subtype its measured resume refusal uses.
         {"subtype": "error_during_execution", "errors": ["the turn failed while it ran"], "result": None},
+        # An interrupted turn (the shape `_interrupted()` measured) that BOS never asked to stop: it
+        # keeps a partial only for a stop it sent itself (BEP 19 §3.10.2).
+        {
+            "subtype": "error_during_execution",
+            "errors": ["[ede_diagnostic] result_type=user last_content_type=n/a stop_reason=tool_use"],
+            "result": None,
+            "terminal_reason": "aborted_tools",
+        },
     ],
-    ids=["api-error", "cli-error"],
+    ids=["api-error", "cli-error", "an-interrupt-bos-never-sent"],
 )
 @pytest.mark.asyncio
 async def test_an_error_result_raises_and_commits_nothing(tmp_path, fake_claude, mem_store, error):
@@ -2285,3 +2298,829 @@ async def test_the_real_cli_streams_a_tool_call_as_turn_events_against_the_real_
     assert sink.events[2].content == "read it"
     for event in sink.events:
         assert (event.chat_id, event.turn_id, event.agent_name) == ("chat-1", "t1", "george")
+
+
+# ── Task 7: interrupt, steer, cooperative stop, timeout, teardown (BEP 19 §3.9, §3.10.2) ──
+#
+# Driven through FakeClaudeClient's HANG, ECHO and Pause (conftest). The real CLI at the end pins
+# what these doubles stand in for: a mid-turn message folded into the running turn, one that
+# arrives after the turn's last model call, a stop while a tool runs, and a stop that cancels a
+# message the CLI still holds.
+
+
+def _interrupted(*, session_id: str = "session-1") -> ResultMessage:
+    """The ``ResultMessage`` the CLI 2.1.281 ends a turn with when BOS interrupts it while a tool
+    runs (measured against the fake Messages API; pinned by the real-CLI stop test below): an
+    error result, with no ``result``, whose ``terminal_reason`` says it was aborted."""
+    return ResultMessage(
+        subtype="error_during_execution",
+        duration_ms=1,
+        duration_api_ms=1,
+        is_error=True,
+        num_turns=3,
+        session_id=session_id,
+        stop_reason="tool_use",
+        terminal_reason="aborted_tools",
+        usage=_CLI_USAGE,
+        result=None,
+        errors=["[ede_diagnostic] result_type=user last_content_type=n/a stop_reason=tool_use"],
+        uuid="result-interrupted",
+    )
+
+
+def _working(text: str = "working on it", *, session_id: str = "session-1") -> AssistantMessage:
+    """The model's text and a tool call: what the CLI streams before it runs the tool."""
+    return AssistantMessage(
+        content=[TextBlock(text=text), ToolUseBlock(id="tu_1", name="Bash", input={"command": "sleep 30"})],
+        model="claude-opus-4-5",
+        session_id=session_id,
+        uuid="assistant-working",
+    )
+
+
+def _stopped_round(text: str = "working on it") -> list[Any]:
+    """A turn a stop lands in while its tool runs: the text and tool call, a pause until the CLI
+    confirms the interrupt (``hang_release``), then what it streams on confirming (measured): the
+    tool's refusal, its own interruption notice, and the interrupted result."""
+    return [
+        _working(text),
+        HANG,
+        UserMessage(content=[ToolResultBlock(tool_use_id="tu_1", content="rejected", is_error=True)]),
+        UserMessage(content=[TextBlock(text="[Request interrupted by user for tool use]")]),
+        _interrupted(),
+    ]
+
+
+class _Interrupt:
+    """AgentActor's poll as a test drives it: queued mid-turn messages, one popped per poll, and
+    how many polls there were."""
+
+    def __init__(self, *messages: str) -> None:
+        self.pending = list(messages)
+        self.calls = 0
+
+    def __call__(self) -> dict[str, Any] | None:
+        self.calls += 1
+        return {"role": "user", "content": self.pending.pop(0)} if self.pending else None
+
+
+_INTERRUPT_REQUEST = {"subtype": "interrupt", "cancel_queued": True}
+
+
+async def _hanging_client(fake_claude: Any) -> Any:
+    await _poll_until(lambda: bool(fake_claude.instances) and fake_claude.instances[-1].hang_reached.is_set())
+    return fake_claude.instances[-1]
+
+
+@pytest.mark.asyncio
+async def test_a_truthy_interrupt_return_is_sent_into_the_running_turn(tmp_path, fake_claude, mem_store):
+    """BEP 19 §3.9: a truthy return is a message for the turn still running, not a stop — so it
+    goes to the CLI as a user message, carrying a uuid of BOS's own for the CLI's echo, and no
+    interrupt is sent. Polled on every message but the terminal ``ResultMessage``."""
+    agent = _agent(tmp_path, chat_store=mem_store)
+    tool = AssistantMessage(
+        content=[ToolUseBlock(id="tu_1", name="Read", input={})], model="claude-opus-4-5", uuid="assistant-tool"
+    )
+    result_block = UserMessage(content=[ToolResultBlock(tool_use_id="tu_1", content="ok")])
+    fake_claude.arm(messages=[tool, ECHO, result_block, *_turn("done")[1:]])
+    interrupt = _Interrupt("also say banana")
+
+    result = await asyncio.wait_for(agent.run("chat-1", "do it", turn_id="t1", interrupt=interrupt), timeout=5)
+
+    client = fake_claude.instances[0]
+    [steer] = client.steers
+    assert steer["message"] == {"role": "user", "content": "also say banana"} and steer["uuid"]
+    assert client.control_requests == [], "delivering a message is not stopping the turn"
+    assert (result.output, result.finish_reason) == ("done", "completed")
+    assert interrupt.calls == 4, "the tool call, the echo, the tool result and the answer; not the ResultMessage"
+
+
+@pytest.mark.asyncio
+async def test_the_interrupt_callback_is_never_polled_on_the_result_message(tmp_path, fake_claude):
+    """BEP 19 §3.9: the poll is destructive (AgentActor pops what it returns), and after the
+    ``ResultMessage`` there is no turn left to put a message into — so the callback is not asked,
+    and a message that arrives then stays in the caller's queue."""
+    fake_claude.arm(messages=_turn("done"))
+    pending = ["the user's follow-up"]
+    calls = 0
+
+    def interrupt() -> dict[str, Any] | None:
+        nonlocal calls
+        calls += 1
+        return {"role": "user", "content": pending.pop(0)} if calls == 3 else None
+
+    await _agent(tmp_path).run("chat-1", "do it", turn_id="t1", interrupt=interrupt)
+
+    assert calls == 2, "the SystemMessage and the AssistantMessage, never the ResultMessage"
+    assert pending == ["the user's follow-up"], "not consumed by a poll after the turn ended"
+    assert fake_claude.instances[0].steers == []
+
+
+@pytest.mark.asyncio
+async def test_a_message_still_pending_at_the_result_is_answered_by_the_next_native_turn(
+    tmp_path, fake_claude, mem_store
+):
+    """Measured against the real CLI, and pinned below: a mid-turn message that misses the turn's
+    last model call is not folded into it; the CLI runs it as a native turn of its own right after
+    the ``ResultMessage``. BOS reads that turn as part of the same one — its answer, its session
+    entry and both turns' usage are what the call reports and commits — and sends no query of its
+    own to start it."""
+    agent = _agent(tmp_path, chat_store=mem_store)
+    follow_up = _turn("answer to the steer", uuid="assistant-2")
+    follow_up.insert(1, ECHO)
+    fake_claude.arm(messages=[*_turn("first answer", uuid="assistant-1"), *follow_up])
+
+    result = await asyncio.wait_for(
+        agent.run("chat-1", "do it", turn_id="t1", interrupt=_Interrupt("also say banana")), timeout=5
+    )
+
+    assert result.output == "answer to the steer"
+    assert result.usage == {key: 2 * value for key, value in _MAPPED_USAGE.items()}, "both native turns' usage"
+    messages = await mem_store.get_messages("chat-1")
+    assert messages[1].llm_message["content"] == "answer to the steer"
+    assert messages[1].metadata["native_turn_id"] == "assistant-2"
+    client = fake_claude.instances[0]
+    assert len(client.prompts) == 2, "the turn's prompt and the steer; the CLI started the follow-up itself"
+    assert client.control_requests == []
+
+
+@pytest.mark.asyncio
+async def test_a_message_the_cli_could_not_be_sent_is_logged_and_does_not_end_the_turn(tmp_path, fake_claude, caplog):
+    """Best-effort but never silent (BEP 19 §3.9): the poll already took the message from the
+    caller's queue, and it came from a user, so a failed send is a WARNING naming the chat and the
+    turn — and the turn goes on without it, rather than waiting for an echo that cannot come."""
+    fake_claude.arm(messages=_turn("still going"), steer_error=RuntimeError("stdin closed"))
+
+    with caplog.at_level(logging.WARNING, logger="bos.extensions.runtimes.claude_code"):
+        result = await asyncio.wait_for(
+            _agent(tmp_path).run("chat-1", "do it", turn_id="t1", interrupt=_Interrupt("stop that")), timeout=5
+        )
+
+    assert result.output == "still going"
+    warnings = [
+        r for r in caplog.records if r.levelno == logging.WARNING and r.name == "bos.extensions.runtimes.claude_code"
+    ]
+    assert len(warnings) == 1
+    message = warnings[0].getMessage()
+    assert "chat-1" in message and "t1" in message and "dropped" in message
+    assert warnings[0].exc_info is not None, "the send's own failure is kept"
+
+
+@pytest.mark.asyncio
+async def test_abort_turn_interrupts_the_cli_and_returns_the_marker_without_committing(
+    tmp_path, fake_claude, mem_store
+):
+    """BEP 19 §3.9: ``AbortTurn`` raised by the callback is the stop, and ``Agent`` catches it and
+    returns ``ABORTED_TURN_CONTENT`` (agent.py). So does this, after telling the CLI to stop — the
+    ``except AbortTurn`` sits ahead of the vendor-failure wrap, which would otherwise report it as
+    a RuntimeError. It commits nothing, and the chat is free again."""
+    agent = _agent(tmp_path, chat_store=mem_store)
+    fake_claude.arm(messages=_turn("unused"))
+
+    def interrupt() -> None:
+        raise AbortTurn()
+
+    result = await asyncio.wait_for(agent.run("chat-1", "do it", turn_id="t1", interrupt=interrupt), timeout=5)
+
+    assert (result.output, result.finish_reason, result.usage) == (ABORTED_TURN_CONTENT, "aborted", {})
+    assert await mem_store.get_messages("chat-1") == []
+    client = fake_claude.instances[0]
+    assert client.control_requests == [_INTERRUPT_REQUEST], "the CLI is told to stop, not just abandoned"
+    assert client.disconnected
+    assert agent._in_flight == {}
+
+
+@pytest.mark.asyncio
+async def test_any_other_callback_exception_interrupts_the_cli_and_fails_the_turn(tmp_path, fake_claude, mem_store):
+    """Only ``AbortTurn`` is the caller's stop; anything else the callback raises fails the turn
+    with its context, as CodexAgent's does — and the CLI is told to stop either way."""
+    agent = _agent(tmp_path, chat_store=mem_store)
+    fake_claude.arm(messages=_turn("unused"))
+
+    def interrupt() -> None:
+        raise ValueError("callback blew up")
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await asyncio.wait_for(agent.run("chat-1", "do it", turn_id="t1", interrupt=interrupt), timeout=5)
+
+    message = str(excinfo.value)
+    assert "callback blew up" in message and "t1" in message and "chat-1" in message
+    assert isinstance(excinfo.value.__cause__, ValueError)
+    assert fake_claude.instances[0].control_requests == [_INTERRUPT_REQUEST]
+    assert await mem_store.get_messages("chat-1") == []
+
+
+@pytest.mark.asyncio
+async def test_the_abort_path_is_bounded_when_the_interrupt_never_answers(tmp_path, fake_claude, monkeypatch):
+    """A caller waits on this path, so the interrupt gets the grace every interrupt here gets
+    rather than becoming a way for a wedged CLI to hang ``run()``."""
+    monkeypatch.setattr(claude_code, "_INTERRUPT_GRACE_SECONDS", 0.05)
+    fake_claude.arm(messages=_turn("unused"), interrupt_hang=asyncio.Event())
+
+    def interrupt() -> None:
+        raise AbortTurn()
+
+    started = time.perf_counter()
+    result = await asyncio.wait_for(_agent(tmp_path).run("chat-1", "do it", interrupt=interrupt), timeout=5)
+
+    assert time.perf_counter() - started < 1
+    assert result.output == ABORTED_TURN_CONTENT
+    assert fake_claude.instances[0].control_requests == [_INTERRUPT_REQUEST]
+
+
+@pytest.mark.asyncio
+async def test_request_stop_interrupts_the_turn_and_keeps_what_it_produced(tmp_path, fake_claude, mem_store):
+    """BEP 19 §3.10.2: a stop is BOS taking the turn away, and ``Agent`` keeps what a stopped turn
+    established — so this keeps the text the turn had streamed and commits it, with the session
+    it ran on. The CLI ends the turn as an error result (measured), which is not raised here: BOS
+    asked for it. ``finish_reason`` is the CLI's own, verbatim."""
+    agent = _agent(tmp_path, chat_store=mem_store)
+    fake_claude.arm(messages=_stopped_round("working on it"))
+    interrupt = _Interrupt()
+
+    turn = asyncio.ensure_future(agent.run("chat-1", "do it", turn_id="t1", interrupt=interrupt))
+    client = await _hanging_client(fake_claude)
+    agent.request_stop()
+    await _poll_until(lambda: bool(client.control_requests))
+    interrupt.pending.append("typed while the turn was stopping")
+    client.hang_release.set()  # the CLI confirming the interrupt, as it does (measured)
+    result = await asyncio.wait_for(turn, timeout=2)
+
+    assert (result.output, result.finish_reason, result.usage) == ("working on it", "aborted_tools", _MAPPED_USAGE)
+    assert interrupt.pending == ["typed while the turn was stopping"], "not polled once the stop began"
+    assert client.control_requests == [_INTERRUPT_REQUEST]
+    messages = await mem_store.get_messages("chat-1")
+    assert messages[1].llm_message["content"] == "working on it"
+    assert messages[1].metadata["native_session_id"] == "session-1"
+    assert client.disconnected
+
+
+@pytest.mark.asyncio
+async def test_a_failed_interrupt_request_does_not_abort_the_stop(tmp_path, fake_claude, mem_store):
+    """The interrupt is a best-effort courtesy to the CLI: a failure sending it is not a turn
+    failure, and the turn still ends the way the CLI ends it."""
+    agent = _agent(tmp_path, chat_store=mem_store)
+    fake_claude.arm(messages=_stopped_round("partial"), interrupt_error=RuntimeError("stdin closed"))
+
+    turn = asyncio.ensure_future(agent.run("chat-1", "do it", turn_id="t1"))
+    client = await _hanging_client(fake_claude)
+    agent.request_stop()
+    await _poll_until(lambda: bool(client.control_requests))
+    client.hang_release.set()
+    result = await asyncio.wait_for(turn, timeout=2)
+
+    assert result.output == "partial"
+
+
+@pytest.mark.asyncio
+async def test_a_stop_the_cli_never_confirms_is_given_up_within_the_grace(
+    tmp_path, fake_claude, mem_store, monkeypatch
+):
+    """BEP 19 §3.10.2: a CLI that ignores the interrupt must not hold the stop open — the stream is
+    cancelled after the grace and the turn raises, committing nothing, with its client closed."""
+    monkeypatch.setattr(claude_code, "_INTERRUPT_GRACE_SECONDS", 0.05)
+    agent = _agent(tmp_path, chat_store=mem_store)
+    fake_claude.arm(messages=[_working(), HANG])
+
+    turn = asyncio.ensure_future(agent.run("chat-1", "do it", turn_id="t1"))
+    client = await _hanging_client(fake_claude)
+    started = time.perf_counter()
+    agent.request_stop()
+    with pytest.raises(RuntimeError, match="did not respond to interrupt"):
+        await asyncio.wait_for(turn, timeout=5)
+
+    assert time.perf_counter() - started < 1
+    assert client.control_requests == [_INTERRUPT_REQUEST]
+    assert client.disconnected
+    assert await mem_store.get_messages("chat-1") == []
+
+
+@pytest.mark.asyncio
+async def test_a_stop_while_the_cli_starts_returns_the_shutdown_marker_without_a_turn(tmp_path, fake_claude, mem_store):
+    """A stop that lands while the CLI is still starting (``connect()``) starts no turn: the call
+    returns the shutdown marker, as one started after the stop does, sends no prompt, and closes the
+    client."""
+    agent = _agent(tmp_path, chat_store=mem_store)
+    gate = asyncio.Event()
+    fake_claude.arm(messages=_turn("unused"), connect_hang=gate)
+
+    turn = asyncio.ensure_future(agent.run("chat-1", "do it", turn_id="t1"))
+    await _poll_until(lambda: bool(fake_claude.instances))
+    agent.request_stop()
+    gate.set()
+    result = await asyncio.wait_for(turn, timeout=2)
+
+    assert (result.output, result.finish_reason) == (SHUTDOWN_CONTENT, "shutdown")
+    client = fake_claude.instances[0]
+    assert client.prompts == [] and client.disconnected
+    assert await mem_store.get_messages("chat-1") == []
+
+
+@pytest.mark.asyncio
+async def test_a_stop_before_a_schema_retry_raises_the_validation_failure_instead(tmp_path, fake_claude, mem_store):
+    """A stop that lands while an attempt still finishes normally leaves an answer that failed
+    validation; a correction would start another native turn after the stop, so there is none —
+    the validation failure is raised and nothing is committed."""
+    agent = _agent(tmp_path, chat_store=mem_store)
+    fake_claude.arm(messages=[HANG, *_turn("not json")])
+
+    turn = asyncio.ensure_future(agent.run("chat-1", "do it", turn_id="t1", schema=_ANSWER_SCHEMA))
+    client = await _hanging_client(fake_claude)
+    agent.request_stop()
+    await _poll_until(lambda: bool(client.control_requests))
+    client.hang_release.set()  # the attempt finishes normally anyway
+    with pytest.raises(StructuredOutputError):
+        await asyncio.wait_for(turn, timeout=2)
+
+    assert len(client.prompts) == 1, "no correction was sent"
+    assert await mem_store.get_messages("chat-1") == []
+
+
+@pytest.mark.asyncio
+async def test_timeout_seconds_expiry_interrupts_the_turn_then_raises(tmp_path, fake_claude, mem_store, monkeypatch):
+    """BEP 19 §3.10.2, §7.20: on expiry the turn is interrupted, then the error is raised — even
+    when the CLI never confirms the interrupt. The message names the phase, and nothing is
+    committed: a caller's own deadline cutting an answer off is a failure, not history."""
+    monkeypatch.setattr(claude_code, "_INTERRUPT_GRACE_SECONDS", 0.05)
+    agent = _agent(tmp_path, chat_store=mem_store, timeout_seconds=0.05)
+    fake_claude.arm(messages=[HANG])
+
+    started = time.perf_counter()
+    with pytest.raises(TimeoutError) as excinfo:
+        await asyncio.wait_for(agent.run("chat-1", "do it", turn_id="t1"), timeout=5)
+
+    message = str(excinfo.value)
+    assert "exceeded timeout_seconds=0.05" in message, "timeout_seconds fired, not the test's own bound"
+    assert "during the turn" in message and "was interrupted" in message
+    assert "claude-code" in message and "george" in message and "chat-1" in message and "t1" in message
+    assert time.perf_counter() - started < 1
+    client = fake_claude.instances[0]
+    assert client.control_requests == [_INTERRUPT_REQUEST]
+    assert client.disconnected
+    assert await mem_store.get_messages("chat-1") == []
+
+
+@pytest.mark.asyncio
+async def test_timeout_seconds_bounds_the_cli_starting_without_the_session_continuity_error(
+    tmp_path, fake_claude, mem_store
+):
+    """``connect()`` — the CLI starting, and a resumed session loading — carries ``timeout_seconds``
+    too, and says so: a CLI that never finishes starting is not a session that could not be resumed
+    (BEP 19 §3.6), which would send an operator looking for a corrupt one. No turn had started, so
+    nothing is interrupted."""
+    await _bind(mem_store, session_id="session-1")
+    agent = _agent(tmp_path, chat_store=mem_store, timeout_seconds=0.05)
+    fake_claude.arm(connect_hang=asyncio.Event())
+
+    started = time.perf_counter()
+    with pytest.raises(TimeoutError) as excinfo:
+        await asyncio.wait_for(agent.run("chat-1", "do it", turn_id="t1"), timeout=5)
+
+    message = str(excinfo.value)
+    assert "at startup" in message and "exceeded timeout_seconds=0.05" in message
+    assert "could not be resumed" not in message and "was interrupted" not in message
+    assert time.perf_counter() - started < 1
+    client = fake_claude.instances[0]
+    assert client.control_requests == [] and client.disconnected
+    assert len(await mem_store.get_messages("chat-1")) == 2
+
+
+@pytest.mark.asyncio
+async def test_each_schema_attempt_gets_a_timeout_window_of_its_own(tmp_path, fake_claude, mem_store):
+    """BEP 19 §3.10.2: ``timeout_seconds`` bounds one native turn attempt, not the whole call, so a
+    correction's ``query()`` gets a fresh window — two attempts that each fit it finish, though
+    together they outlast it."""
+    agent = _agent(tmp_path, chat_store=mem_store, timeout_seconds=0.6)
+    fake_claude.arm(messages=[Pause(0.35), *_turn("not json"), Pause(0.35), *_turn('{"answer": "42"}', uuid="b")])
+
+    result = await asyncio.wait_for(agent.run("chat-1", "do it", turn_id="t1", schema=_ANSWER_SCHEMA), timeout=5)
+
+    assert (result.output, result.structured) == ({"answer": "42"}, True)
+
+
+@pytest.mark.asyncio
+async def test_aclose_mid_turn_stops_the_turn_and_closes_its_client(tmp_path, fake_claude, mem_store):
+    """BEP 19 §3.10.2: ``aclose()`` sets the stop flag, so the turn running interrupts itself and
+    keeps what it produced, and waits for it — within a bound — then closes its client."""
+    agent = _agent(tmp_path, chat_store=mem_store)
+    fake_claude.arm(messages=_stopped_round("working on it"))
+
+    turn = asyncio.ensure_future(agent.run("chat-1", "do it", turn_id="t1"))
+    client = await _hanging_client(fake_claude)
+    closing = asyncio.ensure_future(agent.aclose())
+    await _poll_until(lambda: bool(client.control_requests))
+    client.hang_release.set()
+    await asyncio.wait_for(closing, timeout=2)
+
+    assert client.disconnected
+    assert (await asyncio.wait_for(turn, timeout=2)).output == "working on it"
+
+
+@pytest.mark.asyncio
+async def test_aclose_is_bounded_when_the_turn_swallows_its_cancel(
+    tmp_path, fake_claude, mem_store, monkeypatch, caplog
+):
+    """The Codex branch's fix round 2, carried over: a stream task parked in host code that
+    swallows its cancel is abandoned, not finished, so ``aclose()`` puts a bound of its own on the
+    wait — then closes the client regardless and says how many turns it left behind."""
+    monkeypatch.setattr(claude_code, "_INTERRUPT_GRACE_SECONDS", 0.05)
+    monkeypatch.setattr(claude_code, "_ACLOSE_GRACE_SECONDS", 0.3)
+    agent = _agent(tmp_path, chat_store=mem_store)
+    fake_claude.arm(messages=[HANG], swallow_cancel=True)
+
+    turn = asyncio.ensure_future(agent.run("chat-1", "do it", turn_id="t1"))
+    client = await _hanging_client(fake_claude)
+    stream = agent._in_flight["chat-1"].task
+    try:
+        started = time.perf_counter()
+        with caplog.at_level(logging.WARNING, logger="bos.extensions.runtimes.claude_code"):
+            await asyncio.wait_for(agent.aclose(), timeout=5)
+        elapsed = time.perf_counter() - started
+
+        assert client.cancels_swallowed >= 1, "the abandon path was never reached; the test proves nothing"
+        assert 0.25 <= elapsed < 1.5, f"bounded by _ACLOSE_GRACE_SECONDS, not by the turn: {elapsed:.2f}s"
+        assert client.disconnected
+        assert any("still running after" in r.getMessage() for r in caplog.records)
+    finally:
+        # Retire the abandoned task even when an assertion failed: it swallows cancellation, and the
+        # event loop's own teardown would wait on it forever.
+        client.swallow_cancel = False
+        stream.cancel()
+        for pending in (turn, stream):
+            with contextlib.suppress(BaseException):
+                await asyncio.wait_for(pending, timeout=5)
+
+
+@pytest.mark.asyncio
+async def test_aclose_is_bounded_when_the_interrupt_never_answers(tmp_path, fake_claude, mem_store, monkeypatch):
+    """The other unbounded path: the interrupt is a control request the CLI answers at its leisure,
+    and the SDK's own wait for it is a minute. A CLI that never answers must not hold ``aclose()``
+    open, and its client is closed regardless."""
+    monkeypatch.setattr(claude_code, "_INTERRUPT_GRACE_SECONDS", 0.05)
+    monkeypatch.setattr(claude_code, "_ACLOSE_GRACE_SECONDS", 0.5)
+    agent = _agent(tmp_path, chat_store=mem_store)
+    fake_claude.arm(messages=[HANG], interrupt_hang=asyncio.Event())
+
+    turn = asyncio.ensure_future(agent.run("chat-1", "do it", turn_id="t1"))
+    client = await _hanging_client(fake_claude)
+    started = time.perf_counter()
+    await asyncio.wait_for(agent.aclose(), timeout=5)
+
+    assert time.perf_counter() - started < 1.5
+    assert client.control_requests == [_INTERRUPT_REQUEST], "attempted, not waited out"
+    assert client.disconnected
+    with pytest.raises(RuntimeError, match="did not respond"):  # the turn gives up within its own bound too
+        await asyncio.wait_for(turn, timeout=5)
+
+
+@pytest.mark.asyncio
+async def test_aclose_closes_the_client_of_a_turn_still_settling_and_only_once(
+    tmp_path, fake_claude, mem_store, monkeypatch
+):
+    """``aclose()`` closes each running turn's client once its own bound is up, even while that
+    turn is still giving up on a CLI that does not answer — closing the client is what reaps the
+    CLI. The turn's own teardown, arriving later, shares that one disconnect."""
+    monkeypatch.setattr(claude_code, "_INTERRUPT_GRACE_SECONDS", 0.3)
+    monkeypatch.setattr(claude_code, "_ACLOSE_GRACE_SECONDS", 0.05)
+    agent = _agent(tmp_path, chat_store=mem_store)
+    fake_claude.arm(messages=[HANG], interrupt_hang=asyncio.Event())
+
+    turn = asyncio.ensure_future(agent.run("chat-1", "do it", turn_id="t1"))
+    client = await _hanging_client(fake_claude)
+    await asyncio.wait_for(agent.aclose(), timeout=2)
+
+    assert client.disconnected and not turn.done(), "closed while the turn was still settling"
+    with pytest.raises(RuntimeError, match="did not respond"):
+        await asyncio.wait_for(turn, timeout=5)
+    assert client.disconnect_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_aclose_closes_every_turns_client_even_when_one_close_fails(tmp_path, fake_claude, monkeypatch):
+    """One client's disconnect failing must not leave another turn's CLI running: ``aclose()``
+    closes every in-flight turn's client, all at once, returns once each close has ended, and
+    leaves the failure to the turn it belongs to."""
+    monkeypatch.setattr(claude_code, "_INTERRUPT_GRACE_SECONDS", 0.2)
+    monkeypatch.setattr(claude_code, "_ACLOSE_GRACE_SECONDS", 0.01)
+    agent = _agent(tmp_path)
+    fake_claude.arm(messages=[HANG], disconnect_error=RuntimeError("broken pipe"))
+    first = asyncio.ensure_future(agent.run("chat-1", "a", turn_id="t1"))
+    await _poll_until(lambda: len(fake_claude.instances) == 1 and fake_claude.instances[0].hang_reached.is_set())
+    fake_claude.arm(messages=[HANG])
+    second = asyncio.ensure_future(agent.run("chat-2", "b", turn_id="t2"))
+    await _poll_until(lambda: len(fake_claude.instances) == 2 and fake_claude.instances[1].hang_reached.is_set())
+
+    await asyncio.wait_for(agent.aclose(), timeout=5)
+
+    broken, other = fake_claude.instances
+    assert (broken.disconnect_calls, other.disconnect_calls, other.disconnected) == (1, 1, True)
+    with pytest.raises(RuntimeError, match="broken pipe"):
+        await asyncio.wait_for(first, timeout=5)
+    with pytest.raises(RuntimeError, match="did not respond"):  # its CLI never confirmed the interrupt
+        await asyncio.wait_for(second, timeout=5)
+
+
+@pytest.mark.asyncio
+async def test_a_message_the_poll_returns_as_the_turn_is_stopped_is_dropped_and_logged(
+    tmp_path, fake_claude, mem_store, caplog
+):
+    """An async callback can hand back a message after the stop has begun. The turn is being
+    interrupted, so the message is not sent — the CLI would run it as a turn of its own after the
+    interrupt — and it is logged, since it came from a user."""
+    agent = _agent(tmp_path, chat_store=mem_store)
+    fake_claude.arm(messages=_stopped_round("working"))
+    answering, answer = asyncio.Event(), asyncio.Event()
+
+    async def interrupt() -> dict[str, Any]:
+        answering.set()
+        await answer.wait()
+        return {"role": "user", "content": "one more thing"}
+
+    with caplog.at_level(logging.WARNING, logger="bos.extensions.runtimes.claude_code"):
+        turn = asyncio.ensure_future(agent.run("chat-1", "do it", turn_id="t1", interrupt=interrupt))
+        await _poll_until(answering.is_set)
+        client = fake_claude.instances[0]
+        agent.request_stop()
+        await _poll_until(lambda: bool(client.control_requests))
+        answer.set()
+        client.hang_release.set()
+        result = await asyncio.wait_for(turn, timeout=2)
+
+    assert result.output == "working"
+    assert client.steers == []
+    [warning] = [r for r in caplog.records if r.name == "bos.extensions.runtimes.claude_code"]
+    assert "t1" in warning.getMessage() and "being stopped" in warning.getMessage()
+
+
+@pytest.mark.asyncio
+async def test_a_message_on_its_way_to_the_cli_is_written_before_the_stops_interrupt(tmp_path, fake_claude, mem_store):
+    """``cancel_queued`` drops only what the CLI already holds, so a mid-turn message still being
+    written when a stop begins must reach the CLI before the interrupt does: the lock
+    ``_interrupt`` shares with ``_steer`` orders the two writes."""
+    agent = _agent(tmp_path, chat_store=mem_store)
+    gate = asyncio.Event()
+    fake_claude.arm(messages=_stopped_round("working"), steer_hang=gate)
+
+    turn = asyncio.ensure_future(agent.run("chat-1", "do it", turn_id="t1", interrupt=_Interrupt("one more thing")))
+    await _poll_until(lambda: bool(fake_claude.instances) and len(fake_claude.instances[0].prompts) == 2)
+    client = fake_claude.instances[0]  # the mid-turn message's query() is under way, held at `gate`
+    agent.request_stop()
+    await asyncio.sleep(0.1)
+    assert client.writes == [], "the interrupt waits for the message being written"
+    gate.set()
+    await _poll_until(lambda: client.writes == ["steer", "interrupt"])
+    client.hang_release.set()
+
+    assert (await asyncio.wait_for(turn, timeout=2)).output == "working"
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_turn_still_tells_the_cli_to_stop_and_closes_its_client(tmp_path, fake_claude, mem_store):
+    """``AgentActor`` cancels a turn's task when a user aborts it. ``run()`` still leaves the CLI
+    running nothing on its way out — its stream task cancelled, the CLI told to stop — and closes
+    the client, so a cancellation does not leave the child working against ``cwd``."""
+    agent = _agent(tmp_path, chat_store=mem_store)
+    fake_claude.arm(messages=[HANG])
+
+    turn = asyncio.ensure_future(agent.run("chat-1", "do it", turn_id="t1"))
+    client = await _hanging_client(fake_claude)
+    stream = agent._in_flight["chat-1"].task
+    turn.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(turn, timeout=5)
+    await asyncio.wait({stream}, timeout=1)
+
+    assert stream.cancelled()
+    assert client.control_requests == [_INTERRUPT_REQUEST]
+    assert client.disconnected
+    assert agent._in_flight == {}
+
+
+@pytest.mark.asyncio
+async def test_a_turn_cancelled_while_it_closes_its_client_leaves_the_close_to_finish(tmp_path, fake_claude):
+    """``disconnect()`` bounds itself, but a cancellation delivered inside it would skip the SDK's
+    terminate-then-kill of the CLI (its own docstring says so). So it runs shielded, in a task of
+    its own: a turn cancelled while closing its client leaves that close to finish."""
+    gate = asyncio.Event()
+    fake_claude.arm(messages=_turn("done"), disconnect_hang=gate)
+
+    turn = asyncio.ensure_future(_agent(tmp_path).run("chat-1", "do it"))
+    await _poll_until(lambda: bool(fake_claude.instances) and fake_claude.instances[0].disconnect_started.is_set())
+    turn.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await asyncio.wait_for(turn, timeout=5)
+    client = fake_claude.instances[0]
+    assert not client.disconnected
+    gate.set()
+
+    await _poll_until(lambda: client.disconnected)
+
+
+def test_every_client_asks_the_cli_to_echo_each_message_bos_sends(tmp_path):
+    """BEP 19 §3.9: ``--replay-user-messages`` is how BOS learns whether the CLI took a mid-turn
+    message into a turn — the echo carries BOS's uuid."""
+    assert "--replay-user-messages" in _command(_agent(tmp_path)._options())
+
+
+def test_the_interrupt_reaches_the_cli_through_an_sdk_path_that_still_exists():
+    """The tripwire that makes ``claude_code._interrupt``'s private reach-in acceptable, against
+    the REAL claude-agent-sdk rather than the double, which mirrors this shape. The first half pins
+    the path: the client keeps its ``Query`` in ``_query`` (None until connected), and
+    ``Query._send_control_request(request, timeout)`` sends any control request — the only way to
+    send the CLI's ``interrupt`` with ``cancel_queued``. The second fires in the good direction:
+    when the SDK's own ``interrupt()`` takes a parameter, that is the supported way, and this says
+    to use it."""
+    import inspect
+
+    from claude_agent_sdk._internal.query import Query
+
+    assert ClaudeSDKClient()._query is None
+    assert list(inspect.signature(Query._send_control_request).parameters) == ["self", "request", "timeout"]
+    assert list(inspect.signature(ClaudeSDKClient.interrupt).parameters) == ["self"], (
+        "ClaudeSDKClient.interrupt() takes an argument now: use it instead of the reach-in"
+    )
+
+
+def _processes_in(directory: Path) -> dict[int, str]:
+    """pid -> command line of every process whose working directory is *directory* (Linux, from
+    /proc): the CLI a turn starts, and every tool process it runs there."""
+    found: dict[int, str] = {}
+    for entry in os.listdir("/proc"):
+        if entry.isdigit():
+            try:
+                if os.readlink(f"/proc/{entry}/cwd") == str(directory):
+                    found[int(entry)] = Path(f"/proc/{entry}/cmdline").read_bytes().replace(b"\0", b" ").decode()
+            except OSError:
+                continue
+    return found
+
+
+@contextlib.contextmanager
+def _reaping(directory: Path):
+    """Kill whatever is still running in *directory* when the test ends — only a failed assertion
+    leaves anything, and it is this test's own by where it runs."""
+    try:
+        yield
+    finally:
+        for pid in _processes_in(directory):
+            with contextlib.suppress(OSError):
+                os.kill(pid, 9)
+
+
+def _after_a_tool_starts(sink: CaptureSink, *messages: str) -> Any:
+    """An interrupt callback that returns *messages*, one per poll, once *sink* has seen a tool
+    start — a user typing while the agent's tool runs."""
+    pending = list(messages)
+
+    def interrupt() -> dict[str, Any] | None:
+        started = any(event.event_type == "tool" and event.phase == "start" for event in sink.events)
+        return {"role": "user", "content": pending.pop(0)} if started and pending else None
+
+    return interrupt
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="finds the CLI and its tool through /proc")
+async def test_request_stop_mid_turn_stops_the_cli_and_its_tool_against_the_real_cli(
+    tmp_path, fake_anthropic, monkeypatch
+):
+    """BEP 19 §7.19 in CI, with the real CLI: ``request_stop()`` while the agent's ``Bash`` is still
+    running interrupts the turn, and the call returns what the turn had produced — the text the
+    model streamed before the tool call — with the CLI's own ``finish_reason``, ``aborted_tools``
+    (measured; Codex's is ``interrupted``). Nothing is left running in ``cwd``: the tool's process
+    is killed and the CLI has exited. The kept answer is committed with the session, which the
+    next turn resumes, answering its own prompt with a single model call.
+
+    ``permission="full-access"`` only so ``Bash`` runs without a prompt before BEP 19 Task 8
+    builds the confinement; it confines nothing, and nothing here depends on it doing so."""
+    _point_the_cli_at(fake_anthropic, tmp_path, monkeypatch)
+    ws = (tmp_path / "ws").resolve()
+    ws.mkdir()
+    store = InMemChatStore()
+    agent = _agent(tmp_path, cwd="ws", permission="full-access", auth="api_key", chat_store=store)
+    working = [{"type": "text", "text": "working on it"}, _bash("tu_sleep", "sleep 30")]
+    fake_anthropic.script([working, [{"type": "text", "text": "fresh answer"}]])
+
+    with _reaping(ws):
+        async with asyncio.timeout(60):
+            turn = asyncio.ensure_future(agent.run("chat-1", "wait a while", turn_id="t1"))
+            await _poll_until(lambda: any("sleep 30" in cmd for cmd in _processes_in(ws).values()), timeout=30)
+            agent.request_stop()
+            result = await turn
+            await _poll_until(lambda: not _processes_in(ws), timeout=10)
+
+    assert (result.output, result.finish_reason) == ("working on it", "aborted_tools")
+    [transcript] = list((tmp_path / "claude-config").rglob("*.jsonl"))
+    messages = await store.get_messages("chat-1")
+    assert messages[1].llm_message["content"] == "working on it"
+    assert messages[1].metadata["native_session_id"] == transcript.stem
+
+    again = _agent(tmp_path, cwd="ws", permission="full-access", auth="api_key", chat_store=store)
+    async with asyncio.timeout(60):
+        second = await again.run("chat-1", "second prompt", turn_id="t2")
+    assert second.output == "fresh answer"
+    assert len(fake_anthropic.requests) == 2, "one model call for the stopped turn, one for the next"
+    assert "second prompt" in json.dumps(fake_anthropic.requests[1]["messages"])
+    assert (await store.get_messages("chat-1"))[3].metadata["native_session_id"] == transcript.stem
+
+
+@pytest.mark.asyncio
+async def test_a_mid_turn_message_reaches_the_model_within_the_turn_against_the_real_cli(
+    tmp_path, fake_anthropic, monkeypatch
+):
+    """The measurement BEP 19 §3.9's truthy-return row rests on, pinned: a message the ``interrupt``
+    poll returns while the agent's tool runs reaches the model inside the same turn — in the model
+    call after the tool result, wrapped in the CLI's own "The user sent a new message while you
+    were working" — and the turn goes on: two model calls, one ``ResultMessage``.
+    ``permission="full-access"`` only so ``Bash`` runs unprompted; it confines nothing."""
+    _point_the_cli_at(fake_anthropic, tmp_path, monkeypatch)
+    ws = (tmp_path / "ws").resolve()
+    ws.mkdir()
+    agent = _agent(tmp_path, cwd="ws", permission="full-access", auth="api_key")
+    fake_anthropic.script([[_bash("tu_sleep", "sleep 2")], [{"type": "text", "text": "done"}]])
+    sink = CaptureSink()
+
+    with _reaping(ws):
+        async with asyncio.timeout(60):
+            result = await agent.run(
+                "chat-1", "run it", turn_id="t1", event_sink=sink, interrupt=_after_a_tool_starts(sink, "BANANA-7")
+            )
+
+    assert result.output == "done"
+    assert len(fake_anthropic.requests) == 2
+    assert "BANANA-7" not in json.dumps(fake_anthropic.requests[0]["messages"])
+    sent = json.dumps(fake_anthropic.requests[1]["messages"])
+    assert "BANANA-7" in sent and "The user sent a new message while you were working" in sent
+    assert [e.phase for e in sink.events if e.event_type == "turn"] == ["finish"], "one native turn"
+
+
+@pytest.mark.asyncio
+async def test_a_mid_turn_message_after_the_last_model_call_is_answered_in_the_same_turn_against_the_real_cli(
+    tmp_path, fake_anthropic, monkeypatch
+):
+    """A message the poll returns after the turn's last model call has started misses it, and the
+    CLI runs it as a native turn of its own right after the ``ResultMessage`` (measured). BOS reads
+    that turn as part of the same one — which it can tell from the CLI's echo of the message
+    (``--replay-user-messages``) — so the call returns, and commits, the answer to the message
+    rather than returning early and leaving the CLI to run a turn nobody reads."""
+    _point_the_cli_at(fake_anthropic, tmp_path, monkeypatch)
+    store = InMemChatStore()
+    agent = _agent(tmp_path, auth="api_key", chat_store=store)
+    fake_anthropic.script([[{"type": "text", "text": "first answer"}], [{"type": "text", "text": "the second"}]])
+    sink = CaptureSink()
+    pending = ["BANANA-8"]
+
+    def interrupt() -> dict[str, Any] | None:  # once the model's answer has streamed
+        answered = any(event.event_type == "response" for event in sink.events)
+        return {"role": "user", "content": pending.pop()} if answered and pending else None
+
+    async with asyncio.timeout(60):
+        result = await agent.run("chat-1", "hello", turn_id="t1", event_sink=sink, interrupt=interrupt)
+
+    assert result.output == "the second"
+    assert len(fake_anthropic.requests) == 2
+    assert "BANANA-8" in json.dumps(fake_anthropic.requests[1]["messages"])
+    assert [e.phase for e in sink.events if e.event_type == "turn"] == ["finish", "finish"], "two native turns"
+    answer = (await store.get_messages("chat-1"))[1]
+    assert answer.llm_message["content"] == "the second"
+    transcript = get_session_messages(answer.metadata["native_session_id"], directory=str(tmp_path))
+    [entry] = [m for m in transcript if m.uuid == answer.metadata["native_turn_id"]]
+    assert "the second" in json.dumps(entry.message), "native_turn_id is the follow-up turn's answer in the transcript"
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="finds the CLI and its tool through /proc")
+async def test_a_stop_drops_a_mid_turn_message_the_cli_still_holds_against_the_real_cli(
+    tmp_path, fake_anthropic, monkeypatch, caplog
+):
+    """A mid-turn message the CLI has queued but not yet folded in outlives a bare interrupt and
+    runs as a turn of its own — after the interrupted one, and again when stdin closes (measured).
+    The interrupt BOS sends carries ``cancel_queued``, so after a stop the model is never called
+    again, nothing is left running in ``cwd``, and the dropped message is logged, since it came
+    from a user. ``permission="full-access"`` only so ``Bash`` runs unprompted; it confines
+    nothing."""
+    _point_the_cli_at(fake_anthropic, tmp_path, monkeypatch)
+    ws = (tmp_path / "ws").resolve()
+    ws.mkdir()
+    agent = _agent(tmp_path, cwd="ws", permission="full-access", auth="api_key")
+    fake_anthropic.script([[_bash("tu_sleep", "sleep 30")], [{"type": "text", "text": "never asked"}]])
+    sink = CaptureSink()
+
+    with _reaping(ws), caplog.at_level(logging.WARNING, logger="bos.extensions.runtimes.claude_code"):
+        async with asyncio.timeout(60):
+            turn = asyncio.ensure_future(
+                agent.run(
+                    "chat-1", "wait", turn_id="t1", event_sink=sink, interrupt=_after_a_tool_starts(sink, "BANANA-9")
+                )
+            )
+            await _poll_until(lambda: any("sleep 30" in cmd for cmd in _processes_in(ws).values()), timeout=30)
+            # The message is on its way to the CLI (BOS's own record of it); the stop's interrupt is
+            # written after it, under the same lock.
+            await _poll_until(lambda: bool(agent._in_flight["chat-1"] and agent._in_flight["chat-1"].pending))
+            agent.request_stop()
+            result = await turn
+            await _poll_until(lambda: not _processes_in(ws), timeout=10)
+
+    assert result.finish_reason == "aborted_tools"
+    assert len(fake_anthropic.requests) == 1, "the queued message never reached the model"
+    assert any("dropped" in record.getMessage() and "t1" in record.getMessage() for record in caplog.records)

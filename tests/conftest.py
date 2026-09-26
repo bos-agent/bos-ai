@@ -650,6 +650,28 @@ class FakeClaudeClient:
     makes the next ``receive_response()`` continue from there, through the second round's own
     ``ResultMessage``. Every test written before schema retries existed calls it only once, so
     this is additive and changes no existing test's behaviour.
+
+    Three markers may sit among ``messages`` (BEP 19 §3.9, §3.10.2). ``HANG`` — the one the
+    Codex double uses — pauses the stream with ``hang_reached`` set, a turn the CLI is still
+    working on, until the test sets ``hang_release``: that stands in for the CLI confirming an
+    interrupt, and BOS's own interrupt request never sets it, so a test can also model a CLI
+    that never confirms. ``ECHO`` is the CLI's ``--replay-user-messages`` echo of the oldest
+    mid-turn message BOS sent and nothing has echoed yet — a ``UserMessage`` carrying the uuid
+    BOS put on it — or nothing, when there is none; where a test puts it says when the CLI took
+    that message into a turn. A ``Pause(seconds)`` is the CLI taking that long before its next
+    message.
+
+    The interrupt BOS sends is the CLI's ``interrupt`` control request, which it reaches through
+    ``client._query._send_control_request`` (``claude_code._interrupt`` says why), so this
+    double is its own ``_query`` and records each request in ``control_requests``.
+    ``interrupt_hang`` blocks that request, ``interrupt_error`` fails it, ``steer_error`` fails a
+    mid-turn message's ``query()`` and ``steer_hang`` blocks it, ``connect_hang`` blocks
+    ``connect()``, ``disconnect_hang`` blocks ``disconnect()`` and ``disconnect_error`` fails it
+    (``disconnect_started`` is set on the way in; ``disconnect_calls`` counts calls, ``disconnected``
+    is set once one completes), and
+    ``swallow_cancel`` makes a ``HANG`` ignore cancellation — standing in, as in the Codex double,
+    for the host code a stream task awaits (the sink, the interrupt callback), which can swallow
+    one. ``writes`` records "steer" and "interrupt" in the order they reach the CLI.
     """
 
     def __init__(self, options: Any) -> None:
@@ -657,23 +679,52 @@ class FakeClaudeClient:
         self.messages: list[Any] = []
         self._consumed = 0  # index into `messages`; advances across query()/receive_response() rounds
         self.connect_error: BaseException | None = None
+        self.connect_hang: asyncio.Event | None = None
         self.release: asyncio.Event | None = None
         self.waiting = asyncio.Event()
+        self.hang_reached = asyncio.Event()
+        self.hang_release = asyncio.Event()
+        self.swallow_cancel = False
+        self.cancels_swallowed = 0
         self.prompts: list[Any] = []
+        self.steers: list[dict[str, Any]] = []  # mid-turn messages: a user message dict with a uuid
+        self._unechoed: list[dict[str, Any]] = []
+        self.steer_error: Exception | None = None
+        self.steer_hang: asyncio.Event | None = None
+        self.control_requests: list[dict[str, Any]] = []
+        self.interrupt_hang: asyncio.Event | None = None
+        self.interrupt_error: Exception | None = None
+        self.writes: list[str] = []
+        self._query = self
         self.connected = False
+        self.disconnect_hang: asyncio.Event | None = None
+        self.disconnect_error: Exception | None = None
+        self.disconnect_started = asyncio.Event()
+        self.disconnect_calls = 0
         self.disconnected = False
 
     async def connect(self, prompt: Any = None) -> None:
+        if self.connect_hang is not None:
+            await self.connect_hang.wait()
         if self.connect_error is not None:
             raise self.connect_error
         self.connected = True
 
     async def query(self, prompt: Any, session_id: str = "default") -> None:
         # An AsyncIterable prompt is collected into the message dicts it yields.
-        self.prompts.append(prompt if isinstance(prompt, str) else [message async for message in prompt])
+        collected = prompt if isinstance(prompt, str) else [message async for message in prompt]
+        self.prompts.append(collected)
+        steers = [message for message in collected if "uuid" in message] if isinstance(collected, list) else []
+        if steers and self.steer_hang is not None:
+            await self.steer_hang.wait()
+        if steers and self.steer_error is not None:
+            raise self.steer_error
+        self.steers += steers
+        self._unechoed += steers
+        self.writes += ["steer"] * len(steers)
 
     async def receive_response(self):
-        from claude_agent_sdk import ResultMessage
+        from claude_agent_sdk import ResultMessage, UserMessage
 
         if self.release is not None:
             self.waiting.set()
@@ -681,12 +732,60 @@ class FakeClaudeClient:
         while self._consumed < len(self.messages):
             message = self.messages[self._consumed]
             self._consumed += 1
+            if message is HANG:
+                self.hang_reached.set()
+                while True:
+                    try:
+                        await self.hang_release.wait()
+                        break
+                    except asyncio.CancelledError:
+                        if not self.swallow_cancel:
+                            raise
+                        self.cancels_swallowed += 1
+                continue
+            if isinstance(message, Pause):
+                await asyncio.sleep(message.seconds)
+                continue
+            if message is ECHO:
+                if not self._unechoed:
+                    continue
+                steer = self._unechoed.pop(0)
+                message = UserMessage(content=steer["message"]["content"], uuid=steer["uuid"])
             yield message
             if isinstance(message, ResultMessage):  # as the SDK's own receive_response stops
                 return
 
+    async def _send_control_request(self, request: dict[str, Any], timeout: float = 60.0) -> dict[str, Any]:
+        self.control_requests.append(request)
+        self.writes.append(request.get("subtype", "?"))
+        if self.interrupt_hang is not None:
+            await self.interrupt_hang.wait()
+        if self.interrupt_error is not None:
+            raise self.interrupt_error
+        return {}
+
     async def disconnect(self) -> None:
+        self.disconnect_calls += 1
+        self.disconnect_started.set()
+        if self.disconnect_hang is not None:
+            await self.disconnect_hang.wait()
+        if self.disconnect_error is not None:
+            raise self.disconnect_error
         self.disconnected = True
+
+
+class _Echo:
+    """See ``FakeClaudeClient``: the CLI echoing a mid-turn message BOS sent."""
+
+
+ECHO = _Echo()
+
+
+class Pause:
+    """Among ``FakeClaudeClient.messages``: the CLI taking *seconds* before its next message."""
+
+    def __init__(self, seconds: float) -> None:
+        self.seconds = seconds
 
 
 @pytest.fixture
