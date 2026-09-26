@@ -64,11 +64,12 @@ _FIELDS = sorted(field.name for field in dataclasses.fields(ClaudeAgentOptions))
 
 
 @pytest.fixture(autouse=True)
-def _no_subscription_bypass(monkeypatch, tmp_path):
+def _clean_environment(monkeypatch, tmp_path):
     """The subscription preflight reads this process's environment and one well-known file,
     and a developer's shell may export any of the variables it refuses — and on Claude Code's
-    own remote hosts the file exists. Tests that want either arrange it themselves."""
-    for name in {*_SUBSCRIPTION_BYPASS, *claude_code._SUBSCRIPTION_BYPASS_VARS}:
+    own remote hosts the file exists. BOS's CLAUDE.md read obeys one more variable. Tests that
+    want any of them arrange it themselves."""
+    for name in {*_SUBSCRIPTION_BYPASS, *claude_code._SUBSCRIPTION_BYPASS_VARS, "CLAUDE_CODE_DISABLE_CLAUDE_MDS"}:
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(claude_code, "_WELL_KNOWN_API_KEY_FILE", tmp_path / "no-well-known-api-key")
 
@@ -371,10 +372,20 @@ def test_the_root_claude_md_never_joins_base_instructions(tmp_path):
     assert claude_code._system_prompt(agent._config, "Use tabs.\n") == "Replace it.", "even when handed the file"
 
 
-@pytest.mark.parametrize("prompt_cfg", [{"base_instructions": "Replace it."}, {"setting_sources": ["project"]}])
-def test_the_root_claude_md_is_not_even_read_when_it_could_not_be_used(tmp_path, caplog, prompt_cfg):
-    """Under ``base_instructions`` or ``project`` BOS does not read the file at all, so an escaping
-    one is not even looked at: no WARNING about it."""
+@pytest.mark.parametrize(
+    ("prompt_cfg", "env"),
+    [
+        ({"base_instructions": "Replace it."}, {}),
+        ({"setting_sources": ["project"]}, {}),
+        ({}, {"CLAUDE_CODE_DISABLE_CLAUDE_MDS": "1"}),
+    ],
+    ids=["base_instructions", "project", "disabled"],
+)
+def test_the_root_claude_md_is_not_even_read_when_it_could_not_be_used(tmp_path, monkeypatch, caplog, prompt_cfg, env):
+    """Under ``base_instructions``, ``project`` or the CLI's switch for memory files BOS does not
+    read the file at all, so an escaping one is not even looked at: no WARNING about it."""
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
     secret = tmp_path / "id_rsa"
     secret.write_text("CANARY-private-key\n")
     (tmp_path / "ws").mkdir()
@@ -390,6 +401,57 @@ def test_the_root_claude_md_is_left_to_the_cli_when_project_settings_load(tmp_pa
     (tmp_path / "CLAUDE.md").write_text("Use tabs.\n")
 
     assert _append(_agent(tmp_path, setting_sources=["project"])) is None
+
+
+@pytest.mark.parametrize(
+    ("value", "reads"),
+    [
+        ("1", False),
+        ("true", False),
+        (" YES ", False),
+        ("On", False),
+        ("0", True),
+        ("false", True),
+        ("", True),
+        ("2", True),
+    ],
+)
+def test_the_clis_switch_for_memory_files_turns_off_bos_read_too(tmp_path, monkeypatch, value, reads):
+    """BOS's read stands in for the CLI's memory loading, so it obeys the CLI's switch for that,
+    by the CLI's own rule for this variable: set only when, trimmed and lower-cased, it is 1,
+    true, yes or on (``M.bool`` in the CLI 2.1.281 source). It is also how a host keeps the
+    repository's text out of the prompt."""
+    (tmp_path / "CLAUDE.md").write_text("Use tabs.\n")
+    monkeypatch.setenv("CLAUDE_CODE_DISABLE_CLAUDE_MDS", value)
+
+    assert (_append(_agent(tmp_path)) is not None) is reads
+
+
+def test_each_claude_md_warning_is_logged_once_per_agent(tmp_path, caplog):
+    """The file is read at every turn, but a misconfigured one is reported once per agent for each
+    path and reason, not once per turn. A new reason is reported, and so is the same one to
+    another agent."""
+    secret = tmp_path / "id_rsa"
+    secret.write_text("CANARY-private-key\n")
+    (tmp_path / "ws").mkdir()
+    claude_md = tmp_path / "ws" / "CLAUDE.md"
+    claude_md.symlink_to(secret)
+    agent = _agent(tmp_path, cwd="ws")
+
+    def warnings() -> list[str]:
+        return [r.getMessage() for r in caplog.records if r.name == "bos.extensions.runtimes.claude_code"]
+
+    with caplog.at_level(logging.WARNING, logger="bos.extensions.runtimes.claude_code"):
+        for _ in range(3):
+            agent._options()
+        assert len(warnings()) == 1, warnings()
+        claude_md.unlink()
+        claude_md.write_text("x" * (claude_code._CLAUDE_MD_MAX_BYTES + 1))
+        agent._options()
+        agent._options()
+        assert len(warnings()) == 2, "a new reason is reported"
+        _agent(tmp_path, cwd="ws")._options()
+        assert len(warnings()) == 3, "and so is the same reason to another agent"
 
 
 def test_no_claude_md_no_append(tmp_path):
@@ -655,7 +717,7 @@ async def test_each_clients_cli_binds_a_settings_file_of_its_own(tmp_path, fake_
 
     The nonce covers only this path. The sandbox's other mount points, under `<cwd>/.claude/`
     and in ancestors inside `/tmp/claude-<uid>`, are shared and race the same way (BEP 19
-    §8.2): this test failed in 6 of 36 runs at six-way concurrency with its temporary
+    §3.5.3): this test failed in 6 of 36 runs at six-way concurrency with its temporary
     directories under `/tmp/claude-<uid>`, and in none of 36 under pytest's default location."""
     (tmp_path / "ws").mkdir()
     agent = _agent(tmp_path, permission="workspace-write", cwd="ws")

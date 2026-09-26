@@ -107,7 +107,8 @@ _WORKSPACE_WRITE_SANDBOX: dict[str, Any] = {
 # nothing reads. test_each_clients_cli_binds_a_settings_file_of_its_own pins the file and
 # its name against the real CLI. The nonce covers only this path: the sandbox's other mount
 # points, under `<cwd>/.claude/`, are named by the repository and shared by agents that share
-# a cwd, and they race the same way (3 of 180 commands with six CLIs in one cwd; BEP 19 §8.2).
+# a cwd, and they race the same way (3 of 180 commands with six CLIs in one cwd). That is
+# documented and accepted, not locked around (BEP 19 §3.5.3).
 _SETTINGS_NONCE_VAR = "BOS_SETTINGS_NONCE"
 
 # BEP 19 §3.5.3: which settings files the CLI loads. BOS always sends the list — left at
@@ -253,6 +254,12 @@ _WELL_KNOWN_API_KEY_FILE = Path("/home/claude/.claude/remote/.api_key")
 _CLAUDE_MD_MAX_BYTES = 40_000
 _CLAUDE_MD_HEADING = "# CLAUDE.md in the working directory"
 _CLAUDE_MD_TRUNCATED = f"[BOS truncated this CLAUDE.md at {_CLAUDE_MD_MAX_BYTES} bytes.]"
+# The CLI's own switch for the memory loading BOS's read stands in for, so BOS's read obeys it
+# too, by the CLI's rule for this variable: `M.bool`, which counts it as set only when the
+# value, trimmed and lower-cased, is 1, true, yes or on (read from the CLI 2.1.281 source). It
+# is also how a host keeps repository text out of the prompt, with no BOS key of its own.
+_DISABLE_CLAUDE_MDS_VAR = "CLAUDE_CODE_DISABLE_CLAUDE_MDS"
+_CLI_TRUE = frozenset({"1", "true", "yes", "on"})
 
 # macOS: the binary the CLI runs every sandboxed command through (read from the CLI
 # 2.1.281 source; no macOS host has measured it).
@@ -408,7 +415,7 @@ def _system_prompt(config: ExternalAgentConfig, claude_md: str | None) -> str | 
     return {"type": "preset", "preset": "claude_code", "append": "\n\n".join(parts)}
 
 
-def _root_claude_md(cwd: Path) -> str | None:
+def _root_claude_md(cwd: Path, warned: set[tuple[Path, str]]) -> str | None:
     """The agent's own ``<cwd>/CLAUDE.md`` as text, for BOS to append to its instructions — or
     None when there is none, or it is refused (BEP 19 §3.4.1.4).
 
@@ -424,28 +431,43 @@ def _root_claude_md(cwd: Path) -> str | None:
     runs. The open follows no final symlink and does not block, so a FIFO swapped in cannot
     hang the turn. Refused with a WARNING that names the path.
 
+    Each WARNING is logged once per agent for each path and reason — *warned* is the agent's
+    record of those — since the file is read every turn, and a misconfigured one should not
+    log a line per turn forever (BEP 19 §4.3).
+
     Read per turn, because each turn starts its own CLI, which reads memory afresh when it
     starts; an agent that edits the file changes what its next turn sees.
     """
     candidate = cwd / "CLAUDE.md"
+
+    def warn(reason: str, message: str, *args: object) -> None:
+        if (candidate, reason) not in warned:
+            warned.add((candidate, reason))
+            logger.warning(message, *args)
+
     if not os.path.lexists(candidate):
         return None
     resolved = candidate.resolve()
     if cwd not in resolved.parents or not resolved.is_file():
-        logger.warning(
-            "%s resolves to %s, which is not a regular file inside %s; BOS did not read it", candidate, resolved, cwd
+        warn(
+            "refused",
+            "%s resolves to %s, which is not a regular file inside %s; BOS did not read it",
+            candidate,
+            resolved,
+            cwd,
         )
         return None
     try:
         fd = os.open(resolved, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
     except OSError as exc:
-        logger.warning("%s could not be opened (%s); BOS did not read it", candidate, exc)
+        warn("unopenable", "%s could not be opened (%s); BOS did not read it", candidate, exc)
         return None
     try:
         # Checked on the bare descriptor: `os.fdopen` itself raises for a directory.
         opened = _opened_path(fd)
         if not stat.S_ISREG(os.fstat(fd).st_mode) or (opened is not None and cwd not in opened.parents):
-            logger.warning(
+            warn(
+                "swapped",
                 "%s was no longer a regular file inside %s once BOS opened it (it opened %s); BOS did not read it",
                 candidate,
                 cwd,
@@ -458,8 +480,12 @@ def _root_claude_md(cwd: Path) -> str | None:
         os.close(fd)
     text = data[:_CLAUDE_MD_MAX_BYTES].decode("utf-8", errors="replace")
     if len(data) > _CLAUDE_MD_MAX_BYTES:
-        logger.warning(
-            "%s is over %d bytes; BOS appended only the first %d", candidate, _CLAUDE_MD_MAX_BYTES, _CLAUDE_MD_MAX_BYTES
+        warn(
+            "oversized",
+            "%s is over %d bytes; BOS appended only the first %d",
+            candidate,
+            _CLAUDE_MD_MAX_BYTES,
+            _CLAUDE_MD_MAX_BYTES,
         )
         text += f"\n\n{_CLAUDE_MD_TRUNCATED}"
     return text
@@ -561,6 +587,7 @@ class ClaudeCodeAgent:
             )
 
         self._stop_requested = asyncio.Event()
+        self._claude_md_warned: set[tuple[Path, str]] = set()  # `_root_claude_md`'s once-only WARNINGs
 
     @property
     def name(self) -> str:
@@ -608,9 +635,14 @@ class ClaudeCodeAgent:
         # does not reach, and with `project` loaded, the repo's hooks, MCP servers, settings
         # `env` and apiKeyHelper ran without any trust at all.
         config = self._config
-        # BEP 19 §3.4.1.4: the CLI loads CLAUDE.md itself under `project`, and `base_instructions`
-        # means the host owns the whole prompt, so only otherwise does BOS read the file.
-        reads_claude_md = config.base_instructions is None and "project" not in self._setting_sources
+        # BEP 19 §3.4.1.4: the CLI loads CLAUDE.md itself under `project`, `base_instructions`
+        # means the host owns the whole prompt, and the CLI's own switch for memory files turns
+        # BOS's read off too, so only otherwise does BOS read the file.
+        reads_claude_md = (
+            config.base_instructions is None
+            and "project" not in self._setting_sources
+            and os.environ.get(_DISABLE_CLAUDE_MDS_VAR, "").strip().lower() not in _CLI_TRUE
+        )
         sandbox = (
             cast(SandboxSettings, dict(_WORKSPACE_WRITE_SANDBOX)) if config.permission == "workspace-write" else None
         )
@@ -620,7 +652,9 @@ class ClaudeCodeAgent:
             sandbox=sandbox,
             settings=json.dumps({"env": {_SETTINGS_NONCE_VAR: uuid.uuid4().hex}}),
             setting_sources=list(self._setting_sources),
-            system_prompt=_system_prompt(config, _root_claude_md(config.cwd) if reads_claude_md else None),
+            system_prompt=_system_prompt(
+                config, _root_claude_md(config.cwd, self._claude_md_warned) if reads_claude_md else None
+            ),
             max_turns=self._max_turns,
             model=config.model,
             strict_mcp_config=True,
