@@ -90,20 +90,18 @@ _SUBSCRIPTION_BYPASS = (
     "CLAUDE_CODE_USE_GATEWAY",
 )
 _FIELDS = sorted(field.name for field in dataclasses.fields(ClaudeAgentOptions))
-_REAL_API_KEY_FILE = claude_code._WELL_KNOWN_API_KEY_FILE  # before the autouse fixture moves it
+_REAL_API_KEY_FILE = claude_code._WELL_KNOWN_API_KEY_FILE  # before conftest's autouse fixture moves it
 _REAL_MANAGED_MCP_FILE = claude_code._MANAGED_MCP_FILE  # likewise
 
 
 @pytest.fixture(autouse=True)
-def _clean_environment(monkeypatch, tmp_path):
-    """The subscription preflight reads this process's environment and one well-known file,
-    and a developer's shell may export any of the variables it refuses — and on Claude Code's
-    own remote hosts the file exists. BOS's CLAUDE.md read obeys the CLI's switches for memory
+def _clean_environment(monkeypatch):
+    """The subscription preflight reads this process's environment, and a developer's shell may
+    export any of the variables it refuses (the host files it reads are moved away by conftest's
+    ``_no_host_claude_code_files``). BOS's CLAUDE.md read obeys the CLI's switches for memory
     files. Tests that want any of them arrange it themselves."""
     for name in {*_SUBSCRIPTION_BYPASS, *claude_code._SUBSCRIPTION_BYPASS_VARS, *claude_code._CLAUDE_MD_SWITCHES}:
         monkeypatch.delenv(name, raising=False)
-    monkeypatch.setattr(claude_code, "_WELL_KNOWN_API_KEY_FILE", tmp_path / "no-well-known-api-key")
-    monkeypatch.setattr(claude_code, "_MANAGED_MCP_FILE", tmp_path / "no-managed-mcp.json")
 
 
 @pytest.fixture

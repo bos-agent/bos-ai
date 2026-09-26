@@ -602,6 +602,19 @@ def fake_codex(monkeypatch):
 _XDG_HOMES = ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME")
 
 
+@pytest.fixture(autouse=True)
+def _no_host_claude_code_files(monkeypatch):
+    """``ClaudeCodeAgent`` refuses construction on two host files: the CLI's well-known API key
+    file (under ``auth = "subscription"``) and the administrator's enterprise ``managed-mcp.json``
+    (always). A developer's machine may have either, which would fail every Claude Code test at
+    construction, so both point at a path that cannot exist — a child of ``/dev/null``. Tests
+    that want a file there point the path at one themselves."""
+    from bos.extensions.runtimes import claude_code
+
+    monkeypatch.setattr(claude_code, "_WELL_KNOWN_API_KEY_FILE", Path(os.devnull, "no-well-known-api-key"))
+    monkeypatch.setattr(claude_code, "_MANAGED_MCP_FILE", Path(os.devnull, "no-managed-mcp.json"))
+
+
 @pytest.fixture
 def fake_anthropic(monkeypatch):
     """A fresh FakeAnthropic for one test (tests/fake_anthropic.py), closed after it.

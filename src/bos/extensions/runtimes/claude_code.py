@@ -159,10 +159,13 @@ _PERMISSION_MODES: dict[str, PermissionMode] = {
 }
 
 # BEP 19 §3.5.3: the bash sandbox, under `workspace-write` only. `read-only` needs none
-# because its hook is to deny Bash outright (§3.5; the hook is not built yet), and
-# `full-access` confines nothing. With `allowUnsandboxedCommands: False`, per the SDK's
-# docstring, every command must run sandboxed or be in `excludedCommands`, whatever the
-# model asks (read, not measured). `failIfUnavailable` makes the CLI refuse to start,
+# because it does not offer Bash (`tools=`, `_TOOL_LEVELS`; the hook denies it too, as
+# outside the level's allowlist), and `full-access` confines nothing. With
+# `allowUnsandboxedCommands: False`, per the SDK's docstring, every command must run
+# sandboxed or be in `excludedCommands`, whatever the model asks: a Bash call that sets
+# `dangerouslyDisableSandbox` still ran sandboxed and never reached `can_use_tool` (pinned by
+# test_a_bash_call_asking_to_leave_the_sandbox_stays_confined), and with `True` the same call
+# ran unsandboxed (measured, not pinned). `failIfUnavailable` makes the CLI refuse to start,
 # rather than run bash unsandboxed, when the sandbox cannot start (fact 6c) — without it
 # the sandbox fails open (fact 6). CLI 2.1.281 honours that key, but the SDK's
 # `SandboxSettings` TypedDict does not declare it: a third-party stub gap. The SDK copies
@@ -209,9 +212,9 @@ _WORKSPACE_WRITE_SANDBOX: dict[str, Any] = {
 #   the deny-by-default ground above, so no confined agent spawns a subagent in the first place.
 # - WebFetch and WebSearch are network egress (WebFetch reaches the local network too). Both reach
 #   the hook and `can_use_tool` (measured while building the hook, not pinned), so BOS could gate them
-#   either way; their policy is an open question (§8.2(a)), so under deny-by-default they are excluded
-#   below `full-access`
-#   until it is decided.
+#   either way; their policy is decided (§8.2(a)): excluded below `full-access`, for parity with Codex,
+#   whose `read-only` and `workspace-write` sandboxes have no network by default, and because WebFetch
+#   is local-network egress that `permission` does not bound.
 # - Skill (loads packaged instructions into the turn) and ReportFindings (reports to a host review
 #   UI) are neither confinement-bounded nor needed by a confined agent, so deny-by-default excludes
 #   them below `full-access` too.
@@ -258,6 +261,7 @@ _TOOL_LEVELS: Mapping[str, frozenset[str]] = MappingProxyType({
 # not offered by CLI 2.1.281, so they are absent here. EnterWorktree (`path`) and
 # Workflow (`scriptPath`) also take a path, but both are offered only at `full-access`, where the
 # hook path-checks nothing, so neither needs an entry. A tool not in this map is not path-checked.
+# Each entry's deny is pinned by test_the_hook_denies_every_file_tool_outside_the_root_per_level.
 _FILE_TOOL_PATH_ARG: Mapping[str, str] = MappingProxyType({
     "Read": "file_path",
     "Write": "file_path",
@@ -351,10 +355,11 @@ _SETTINGS_NONCE_VAR = "BOS_SETTINGS_NONCE"
 # keeping that list current. Under the default none of it ran, and the CLI loaded no
 # CLAUDE.md (test_by_default_nothing_the_repo_authors_runs_or_reaches_the_model).
 #
-# A host may still opt in; construction then logs one WARNING naming the consequence. The
-# PreToolUse hook (not built yet) must then deny the agent's own writes under `.claude/`,
+# A host may still opt in; construction then logs one WARNING naming the consequence, and
+# the PreToolUse hook then denies the agent's own writes under `<cwd>/.claude/` (`_hook`),
 # or an agent could plant settings for its next turn: the Write tool reached `can_use_tool`
-# for .claude/settings.json and created it when allowed (measured, not pinned). A repo's
+# for .claude/settings.json and created it when allowed (measured; the deny is pinned by
+# test_dot_claude_writes_are_denied_under_the_opt_in). A repo's
 # .mcp.json stays inert either way, because `strict_mcp_config` is always sent.
 _SETTING_SOURCES: tuple[str, ...] = get_args(SettingSource)
 _DEFAULT_SETTING_SOURCES: tuple[SettingSource, ...] = ()
@@ -388,9 +393,10 @@ _INHERITED_ENV_OVERRIDES: Mapping[str, str] = MappingProxyType({
     # an opt-out, and on unless a settings file says otherwise: the CLI loads the operator's
     # auto-memory index from <CLAUDE_CONFIG_DIR>/projects/<slug>/memory/ into every turn, as
     # instructions, and tells the model to write there. This switches the loading and the
-    # instructions off; the CLI still lets a `read-only` agent's Write into that directory
-    # through unasked, which BOS's PreToolUse hook is to deny (BEP 19 §3.5.3). A settings
-    # file cannot turn it back on over this: the variable is read first.
+    # instructions off, not the CLI's carve-out of that directory from the permission check —
+    # a `read-only` agent's Write there went through unasked while Write was offered at that
+    # level — which `tools=` and the PreToolUse hook close (`_cli_config_dir`, BEP 19 §3.5.3).
+    # A settings file cannot turn it back on over this: the variable is read first.
     "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
     # Read from the source and not measured, each overridden because BOS loads no plugins,
     # skills or other MCP servers by default:
@@ -563,7 +569,8 @@ _WELL_KNOWN_API_KEY_FILE = Path("/home/claude/.claude/remote/.api_key")
 # one exists the CLI refuses `--strict-mcp-config`, which BOS sends on every client, and while a
 # broken one exists it drops every server BOS passes (read from the CLI 2.1.281 source: `Jdr`,
 # `CYt`, and `_f` for the directory; not measured — that means writing the administrator's
-# directory).
+# directory). BOS refuses construction whenever the file exists, readable or not, which is
+# the conservative side of the CLI's own condition.
 _MANAGED_SETTINGS_DIRS = {"darwin": "/Library/Application Support/ClaudeCode", "win32": r"C:\Program Files\ClaudeCode"}
 _MANAGED_MCP_FILE = Path(_MANAGED_SETTINGS_DIRS.get(sys.platform, "/etc/claude-code")) / "managed-mcp.json"
 
@@ -693,8 +700,8 @@ def _bash_sandbox_unavailable(platform: str) -> str | None:
     dependencies grows, a host this passes is refused at its first turn instead of here. It
     checks presence, as the CLI does, not usability: a ``bwrap`` installed but unable to
     create a sandbox passes both, and what the CLI then does is not measured (BEP 19 §8.2).
-    The stderr tripwire BEP 19 §3.5.3 describes, for a degrade path the key does not cover,
-    is not built yet.
+    Behind both sits the stderr tripwire (``_sandbox_tripwire``), for a degrade path the key
+    does not cover (BEP 19 §3.5.3).
     """
     if platform == "win32":
         return (
@@ -1227,8 +1234,9 @@ class ClaudeCodeAgent:
                 f"sandbox, and BOS refuses rather than let bash run unsandboxed (BEP 19 §3.5.3)."
             )
 
-        # BEP 19 §8.2: with an enterprise MCP config present every turn would fail at the CLI's own
-        # startup, so it is refused once, here. `os.path.exists`, as for the key file above.
+        # BEP 19 §8.2: while a valid enterprise MCP config exists every turn would fail at the CLI's
+        # own startup, and while a broken one exists the CLI drops BOS's server, so it is refused
+        # once, here, on the file's existence alone. `os.path.exists`, as for the key file above.
         if os.path.exists(_MANAGED_MCP_FILE):
             raise ValueError(
                 f"{_MANAGED_MCP_FILE} exists: this host's administrator gives an enterprise MCP config exclusive "

@@ -214,12 +214,38 @@ async def test_workspace_write_confines_file_writes_to_the_root(tmp_path, fake_a
 
 @pytest.mark.asyncio
 @_needs_sandbox
+async def test_workspace_write_reads_only_inside_the_root(tmp_path, fake_anthropic, monkeypatch):
+    """Under ``workspace-write``, as under ``read-only``: an in-root Read is served and an
+    out-of-root Read is denied by the hook, with its reason (BEP §3.5.5)."""
+    ws, outside = tmp_path / "ws", tmp_path / "outside"
+    ws.mkdir()
+    outside.mkdir()
+    (ws / "notes.txt").write_text("in-root secret\n")
+    (outside / "secret.txt").write_text("out-of-root secret\n")
+    agent = _agent(tmp_path, monkeypatch, fake_anthropic, permission="workspace-write")
+    fake_anthropic.script([
+        [
+            _tu("tu_read_in", "Read", file_path=str(ws / "notes.txt")),
+            _tu("tu_read_out", "Read", file_path=str(outside / "secret.txt")),
+        ]
+    ])
+    await _run(agent)
+    results = _tool_results(fake_anthropic)
+
+    assert "in-root secret" in results["tu_read_in"], f"in-root Read should be served: {results}"
+    assert "out-of-root secret" not in results["tu_read_out"], f"out-of-root Read should be denied: {results}"
+    assert "outside the workspace root" in results["tu_read_out"], results
+
+
+@pytest.mark.asyncio
+@_needs_sandbox
 @pytest.mark.parametrize("spelling", ["dotdot", "symlink", "absolute", "relative", "tilde"])
 async def test_each_escape_spelling_is_denied(tmp_path, fake_anthropic, monkeypatch, spelling):
     """Review Focus 3: a path that escapes by spelling is denied at ``workspace-write`` — ``..``, a
     symlink inside ``cwd`` pointing out, an absolute out-of-root path, a relative path that resolves
     against ``cwd`` to outside it, and ``~`` (which the CLI expands to an absolute ``$HOME`` path
-    before the hook, so it lands on the same out-of-root deny). The hook resolves before comparing."""
+    before the hook, so it lands on the same out-of-root deny). The hook resolves before comparing,
+    and the tool result carries its reason, so a spelling refused for any other reason fails here."""
     ws, outside = tmp_path / "ws", tmp_path / "outside"
     ws.mkdir()
     outside.mkdir()
@@ -242,6 +268,7 @@ async def test_each_escape_spelling_is_denied(tmp_path, fake_anthropic, monkeypa
     await _run(agent)
 
     assert not marker.exists(), f"the {spelling} escape wrote out-of-root: {_tool_results(fake_anthropic)}"
+    assert "outside the workspace root" in _tool_results(fake_anthropic)["tu"], _tool_results(fake_anthropic)
 
 
 @pytest.mark.asyncio
@@ -278,6 +305,44 @@ async def test_workspace_write_confines_bash_writes_to_the_root(tmp_path, fake_a
     assert inside.exists(), f"in-root Bash write should land: {results}"
     assert not escaped.exists(), f"out-of-root Bash write should be refused by the sandbox: {results}"
     assert "Read-only file system" in results["tu_out"], results
+
+
+@pytest.mark.asyncio
+@_needs_sandbox
+async def test_a_bash_call_asking_to_leave_the_sandbox_stays_confined(tmp_path, fake_anthropic, monkeypatch):
+    """BEP §3.5.3: with the sandbox on, the Bash tool still offers the model a
+    ``dangerouslyDisableSandbox`` parameter — model-controlled — and ``can_use_tool`` would answer yes
+    to Bash at ``workspace-write``. A call that sets it stays sandboxed: its out-of-root ``touch``
+    fails "Read-only file system", and ``can_use_tool`` is never asked. A turn through ``run()``,
+    with BOS's own ``can_use_tool`` wrapped to record each call."""
+    ws, outside = tmp_path / "ws", tmp_path / "outside"
+    ws.mkdir()
+    outside.mkdir()
+    escaped = outside / "escaped.txt"
+    agent = _agent(tmp_path, monkeypatch, fake_anthropic, permission="workspace-write")
+    reached: list[str] = []
+    real_can_use_tool = agent._can_use_tool
+
+    def recording_can_use_tool(*args: Any, **kwargs: Any) -> Any:
+        base = real_can_use_tool(*args, **kwargs)
+        assert base is not None
+
+        async def recording(name: str, tool_input: dict[str, Any], context: Any) -> Any:
+            reached.append(name)
+            return await base(name, tool_input, context)
+
+        return recording
+
+    monkeypatch.setattr(agent, "_can_use_tool", recording_can_use_tool)
+    fake_anthropic.script([[_tu("tu", "Bash", command=f"touch {escaped}", dangerouslyDisableSandbox=True)]])
+    await _run(agent)
+    results = _tool_results(fake_anthropic)
+
+    bash = next(t for t in fake_anthropic.requests[0]["tools"] if t["name"] == "Bash")
+    assert "dangerouslyDisableSandbox" in bash["input_schema"]["properties"], "the parameter is offered"
+    assert not escaped.exists(), f"a call asking to leave the sandbox wrote out-of-root: {results}"
+    assert "Read-only file system" in results["tu"], results
+    assert reached == [], f"can_use_tool was asked: {reached}"
 
 
 @pytest.mark.skipif(
@@ -581,10 +646,12 @@ async def _poll(predicate: Any, *, timeout: float = 3.0) -> Any:
             await asyncio.sleep(0.01)
 
 
-def test_the_tripwire_only_arms_under_workspace_write(tmp_path, fake_anthropic, monkeypatch):
-    """Only ``workspace-write`` has a bash sandbox to degrade, so ``run()`` sets the stderr tripwire
-    only there; at other levels ``_options()`` leaves ``stderr`` unset. Asserted on the callback the
-    agent builds, so the wiring is pinned without a turn."""
+def test_the_tripwire_callback_records_only_sandbox_disabled_lines(tmp_path, fake_anthropic, monkeypatch):
+    """``_sandbox_tripwire``'s callback records a stderr line carrying the CLI's "Sandbox disabled"
+    warning and ignores any other line. The callback does not check the level itself — ``run()``
+    wires it only under ``workspace-write``, which
+    ``test_the_stderr_tripwire_is_wired_only_under_workspace_write`` pins — so it is built here on a
+    ``read-only`` agent."""
     tripped: list[str] = []
     cb = _agent(tmp_path, monkeypatch, fake_anthropic, permission="read-only")._sandbox_tripwire(tripped, "c", "t")
     cb("[ERROR] Sandbox disabled: whatever")
@@ -779,6 +846,39 @@ async def test_the_hook_denies_a_tool_outside_the_levels_allowlist(tmp_path, fak
     # A tool that IS in the allowlist, in-root, is not denied by the backstop.
     allowed = await hook({"tool_name": "Read", "tool_input": {"file_path": str(tmp_path / "ws" / "f")}}, "tu", None)
     assert allowed == {}, allowed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("permission", ["read-only", "workspace-write", "full-access"])
+@pytest.mark.parametrize(
+    ("tool", "arg"),
+    [("Read", "file_path"), ("Write", "file_path"), ("Edit", "file_path"), ("NotebookEdit", "notebook_path")],
+)
+async def test_the_hook_denies_every_file_tool_outside_the_root_per_level(
+    tmp_path, fake_anthropic, monkeypatch, permission, tool, arg
+):
+    """BEP §3.5.3: the hook's deny of an out-of-root path, on every file tool at every level, by a
+    direct call. For ``Edit`` and ``NotebookEdit`` this is the only proof: against the real CLI its
+    own "File has not been read yet" check refuses an out-of-root edit before the hook is asked
+    (measured in review), so a real-CLI test would pass without the hook. Each call carries its path
+    under the argument name the CLI's tool offers (§3.5.3). Where the tool is offered below
+    ``full-access`` the hook denies the path as outside the root; at ``read-only`` the three writers
+    are not offered and the hook denies them as outside the allowlist; ``full-access`` confines
+    nothing on the filesystem. No sandbox is started, so ``workspace-write`` builds on any host."""
+    monkeypatch.setattr(claude_code, "_bash_sandbox_unavailable", lambda platform: None)
+    agent = _agent(tmp_path, monkeypatch, fake_anthropic, permission=permission)
+    decision = await agent._hook()(
+        {"tool_name": tool, "tool_input": {arg: str(tmp_path / "outside" / "f")}}, "tu", None
+    )
+
+    if permission == "full-access":
+        assert decision == {}, decision
+        return
+    out = decision.get("hookSpecificOutput", {})  # type: ignore[union-attr]
+    assert out.get("permissionDecision") == "deny", decision
+    offered = permission in _TOOL_LEVELS[tool]
+    reason = "outside the workspace root" if offered else "not available"
+    assert reason in out.get("permissionDecisionReason", ""), decision
 
 
 @pytest.mark.asyncio

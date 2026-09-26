@@ -24,7 +24,6 @@ import logging
 import re
 from dataclasses import replace
 from pathlib import Path
-from types import MappingProxyType
 from typing import Any
 
 import pytest
@@ -537,15 +536,11 @@ async def test_bos_tools_are_offered_up_front_when_the_operator_turns_tool_searc
     tmp_path, fake_anthropic, monkeypatch, host_tools
 ):
     """Tool search — on by default against a first-party host, and forced on by an inherited
-    `ENABLE_TOOL_SEARCH=true`, which the CLI honours even against the fake — defers tools behind a
-    `ToolSearch` tool and adds a `DeferredToolPlaceholder` the confinement does not classify. BOS's
-    environment pins it off (§3.12), and the SDK layers BOS's `env` over the inherited one, so with
-    `true` inherited BOS's tools are still offered up front, no placeholder appears, and the call
-    completes."""
-    # Assumes Task 8's ENABLE_TOOL_SEARCH override (t8-fix1, d643d87); this patch is a no-op once it lands.
-    overrides = claude_code._INHERITED_ENV_OVERRIDES
-    pinned = {**overrides, "ENABLE_TOOL_SEARCH": overrides.get("ENABLE_TOOL_SEARCH", "false")}
-    monkeypatch.setattr(claude_code, "_INHERITED_ENV_OVERRIDES", MappingProxyType(pinned))
+    `ENABLE_TOOL_SEARCH=true`, which the CLI honours even against the fake — adds a
+    `DeferredToolPlaceholder` the confinement does not classify. BOS's environment pins it off
+    (§3.12), and the SDK layers BOS's `env` over the inherited one, so with `true` inherited no
+    placeholder appears, BOS's tool is offered up front, and the call completes. Without BOS's pin
+    the placeholder appears, which fails this test."""
     _point_the_cli_at(fake_anthropic, tmp_path, monkeypatch)
     monkeypatch.setenv("ENABLE_TOOL_SEARCH", "true")
     server = BosToolMcpServer()
