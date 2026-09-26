@@ -79,6 +79,7 @@ life of the gateway.
 |---------|---------------|
 | Gateway, actors, channels, message flow | [Runtime & gateway](runtime.md) |
 | Agent assembly, actor identity, multi-agent patterns | [Agents & actors](agents-and-actors.md) |
+| Claude Code and Codex as agents: config, permission, sessions | [External agents](external-agents.md) |
 | Memory, consolidation, skills | [Memory & skills](memory-and-skills.md) |
 | Extension points, tools, plugins, providers | [Architecture](../architecture/index.md) |
 | Hands-on walkthroughs | [Tutorials](../tutorials/index.md) |

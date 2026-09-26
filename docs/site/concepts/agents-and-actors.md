@@ -28,6 +28,10 @@ An **agent** is an LLM-driven turn loop assembled at runtime from:
 Agents are assembled lazily; the spec (name, prompt, model, tool/plugin lists) is
 resolved at startup, but the object that runs turns is built on first use.
 
+An agent can instead be backed by an external runtime — Claude Code or Codex — whose turn
+loop, tools and login are the vendor's; it is still addressed like any agent. See
+[External agents](external-agents.md).
+
 ---
 
 ## What an actor is
@@ -79,8 +83,8 @@ For every agent name, the final specification is a **deep merge in this order**:
 
 This means:
 
-- `[agent.defaults]` applies to every agent — put your project-wide model, tool
-  list, and plugin list here.
+- `[agent.defaults]` applies to every agent except an external one (Claude Code,
+  Codex) — put your project-wide model, tool list, and plugin list here.
 - A registered `@ep_agent` factory (a Python function decorated with
   `@ep_agent(name="...")`) can synthesise an agent spec programmatically; users can
   still override the result in `[agents.<name>]`.

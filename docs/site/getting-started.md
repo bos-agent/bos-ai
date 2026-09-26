@@ -41,6 +41,9 @@ see [Embedding BOS](embedding/index.md).
 | `bos-ai[claude-code]` | The Claude Code external agent runtime (BEP 19), with the `claude` CLI bundled in the `claude-agent-sdk` wheel (~230 MB) |
 | `bos-ai[all]` | Every extra above except `codex` and `claude-code`, which each bundle a vendor CLI binary |
 
+The `codex` and `claude-code` extras let a BOS agent run on Codex or Claude Code — see
+[External agents](concepts/external-agents.md) for declaring, configuring and logging in.
+
 ## First run (no project)
 
 ```bash

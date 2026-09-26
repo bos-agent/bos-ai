@@ -38,6 +38,8 @@ conventional directories.
 An **agent** is an LLM-driven turn loop: a system prompt, a model, a set of
 **tools**, a set of **plugins** (which contribute more tools + prompt sections +
 interceptors), and config knobs. That is the same object in both shapes below.
+An agent kind can instead be backed by an **external runtime** — Claude Code or
+Codex — whose turn loop is the vendor's, behind the same `AgentPort` (§13).
 Everything pluggable is a named **extension** registered at an **extension
 point**. Cross-cutting services — chat persistence, memory consolidation,
 background jobs, message routing — are owned by the **harness** and selected by
@@ -49,7 +51,7 @@ How that agent is *run* is a choice between two shapes:
 **A — your code calls the agent.** Nothing long-lived: the agent is built in the
 calling process and driven one turn at a time. From Python that is `bos.sdk`
 (§3), which needs only the base `bos-ai` install; from a shell it is
-`boscli ask` (§13).
+`boscli ask` (§14).
 
 **B — a gateway process hosts actors.** A long-lived process holds one or more
 **actors** — named, addressable, restartable mailboxes, each bound to an agent
@@ -148,7 +150,7 @@ simple version and an advanced one:
 |---|---|---|
 | Entry point | `bos.sdk`: `BosApp`, `open_harness` | `bos.runner.GatewayMount` |
 | Per turn | your code calls `agent.run(chat_id, text)` | the gateway's actors/channels drive it |
-| Gives you | an `Agent` object | actors, channels, chat coordination, WS protocol |
+| Gives you | an `AgentPort` (a BOS `Agent`, or an external runtime — §13) | actors, channels, chat coordination, WS protocol |
 | Install | base `bos-ai` | `bos-ai[gateway]` |
 | Writable `bos_dir` | only for file-backed stores | always (`<bos_dir>/run/`: lock, state, cursors) |
 | Example | `examples/embed_sdk.py` | `examples/embed_gateway_fastapi.py` |
@@ -163,9 +165,12 @@ async with BosApp(config_dict, bos_dir="/var/lib/myapp/.bos") as app:
     result = await agent.run("chat-42", "hello")   # result.output
 ```
 
-- `agent(kind=None)` is **sync** and returns a cached `Agent`; every kind in
-  `config.agents` is built during `__aenter__`. A kind only an `@ep_agent`
-  factory registers needs `await app.build_agent(kind)`.
+- `agent(kind=None)` is **sync** and returns a cached `AgentPort` — BOS's own
+  `Agent`, or an external runtime (§13), which implements the port without being an
+  `Agent`; every kind in `config.agents` is built during `__aenter__`. A kind only an
+  `@ep_agent` factory registers — or a bare reserved runtime kind (§13.2) — needs
+  `await app.build_agent(kind, agent_cfg=None)`; `agent_cfg` is the top config layer
+  for that first build, and a kind already cached refuses one.
 - There is **no `BosApp.ask()`** and no wrapper over `Agent.run()` (BEP 18
   §2.2.1): `run()` has ten parameters, so a façade would either mirror them
   forever or push callers down a layer. `app.harness` / `app.workspace` expose
@@ -193,7 +198,7 @@ callable because a restart re-reads config. Routes under the mount path:
 
 Set `[platform] extensions = []` and import only the adapters you want, instead
 of `bos.exts` which loads every built-in. The contract is **`bos.sdk.__all__`**
-(34 names): `BosApp`, `open_harness`, the agent surface, the ports plus every
+(39 names): `BosApp`, `open_harness`, the agent surface (`AgentPort`, `Agent`, …), the ports plus every
 type their own method signatures use, the nine `ep_*` points, and `Workspace` /
 `RootConfig` / `validate_config`. A test enforces that every promised port is
 implementable from promised names alone. `bos.sdk` re-exports rather than
@@ -237,7 +242,7 @@ default_agent = "main"
 ```
 
 It selects the agent kind a caller gets when it names none: a bare `boscli ask`
-(§13) and `app.agent()` in `bos.sdk` (§3) both resolve through it. The chain
+(§14) and `app.agent()` in `bos.sdk` (§3) both resolve through it. The chain
 (`bos.config.workspace.Workspace.resolve_default_agent`):
 
 1. **The key, if set.** It must name an `[agents.<name>]` entry or a kind some
@@ -386,7 +391,7 @@ enabled = ["ReadFile", "GrepSearch", "WebSearch"]
 | `tools` | `{enabled, disabled, usages}` | `enabled=["*"]` for all; `usages` overrides per-tool guidance. |
 | `plugins` | `{enabled, disabled}` | `enabled=["*"]` for all registered plugins. |
 | `plugin-bindings` | `{<Plugin>: {…}}` | Per-plugin settings; key is hyphenated in TOML. |
-| `_parent` | `str` | Inherit from another `[agents.*]` agent (deep-merged underneath; see §4.8). |
+| `_parent` | `str` | Inherit from another agent — `[agents.*]`, an `@ep_agent` factory, or a reserved runtime (`claude-code`, `codex`, §13) — deep-merged underneath; see §4.8. |
 
 **Model precedence** (see `bos.core.llm.LLMClient`): `[agents.<name>].model` → `[agent.defaults].model`
 → `BOS_MODEL` env → `[exts.ep_provider.<provider>].model`.
@@ -435,6 +440,10 @@ For each agent name, the final spec is a deep merge in this order (`bos.config.w
 [agent.defaults]  →  ( _parent chain, root-first )  →  @ep_agent factory result (if any)  →  [agents.<name>] / external file
 ```
 
+An agent backed by an external runtime — a reserved kind (`claude-code`, `codex`), or one
+whose inheritance-resolved spec carries `external_runtime` — starts from `{}` instead of
+`[agent.defaults]` (§13.2).
+
 **What counts as "set".** Only fields a term actually specifies take part in the merge; a
 field it omits inherits from the left. An explicit **empty list** *is* a value and replaces
 what it inherits (`enabled = []` → nothing enabled), but an explicit **null** on an optional
@@ -447,9 +456,11 @@ standing rather than wiping it. Clearing an inherited optional is not expressibl
 **Inheritance (`_parent`).** An `[agents.<name>]` table may set `_parent = "<other agent>"` to
 inherit that agent's resolved spec, deep-merged underneath it (same merge semantics: dicts merge,
 lists/scalars replace). Chains resolve transitively (`c` → `b` → `a`); `[agent.defaults]` remains
-the global floor under the chain. `_parent` may reference only another `[agents.*]` agent (inline or
-external file) — not an `@ep_agent` factory or `[agent.defaults]`. A cycle or unknown parent raises at
-bootstrap. The directive is stripped before registration and never reaches the `Agent` constructor.
+the global floor under the chain, except for an externally-backed agent (above). `_parent` may reference
+another `[agents.*]` agent (inline or external file), an `@ep_agent` factory agent (e.g. `BOS`; its spec
+is passed to the resolver as `factory_specs`), or a reserved runtime kind, supplied the same way from
+`_EXTERNAL_RUNTIME_SPECS` (§13.2) — not `[agent.defaults]`. The parent's `agent_name` is not inherited.
+A cycle or unknown parent raises at bootstrap. The directive is stripped before registration and never reaches the `Agent` constructor.
 (`bos.config.workspace._resolve_agent_inheritance`.)
 
 ```toml
@@ -475,7 +486,7 @@ via `_parent = "BOS"`. There is no implicit default-agent fallback beyond the co
 `[runtime]`, with `[runtime.gateway]`, `[runtime.actor_resolver]`,
 `[runtime.actors.<name>]` and `[[runtime.channels]]`, configures shape B only.
 It is documented in full in §12.1. The one in-process path that reads it is
-`boscli ask --actor <name>` (§13).
+`boscli ask --actor <name>` (§14).
 
 ---
 
@@ -610,15 +621,17 @@ A provider is `async (messages, **kwargs) -> LLMResponse`. The LLM client
 ```python
 # bos.core.llm.LLMClient — simplified
 model = kwargs.get("model") or os.getenv("BOS_MODEL")
-provider_name, sep, model_name = model.partition("/")     # "codex/gpt-5" -> ("codex","gpt-5")
+provider_name, sep, model_name = model.partition("/")     # "myco/m-1" -> ("myco","m-1")
 if not sep or not ep_provider.has(provider_name):
     provider_name, model_name = "litellm", model           # fall back, keep full string
 return await ep_provider.invoke(provider_name, kwargs | {"messages": messages, "model": model_name})
 ```
 
-So: register `@ep_provider(name="codex")` and any agent whose `model = "codex/..."` routes
-to it. If the prefix is not a registered provider (e.g. `openai/gpt-4o`), it falls back to
-the built-in `litellm` provider with the full model string. Provider defaults come from
+So: register `@ep_provider(name="myco")` and any agent whose `model = "myco/..."` routes
+to it. (A provider is a model backend for BOS's own turn loop; running Claude Code or Codex
+as the agent is a different mechanism — §13.) If the prefix is not a registered provider
+(e.g. `openai/gpt-4o`), it falls back to the built-in `litellm` provider with the full model
+string. Provider defaults come from
 `[exts.ep_provider.<name>]`. The only built-in provider is `litellm`, which is also the
 default fallback (registered by `bos.core.defaults`); it reaches every provider LiteLLM
 supports, so a custom `@ep_provider` is only needed for non-LiteLLM backends.
@@ -767,7 +780,8 @@ agent. There are two cooperating roles (`bos.core.contract`):
 From `bos.core.harness` (`_bind_plugins_for_agent` / `_instantiate_and_setup_plugin` /
 `create_agent`):
 
-1. When an agent is created, the harness computes its enabled plugin set:
+1. When an agent is created (a BOS `Agent`; an external runtime binds no plugins, §13), the
+   harness computes its enabled plugin set:
    `plugins.enabled` (with `"*"` expanding to **all registered `ep_plugin` names** minus
    `disabled`) minus `plugins.disabled`.
 2. For each enabled plugin not yet instantiated: `ep_plugin.invoke(name)` builds the
@@ -954,8 +968,9 @@ through the project venv (`uv run boscli ...`) so the package is importable.
 3. **`[exts]` defaults**: for each `[exts.<ep>.<impl>]`, `ExtensionPoint.lookup(ep)` then
    `update_defaults(impl, cfg)` (deep-merged into the extension's defaults).
 4. **Agents**: resolve `[agents.*]` `_parent` inheritance, invoke every `@ep_agent` factory
-   once, merge `[agent.defaults] → _parent chain → factory → [agents.<name>]`, and register
-   each into `AgentRegistry`. The built-in `BOS` agent is among the factories (loaded via
+   once, merge `[agent.defaults] → _parent chain → factory → [agents.<name>]` (`{}` in place
+   of `[agent.defaults]` for an externally-backed agent, §13.2), and register each into
+   `AgentRegistry`. The built-in `BOS` agent is among the factories (loaded via
    `bos.exts`); there is no separate fallback step.
 
 Then the harness opens (`AgentHarness.__aenter__`): `bos.core.defaults` self-registers
@@ -1062,7 +1077,271 @@ start, by `ep_channel.get(cfg.type)` in `bos.gateway.channels.channel_manager`. 
 
 ---
 
-## 13. CLI reference (`boscli`)
+## 13. External agent runtimes — Claude Code & Codex
+
+An agent kind can be backed by a vendor's own agent harness instead of BOS's turn loop:
+**Claude Code** (`claude-agent-sdk` 0.2.159, driving the `claude` CLI 2.1.281 it bundles)
+or **Codex** (`openai-codex` 0.156.1, driving `codex app-server`). Each implements
+`AgentPort` (`bos.core.agent.contract`: `name`, `request_stop`, `ask`, `run`) plus the
+harness-side `ExternalRuntime` (`aclose`, `resolved_config`), without being an `Agent`: no
+`LLM`, no plugins, no BOS tools, no interceptors, no consolidator or compaction. It works
+wherever an agent kind does — `boscli ask --agent`, `[runtime.actors.*]`, `AskSubagent`,
+`BosApp.agent()`. Classes: `bos.extensions.runtimes.claude_code.ClaudeCodeAgent`,
+`bos.extensions.runtimes.codex.CodexAgent`; shared config/session/persistence helpers in
+`bos.extensions.runtimes._shared`. Design: BEP 19.
+
+### 13.1 Install & runtime shape
+
+| | Claude Code | Codex |
+|---|---|---|
+| Extra (not in `all`) | `bos-ai[claude-code]` | `bos-ai[codex]` |
+| Vendor process | one `claude` CLI child **per turn** (`ClaudeSDKClient`, `resume=`), disconnected when the turn ends | one `codex app-server` child **per agent**, spawned lazily by `_ensure_client` on the first turn (or first `native_messages`), closed by `aclose()` at harness exit |
+| Login | the OS user's Claude Code login (`claude` → `/login`, or `CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token`) | `codex login` |
+
+Both extras add `mcp>=2,<3` and `bos-ai[gateway]` (§13.8). Dispatch is
+`bos.core.harness.EXTERNAL_AGENT_KINDS` (`"claude-code"`, `"codex"` → dotted class paths),
+imported by `_load_external_runtime` on first build; a missing extra raises *"The 'codex'
+agent runtime needs its optional dependency. Install it with: pip install
+'bos-ai[codex]'"*. `AgentHarness.create_agent` branches **before** plugin binding when
+`kind` is reserved or the merged config carries `external_runtime`, builds the runtime with
+the harness's `chat_store`, `workspace`, the MCP accessor and the shared
+`StructuredValidator`, and appends it to `_owned` (closed on harness exit).
+
+### 13.2 Declaring one
+
+`_parent = "claude-code"` / `"codex"` in `[agents.<name>]` or an agent file makes a named
+instance: `bos.config.workspace` passes `_EXTERNAL_RUNTIME_SPECS`
+(`{"codex": {"external_runtime": "codex"}, …}`) to `_resolve_agent_inheritance` as
+pseudo-factory parents, so the child inherits `external_runtime`, and `kind`/`name` stay the
+child's own (`george` reports `george`).
+
+```markdown
+---
+_parent: codex
+permission: workspace-write
+cwd: services/api
+mcp_tools: [CreateTicket]
+---
+You are George, the implementer for the payments service.
+```
+
+- `[agents.codex]` / `[agents.claude-code]` define an agent named after the runtime, whose
+  spec every `_parent = "<runtime>"` child also inherits. Without such a table the reserved
+  kinds are **not registered** (no phantom agent in `AgentRegistry`): `boscli ask --agent
+  codex` and `app.agent("codex")` fail as unknown; build them with
+  `await app.build_agent("codex", agent_cfg={...})` or `harness.create_agent("codex", {...})`.
+- `agent_cfg` may carry `_parent` (a reserved runtime or any registered agent), resolved by
+  `bos.core.harness._resolve_agent_cfg_parent`; refused for an already-registered `kind`, and
+  when its runtime contradicts `kind` or an `external_runtime` in the same `agent_cfg`.
+  `_parent` in `[runtime.actors.*].agent_cfg` is refused at config load.
+- A hand-written `external_runtime` in `[agents.*]` is rejected at bootstrap (use `_parent`).
+- **`[agent.defaults]` is not merged** into an externally-backed agent: the registration loop
+  in `Workspace.bootstrap_platform` starts it from `{}` (reserved name, or resolved
+  `external_runtime`).
+- Precedence, low → high: the reserved kind → `[agents.<runtime>]` → the agent's own spec →
+  `[runtime.actors.<a>].agent_cfg` → the `agent_cfg` passed to `build_agent`/`create_agent`.
+- Config is validated at construction — `BosApp.__aenter__` for kinds in `config.agents`, an
+  actor's start, `boscli ask`, `build_agent` — and construction never starts a vendor
+  process.
+
+### 13.3 Config keys
+
+Validated strictly by `_shared.parse_external_config` (unknown key → `ValueError` naming it
+and the known set).
+
+| Key | Runtime | Default | Meaning |
+|---|---|---|---|
+| `permission` | both | **required** | `read-only` \| `workspace-write` \| `full-access` (§13.4). |
+| `cwd` | both | `"."` | str, resolved against the harness workspace root (a project's root, the parent of `.bos/`; `"."` — the process cwd — for `BosApp(dict, bos_dir=…)`), symlinks resolved; must stay inside it. The confinement root. |
+| `system_prompt` | both | — | **Appended** to the runtime's prompt: Claude Code `{"type": "preset", "preset": "claude_code", "append": …}`; Codex `developer_instructions`. An agent file's body. |
+| `base_instructions` | both | — | **Replaces** it (Claude Code: plain-str `system_prompt`; Codex: `base_instructions`). Mutually exclusive with `system_prompt`. |
+| `model` | both | runtime default | Native model name, verbatim. Per turn, `llm_args["model"]` overrides it (`boscli ask --model`; `BOS_MODEL` does not reach it). |
+| `auth` | both | `"subscription"` | or `"api_key"` (§13.5). |
+| `timeout_seconds` | both | `None` | Number; bounds each attempt (§13.9). |
+| `mcp_tools` | both | `[]` | List of `ep_tool` names exposed over MCP (§13.8); `"*"` and a bare string refused. |
+| `native_options` | both | `{}` | Vendor settings (below). |
+| `setting_sources` | Claude Code | `[]` | List from `user`/`project`/`local`: which CLI settings files load. `project`/`local` log a WARNING (repo hooks, `apiKeyHelper` run on the host outside sandbox and `permission`). Unknown to Codex. |
+| `max_iterations` | Claude Code | `None` | Positive int → the CLI's `max_turns`; spending it closes the turn with `MAX_ITERATION_CONTENT`, committed. Dropped for Codex. |
+
+- **`native_options`, Claude Code** — an allowlist over `ClaudeAgentOptions` fields
+  (`claude_code._ALLOWED`): `fallback_model`, `max_budget_usd`, `betas`, `thinking`,
+  `max_thinking_tokens`, `task_budget`. Every other field is BOS-owned (`_BOS_OWNED`:
+  `permission_mode`, `sandbox`, `settings`, `setting_sources`, `hooks`, `can_use_tool`,
+  `tools`, `mcp_servers`, `strict_mcp_config`, `env`, `resume`, `extra_args`, …) or refused
+  (`_REFUSED`: `cli_path`, `add_dirs`, `plugins`, `agents`, `user`, session fields, …); a
+  test partitions `dataclasses.fields(ClaudeAgentOptions)` into the three sets. Refused at
+  construction, each key with its reason.
+- **`native_options`, Codex** — keywords to `thread_start`/`thread_resume`; a `config`
+  sub-table is merged into the `config=` override (itself merged over `~/.codex/config.toml`).
+  Refused (`codex._RESERVED_NATIVE_OPTIONS`): `sandbox`, `approval_mode`, `cwd`, `model`,
+  `developer_instructions`, `base_instructions`, `config.mcp_servers`,
+  `config.sandbox_workspace_write` (nested or dotted spelling). A denylist found by probing,
+  not provably complete; an unknown keyword surfaces as the vendor's `TypeError` on the
+  first turn.
+- **Dropped** with one DEBUG line (`_shared._DROPPED_KEYS`): `tools`, `exclude_tools`,
+  `tools_usage`, `plugins`, `plugin-bindings`, `max_tokens`, `max_iteration_handoff`,
+  `shutdown_handoff`, `tool_noise_filter`, `history_attribution`, `reasoning_effort` (the
+  config key; `llm_args["reasoning_effort"]` is forwarded), `description`, `agent_name`,
+  `kind`, `name`, and `max_iterations` for Codex. (`description` still reaches
+  `AgentRegistry.describe()`, which `AskSubagent` lists.)
+
+### 13.4 `permission`
+
+Bounds the filesystem, **not** the tools: every `mcp_tools` entry is callable at every level
+(§13.8). No approval ever waits on a person.
+
+**Claude Code** — BOS builds the confinement (`permission_mode` is only an approval policy):
+a `tools=` allowlist per level (`claude_code._TOOL_LEVELS`; an unoffered tool is not
+callable), a `PreToolUse` hook on every call (`ClaudeCodeAgent._hook`: denies tools outside
+the allowlist; below `full-access`, resolves each file-tool path — `Read`/`Write`/`Edit`
+`file_path`, `NotebookEdit` `notebook_path` — against `cwd` and denies it outside `cwd`,
+inside the CLI config dir `CLAUDE_CONFIG_DIR` or `~/.claude`, or under `<cwd>/.claude` when
+`setting_sources` opts into repo settings), a `can_use_tool` that answers by policy, and the
+CLI's bash sandbox.
+
+| `permission` | `permission_mode` | Built-in tools offered | Bash |
+|---|---|---|---|
+| `read-only` | `default` | `Read` | not offered |
+| `workspace-write` | `acceptEdits` | `Read`, `Write`, `Edit`, `NotebookEdit`, `Bash` | sandbox `{"enabled": True, "allowUnsandboxedCommands": False, "failIfUnavailable": True}`: writes confined to `cwd` and a per-turn `TMPDIR` (removed after the turn); `dangerouslyDisableSandbox` still runs sandboxed |
+| `full-access` | `bypassPermissions` | all except `ListAgents`, `SendMessage`, `AskUserQuestion`, `EnterPlanMode`, `ExitPlanMode` | no sandbox; file tools unconfined; `WebFetch`/`WebSearch` offered only here |
+
+`workspace-write` is refused at construction where the sandbox cannot run
+(`_bash_sandbox_unavailable`): Linux without `bwrap`/`socat` on `PATH`, macOS without
+`/usr/bin/sandbox-exec`, always on Windows. A "Sandbox disabled" line on the CLI's stderr
+ends the turn (`_SandboxDisabledError`). **Unconfined**: bash *reads* at `workspace-write`;
+an `@path` in the prompt, which the CLI reads itself (outside `cwd`, any level); `full-access`.
+Concurrent `workspace-write` agents sharing a `cwd` can rarely fail (never escape) a
+sandboxed command on shared mount points under `<cwd>/.claude/` — give each its own `cwd`.
+The CLI inherits BOS's `os.environ`; `_INHERITED_ENV_OVERRIDES` switches off variables that
+would load plugins, hooks, settings, MCP servers or skills, and auto-memory.
+
+**Codex** — `permission` picks Codex's OS sandbox (`codex._SANDBOXES`: `read-only`,
+`workspace-write`, `danger-full-access`), which is the whole boundary; every level runs
+`ApprovalMode.deny_all` (approval policy `never`, no reviewer), so escalations are refused
+by Codex itself, and `_deny_approval` (installed over the SDK's auto-accepting handler)
+refuses any request that reaches BOS. Reads are unconfined at every level;
+`workspace-write` can also write `/tmp` and `$TMPDIR` (Codex's default). Codex reads the
+operator's `~/.codex/config.toml`.
+
+### 13.5 Auth
+
+`auth = "subscription"` (default) = the runtime's existing login; `"api_key"` skips BOS's
+check. BOS stores no token.
+
+- **Claude Code, at construction** (reads the environment, spawns nothing): refuses
+  `subscription` while any of `_SUBSCRIPTION_BYPASS_VARS` is non-empty — `ANTHROPIC_API_KEY`,
+  `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR`, `ANTHROPIC_PROFILE`,
+  `ANTHROPIC_CONFIG_DIR`, `ANTHROPIC_FEDERATION_RULE_ID`, `ANTHROPIC_ORGANIZATION_ID`,
+  `ANTHROPIC_UNIX_SOCKET`, `CLAUDE_CODE_SIMPLE`, `CLAUDE_CODE_USE_{BEDROCK,VERTEX,FOUNDRY,
+  ANTHROPIC_AWS,ANTHROPIC_GOOGLE_CLOUD,MANTLE,GATEWAY}` — or while
+  `/home/claude/.claude/remote/.api_key` exists. `CLAUDE_CODE_OAUTH_TOKEN` and
+  `ANTHROPIC_BASE_URL` are allowed. `[platform].envfile`/`envs` count (they write
+  `os.environ`). No login check exists: a missing login fails the first turn in the CLI.
+  Any Claude Code agent is also refused while `managed-mcp.json` exists
+  (`/etc/claude-code/` on Linux): the CLI would refuse the `--strict-mcp-config` BOS always
+  sends.
+- **Codex, on the first turn** (or first `native_messages`): `_preflight_auth` calls
+  `account()` (bounded 30 s) once per agent; no account → *"auth="subscription" but no Codex
+  account is logged in. Run `codex login`, or set auth="api_key" to opt out of this check."*
+
+### 13.6 Sessions, persistence, `get_messages`
+
+- **One native session per `chat_id`** (Claude session / Codex thread). The id is written into
+  the metadata of the assistant message BOS commits (`external_runtime`, `native_session_id`,
+  `native_turn_id`, `usage`; `_shared.commit_external_turn`) and read back by scanning the
+  chat store newest-first (`_shared.read_native_session_id`, `active_only=False`), so it
+  survives restarts. An unresumable session raises (*"… could not be resumed, and BOS does not
+  silently start a fresh session under the same chat_id"*). A chat whose newest external turn
+  names another runtime gets a new session with a WARNING; switching back starts another.
+  A second concurrent turn on one `chat_id` raises (*"already has a turn running on chat"*).
+  `boscli ask` and `AskSubagent` use a fresh `chat_id` per call.
+- **Two messages per turn** — user message + final answer; no tool calls, results or
+  thinking. Failed, timed-out, `AbortTurn`-ed or schema-exhausted turns commit nothing (the
+  exchange may remain in an existing native session); a `request_stop()`-ed turn commits its
+  partial text; Claude Code's `max_turns` closure commits `MAX_ITERATION_CONTENT`.
+- **`BosApp.get_messages(chat_id, *, source="auto"|"bos"|"native")`** (`bos.sdk._app`):
+  `"bos"` = the chat store's active window, guaranteed; `"native"` = the runtime's
+  `native_messages(chat_id)` — user/assistant messages only, `metadata` `source`,
+  `native_turn_id`, `native_item_id`, promising nothing (pruned/compacted by the vendor);
+  `"auto"` (default) = native when the chat's stored metadata names a runtime, else bos.
+  Routed to the one built agent whose `resolved_config["external_runtime"]` matches; none or
+  several → `RuntimeError` (call `app.agent(k).native_messages(chat_id)`). Claude Code reads
+  `<CLAUDE_CONFIG_DIR or ~/.claude>/projects/…` JSONL via `get_session_messages` (no CLI;
+  `native_turn_id` is `None`; an empty read for a recorded session raises). Codex calls
+  `thread.read(include_turns=True)` on its app-server (may spawn it and run the auth
+  preflight; bounded by `timeout_seconds`), drops `commentary`, and emits one `system` gap
+  marker (`metadata["items_view"]`) per turn not fully loaded.
+
+### 13.7 Project docs
+
+- **Claude Code**: unless `setting_sources` includes `project`, the CLI loads no memory file,
+  so BOS reads `<cwd>/CLAUDE.md` itself (`claude_code._root_claude_md`) every turn and appends
+  it after `system_prompt` under `# CLAUDE.md in the working directory`. Only that file (no
+  `@` imports, parents, subdirs, `CLAUDE.local.md`); a regular file inside `cwd` or it is
+  skipped with a WARNING; truncated at 40,000 bytes with a marker line; never added to
+  `base_instructions`. Off when `CLAUDE_CODE_DISABLE_CLAUDE_MDS`, `CLAUDE_CODE_SAFE_MODE` or
+  `CLAUDE_CODE_SIMPLE` is `1`/`true`/`yes`/`on` in BOS's environment.
+- **Codex** reads `AGENTS.md` itself; no suppression is offered (`project_doc_max_bytes = 0`
+  via `native_options.config` is accepted but did not suppress it live).
+
+### 13.8 MCP egress (`mcp_tools`)
+
+`bos.extensions.runtimes.mcp_egress.BosToolMcpServer`: one streamable-HTTP MCP server per
+harness on `127.0.0.1:<ephemeral>`, built lazily by `AgentHarness._ensure_tool_mcp_server`
+the first time an agent has a resolvable `mcp_tools` name. Each agent gets a bearer token
+(`register_agent`); `tools/list` and `tools/call` are scoped to that token's grant, and a
+call runs `ep_tool.invoke(name, args)` in the BOS process (a raise becomes an `isError`
+result). Unknown names: one WARNING each at the first turn, skipped
+(`mcp_egress.unregistered_tools`; `boscli inspect agent <name>` reports them before any
+turn). The token reaches the child only via its environment (`BOS_MCP_BEARER_<random>`),
+readable by the agent's own shell. Claude Code: `mcp_servers={"bos-tools": {"type": "http",
+…}}`, `strict_mcp_config=True` (no repo `.mcp.json`, no operator servers), tools named
+`mcp__bos-tools__<Tool>`, and the hook/`can_use_tool` let through exactly the granted names;
+a CLI init reporting the server not connected logs a WARNING. Codex: `config={"mcp_servers":
+{"bos-tools": {"url": …, "bearer_token_env_var": …, "default_tools_approval_mode":
+"approve"}}}` —
+the only pre-approved server under `never`; an operator `[mcp_servers.bos-tools]` in
+`~/.codex/config.toml` is merged in and can break the config load (stdio entry, or
+`bearer_token`).
+
+### 13.9 Running a turn
+
+- **`run()`/`ask()`** as in §3; `AgentResult.iterations` is `1`; `usage` keys (both):
+  `input_tokens` (cached included), `cached_input_tokens`, `cache_write_input_tokens`,
+  `output_tokens`, `total_tokens`, `reasoning_output_tokens` (Claude Code: when reported).
+- **Content**: Claude Code — image path read and base64-encoded by BOS, `FilePart` sent as
+  text `[attachment: <value> (<mime>)]`; Codex — `ImageInput`/`LocalImageInput`, `FilePart`
+  → `MentionInput` (a url-sourced `FilePart` raises).
+- **`llm_args`**: `model` → per-turn native model; `reasoning_effort` → the runtime's effort.
+- **`event_sink`**: Claude Code — `ToolUseBlock` → `tool`/`start`, matching `ToolResultBlock` →
+  `tool`/`finish` (`fail` if `is_error`), `TextBlock` → `response`/`finish`, `ResultMessage` →
+  `turn`/`finish` (`turn`/`fail`, `stage=detail=max_iteration`, on `max_turns`); sub-agent
+  messages and the synthetic `StructuredOutput` tool skipped. Codex — command-execution and
+  MCP-tool items → `tool`/`start`·`finish` (`tool_name` = the command, or the tool), agent
+  messages → `response`/`finish` (commentary and final answer indistinguishable),
+  `turn/completed` → `turn`/`finish`; other items skipped. Both emit one `turn`/`finish` per
+  schema attempt.
+- **`schema=`**: Claude Code `output_format={"type": "json_schema", …}`, Codex
+  `output_schema=`; the reply is always re-validated with the injected `StructuredValidator`,
+  retried with a correction message up to `max_schema_retries`, then `StructuredOutputError`.
+- **`interrupt` callback**: a truthy return is delivered into the running turn (Claude Code
+  `query()` mid-turn; Codex `steer()`); a raised `AbortTurn` interrupts the vendor turn and
+  returns `ABORTED_TURN_CONTENT`, `finish_reason="aborted"`.
+- **`request_stop()`**: interrupts the running turn and returns its latest text (committed);
+  one-way — a later turn returns `SHUTDOWN_CONTENT`, `finish_reason="shutdown"`, before any
+  vendor call.
+- **`timeout_seconds`**: per attempt (each schema retry gets its own window) plus setup
+  (Claude Code `connect()`; Codex `thread_start`/`thread_resume`/`thread.turn`); raises
+  `TimeoutError` naming the phase; mid-turn expiry interrupts first. `None` = no deadline.
+  `aclose()` drains in-flight turns for 10 s, then closes clients regardless.
+- **`finish_reason`** (verbatim): Claude Code — the CLI's `terminal_reason` (e.g.
+  `completed`), else `stop_reason`; `max_turns`; a stop gives `aborted_tools` /
+  `aborted_streaming`. Codex — `TurnStatus` (`completed`; `interrupted` on a stop). An
+  interrupted or failed turn BOS did not ask for raises.
+
+---
+
+## 14. CLI reference (`boscli`)
 
 Global options: `-c/--config <path|preset>` (or `BOS_CONFIG`), `-l/--log-level <LEVEL>`
 (or `BOS_LOG_LEVEL`, default `ERROR`). Commands are lazy-loaded; third parties add more via
@@ -1100,7 +1379,7 @@ listed in the prompt, default 50), `BOS_LOG_LEVEL`, plus provider `*_API_KEY`s.
 
 ---
 
-## 14. Quick reference
+## 15. Quick reference
 
 **Config sections**: `default_agent` (top-level key) · `[platform]` (env/discovery) · `[harness]` (service impls) ·
 `[exts.<ep>.<impl>]` (extension config) · `[agent.defaults]` + `[agents.<name>]` (agents) ·
@@ -1112,6 +1391,9 @@ listed in the prompt, default 50), `BOS_LOG_LEVEL`, plus provider `*_API_KEY`s.
 
 **Entry-point groups**: `bos.exts` (extensions) · `bos.skills` (skills) · `boscli.commands`
 (CLI).
+
+**Reserved agent kinds**: `claude-code`, `codex` — external runtimes (§13); valid `_parent`
+targets, registered as agents only when `[agents.<kind>]` exists.
 
 **Default harness impls**: `LLMConsolidator`, `JsonlChatStore`, `JsonlMailRoute`.
 **Default plugins**: `MemoryPlugin`, `PlanPlugin`, `TaskPlugin`,

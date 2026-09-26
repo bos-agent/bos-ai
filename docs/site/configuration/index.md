@@ -65,7 +65,7 @@ built-in preset is `default`.
 | `[platform]` | Environment loading and where to discover extensions & agents. |
 | `[harness]` | Selects which implementation backs each shared service. |
 | `[exts.<ep>.<impl>]` | Configures any registered extension (tools, providers, stores…). |
-| `[agent.defaults]` | Defaults merged into every agent. |
+| `[agent.defaults]` | Defaults merged into every agent, except Claude Code and Codex agents. |
 | `[agents.<name>]` | A named agent definition. |
 | `[runtime]` | The runtime: actors, gateway, channels. |
 
@@ -184,7 +184,8 @@ skill_dirs = ["skills"]
 
 ## `[agent.defaults]` and `[agents.<name>]` — agents
 
-Both use the same `AgentConfig` schema. `[agent.defaults]` is merged into every agent;
+Both use the same `AgentConfig` schema. `[agent.defaults]` is merged into every agent
+except those backed by an [external runtime](#external-agents-claude-code-codex);
 `[agents.<name>]` defines a specific agent.
 
 ```toml
@@ -230,7 +231,7 @@ enabled = ["writer"]
 | `tools` | `{ enabled, disabled, usages }` | `enabled=["*"]` = all; `usages` overrides per-tool guidance. |
 | `plugins` | `{ enabled, disabled }` | `enabled=["*"]` = all registered plugins. |
 | `plugin-bindings` | `{ <Plugin>: {…} }` | Per-plugin config (key is hyphenated in TOML). |
-| `_parent` | `str` | Inherit from another `[agents.*]` agent — see [Agent inheritance](#agent-inheritance-_parent). |
+| `_parent` | `str` | Inherit from another agent — see [Agent inheritance](#agent-inheritance-_parent). |
 
 !!! info "Note the hyphen"
     Per-plugin configuration uses `plugin-bindings` (with a hyphen) in TOML, e.g.
@@ -270,9 +271,11 @@ system_prompt = "You coordinate a team, warmly."  # overrides just this field
 ```
 
 - **Multi-level**: chains resolve transitively (`c` → `b` → `a`).
-- **Floor still applies**: `[agent.defaults]` is merged in under the `_parent` chain for every agent.
-- **Scope**: `_parent` may name only another `[agents.*]` agent (inline or an external file) — not an
-  `@ep_agent` factory agent or `[agent.defaults]`.
+- **Floor still applies**: `[agent.defaults]` is merged in under the `_parent` chain for every agent,
+  except one that resolves to an external runtime.
+- **Scope**: `_parent` may name another `[agents.*]` agent (inline or an external file), an `@ep_agent`
+  factory agent such as the built-in `BOS`, or one of the reserved runtimes `claude-code` and `codex`
+  ([External agents](#external-agents-claude-code-codex)) — not `[agent.defaults]`.
 - **Errors**: a cycle (`a` → `b` → `a`) or an unknown parent fails fast at startup with a clear message.
 
 !!! warning "Lists replace, they don't union"
@@ -327,6 +330,29 @@ memory, planning, tasks, skills, and sub-agent delegation), registered when `bos
 your `[platform.extensions]` (the default). It resolves through this same chain — `[agents.BOS]`
 composes over it, or inherit from it with `_parent = "BOS"`. There is no hidden default-agent
 fallback: drop `bos.exts` and you must define your own agent.
+
+### External agents — Claude Code & Codex
+
+An agent whose `_parent` is `claude-code` or `codex` (or an agent named after one of those
+reserved kinds) is backed by that vendor's own agent harness instead of BOS's turn loop.
+It needs the `bos-ai[claude-code]` or `bos-ai[codex]` extra and the runtime's own login.
+(This is unrelated to the external agent *files* above, which can define any agent.)
+
+```toml
+[agents.reviewer]
+_parent = "claude-code"
+permission = "read-only"           # required: read-only | workspace-write | full-access
+cwd = "services/api"               # workspace-relative confinement root (default ".")
+system_prompt = "You review this service's code and report problems."   # appended to the runtime's own prompt
+```
+
+Such an agent takes a different set of keys — `permission` (required), `cwd`,
+`system_prompt` / `base_instructions`, `model` (a native model name), `auth`,
+`timeout_seconds`, `mcp_tools`, `native_options`, and for Claude Code `setting_sources` and
+`max_iterations` — and rejects a key it does not know. `[agent.defaults]` does not reach it,
+and BOS-agent keys such as `tools`, `plugins` and `max_tokens` are ignored. The full key
+reference, what each `permission` level enforces per runtime, and the construction-time
+refusals are in [External agents](../concepts/external-agents.md#configuration-reference).
 
 ---
 

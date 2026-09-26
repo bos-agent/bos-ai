@@ -32,7 +32,10 @@ decisions, see the [BEP Index](beps.md).
 - **Gateway** — the process that hosts actors and channels and serves a control plane.
   See [Runtime & gateway](../concepts/runtime.md).
 - **Actors & agents** — named, addressable runtime instances bound to LLM-driven agents.
-  See [Agents & actors](../concepts/agents-and-actors.md).
+  See [Agents & actors](../concepts/agents-and-actors.md). The agent is usually BOS's own
+  LLM loop, but it may be an external runtime — Claude Code or Codex — behind the same
+  `AgentPort`, running the vendor's turn loop in a child process. See
+  [External agents](../concepts/external-agents.md).
 - **Channels** — how users reach an agent (TUI, Telegram, Lark, HTTP).
   See [Writing channels](../extending/channels.md).
 - **Harness** — the lifecycle owner of shared services (chat persistence, memory
