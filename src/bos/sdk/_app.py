@@ -27,7 +27,8 @@ _ACTIVE: BosApp | None = None
 class BosApp:
     """Owns a harness and caches the agents built from it.
 
-    It returns ``Agent`` rather than wrapping ``run()``: dropping to the lower
+    It returns an ``AgentPort`` — BOS's own ``Agent`` or an external runtime
+    (BEP 19) — rather than wrapping ``run()``: dropping to the lower
     layer must be the *same* objects, not a different path, which is what
     ``harness`` and ``workspace`` are for.
     """

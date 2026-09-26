@@ -38,9 +38,10 @@ LiteLLM `provider/model` string.
 | Project docs | BOS appends the root `CLAUDE.md` | Codex reads `AGENTS.md` itself |
 
 !!! note "Status"
-    The Codex runtime has been validated against a real ChatGPT subscription. The
-    Claude Code runtime's behaviour is pinned in CI against the real bundled CLI with a
-    scripted model; its live-login validation is tracked in BEP 19 §8.1.
+    Both runtimes are pinned in CI against their real vendor CLIs with a scripted model,
+    and both have been validated against a real subscription — Codex against ChatGPT,
+    Claude Code against a Claude subscription logged in through `claude`'s own `/login`.
+    BEP 19 §8.1 lists what each live run did and did not cover.
 
 ---
 
