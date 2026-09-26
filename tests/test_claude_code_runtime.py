@@ -1150,6 +1150,51 @@ def test_what_was_read_from_the_cli_source_is_pinned_to_its_version():
     assert __cli_version__ == "2.1.281", "re-read the CLI source behind the claims above, then update this pin"
 
 
+def _env_catalog_script() -> Any:
+    """scripts/claude_cli_env_catalog.py, which a maintainer runs too; scripts/ is not a package."""
+    import importlib.util
+
+    path = Path(__file__).resolve().parents[1] / "scripts" / "claude_cli_env_catalog.py"
+    spec = importlib.util.spec_from_file_location("claude_cli_env_catalog", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_the_cli_env_catalog_matches_its_snapshot():
+    """BEP 19 §3.12, §3.13: the inherited-variable list in claude_code.py was checked against every
+    name the bundled CLI's environment module declares, and a new CLI can declare one that loads
+    what BOS's default leaves out. So the catalog is extracted from the bundled binary each run
+    and compared with tests/data/claude_cli_env_catalog.txt; the extraction itself raises rather
+    than return a short list if the bundle stops being shaped as it reads it."""
+    catalog = _env_catalog_script()
+    current = catalog.extract(catalog.bundled_cli())
+    header, recorded = catalog.read_snapshot()
+    added, removed = sorted(set(current) - set(recorded)), sorted(set(recorded) - set(current))
+    assert not added and not removed, (
+        f"the bundled CLI's environment catalog changed — added: {added}; removed: {removed}. Classify each "
+        f"added name by BEP 19 §3.12's rule: an override in claude_code.py's _INHERITED_ENV_OVERRIDES if it "
+        f"would load what BOS's default leaves out (a refusal if the CLI reads it by presence), or a line in "
+        f"the left-alone comment after it; drop what names a removed one. Then regenerate the snapshot: "
+        f"uv run python scripts/claude_cli_env_catalog.py --write"
+    )
+    assert header == catalog.header(catalog.cli_version(), len(current)), (
+        f"the snapshot was taken from another CLI ({header!r}); with no name changed, regenerate it to record "
+        f"this one: uv run python scripts/claude_cli_env_catalog.py --write"
+    )
+
+
+@pytest.mark.parametrize("content", [b"no catalog here", b"var G={};Ro(G,{ANTHROPIC_BASE_URL:()=>oi});var S={...G};"])
+def test_the_env_catalog_extraction_fails_loudly_where_it_finds_no_catalog(tmp_path, content):
+    """A CLI built another way must fail the comparison above, not pass it with a short list."""
+    binary = tmp_path / "claude"
+    binary.write_bytes(content)
+
+    with pytest.raises(LookupError):
+        _env_catalog_script().extract(binary)
+
+
 def test_workspace_write_is_refused_where_the_bash_sandbox_is_unavailable(tmp_path, monkeypatch):
     """Refused at construction with the check's reason. The levels that run no sandbox do
     not consult it."""

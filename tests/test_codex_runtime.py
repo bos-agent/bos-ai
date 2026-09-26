@@ -1719,6 +1719,45 @@ def test_unwrap_thread_item_falls_back_when_root_is_absent():
 # --- Task 8: approvals are decided by policy, never awaited (BEP 19 §3.5.4) ---
 
 
+def test_what_was_read_or_measured_against_codex_is_pinned_to_its_version():
+    """Several things in codex.py rest on reading openai-codex 0.156.1, or on measuring the
+    codex-cli 0.156.1 binary it ships, rather than on a test that fails when they change:
+
+    - ``_APPROVAL_MODE`` (BEP 19 §3.5.4): ``ApprovalMode.deny_all`` is ``AskForApproval(never)``
+      with no reviewer (read from ``openai_codex/_approval_mode.py``), and an ``approval_policy``
+      or ``approvals_reviewer`` in ``native_options.config`` loses to it (measured).
+    - ``_APPROVAL_DENIALS`` (§3.5.4): the five approval methods and each one's refusal, read from
+      the schema the binary generates; a sixth method would fall through to ``{}`` (§8.2).
+    - ``_RESERVED_CONFIG_KEYS`` (§3.4): ``sandbox_mode`` and ``approval_policy`` in ``config`` lose
+      to the typed keywords, while ``sandbox_workspace_write`` reaches the chosen sandbox — seven
+      candidate settings probed against the resolved ``SandboxPolicy`` (measured).
+    - ``_mcp_egress_config`` and ``_MCP_SERVER_NAME`` (§3.8): ``config=`` merges per key over the
+      operator's ``config.toml``, ``bearer_token`` fails the load, ``http_headers`` loses to a
+      colliding ``bearer_token_env_var``, and ``default_tools_approval_mode = "approve"`` lets
+      BOS's server, and only it, through ``never`` (measured against the binary).
+    - ``_LOADED_ITEMS_VIEWS`` (§3.7): ``Turn.items_view`` defaults to the bare string ``"full"``,
+      and ``TurnItemsView`` is a closed ``Enum`` (read from, and checked against, the package).
+    - ``_raise_for_failed_turn`` and ``_final_assistant_response_from_items``, which mirror
+      vendor-internal functions in ``openai_codex._run``.
+    - the bounds on ``account()``, ``thread.read()`` and the setup RPCs (§3.10.2), each resting
+      on the vendor's unbounded request path, and ``client.close()`` bounding itself (read, and
+      measured at 2.003s).
+
+    Some of this is also pinned where a test drives the real package or child — the
+    approval-handler reach-in (``test_codex_approval_handler_attribute_exists``), the escalation
+    refusal and the MCP wiring (tests/test_codex_mcp_wiring.py) — but most of it is not. An
+    openai-codex release can move any of it: this fails until each is read or measured again."""
+    import importlib.metadata
+    import subprocess
+
+    from openai_codex.client import CodexConfig, _resolve_codex_bin
+
+    assert importlib.metadata.version("openai-codex") == "0.156.1", "re-check the claims above, then update this pin"
+    # The binary the client would spawn, asked as the client resolves it.
+    version = subprocess.run([str(_resolve_codex_bin(CodexConfig())), "--version"], capture_output=True, text=True)
+    assert version.stdout.strip() == "codex-cli 0.156.1", "re-measure the claims above, then update this pin"
+
+
 def test_codex_approval_handler_attribute_exists():
     """The tripwire that makes `_ensure_client`'s private reach-in acceptable,
     run against the REAL openai_codex rather than the double — the double

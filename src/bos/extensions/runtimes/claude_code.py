@@ -509,12 +509,16 @@ _INHERITED_ENV_OVERRIDES: Mapping[str, str] = MappingProxyType({
 # - CLAUDE_AGENT_SDK_MCP_NO_PREFIX, which renames the tools of in-process SDK MCP servers
 #   only, and BOS's MCP server is an HTTP one (§3.8).
 # - restrictions only: CLAUDE_CODE_DISABLE_* and CLAUDE_CODE_SKIP_PLUGIN_MCP_SERVERS*.
-# The list was then checked against the CLI's whole environment catalog, the 1030 names its
-# environment module declares: each of the 225 whose names put them on a loading path or
-# read as a trigger (sync, install, update, fetch, enable, load) was classified, its use
-# sites read wherever it could load, widen, fetch or bill. Those that matter are named
-# above; the rest are timeouts, sizes, caches, telemetry, display settings, TLS and tool
-# paths, further restrictions, and internals of the modes named above.
+# The list was then checked against the CLI's whole environment catalog, the 1049 names its
+# environment module declares: of the 1030 spelled in capitals, each of the 225 whose names
+# put them on a loading path or read as a trigger (sync, install, update, fetch, enable, load)
+# was classified, its use sites read wherever it could load, widen, fetch or bill. Those that
+# matter are named above; the rest are timeouts, sizes, caches, telemetry, display settings,
+# TLS and tool paths, further restrictions, and internals of the modes named above. The other
+# 19 have names on no loading path: Windows' own mixed-case variables, the lower-case proxy and
+# Google Cloud ones, __CFBundleIdentifier, and _CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL (see
+# `_base_url_route`). The catalog is a standing test (test_the_cli_env_catalog_matches_its_
+# snapshot, BEP 19 §3.13): a name a later CLI adds fails it until classified here.
 
 # BEP 19 §3.10.3: under `auth = "subscription"`, each of these in BOS's environment makes the
 # CLI stop using the subscription login — the CLI inherits that environment whole (§3.12) —
