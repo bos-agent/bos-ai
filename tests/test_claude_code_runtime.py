@@ -48,7 +48,7 @@ from fake_anthropic import FakeAnthropic
 from test_claude_code_vendor_facts import _bash, _tool_results
 from test_external_agent_seam import _write_workspace
 
-from bos.core.agent import SHUTDOWN_CONTENT
+from bos.core.agent import SHUTDOWN_CONTENT, StructuredOutputError
 from bos.core.agent.agent import MAX_ITERATION_CONTENT
 from bos.extensions.chat_stores.in_memory import InMemChatStore
 from bos.extensions.runtimes import claude_code
@@ -1750,13 +1750,70 @@ async def test_busy_rejects_a_second_turn_on_the_same_chat_but_not_a_different_o
     assert (await agent.run("chat-1", "d")).output == "three", "a finished turn frees its chat"
 
 
-@pytest.mark.asyncio
-async def test_schema_is_refused_until_structured_output_is_built(tmp_path, fake_claude):
-    """Dropping ``schema`` would hand back unvalidated text where the caller asked for an object."""
-    with pytest.raises(NotImplementedError, match="§3.9"):
-        await _agent(tmp_path).run("chat-1", "go", schema={"type": "object"})
+_ANSWER_SCHEMA = {
+    "type": "object",
+    "properties": {"answer": {"type": "string"}},
+    "required": ["answer"],
+    "additionalProperties": False,
+}
 
-    assert fake_claude.instances == []
+
+@pytest.mark.asyncio
+async def test_a_schema_validation_failure_sends_one_correction_message_per_retry(tmp_path, fake_claude, mem_store):
+    """BEP 19 §3.9, §3.10.2, BEP 12: a validation failure re-queries the *same* connected client
+    (one CLI child, not two) with a plain-text correction, up to ``max_schema_retries``. The
+    winning attempt's raw text is what gets committed; its validated object is what ``run()``
+    returns, with ``structured=True``."""
+    agent = _agent(tmp_path, chat_store=mem_store)
+    fake_claude.arm(messages=[*_turn("not json"), *_turn('{"answer": "42"}')])
+
+    result = await agent.run("chat-1", "go", turn_id="t1", schema=_ANSWER_SCHEMA, max_schema_retries=1)
+
+    assert (result.output, result.structured) == ({"answer": "42"}, True)
+    (client,) = fake_claude.instances
+    assert client.prompts[0] == "go", "the first attempt sends the caller's own content"
+    assert len(client.prompts) == 2, "one retry, one correction message, on the same client"
+    assert "failed schema validation" in client.prompts[1]
+    assert "Reply ONLY with JSON matching the schema" in client.prompts[1]
+    assert client.options.output_format == {"type": "json_schema", "schema": _ANSWER_SCHEMA}
+    assert client.connected and client.disconnected, "one CLI child served both attempts"
+    messages = await mem_store.get_messages("chat-1")
+    assert messages[1].llm_message["content"] == '{"answer": "42"}', "the committed text is the winning attempt's"
+
+
+@pytest.mark.asyncio
+async def test_exhausting_schema_retries_raises_structured_output_error_and_commits_nothing(
+    tmp_path, fake_claude, mem_store
+):
+    agent = _agent(tmp_path, chat_store=mem_store)
+    fake_claude.arm(messages=[*_turn("nope"), *_turn("still nope")])
+
+    with pytest.raises(StructuredOutputError):
+        await agent.run("chat-1", "go", schema=_ANSWER_SCHEMA, max_schema_retries=1)
+
+    (client,) = fake_claude.instances
+    assert len(client.prompts) == 2, "the one allowed retry was used, then retries were exhausted"
+    assert await mem_store.get_messages("chat-1") == [], "an unvalidated reply is not turn history"
+
+    fake_claude.arm(messages=_turn('{"answer": "1"}'))
+    again = await agent.run("chat-1", "go", schema=_ANSWER_SCHEMA)
+    assert again.output == {"answer": "1"}, "a failed turn does not leave the chat busy"
+
+
+@pytest.mark.asyncio
+async def test_a_schema_turn_that_spends_max_turns_returns_unstructured(tmp_path, fake_claude, mem_store):
+    """BEP 19 §3.9: mirrors what BOS's own ``Agent.run`` does when a schema turn hits
+    ``max_iterations`` — ``_close_with_handoff`` never sets ``structured_ok`` (agent.py), so a
+    turn that runs out of budget is never schema-checked and returns the ordinary
+    ``MAX_ITERATION_CONTENT`` marker unstructured, rather than raising ``StructuredOutputError``
+    for an answer the model was never given the budget to produce."""
+    agent = _agent(tmp_path, chat_store=mem_store)
+    fake_claude.arm(messages=_turn(subtype="error_max_turns", is_error=True, result=None, terminal_reason="max_turns"))
+
+    result = await agent.run("chat-1", "go", schema=_ANSWER_SCHEMA)
+
+    assert (result.output, result.structured, result.finish_reason) == (MAX_ITERATION_CONTENT, False, "max_turns")
+    assert (await mem_store.get_messages("chat-1"))[1].llm_message["content"] == MAX_ITERATION_CONTENT
 
 
 def test_a_plain_string_prompt_passes_through_unchanged():
@@ -1920,3 +1977,28 @@ async def test_a_turn_that_spends_max_iterations_closes_like_bos_agent_against_t
     assert messages[1].llm_message["content"] == MAX_ITERATION_CONTENT
     assert messages[1].metadata["native_session_id"] == transcript.stem, "committed with the session the CLI ran"
     assert (second.output, messages[3].metadata["native_session_id"]) == ("read it", transcript.stem)
+
+
+@pytest.mark.asyncio
+async def test_structured_output_arrives_from_the_synthetic_tool_against_the_real_cli(
+    tmp_path, fake_anthropic, monkeypatch
+):
+    """BEP 19 §3.9, measured against CLI 2.1.281: `output_format` makes the CLI offer the model a
+    synthetic `StructuredOutput` tool whose `input_schema` is the schema BOS sent, and answer a
+    call to it itself with a synthetic tool result, rather than ever pass the call back to BOS —
+    but BOS never trusts that on its own (BEP 12): `result.result`, the tool's JSON input
+    verbatim, is re-validated locally, and `AgentResult.output` is the validated object with
+    `structured=True`."""
+    _point_the_cli_at(fake_anthropic, tmp_path, monkeypatch)
+    store = InMemChatStore()
+    agent = _agent(tmp_path, auth="api_key", chat_store=store)
+    fake_anthropic.script([[{"type": "tool_use", "id": "tu_1", "name": "StructuredOutput", "input": {"answer": "42"}}]])
+
+    async with asyncio.timeout(60):
+        result = await agent.run("chat-1", "what is the answer?", turn_id="t1", schema=_ANSWER_SCHEMA)
+
+    assert (result.output, result.structured) == ({"answer": "42"}, True)
+    [tool] = [t for t in fake_anthropic.requests[0]["tools"] if t["name"] == "StructuredOutput"]
+    assert tool["input_schema"] == _ANSWER_SCHEMA, "the CLI offers the model exactly BOS's own schema"
+    messages = await store.get_messages("chat-1")
+    assert json.loads(messages[1].llm_message["content"]) == {"answer": "42"}, "the committed text is the tool's input"

@@ -635,17 +635,27 @@ class FakeClaudeClient:
     changes breaks the tests instead of a look-alike drifting from it. Only the methods
     ``ClaudeCodeAgent`` calls exist here.
 
-    One instance per turn, as the runtime builds one client per turn (BEP 19 §3.10.1), so
-    every knob is per instance: arm it through the ``fake_claude`` fixture before the turn
-    that builds it. ``connect_error`` is raised by ``connect()`` — where the real SDK
+    One instance per turn, as the runtime builds one client per turn (BEP 19 §3.10.1) — a
+    schema retry included, since it re-queries the same connected client rather than building a
+    new one — so every knob is per instance: arm it through the ``fake_claude`` fixture before
+    the turn that builds it. ``connect_error`` is raised by ``connect()`` — where the real SDK
     raises a startup refusal, such as a ``resume`` the CLI cannot honour. ``release``, when
     set, holds ``receive_response`` open until the test sets it, with ``waiting`` set once
     it is held.
+
+    ``messages`` may hold more than one round concatenated — each round is whatever a real
+    ``query()``/``receive_response()`` cycle would stream, ending in its own ``ResultMessage``
+    — for a test that arms a schema retry: the first ``receive_response()`` call consumes up to
+    the first ``ResultMessage``, and a second ``query()`` call (BOS's own correction message)
+    makes the next ``receive_response()`` continue from there, through the second round's own
+    ``ResultMessage``. Every test written before schema retries existed calls it only once, so
+    this is additive and changes no existing test's behaviour.
     """
 
     def __init__(self, options: Any) -> None:
         self.options = options
         self.messages: list[Any] = []
+        self._consumed = 0  # index into `messages`; advances across query()/receive_response() rounds
         self.connect_error: BaseException | None = None
         self.release: asyncio.Event | None = None
         self.waiting = asyncio.Event()
@@ -668,7 +678,9 @@ class FakeClaudeClient:
         if self.release is not None:
             self.waiting.set()
             await self.release.wait()
-        for message in self.messages:
+        while self._consumed < len(self.messages):
+            message = self.messages[self._consumed]
+            self._consumed += 1
             yield message
             if isinstance(message, ResultMessage):  # as the SDK's own receive_response stops
                 return

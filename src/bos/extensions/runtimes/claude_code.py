@@ -23,11 +23,13 @@ against ``mcp``.
 What exists so far is construction — the config, the permission mapping, the per-client
 settings nonce, no repository settings unless a host opts in, the ``native_options``
 allowlist, and the fail-closed preflights; every check that reads the host runs there, and
-none starts the CLI — and a turn: ``run()`` resumes the chat's native session, runs one CLI
-child to the end of the turn and commits the two-message record (BEP 19 §3.6, §3.7, §3.9).
-A turn is not yet streamed as ``TurnEvent``s, polled for an ``interrupt``, bounded by
-``timeout_seconds`` or schema-checked, and the hook and ``can_use_tool`` are not built, so
-nothing in this module confines anything yet.
+none starts the CLI — a turn: ``run()`` resumes the chat's native session, runs one CLI
+child to the end of the turn and commits the two-message record (BEP 19 §3.6, §3.7, §3.9) —
+and structured output: a ``schema`` turn validates the CLI's answer locally and retries with a
+correction message on failure, up to ``max_schema_retries`` (§3.9, BEP 12).
+A turn is not yet streamed as ``TurnEvent``s, polled for an ``interrupt`` or bounded by
+``timeout_seconds``, and the hook and ``can_use_tool`` are not built, so nothing in this module
+confines anything yet.
 """
 
 from __future__ import annotations
@@ -64,6 +66,7 @@ from bos.core.agent import (
     AgentResult,
     ChatStore,
     MessageContent,
+    StructuredOutputError,
     StructuredValidator,
     TurnEventSink,
     _compact,
@@ -920,7 +923,7 @@ class ClaudeCodeAgent:
         :meth:`_options` plus the turn's own fields — ``resume`` when the chat has a native
         session on record (§3.6), ``llm_args["model"]`` as ``model`` and
         ``llm_args["reasoning_effort"]`` as ``effort``, whose values BOS's ``low``/``medium``/
-        ``high`` are among — and disconnected however the turn ends.
+        ``high`` are among — and disconnected however the turn ends, schema retries included.
 
         The answer is ``ResultMessage.result``. ``usage`` is mapped by :func:`_usage`, and
         ``finish_reason`` is the CLI's ``terminal_reason``, or its ``stop_reason`` when it
@@ -933,6 +936,30 @@ class ClaudeCodeAgent:
         runtime, agent, chat and turn, and whether it came at startup; a caller's malformed
         content raises its own error, before any client is built.
 
+        ``schema`` sends ``options.output_format={"type": "json_schema", "schema": schema}``
+        (§3.9). What that makes the CLI do to the *model* was measured against CLI 2.1.281 with
+        the fake Messages API, not assumed: it offers a synthetic ``StructuredOutput`` tool whose
+        ``input_schema`` is *schema* verbatim, and answers a call to it itself with a synthetic
+        tool result — never handing BOS a tool call to run — and if the model replies without
+        calling it, the CLI injects its own one-shot nudge (a ``UserMessage`` reading
+        ``"[structured-output-enforce] You MUST call the StructuredOutput tool..."``) and tries
+        once more, inside the *same* ``receive_response()``; so BOS always sees exactly one
+        ``ResultMessage`` per attempt, whichever way it went. None of that is trusted on its own
+        (BEP 12): whatever happened, ``result.result`` — the tool's JSON input, verbatim, when it
+        was called — is re-validated locally with the injected ``StructuredValidator``, the same
+        one every ``Agent`` gets. A validation failure sends one plain-text correction message per
+        retry, up to ``max_schema_retries``, as ``CodexAgent`` does; exhausting retries raises
+        ``StructuredOutputError`` and commits nothing, the same as any other turn failure
+        (``test_structured_output_arrives_from_the_synthetic_tool_against_the_real_cli`` pins the
+        tool and the round trip; ``test_a_schema_validation_failure_sends_one_correction_message_
+        per_retry`` pins the retry). Each retry is a new ``query()`` on the *same* connected client
+        and native session — not a new CLI child — and, measured, ``max_turns`` is a budget that
+        resets for every ``query()``, so a retry gets the same fresh budget the first attempt did,
+        the way a fresh ``timeout_seconds`` window will once Task 7 adds one (§3.10.2). A turn that
+        spends ``max_turns`` — first attempt or retry — is never schema-checked: like BOS's own
+        ``Agent`` when a schema turn hits ``max_iterations`` (``_close_with_handoff`` never sets
+        its ``structured_ok``), it closes unstructured, answering ``MAX_ITERATION_CONTENT``.
+
         Two concurrent turns on one ``chat_id`` are refused rather than queued: a native session
         is single-threaded (§3.10.1). A turn started after :meth:`request_stop` or
         :meth:`aclose` returns ``SHUTDOWN_CONTENT`` before any client is built.
@@ -941,7 +968,6 @@ class ClaudeCodeAgent:
         # `ctx_metadata` (Task 6: streamed TurnEvents, BEP 19 §3.9); `interrupt` (Task 7, §3.9),
         # which is not polled, so a message a caller queues mid-turn stays in its queue; and the
         # config's `timeout_seconds` (Task 7, §3.10.2), so nothing bounds a turn yet.
-        # `max_schema_retries` has nothing to count without `schema` (Task 5), refused below.
         turn_id = turn_id or uuid.uuid4().hex
         # Before anything that costs, as `CodexAgent.run` does and for its reason: a turn
         # started after `request_stop()` cannot succeed, so it starts no CLI and no billable
@@ -956,13 +982,6 @@ class ClaudeCodeAgent:
                 chat_id,
             )
             return external_agent_result(output=SHUTDOWN_CONTENT, turn_id=turn_id, usage=None, finish_reason="shutdown")
-        if schema is not None:
-            # Refused rather than dropped: without it the turn would hand back unvalidated text
-            # where the caller asked for a validated object.
-            raise NotImplementedError(
-                f"{self._config.runtime} runtime {self._kind!r}: `schema` is not supported yet; the structured "
-                f"output of BEP 19 §3.9 is still to be built."
-            )
         if chat_id in self._in_flight:
             raise RuntimeError(
                 f"Agent {self._kind!r} already has a turn running on chat {chat_id!r}. A Claude Code session is "
@@ -978,7 +997,15 @@ class ClaudeCodeAgent:
             llm = llm_args or {}
             options = replace(
                 self._options(),
-                **_compact(resume=native_session_id, model=llm.get("model"), effort=llm.get("reasoning_effort")),
+                **_compact(
+                    resume=native_session_id,
+                    model=llm.get("model"),
+                    effort=llm.get("reasoning_effort"),
+                    # BEP 19 §3.9: the CLI's own structured-output flag (`run()`'s docstring says
+                    # what it makes the CLI do). `_compact` drops this when `schema` is None, so an
+                    # unstructured turn's options are unaffected.
+                    output_format={"type": "json_schema", "schema": schema} if schema is not None else None,
+                ),
             )
             prompt = _content_to_claude_prompt(content)
 
@@ -988,22 +1015,12 @@ class ClaudeCodeAgent:
             result: ResultMessage | None = None
             answer_uuid: str | None = None
             phase = "at startup"  # connect(): the CLI starting, the resumed session loading
-            try:
-                await client.connect()
-                phase = "during the turn"
-                await client.query(prompt if isinstance(prompt, str) else _user_message(prompt))
-                async for message in client.receive_response():
-                    if isinstance(message, AssistantMessage) and message.parent_tool_use_id is None:
-                        # Recorded as `native_turn_id`, since the stream names no turn: the turn's
-                        # last top-level assistant message, a transcript entry, which
-                        # `get_session_messages` returns under this uuid (pinned by
-                        # test_a_second_turn_resumes_the_first_by_session_id_against_the_real_cli).
-                        # `ResultMessage.uuid` is in no transcript, and the prompt's own entry is not
-                        # in the stream (both measured, not pinned).
-                        answer_uuid = message.uuid
-                    elif isinstance(message, ResultMessage):
-                        result = message
-            except Exception as exc:
+            structured_output: Any = None
+            structured_ok = False
+            ran_out = False
+            retries = 0
+
+            def _vendor_failure(exc: Exception) -> RuntimeError:
                 # Every vendor failure on the turn path gets the runtime, agent, chat and turn, the
                 # cause chained, as CodexAgent's do — the SDK's typed errors, and the bare
                 # Exception it raises for a control request that times out (the initialize
@@ -1025,57 +1042,124 @@ class ClaudeCodeAgent:
                 # CLI finds a session with that title (its message says it would; not measured),
                 # which the session check below catches — because reporting it as a lost session
                 # sends an operator looking for one (§3.10.2).
+                #
+                # Shared between `connect()` and every retry's `query()` (both call this), since a
+                # schema retry can fail natively too — a new native failure, not one more
+                # validation attempt to retry.
                 refusal = f"No conversation found with session ID: {native_session_id}"
                 if (
                     native_session_id is not None
                     and isinstance(exc, ResultError)
                     and any(refusal in error for error in exc.errors)
                 ):
-                    raise RuntimeError(
+                    return RuntimeError(
                         f"{self._config.runtime} runtime {self._kind!r}: session {native_session_id!r} for chat "
                         f"{chat_id!r} could not be resumed, and BOS does not silently start a fresh session "
                         f"under the same chat_id (BEP 19 §3.6): {exc}"
-                    ) from exc
-                raise RuntimeError(
+                    )
+                return RuntimeError(
                     f"{self._config.runtime} runtime {self._kind!r}: turn {turn_id!r} for chat {chat_id!r} failed "
                     f"{phase}: {exc}"
-                ) from exc
+                )
+
+            try:
+                try:
+                    await client.connect()
+                except Exception as exc:
+                    raise _vendor_failure(exc) from exc
+                phase = "during the turn"
+                while True:
+                    try:
+                        await client.query(prompt if isinstance(prompt, str) else _user_message(prompt))
+                        result = None
+                        async for message in client.receive_response():
+                            if isinstance(message, AssistantMessage) and message.parent_tool_use_id is None:
+                                # Recorded as `native_turn_id`, since the stream names no turn: the
+                                # turn's last top-level assistant message, a transcript entry, which
+                                # `get_session_messages` returns under this uuid (pinned by
+                                # test_a_second_turn_resumes_the_first_by_session_id_against_the_real_cli).
+                                # `ResultMessage.uuid` is in no transcript, and the prompt's own entry
+                                # is not in the stream (both measured, not pinned). On a schema retry
+                                # this is overwritten by the winning attempt's own message.
+                                answer_uuid = message.uuid
+                            elif isinstance(message, ResultMessage):
+                                result = message
+                    except Exception as exc:
+                        raise _vendor_failure(exc) from exc
+
+                    if result is None:
+                        raise RuntimeError(
+                            f"{self._config.runtime} runtime {self._kind!r}: turn {turn_id!r} for chat "
+                            f"{chat_id!r} ended without a result"
+                        )
+                    # BEP 19 §3.9: `max_iterations` is a budget, not an error. The CLI ends a turn
+                    # that spends `max_turns` as an error result, subtype "error_max_turns" (pinned
+                    # by test_a_turn_that_spends_max_iterations_closes_like_bos_agent_against_the_
+                    # real_cli), and BOS closes it as its own Agent closes at `max_iterations`:
+                    # MAX_ITERATION_CONTENT, with no handoff, since nothing hands an external
+                    # runtime a consolidator, and committed with the session that ran it, so the
+                    # next turn resumes there. A schema turn that runs out is not schema-checked
+                    # below, the same call BOS's own Agent.run makes: a turn closed by
+                    # `_close_with_handoff` never sets `structured_ok`, so it returns unstructured
+                    # too (agent.py) — an unstructured marker is honest about what happened, where
+                    # a `StructuredOutputError` would blame validation for a budget the model never
+                    # got to spend on the schema at all. Measured: with `schema` set, the CLI's own
+                    # self-correction nudge (above) already spends a native turn, so `max_turns=1`
+                    # exhausts on the very first attempt whenever the model does not comply
+                    # immediately, before BOS's own retry loop ever runs.
+                    ran_out = result.subtype == "error_max_turns"
+                    if result.is_error and not ran_out:
+                        # The SDK documents an API failure as arriving under subtype "success", its
+                        # prose in `result`; an error the CLI raises itself names its subtype and
+                        # carries `errors`, as the measured resume refusal does. All four go out.
+                        raise RuntimeError(
+                            f"{self._config.runtime} runtime {self._kind!r}: turn {turn_id!r} for chat "
+                            f"{chat_id!r} failed: subtype={result.subtype!r}, errors={result.errors!r}, "
+                            f"api_error_status={result.api_error_status!r}, result={result.result!r}"
+                        )
+                    if native_session_id is not None and result.session_id != native_session_id:
+                        # Never a silent new session under the same chat_id (BEP 19 §3.6). A resumed
+                        # turn answers from the session it resumed — measured: the ResultMessage
+                        # carries that id — and the SDK documents a new id only under
+                        # `fork_session`, which `native_options` refuses. So this fires only if the
+                        # CLI stops doing so, or resumed another session by that name; the turn ran,
+                        # and is not committed.
+                        raise RuntimeError(
+                            f"{self._config.runtime} runtime {self._kind!r}: turn {turn_id!r} resumed session "
+                            f"{native_session_id!r} for chat {chat_id!r}, but the CLI answered from session "
+                            f"{result.session_id!r}. BOS does not move a chat to another session silently "
+                            f"(BEP 19 §3.6), so it committed nothing."
+                        )
+                    if schema is None or ran_out:
+                        break
+                    try:
+                        # BEP 12: the CLI's own `structured_output` (from its `StructuredOutput`
+                        # tool call) is never trusted on its own — `result.result` is exactly that
+                        # tool call's JSON input when it was called (measured), so validating it
+                        # here is one code path for both "the model complied" and "the model never
+                        # called the tool", the same as CodexAgent's plain-text schema turns.
+                        structured_output = self._structured_validator.validate(result.result or "", schema)
+                        structured_ok = True
+                        break
+                    except StructuredOutputError as e:
+                        if retries >= max_schema_retries:
+                            # Exhausted: commits nothing, same as a native failure above — an
+                            # unvalidated reply is not the answer `schema=` promised, so it is not
+                            # turn history either.
+                            raise
+                        retries += 1
+                        # A new query() on the SAME connected client and native session (measured:
+                        # the session id does not change) — not a new CLI child — and `max_turns`
+                        # is a per-query() budget that resets for it (measured: a client already at
+                        # its limit still completes a later query() cleanly), so this retry gets the
+                        # same fresh budget the first attempt did, mirroring the per-attempt
+                        # `timeout_seconds` window BEP 19 §3.10.2 gives Codex's own retries.
+                        prompt = (
+                            f"Your previous response failed schema validation: {e}. "
+                            "Reply ONLY with JSON matching the schema."
+                        )
             finally:
                 await client.disconnect()
-
-            if result is None:
-                raise RuntimeError(
-                    f"{self._config.runtime} runtime {self._kind!r}: turn {turn_id!r} for chat {chat_id!r} ended "
-                    f"without a result"
-                )
-            # BEP 19 §3.9: `max_iterations` is a budget, not an error. The CLI ends a turn that
-            # spends `max_turns` as an error result, subtype "error_max_turns" (pinned by
-            # test_a_turn_that_spends_max_iterations_closes_like_bos_agent_against_the_real_cli),
-            # and BOS closes it as its own Agent closes at `max_iterations`: MAX_ITERATION_CONTENT,
-            # with no handoff, since nothing hands an external runtime a consolidator, and
-            # committed with the session that ran it, so the next turn resumes there.
-            ran_out = result.subtype == "error_max_turns"
-            if result.is_error and not ran_out:
-                # The SDK documents an API failure as arriving under subtype "success", its prose in
-                # `result`; an error the CLI raises itself names its subtype and carries `errors`,
-                # as the measured resume refusal does. All four go out.
-                raise RuntimeError(
-                    f"{self._config.runtime} runtime {self._kind!r}: turn {turn_id!r} for chat {chat_id!r} failed: "
-                    f"subtype={result.subtype!r}, errors={result.errors!r}, "
-                    f"api_error_status={result.api_error_status!r}, result={result.result!r}"
-                )
-            if native_session_id is not None and result.session_id != native_session_id:
-                # Never a silent new session under the same chat_id (BEP 19 §3.6). A resumed turn
-                # answers from the session it resumed — measured: the ResultMessage carries that
-                # id — and the SDK documents a new id only under `fork_session`, which
-                # `native_options` refuses. So this fires only if the CLI stops doing so, or
-                # resumed another session by that name; the turn ran, and is not committed.
-                raise RuntimeError(
-                    f"{self._config.runtime} runtime {self._kind!r}: turn {turn_id!r} resumed session "
-                    f"{native_session_id!r} for chat {chat_id!r}, but the CLI answered from session "
-                    f"{result.session_id!r}. BOS does not move a chat to another session silently (BEP 19 §3.6), "
-                    f"so it committed nothing."
-                )
 
             text = MAX_ITERATION_CONTENT if ran_out else (result.result or "")
             usage = _usage(result.usage)
@@ -1097,7 +1181,8 @@ class ClaudeCodeAgent:
                         await observed
 
             return external_agent_result(
-                output=text,
+                output=structured_output if structured_ok else text,
+                structured=structured_ok,
                 turn_id=turn_id,
                 usage=usage,
                 finish_reason=result.terminal_reason or result.stop_reason,
