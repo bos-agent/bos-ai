@@ -1,9 +1,16 @@
 import asyncio
 import os
 import signal
+from pathlib import Path
 from typing import Any
 
-from bos.core import ep_tool
+from bos.core import ToolContext, ep_tool
+
+
+def _in_workspace(cwd: str, context: ToolContext | None) -> Path:
+    # As filesystem._in_workspace — kept here rather than imported, since
+    # importing that module registers the file tools as a side effect.
+    return Path(context.workspace) / cwd if context is not None and context.workspace else Path(cwd)
 
 
 def _subprocess_kwargs() -> dict[str, Any]:
@@ -62,14 +69,14 @@ Guidelines:
 - If a command fails, inspect the error and change approach instead of repeating blindly.
 """,
 )
-async def tool_bash(command: str, cwd: str = ".", timeout: int = 60) -> str:
+async def tool_bash(command: str, cwd: str = ".", timeout: int = 60, context: ToolContext | None = None) -> str:
     proc: asyncio.subprocess.Process | None = None
     try:
         proc = await asyncio.create_subprocess_shell(
             command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            cwd=cwd,
+            cwd=_in_workspace(cwd, context),
             **_subprocess_kwargs(),
         )
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
@@ -106,7 +113,7 @@ async def tool_bash(command: str, cwd: str = ".", timeout: int = 60) -> str:
         "required": ["command"],
     },
 )
-async def tool_powershell(command: str, cwd: str = ".", timeout: int = 60) -> str:
+async def tool_powershell(command: str, cwd: str = ".", timeout: int = 60, context: ToolContext | None = None) -> str:
     proc: asyncio.subprocess.Process | None = None
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -116,7 +123,7 @@ async def tool_powershell(command: str, cwd: str = ".", timeout: int = 60) -> st
             command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            cwd=cwd,
+            cwd=_in_workspace(cwd, context),
             **_subprocess_kwargs(),
         )
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)

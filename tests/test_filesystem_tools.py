@@ -197,3 +197,74 @@ async def test_grep_search_remove_ignore_searches_dotbos(tmp_path):
 
     assert "visible.txt" in result
     assert "secret.txt" in result
+
+
+def _ctx(workspace, chat_id: str = "chat-1"):
+    from bos.core import ParentTurn, ToolContext
+
+    return ToolContext(parent=ParentTurn(chat_id=chat_id, turn_id="t", agent_name="a"), workspace=str(workspace))
+
+
+@pytest.mark.asyncio
+async def test_relative_paths_resolve_against_the_workspace_not_the_process_cwd(tmp_path, monkeypatch):
+    filesystem._READ_FILES.clear()
+    workspace, elsewhere = tmp_path / "ws", tmp_path / "elsewhere"
+    workspace.mkdir()
+    elsewhere.mkdir()
+    (workspace / "a.txt").write_text("alpha\n", encoding="utf-8")
+    monkeypatch.chdir(elsewhere)  # an embedding host's cwd, not the workspace
+    ctx = _ctx(workspace)
+
+    assert await filesystem.tool_read_file("a.txt", context=ctx) == "1\talpha\n"
+    assert await filesystem.tool_write_file("a.txt", "beta\n", context=ctx) == "Successfully wrote to a.txt."
+    assert await filesystem.tool_edit_file("a.txt", "beta", "gamma", context=ctx) == "Successfully edited a.txt."
+    assert (workspace / "a.txt").read_text(encoding="utf-8") == "gamma\n"
+    assert list(elsewhere.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_a_read_licenses_an_overwrite_only_in_the_chat_that_read(tmp_path, monkeypatch):
+    filesystem._READ_FILES.clear()
+    monkeypatch.chdir(tmp_path)  # whatever resolves wrongly lands here, not in the repo
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / "a.txt").write_text("original\n", encoding="utf-8")
+    await filesystem.tool_read_file("a.txt", context=_ctx(workspace, "chat-a"))
+
+    other_chat = await filesystem.tool_write_file("a.txt", "from b\n", context=_ctx(workspace, "chat-b"))
+    same_chat = await filesystem.tool_write_file("a.txt", "from a\n", context=_ctx(workspace, "chat-a"))
+
+    assert other_chat == "Error: Refusing to overwrite existing file 'a.txt' before it has been read with ReadFile."
+    assert same_chat == "Successfully wrote to a.txt."
+
+
+@pytest.mark.parametrize("grep_binary", [True, False], ids=["rg-or-grep", "python-fallback"])
+@pytest.mark.asyncio
+async def test_searches_run_in_the_workspace_and_answer_relative_to_it(tmp_path, monkeypatch, grep_binary):
+    # Under a directory the searches ignore by name: the ignore check must see the
+    # path within the workspace, never the workspace's own location.
+    workspace = tmp_path / "build" / "ws"
+    (workspace / "src").mkdir(parents=True)
+    (workspace / "src" / "a.py").write_text("needle = 1\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    if not grep_binary:
+        monkeypatch.setattr(filesystem.os, "system", lambda _cmd: 1)
+    ctx = _ctx(workspace)
+
+    assert await filesystem.tool_glob_search("src/*.py", context=ctx) == "src/a.py"
+    grep = await filesystem.tool_grep_search("needle", context=ctx)
+    assert "a.py" in grep and "needle = 1" in grep
+    assert str(workspace) not in grep
+
+
+@pytest.mark.asyncio
+async def test_an_agent_hands_its_workspace_to_the_tools(tmp_path, monkeypatch):
+    from conftest import create_test_agent
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / "a.txt").write_text("alpha\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    agent = create_test_agent(tools=["ReadFile"], workspace=str(workspace))
+
+    assert await agent._invoke_tool("ReadFile", path="a.txt", chat_id="c") == "1\talpha\n"

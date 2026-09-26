@@ -108,7 +108,7 @@ def _sync_read(path: str) -> str:
 
 ## `ToolContext` injection
 
-Declare a parameter named `context` with type `ToolContext | None` and the harness injects a context object at call time.  The most common use is accessing `context.parent` to spawn nested agent turns.
+Declare a parameter named `context` with type `ToolContext | None` and the harness injects a context object at call time.  The most common use is accessing `context.parent` to spawn nested agent turns.  `context.workspace` is the calling agent's workspace root: resolve a relative path the model gives you against it rather than the process's working directory, which an embedding host owns.
 
 ```python
 from bos.core.contract import ToolContext
@@ -222,6 +222,8 @@ For reference, the built-in tools registered by `src/bos/extensions/tools/filesy
 | `GrepSearch` | Search file contents with rg/grep (context-window-safe output) |
 
 `GlobSearch` and `GrepSearch` accept `replace_ignore` / `extend_ignore` / `remove_ignore` via `[exts.ep_tool.<Name>]` to customise which directories are skipped.
+
+A relative `path` — and the `cwd` of `GlobSearch`, `GrepSearch` and the `Bash` / `PowerShell` system tools — resolves against the agent's workspace, not the process's working directory, so an agent behaves the same however the process was started. Absolute paths are taken as given: nothing confines the tools to the workspace. `WriteFile`'s refusal to overwrite an unread file is per chat — a read in one conversation does not license an overwrite in another.
 
 ---
 

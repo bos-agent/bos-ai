@@ -5,14 +5,34 @@ import re
 from collections.abc import Sequence
 from pathlib import Path
 
-from bos.core import ep_tool
+from bos.core import ToolContext, ep_tool
 
 # Directories skipped by GlobSearch/GrepSearch by default. Includes the
 # workspace's `.bos/` control directory. Both tools resolve their effective
 # ignore set via _resolve_ignore_dirs, configurable per tool through
 # [exts.ep_tool.<Tool>] replace_ignore / extend_ignore / remove_ignore.
 _IGNORE_DIRS = {".git", ".pycache", "__pycache__", "node_modules", "venv", ".venv", ".uv", "dist", "build", ".bos"}
-_READ_FILES: set[Path] = set()
+# Files each chat has read, so that WriteFile's read-before-overwrite holds per
+# conversation: one chat's read must not license another's overwrite. A call
+# with no ToolContext shares the None entry.
+# ponytail: grows by one entry per chat that reads a file, for the process's
+# life; evict on chat deletion if that ever shows up in memory.
+_READ_FILES: dict[str | None, set[Path]] = {}
+
+
+def _workspace_root(context: ToolContext | None) -> Path | None:
+    return Path(context.workspace) if context is not None and context.workspace else None
+
+
+def _in_workspace(path: str, context: ToolContext | None) -> Path:
+    """*path* as the model means it: relative to the agent's workspace, not the
+    process cwd. An absolute *path* is taken as is (pathlib's ``/`` keeps it)."""
+    root = _workspace_root(context)
+    return root / path if root is not None else Path(path)
+
+
+def _chat_of(context: ToolContext | None) -> str | None:
+    return context.parent.chat_id if context is not None else None
 
 
 def _resolve_ignore_dirs(
@@ -78,12 +98,14 @@ Guidelines:
 - Do not reread immediately after a successful EditFile/WriteFile unless semantic verification requires it.
 """,
 )
-async def tool_read_file(path: str, line_offset: int = 0, limit: int = 500) -> str:
-    return await asyncio.to_thread(_sync_tool_read_file, path, line_offset, limit)
+async def tool_read_file(
+    path: str, line_offset: int = 0, limit: int = 500, context: ToolContext | None = None
+) -> str:
+    return await asyncio.to_thread(_sync_tool_read_file, path, line_offset, limit, context)
 
 
-def _sync_tool_read_file(path: str, line_offset: int = 0, limit: int = 500) -> str:
-    p = Path(path)
+def _sync_tool_read_file(path: str, line_offset: int = 0, limit: int = 500, context: ToolContext | None = None) -> str:
+    p = _in_workspace(path, context)
     if not p.exists():
         return f"Error: File '{path}' does not exist."
     if not p.is_file():
@@ -102,7 +124,7 @@ def _sync_tool_read_file(path: str, line_offset: int = 0, limit: int = 500) -> s
                     break
                 line_number = line_offset + len(lines) + 1
                 lines.append(f"{line_number}\t{line}")
-        _READ_FILES.add(p.resolve())
+        _READ_FILES.setdefault(_chat_of(context), set()).add(p.resolve())
         return "".join(lines) or "(Reached end of file or file is empty)"
     except Exception as e:
         return f"Error reading file {path}: {e}"
@@ -131,19 +153,20 @@ Guidelines:
 - After writing meaningful code, verify with an appropriate test, import, or focused inspection.
 """,
 )
-async def tool_write_file(path: str, content: str) -> str:
-    return await asyncio.to_thread(_sync_tool_write_file, path, content)
+async def tool_write_file(path: str, content: str, context: ToolContext | None = None) -> str:
+    return await asyncio.to_thread(_sync_tool_write_file, path, content, context)
 
 
-def _sync_tool_write_file(path: str, content: str) -> str:
-    p = Path(path)
+def _sync_tool_write_file(path: str, content: str, context: ToolContext | None = None) -> str:
+    p = _in_workspace(path, context)
+    read = _READ_FILES.setdefault(_chat_of(context), set())
     try:
         resolved = p.resolve(strict=False)
-        if p.exists() and p.is_file() and resolved not in _READ_FILES:
+        if p.exists() and p.is_file() and resolved not in read:
             return f"Error: Refusing to overwrite existing file '{path}' before it has been read with ReadFile."
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content, encoding="utf-8")
-        _READ_FILES.add(resolved)
+        read.add(resolved)
         return f"Successfully wrote to {path}."
     except Exception as e:
         return f"Error writing to file {path}: {e}"
@@ -183,15 +206,27 @@ Guidelines:
 """,
 )
 async def tool_edit_file(
-    path: str, old_string: str, new_string: str, line_offset: int = 0, replace_all: bool = False
+    path: str,
+    old_string: str,
+    new_string: str,
+    line_offset: int = 0,
+    replace_all: bool = False,
+    context: ToolContext | None = None,
 ) -> str:
-    return await asyncio.to_thread(_sync_tool_edit_file, path, old_string, new_string, line_offset, replace_all)
+    return await asyncio.to_thread(
+        _sync_tool_edit_file, path, old_string, new_string, line_offset, replace_all, context
+    )
 
 
 def _sync_tool_edit_file(
-    path: str, old_string: str, new_string: str, line_offset: int = 0, replace_all: bool = False
+    path: str,
+    old_string: str,
+    new_string: str,
+    line_offset: int = 0,
+    replace_all: bool = False,
+    context: ToolContext | None = None,
 ) -> str:
-    p = Path(path)
+    p = _in_workspace(path, context)
     if not p.exists() or not p.is_file():
         return f"Error: File '{path}' does not exist."
     try:
@@ -263,20 +298,31 @@ async def tool_glob_search(
     replace_ignore: Sequence[str] | None = None,
     extend_ignore: Sequence[str] | None = None,
     remove_ignore: Sequence[str] | None = None,
+    context: ToolContext | None = None,
 ) -> str:
     # replace_ignore / extend_ignore / remove_ignore are config-only knobs (see
     # _resolve_ignore_dirs), set via [exts.ep_tool.GlobSearch]. Ignore entries match
     # directory names in the path; unlike GrepSearch, GlobSearch does not interpret
     # them as file globs.
     ignore_dirs = _resolve_ignore_dirs(replace_ignore, extend_ignore, remove_ignore)
-    return await asyncio.to_thread(_sync_tool_glob_search, pattern, cwd, ignore_dirs)
+    return await asyncio.to_thread(_sync_tool_glob_search, pattern, cwd, ignore_dirs, _workspace_root(context))
 
 
-def _sync_tool_glob_search(pattern: str, cwd: str, ignore_dirs: set[str]) -> str:
+def _shown(p: Path, cwd: str, root: Path | None) -> Path:
+    """A search hit as the model gave its *cwd*: under a relative one, relative
+    to the workspace — so the ignore check never sees the workspace's own path,
+    and the hit reads back through ReadFile unchanged."""
+    return p.relative_to(root) if root is not None and not Path(cwd).is_absolute() else p
+
+
+def _sync_tool_glob_search(pattern: str, cwd: str, ignore_dirs: set[str], root: Path | None = None) -> str:
+    base = root / cwd if root is not None else Path(cwd)
     try:
-        matches = [
-            str(p) for p in Path(cwd).glob(pattern) if p.is_file() and not any(part in ignore_dirs for part in p.parts)
-        ]
+        matches = []
+        for p in base.glob(pattern):
+            shown = _shown(p, cwd, root)
+            if p.is_file() and not any(part in ignore_dirs for part in shown.parts):
+                matches.append(str(shown))
         if not matches:
             return "No files matched."
 
@@ -313,12 +359,14 @@ async def tool_grep_search(
     replace_ignore: Sequence[str] | None = None,
     extend_ignore: Sequence[str] | None = None,
     remove_ignore: Sequence[str] | None = None,
+    context: ToolContext | None = None,
 ) -> str:
     # replace_ignore / extend_ignore / remove_ignore are config-only knobs (see
     # _resolve_ignore_dirs), set via [exts.ep_tool.GrepSearch]. Entries may be directory
     # names (".venv") or file globs ("*.min.js") — _is_file_glob routes each to the
     # right rg/grep flag.
     exclude_patterns: list[str] = sorted(_resolve_ignore_dirs(replace_ignore, extend_ignore, remove_ignore))
+    root = _workspace_root(context)
 
     # Attempt to use 'rg' first, then 'grep'.
     cmd = None
@@ -341,8 +389,10 @@ async def tool_grep_search(
 
     if cmd:
         try:
+            # Run from the workspace, so rg/grep resolve and print *cwd* as they
+            # would with the workspace as the process cwd.
             proc = await asyncio.create_subprocess_exec(
-                *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+                *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, cwd=root
             )
             stdout, _stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
             text = stdout.decode("utf-8", errors="replace")
@@ -369,10 +419,11 @@ async def tool_grep_search(
                 else:
                     exclude_dirs.add(pat)
 
-            for p in Path(cwd).rglob("*"):
+            for p in _in_workspace(cwd, context).rglob("*"):
                 if not p.is_file():
                     continue
-                if any(part in exclude_dirs for part in p.parts):
+                shown = _shown(p, cwd, root)
+                if any(part in exclude_dirs for part in shown.parts):
                     continue
                 if any(fnmatch.fnmatch(p.name, g) for g in exclude_globs):
                     continue
@@ -381,7 +432,7 @@ async def tool_grep_search(
                     for i, line in enumerate(content.splitlines(), start=1):
                         if compiled.search(line):
                             stripped = line.strip()
-                            matches.append(f"{p}:{i}:{stripped}")
+                            matches.append(f"{shown}:{i}:{stripped}")
                             if len(matches) > _MAX_GREP_LINES:
                                 matches.append("... truncated (max 100 matches).")
                                 return "\n".join(matches)
