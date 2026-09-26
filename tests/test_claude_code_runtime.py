@@ -939,8 +939,9 @@ async def test_a_host_that_opts_into_repo_settings_runs_the_repos_commands(
 
 def test_every_client_switches_off_the_inherited_variables_that_load_what_the_default_leaves_out(tmp_path):
     """BEP 19 §3.12: the values BOS sends over whatever it inherited. Spelled out here, so an
-    override dropped from claude_code.py fails. Five are measured by the test below; the other
-    eighteen are read from the CLI source, and this is all that can be pinned of them here."""
+    override dropped from claude_code.py fails. Six are measured — five by the route test below, and
+    ENABLE_TOOL_SEARCH by test_bos_pins_tool_search_off_so_the_full_tool_surface_is_offered
+    (tests/test_claude_code_confinement.py) — and the other eighteen are read from the CLI source."""
     assert _agent(tmp_path)._options().env == {
         "CLAUDE_CODE_PLUGIN_DIRS": "",
         "CLAUDE_BG_SESSION_PERMISSION_RULES": "",
@@ -965,6 +966,9 @@ def test_every_client_switches_off_the_inherited_variables_that_load_what_the_de
         "CLAUDE_CODE_PACKAGE_MANAGER_AUTO_UPDATE": "",
         "SYSTEM_REMINDER_MEMORY_CONTEXT": "",
         "CLAUDE_CODE_PROJECT_DIR_NAME": "",
+        # Not an inherited loader: pins the tool surface the confinement and MCP egress were measured
+        # against (§3.5.3); with tool search on, the CLI offers a DeferredToolPlaceholder (the pin's test).
+        "ENABLE_TOOL_SEARCH": "false",
     }
 
 
@@ -1582,15 +1586,24 @@ async def test_a_bare_exception_from_the_sdk_carries_the_turns_context(tmp_path,
     ],
     ids=["unknown-part", "non-base64-data-url"],
 )
+@pytest.mark.parametrize("permission", ["read-only", "workspace-write"])
 @pytest.mark.asyncio
-async def test_malformed_content_is_the_callers_error_and_starts_no_cli(tmp_path, fake_claude, content, error):
+async def test_malformed_content_is_the_callers_error_and_starts_no_cli(
+    tmp_path, fake_claude, monkeypatch, sandbox_available, content, error, permission
+):
     """Content is converted before any client is built, outside the catch that gives vendor
     failures the turn's context, so a caller's malformed content raises the caller's own error,
-    as CodexAgent leaves it — and no CLI starts."""
+    as CodexAgent leaves it — and no CLI starts. Under ``workspace-write`` it is converted before
+    the turn's own TMPDIR is made, so none is left behind (no teardown runs for this error)."""
+    made: list[str] = []
+    real_mkdtemp = claude_code.tempfile.mkdtemp
+    monkeypatch.setattr(claude_code.tempfile, "mkdtemp", lambda **kw: made.append(real_mkdtemp(**kw)) or made[-1])
+
     with pytest.raises(error):
-        await _agent(tmp_path).run("chat-1", content)
+        await _agent(tmp_path, permission=permission).run("chat-1", content)
 
     assert fake_claude.instances == []
+    assert [path for path in made if Path(path).exists()] == [], "a per-turn TMPDIR outlived the failed turn"
 
 
 @pytest.mark.asyncio

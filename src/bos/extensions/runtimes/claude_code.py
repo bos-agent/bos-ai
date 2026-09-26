@@ -63,6 +63,7 @@ import os
 import shutil
 import stat
 import sys
+import tempfile
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import replace
@@ -409,6 +410,18 @@ _INHERITED_ENV_OVERRIDES: Mapping[str, str] = MappingProxyType({
     # `native_messages()` (§3.7) never looks in. Switched off so the CLI's write and BOS's
     # read agree on the project directory's name.
     "CLAUDE_CODE_PROJECT_DIR_NAME": "",
+    # Not an inherited loader: this pins the tool surface BOS's confinement (§3.5.3, `_TOOL_LEVELS`)
+    # and MCP egress (§3.8) were measured against — every tool offered up front. The CLI turns tool
+    # search ON by default on a first-party Anthropic host (i.e. in production under the subscription
+    # login) and OFF when `ANTHROPIC_BASE_URL` points elsewhere (read from source: `Cot()`, `Qg()`),
+    # which is why every test (fake base URL) ran with it off. With it on, the CLI offers a
+    # `DeferredToolPlaceholder` the classification does not know (the hook denies it, so confinement
+    # still holds); BOS's own MCP tools were still offered directly under BOS's `tools=` (measured,
+    # not pinned). `false` yields the standard full surface: measured (20 tools, no placeholder, no
+    # warning), and it overrides an inherited `true`. Read raw / `M.str`; the CLI's `Cot()` maps it to
+    # "standard". Measured against CLI 2.1.281; pinned by
+    # test_bos_pins_tool_search_off_so_the_full_tool_surface_is_offered.
+    "ENABLE_TOOL_SEARCH": "false",
 })
 # Read on those paths and left alone, because under BOS's default each is inert or loads
 # nothing from outside the session:
@@ -1064,6 +1077,11 @@ class _Turn:
         # it once per message and ends the turn if it is non-empty. A list, not a flag, so the raise
         # can quote the CLI's own line.
         self.sandbox_tripped: list[str] = []
+        # BEP 19 §3.5.3, §8.2 (R14): the per-turn TMPDIR directory BOS created for this client's CLI
+        # under workspace-write (None otherwise), which moves the sandbox's writable temp root off the
+        # shared /tmp/claude-<uid>. `_teardown` removes exactly this path once the client has
+        # disconnected.
+        self.tmpdir: Path | None = None
 
 
 def _reads_past(turn: _Turn, result: ResultMessage) -> bool:
@@ -1905,6 +1923,11 @@ class ClaudeCodeAgent:
                 )
         finally:
             await self._close(turn)
+            # BEP 19 §3.5.3 (R14): the CLI has now disconnected (its child has exited), so removing the
+            # per-turn TMPDIR removes only what this client owned. Exactly the path BOS created, and
+            # best-effort — a teardown error must not mask the turn's result.
+            if turn.tmpdir is not None:
+                shutil.rmtree(turn.tmpdir, ignore_errors=True)
 
     def _release(self, chat_id: str, turn: _Turn | None) -> None:
         """Free *chat_id* for its next turn once *turn*'s CLI is gone (BEP 19 §3.10.1). A
@@ -2071,12 +2094,31 @@ class ClaudeCodeAgent:
                     output_format={"type": "json_schema", "schema": schema} if schema is not None else None,
                 ),
             )
+            # BEP 19 §3.5.3, §8.2 (R14): under workspace-write, give this client's CLI a per-turn
+            # TMPDIR of its own. The CLI derives the bash sandbox's writable temp root from TMPDIR
+            # (Node's os.tmpdir()), so pointing it at a BOS-owned directory moves that root off the
+            # shared `<system temp>/claude-<uid>` — the directory every live Claude Code session of the
+            # same user shares. Measured: the agent's own commands keep a working temp (mktemp lands in
+            # the BOS dir), while a bash write to the shared root is refused ("Read-only file system"),
+            # because the shared root is no longer among the sandbox's writable binds. This alone
+            # closes the write half; a `permissions.deny` Edit rule was tried too (the plan's candidate)
+            # and proved redundant — moving TMPDIR already removes the shared root's writable bind — so
+            # it is not sent. Reads are not restricted (a bash read of the shared root still returns
+            # files, §3.5.5). Set in `run()`, not `_options()`, because the directory is per-turn and
+            # its lifetime is the turn's; `_teardown` removes it once the client has disconnected.
+            # The caller's content is converted first: a malformed part raises before the
+            # directory exists, so it cannot be left behind by an error no teardown sees.
             prompt = _content_to_claude_prompt(content)
+            tmpdir_override: Path | None = None
+            if self._config.permission == "workspace-write":
+                tmpdir_override = Path(tempfile.mkdtemp(prefix="bos-cc-tmpdir-"))
+                options = replace(options, env={**(options.env or {}), "TMPDIR": str(tmpdir_override)})
 
             # ponytail: a client per turn costs one CLI spawn (~1s). A per-chat_id session pool
             # is the upgrade if that latency shows up; resume= makes the stateless version correct.
             turn = _Turn(_CLIENT_FACTORY(options))
             turn.sandbox_tripped = tripped  # the list the tripwire appends to (BEP 19 §3.5.3)
+            turn.tmpdir = tmpdir_override  # removed in `_teardown` once the client has disconnected
             phase = "at startup"  # connect(): the CLI starting, the resumed session loading
             structured_output: Any = None
             structured_ok = False

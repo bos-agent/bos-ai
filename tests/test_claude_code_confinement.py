@@ -21,19 +21,24 @@ import json
 import os
 import re
 import shutil
+import tempfile
+import uuid
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import pytest
 from claude_agent_sdk import (
+    ClaudeAgentOptions,
     ClaudeSDKClient,
+    HookMatcher,
     PermissionResultAllow,
     PermissionResultDeny,
     ResultMessage,
 )
 from conftest import claude_cli_env
 from fake_anthropic import FakeAnthropic
+from test_claude_code_runtime import _turn as _fake_turn
 from test_claude_code_vendor_facts import _bash, _tool_results, _write
 
 from bos.core.defaults.structured_validator import JsonSchemaValidator
@@ -680,4 +685,239 @@ async def test_an_at_path_prompt_reads_outside_the_root_unconfined(tmp_path, fak
 
     assert any("CANARY-atpath-7c2f" in json.dumps(body) for body in fake_anthropic.requests), (
         "the @path file reached the model (unconfined read, documented not fixed)"
+    )
+
+
+# ── R14: the shared /tmp/claude-<uid> is denied to the agent's sandboxed bash ─
+
+
+@pytest.mark.asyncio
+@_needs_sandbox
+async def test_workspace_write_bash_cannot_write_the_shared_tmp_root(tmp_path, fake_anthropic, monkeypatch):
+    """R14 hardening: under ``workspace-write`` a per-turn ``TMPDIR`` moves the bash sandbox's writable
+    temp root off the shared ``<system temp>/claude-<uid>`` (every live Claude Code session of the same
+    user shares it), so the agent's own commands keep a working temp there while a bash write to the
+    shared root is refused. Measured: TMPDIR alone suffices (the plan's candidate ``permissions.deny``
+    Edit rule proved redundant). The test creates its own probe dir under the shared root and removes
+    it; it never touches any other session's files there.
+
+    Reads are not restricted (§3.5.5), so this closes the bash-*write* half only."""
+    shared = Path(tempfile.gettempdir()) / f"claude-{os.getuid()}"
+    probe = shared / f"bos-t8fix-{uuid.uuid4().hex}"
+    probe.mkdir(parents=True)
+    shared_target = probe / "escaped.txt"
+    try:
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        agent = _agent(tmp_path, monkeypatch, fake_anthropic, permission="workspace-write")
+        inroot = ws / "in.txt"
+        # Simple, separate steps: an in-root touch, a mktemp (which must land in the per-turn TMPDIR,
+        # not the shared root), then a touch of the shared root the sandbox must refuse.
+        cmd = (
+            f"touch {inroot} && echo IN_OK; "
+            f"d=$(mktemp -d) && echo MKTEMP_OK:$d || echo MKTEMP_FAIL; "
+            f"touch {shared_target} 2>&1; echo done"
+        )
+        fake_anthropic.script([[_bash("tu", cmd)]])
+        await _run(agent)
+        res = _tool_results(fake_anthropic).get("tu", "")
+
+        assert not shared_target.exists(), f"the agent's bash wrote the shared tmp root: {res}"
+        assert "Read-only file system" in res, f"the sandbox should refuse the shared write: {res}"
+        assert "IN_OK" in res, f"an in-root command must still work: {res}"
+        assert "MKTEMP_OK" in res, f"the per-turn TMPDIR must keep temp working: {res}"
+        assert str(shared) not in res.split("MKTEMP_OK:", 1)[-1].splitlines()[0], "mktemp must not use the shared root"
+    finally:
+        shutil.rmtree(probe, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+@_needs_sandbox
+async def test_the_per_turn_tmpdir_is_removed_after_the_turn(tmp_path, fake_anthropic, monkeypatch):
+    """The per-turn ``TMPDIR`` BOS creates under ``workspace-write`` is removed once the turn's client
+    disconnects (BEP 19 §3.5.3, R14). Captured from the built options via the client factory, then
+    asserted gone after ``run()`` returns."""
+    seen: list[str] = []
+    real_factory = claude_code._CLIENT_FACTORY
+
+    def factory(options):  # type: ignore[no-untyped-def]
+        tmpdir = (options.env or {}).get("TMPDIR")
+        if tmpdir:
+            seen.append(tmpdir)
+        return real_factory(options)
+
+    monkeypatch.setattr(claude_code, "_CLIENT_FACTORY", factory)
+    (tmp_path / "ws").mkdir()
+    agent = _agent(tmp_path, monkeypatch, fake_anthropic, permission="workspace-write")
+    fake_anthropic.script([[{"type": "text", "text": "ok"}]])
+    await _run(agent)
+
+    assert seen, "run() set a per-turn TMPDIR under workspace-write"
+    assert seen[0].startswith(tempfile.gettempdir()), seen
+    assert not Path(seen[0]).exists(), "the per-turn TMPDIR was removed after the turn"
+
+
+# ── Review Minors ────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_the_hook_denies_a_tool_outside_the_levels_allowlist(tmp_path, fake_anthropic, monkeypatch):
+    """Minor #1: the hook's allowlist backstop (`tool not in allowed` → deny), pinned directly —
+    `tools=` shadows it end-to-end (an excluded tool never reaches the hook), so a unit call is what
+    catches it silently breaking. A `read-only` agent's hook denies `Bash` (not in its allowlist)."""
+    agent = _agent(tmp_path, monkeypatch, fake_anthropic, permission="read-only")
+    hook = agent._hook()
+    decision = await hook({"tool_name": "Bash", "tool_input": {"command": "echo hi"}}, "tu", None)
+
+    out = decision.get("hookSpecificOutput", {})  # type: ignore[union-attr]
+    assert out.get("permissionDecision") == "deny", decision
+    assert "not available" in out.get("permissionDecisionReason", ""), decision
+    # A tool that IS in the allowlist, in-root, is not denied by the backstop.
+    allowed = await hook({"tool_name": "Read", "tool_input": {"file_path": str(tmp_path / "ws" / "f")}}, "tu", None)
+    assert allowed == {}, allowed
+
+
+@pytest.mark.asyncio
+async def test_the_stderr_tripwire_is_wired_only_under_workspace_write(tmp_path, fake_claude, monkeypatch):
+    """Minor #2: `run()` wires the stderr tripwire only under `workspace-write` (the one level with a
+    bash sandbox to degrade). Asserted on the options the client factory received: `stderr` is set at
+    `workspace-write`, `None` at `read-only` and `full-access`. Driven against `FakeClaudeClient`."""
+    monkeypatch.setattr(claude_code, "_bash_sandbox_unavailable", lambda platform: None)  # let ww construct
+
+    async def stderr_for(permission: str) -> Any:
+        (tmp_path / permission).mkdir()
+        agent = ClaudeCodeAgent(
+            kind="george",
+            cfg={"permission": permission, "auth": "api_key", "cwd": "."},
+            chat_store=None,
+            workspace=tmp_path / permission,
+            mcp=_no_mcp,
+            structured_validator=JsonSchemaValidator(),
+        )
+        fake_claude.arm(messages=_fake_turn("ok"))
+        await _run(agent)
+        return fake_claude.instances[-1].options.stderr
+
+    assert callable(await stderr_for("workspace-write")), "the tripwire is wired under workspace-write"
+    assert await stderr_for("read-only") is None, "no tripwire at read-only (no sandbox)"
+    assert await stderr_for("full-access") is None, "no tripwire at full-access (sandbox off)"
+
+
+def test_cli_config_dir_falls_back_to_home_when_unset(tmp_path, monkeypatch):
+    """Minor #3: `_cli_config_dir()` returns `<HOME>/.claude` when `CLAUDE_CONFIG_DIR` is unset —
+    computed only, under a patched `HOME`, never reading the owner's real directory."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.setenv("HOME", str(home))
+    assert claude_code._cli_config_dir() == (home / ".claude").resolve()
+    # And it honours an explicit CLAUDE_CONFIG_DIR.
+    cfg = tmp_path / "cfg"
+    cfg.mkdir()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(cfg))
+    assert claude_code._cli_config_dir() == cfg.resolve()
+
+
+# ── R12: cells §3.5.3 named but had not pinned ───────────────────────────────
+
+
+@pytest.mark.asyncio
+@_needs_sandbox
+async def test_the_hook_sees_a_bash_call(tmp_path, fake_anthropic, monkeypatch):
+    """R12: the PreToolUse hook fires for `Bash`, not only the file tools — pinned by wrapping BOS's
+    own hook to record the tool names it is handed on a real `workspace-write` turn."""
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    agent = _agent(tmp_path, monkeypatch, fake_anthropic, permission="workspace-write")
+    seen: list[str] = []
+    real_hook = agent._hook()
+
+    async def recording(input_data, tool_use_id, context):  # type: ignore[no-untyped-def]
+        seen.append(dict(input_data).get("tool_name", ""))
+        return await real_hook(input_data, tool_use_id, context)
+
+    options = replace(
+        agent._options(),
+        hooks={"PreToolUse": [HookMatcher(matcher=None, hooks=[recording])]},
+        env={**agent._options().env, **claude_cli_env(tmp_path, fake_anthropic)},
+    )
+    fake_anthropic.script([[_bash("tu", f"touch {ws / 'f.txt'}")]])
+    async with asyncio.timeout(90):
+        async with ClaudeSDKClient(options) as client:
+            await client.query("go")
+            messages = [m async for m in client.receive_response()]
+    assert isinstance(messages[-1], ResultMessage), messages[-1]
+    assert "Bash" in seen, f"the hook should see the Bash call: {seen}"
+
+
+@pytest.mark.asyncio
+async def test_dontask_refuses_an_in_root_write(tmp_path, fake_anthropic, monkeypatch):
+    """R12: `dontAsk` refuses even an in-root `Write` that nothing pre-approved — the vendor fact
+    behind §3.5.3's note that BOS never maps to it (a `workspace-write` agent under `dontAsk` could
+    not write at all). A standalone real-CLI turn; BOS never sends this mode."""
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    inroot = ws / "in.txt"
+    env = claude_cli_env(tmp_path, fake_anthropic)
+    options = ClaudeAgentOptions(
+        cwd=ws,
+        env=env,
+        setting_sources=[],
+        system_prompt={"type": "preset", "preset": "claude_code"},
+        permission_mode="dontAsk",
+    )
+    fake_anthropic.script([[_write("tu", inroot)]])
+    async with asyncio.timeout(90):
+        async with ClaudeSDKClient(options) as client:
+            await client.query("go")
+            messages = [m async for m in client.receive_response()]
+    assert isinstance(messages[-1], ResultMessage), messages[-1]
+    assert not inroot.exists(), (
+        f"dontAsk should refuse an in-root Write nothing pre-approved: {_tool_results(fake_anthropic)}"
+    )
+    assert "don't ask" in _tool_results(fake_anthropic)["tu"], _tool_results(fake_anthropic)
+
+
+# ── Tool search off: the full tool surface is offered up front ───────────────
+
+
+@pytest.mark.asyncio
+async def test_bos_pins_tool_search_off_so_the_full_tool_surface_is_offered(tmp_path, fake_anthropic, monkeypatch):
+    """The CLI turns tool search ON on a first-party Anthropic host (production, subscription login;
+    read from source), and with it on offers a ``DeferredToolPlaceholder`` the classification does not
+    know. BOS pins it off with ``ENABLE_TOOL_SEARCH="false"`` (BEP 19 §3.12), keeping the surface the
+    confinement and the MCP egress were measured against.
+
+    Pinned by forcing tool search on in the test process's environment (``ENABLE_TOOL_SEARCH=true``,
+    which the CLI honours even against the fake base URL), then showing BOS's override wins: the tools
+    offered under BOS's options carry no ``DeferredToolPlaceholder`` and equal the classified set. The
+    control — the same options with BOS's override removed — shows the placeholder appears, so the
+    test cannot pass vacuously."""
+    monkeypatch.setenv("ENABLE_TOOL_SEARCH", "true")  # force it on even against the fake base URL
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    agent = _agent(tmp_path, monkeypatch, fake_anthropic, permission="read-only")
+
+    async def offered(env_override: dict[str, str]) -> set[str]:
+        fake = FakeAnthropic()
+        try:
+            base = agent._options()
+            options = replace(base, tools=None, env={**base.env, **claude_cli_env(tmp_path, fake), **env_override})
+            fake.script([[{"type": "text", "text": "ok"}]])
+            async with asyncio.timeout(90):
+                async with ClaudeSDKClient(options) as client:
+                    await client.query("go")
+                    assert isinstance([m async for m in client.receive_response()][-1], ResultMessage)
+            return {t["name"] for t in fake.requests[0]["tools"]}
+        finally:
+            fake.close()
+
+    with_override = await offered({})  # BOS's env already carries ENABLE_TOOL_SEARCH="false"
+    assert "DeferredToolPlaceholder" not in with_override, with_override
+    assert "ToolSearch" not in with_override, with_override
+    assert with_override == set(_TOOL_LEVELS), "the full classified surface is offered up front"
+
+    without_override = await offered({"ENABLE_TOOL_SEARCH": "true"})  # drop BOS's pin
+    assert "DeferredToolPlaceholder" in without_override, (
+        f"control: with tool search on, the CLI offers a placeholder: {sorted(without_override)}"
     )
