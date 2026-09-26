@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import importlib
+import os
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from fake_anthropic import FakeAnthropic
 
 from bos.core.agent import Agent, AgentResult, TurnContext
 from bos.core.contract import Message, TurnInterceptor, ep_consolidator, ep_tool
@@ -322,7 +326,9 @@ def _default_turn_notifications(thread_id: str, turn_id: str, result: Any) -> li
     if result.final_response:
         item = ThreadItem(
             AgentMessageThreadItem(
-                id=f"{turn_id}-response", text=result.final_response, phase=MessagePhase.final_answer,
+                id=f"{turn_id}-response",
+                text=result.final_response,
+                phase=MessagePhase.final_answer,
                 type="agentMessage",
             )
         )
@@ -582,3 +588,287 @@ def fake_codex(monkeypatch):
     registry = _Registry()
     monkeypatch.setattr(codex_mod, "_CODEX_FACTORY", registry)
     return registry
+
+
+# ── Claude Code real-CLI support (BEP 19 Layer 4b) ──────────────────────────
+#
+# The model is the only fake: tests drive the real `claude` CLI bundled in
+# claude-agent-sdk against FakeAnthropic, so every permission decision in them is
+# the vendor's own.
+
+
+# Each of these, when set, moves some of the CLI's per-user config, data, cache or
+# state out of HOME — its Anthropic credentials lookup ($XDG_CONFIG_HOME/anthropic)
+# among them.
+_XDG_HOMES = ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME")
+
+
+def _move_claude_code_host_files(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``ClaudeCodeAgent`` refuses construction on two host files: the CLI's well-known API key
+    file (under ``auth = "subscription"``) and the administrator's enterprise ``managed-mcp.json``
+    (always). A developer's machine may have either, which would fail every Claude Code test at
+    construction, so both point at a path that cannot exist — a child of ``/dev/null``. Tests
+    that want a file there point the path at one themselves. Without the ``claude-code`` extra
+    there is no runtime to patch, and nothing is done."""
+    try:
+        claude_code = importlib.import_module("bos.extensions.runtimes.claude_code")
+    except ImportError:
+        return
+    monkeypatch.setattr(claude_code, "_WELL_KNOWN_API_KEY_FILE", Path(os.devnull, "no-well-known-api-key"))
+    monkeypatch.setattr(claude_code, "_MANAGED_MCP_FILE", Path(os.devnull, "no-managed-mcp.json"))
+
+
+@pytest.fixture(autouse=True)
+def _claude_code_isolation(monkeypatch, tmp_path):
+    """Every test, whether or not it is about Claude Code: ``CLAUDE_CONFIG_DIR`` points under the
+    test's own *tmp_path* — the directory ``claude_cli_env`` also names — so nothing that computes
+    the CLI's config directory (the hook's ``_cli_config_dir``, ``get_session_messages``) resolves
+    the developer's own ``~/.claude``; tests of the unset fallback unset it and patch ``HOME``
+    themselves. And the host files ``_move_claude_code_host_files`` names are moved away."""
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-config"))
+    _move_claude_code_host_files(monkeypatch)
+
+
+@pytest.fixture
+def fake_anthropic(monkeypatch):
+    """A fresh FakeAnthropic for one test (tests/fake_anthropic.py), closed after it.
+
+    Also removes every ``CLAUDE*``, ``ANTHROPIC*`` and ``MCP_*`` variable, and the XDG
+    base directories in ``_XDG_HOMES``, from this process for the test's duration. The
+    SDK builds the child's environment from ``os.environ`` with ``options.env``
+    layered on top, so ``claude_cli_env`` can override a variable but never unset one.
+    A pytest run started from inside a Claude Code session inherits that session's
+    variables — ``CLAUDE_CODE_SESSION_ID``, ``CLAUDE_CODE_MESSAGING_SOCKET``,
+    ``MCP_CONNECTION_NONBLOCKING`` among them, all read by the CLI — and a developer's
+    shell may export ``ANTHROPIC_*`` credentials or an ``XDG_CONFIG_HOME`` holding real
+    ones. CI is not clean either: GitHub's Ubuntu runner image sets ``XDG_CONFIG_HOME``.
+    Scrubbing makes every run hand the child the same environment. A test that needs one
+    of these set for the test process itself sets it after this fixture has run. Kept:
+    ``CLAUDE_CONFIG_DIR``, which ``_claude_code_isolation`` has already pointed under the
+    test's own directory, replacing any inherited value.
+    """
+    for name in list(os.environ):
+        if name == "CLAUDE_CONFIG_DIR":
+            continue
+        if name.startswith(("CLAUDE", "ANTHROPIC", "MCP_")) or name in _XDG_HOMES:
+            monkeypatch.delenv(name)
+    fake = FakeAnthropic()
+    yield fake
+    fake.close()
+
+
+class FakeClaudeClient:
+    """Stands in for ``claude_agent_sdk.ClaudeSDKClient`` at ``claude_code._CLIENT_FACTORY``.
+
+    Fakes the transport, never the vendor's data: ``receive_response`` yields what a test
+    armed in ``messages``, and those are the SDK's own message dataclasses
+    (``SystemMessage``, ``AssistantMessage``, ``ResultMessage``, …), so a shape the vendor
+    changes breaks the tests instead of a look-alike drifting from it. Only the methods
+    ``ClaudeCodeAgent`` calls exist here.
+
+    One instance per turn, as the runtime builds one client per turn (BEP 19 §3.10.1) — a
+    schema retry included, since it re-queries the same connected client rather than building a
+    new one — so every knob is per instance: arm it through the ``fake_claude`` fixture before
+    the turn that builds it. ``connect_error`` is raised by ``connect()`` — where the real SDK
+    raises a startup refusal, such as a ``resume`` the CLI cannot honour. ``release``, when
+    set, holds ``receive_response`` open until the test sets it, with ``waiting`` set once
+    it is held.
+
+    ``messages`` may hold more than one round concatenated — each round is whatever a real
+    ``query()``/``receive_response()`` cycle would stream, ending in its own ``ResultMessage``
+    — for a test that arms a schema retry: the first ``receive_response()`` call consumes up to
+    the first ``ResultMessage``, and a second ``query()`` call (BOS's own correction message)
+    makes the next ``receive_response()`` continue from there, through the second round's own
+    ``ResultMessage``. Every test written before schema retries existed calls it only once, so
+    this is additive and changes no existing test's behaviour.
+
+    Three markers may sit among ``messages`` (BEP 19 §3.9, §3.10.2). ``HANG`` — the one the
+    Codex double uses — pauses the stream with ``hang_reached`` set, a turn the CLI is still
+    working on, until the test sets ``hang_release``: that stands in for the CLI confirming an
+    interrupt, and BOS's own interrupt request never sets it, so a test can also model a CLI
+    that never confirms. ``ECHO`` is the CLI's ``--replay-user-messages`` echo of the oldest
+    mid-turn message BOS sent and nothing has echoed yet — a ``UserMessage`` carrying the uuid
+    BOS put on it — or nothing, when there is none; where a test puts it says when the CLI took
+    that message into a turn. A ``Pause(seconds)`` is the CLI taking that long before its next
+    message.
+
+    The interrupt BOS sends is the CLI's ``interrupt`` control request, which it reaches through
+    ``client._query._send_control_request`` (``claude_code._interrupt`` says why), so this
+    double is its own ``_query`` and records each request in ``control_requests``.
+    ``interrupt_hang`` blocks that request, ``interrupt_error`` fails it, ``steer_error`` fails a
+    mid-turn message's ``query()`` and ``steer_hang`` blocks it, ``connect_hang`` blocks
+    ``connect()``, ``disconnect_hang`` blocks ``disconnect()`` and ``disconnect_error`` fails it
+    (``disconnect_started`` is set on the way in; ``disconnect_calls`` counts calls, ``disconnected``
+    is set once one completes), and
+    ``swallow_cancel`` makes a ``HANG`` ignore cancellation — standing in, as in the Codex double,
+    for the host code a stream task awaits (the sink, the interrupt callback), which can swallow
+    one. ``writes`` records "steer" and "interrupt" in the order they reach the CLI.
+    """
+
+    def __init__(self, options: Any) -> None:
+        self.options = options
+        self.messages: list[Any] = []
+        self._consumed = 0  # index into `messages`; advances across query()/receive_response() rounds
+        self.connect_error: BaseException | None = None
+        self.connect_hang: asyncio.Event | None = None
+        self.release: asyncio.Event | None = None
+        self.waiting = asyncio.Event()
+        self.hang_reached = asyncio.Event()
+        self.hang_release = asyncio.Event()
+        self.swallow_cancel = False
+        self.cancels_swallowed = 0
+        self.prompts: list[Any] = []
+        self.steers: list[dict[str, Any]] = []  # mid-turn messages: a user message dict with a uuid
+        self._unechoed: list[dict[str, Any]] = []
+        self.steer_error: Exception | None = None
+        self.steer_hang: asyncio.Event | None = None
+        self.control_requests: list[dict[str, Any]] = []
+        self.interrupt_hang: asyncio.Event | None = None
+        self.interrupt_error: Exception | None = None
+        self.writes: list[str] = []
+        self._query = self
+        self.connected = False
+        self.disconnect_hang: asyncio.Event | None = None
+        self.disconnect_error: Exception | None = None
+        self.disconnect_started = asyncio.Event()
+        self.disconnect_calls = 0
+        self.disconnected = False
+
+    async def connect(self, prompt: Any = None) -> None:
+        if self.connect_hang is not None:
+            await self.connect_hang.wait()
+        if self.connect_error is not None:
+            raise self.connect_error
+        self.connected = True
+
+    async def query(self, prompt: Any, session_id: str = "default") -> None:
+        # An AsyncIterable prompt is collected into the message dicts it yields.
+        collected = prompt if isinstance(prompt, str) else [message async for message in prompt]
+        self.prompts.append(collected)
+        steers = [message for message in collected if "uuid" in message] if isinstance(collected, list) else []
+        if steers and self.steer_hang is not None:
+            await self.steer_hang.wait()
+        if steers and self.steer_error is not None:
+            raise self.steer_error
+        self.steers += steers
+        self._unechoed += steers
+        self.writes += ["steer"] * len(steers)
+
+    async def receive_response(self):
+        from claude_agent_sdk import ResultMessage, UserMessage
+
+        if self.release is not None:
+            self.waiting.set()
+            await self.release.wait()
+        while self._consumed < len(self.messages):
+            message = self.messages[self._consumed]
+            self._consumed += 1
+            if message is HANG:
+                self.hang_reached.set()
+                while True:
+                    try:
+                        await self.hang_release.wait()
+                        break
+                    except asyncio.CancelledError:
+                        if not self.swallow_cancel:
+                            raise
+                        self.cancels_swallowed += 1
+                continue
+            if isinstance(message, Pause):
+                await asyncio.sleep(message.seconds)
+                continue
+            if message is ECHO:
+                if not self._unechoed:
+                    continue
+                steer = self._unechoed.pop(0)
+                message = UserMessage(content=steer["message"]["content"], uuid=steer["uuid"])
+            yield message
+            if isinstance(message, ResultMessage):  # as the SDK's own receive_response stops
+                return
+
+    async def _send_control_request(self, request: dict[str, Any], timeout: float = 60.0) -> dict[str, Any]:
+        self.control_requests.append(request)
+        self.writes.append(request.get("subtype", "?"))
+        if self.interrupt_hang is not None:
+            await self.interrupt_hang.wait()
+        if self.interrupt_error is not None:
+            raise self.interrupt_error
+        return {}
+
+    async def disconnect(self) -> None:
+        self.disconnect_calls += 1
+        self.disconnect_started.set()
+        if self.disconnect_hang is not None:
+            await self.disconnect_hang.wait()
+        if self.disconnect_error is not None:
+            raise self.disconnect_error
+        self.disconnected = True
+
+
+class _Echo:
+    """See ``FakeClaudeClient``: the CLI echoing a mid-turn message BOS sent."""
+
+
+ECHO = _Echo()
+
+
+class Pause:
+    """Among ``FakeClaudeClient.messages``: the CLI taking *seconds* before its next message."""
+
+    def __init__(self, seconds: float) -> None:
+        self.seconds = seconds
+
+
+@pytest.fixture
+def fake_claude(monkeypatch):
+    """Point ClaudeCodeAgent's client factory at FakeClaudeClient. Records every instance
+    in ``instances``; ``arm(**knobs)`` sets knobs on the next instance built."""
+    import bos.extensions.runtimes.claude_code as claude_code_mod
+
+    class _Registry:
+        def __init__(self) -> None:
+            self.instances: list[FakeClaudeClient] = []
+            self._pending: dict[str, Any] = {}
+
+        def arm(self, **knobs: Any) -> None:
+            self._pending.update(knobs)
+
+        def __call__(self, options: Any) -> FakeClaudeClient:
+            instance = FakeClaudeClient(options)
+            for name, value in self._pending.items():
+                setattr(instance, name, value)
+            self._pending.clear()
+            self.instances.append(instance)
+            return instance
+
+    registry = _Registry()
+    monkeypatch.setattr(claude_code_mod, "_CLIENT_FACTORY", registry)
+    return registry
+
+
+def claude_cli_env(tmp_path: Path, fake: FakeAnthropic) -> dict[str, str]:
+    """The environment a real-CLI test hands the ``claude`` child, as ``options.env``.
+
+    ``HOME`` and ``CLAUDE_CONFIG_DIR`` are two directories under *tmp_path*, created if
+    missing, so a second call with the same *tmp_path* returns the same environment —
+    what a resumed session needs to find its transcript. With the ``fake_anthropic``
+    fixture's scrub, the child's config, credentials and transcripts all resolve under
+    them, never in the developer's ``~/.claude`` or ``~/.claude.json``. In these fresh
+    directories the CLI keeps its global config — workspace trust included — at
+    ``<CLAUDE_CONFIG_DIR>/.claude.json``, not ``<HOME>/.claude.json``;
+    ``test_fact_4_*`` in test_claude_code_vendor_facts.py pins that. It is not the general
+    rule: the CLI prefers a legacy ``.config.json`` in the config directory when one exists,
+    and names the file ``.claude-custom-oauth.json`` when ``CLAUDE_CODE_CUSTOM_OAUTH_URL``
+    is set. The API key is a placeholder only the fake ever sees.
+    """
+    home, config = tmp_path / "home", tmp_path / "claude-config"
+    home.mkdir(parents=True, exist_ok=True)
+    config.mkdir(parents=True, exist_ok=True)
+    return {
+        "HOME": str(home),
+        "CLAUDE_CONFIG_DIR": str(config),
+        "ANTHROPIC_BASE_URL": fake.url,
+        "ANTHROPIC_API_KEY": "sk-ant-fake",
+        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+        "DISABLE_TELEMETRY": "1",
+    }

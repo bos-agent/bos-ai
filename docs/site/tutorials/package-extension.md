@@ -245,7 +245,10 @@ override package skills on name collision.
 
 ---
 
-You have completed the tutorial track. From here:
+**Next:** [Run Claude Code or Codex as an agent](external-agents.md) — back a named
+agent with a vendor's own agent harness.
+
+Or, from here:
 
 - **[Configuration reference](../configuration/index.md)** — every config key
   explained in depth.

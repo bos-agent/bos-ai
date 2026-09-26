@@ -197,6 +197,15 @@ all = [
     { name = "uvicorn" },
     { name = "websockets" },
 ]
+claude-code = [
+    { name = "claude-agent-sdk" },
+    { name = "httpx" },
+    { name = "mcp" },
+    { name = "python-multipart" },
+    { name = "starlette" },
+    { name = "uvicorn" },
+    { name = "websockets" },
+]
 cli = [
     { name = "click" },
     { name = "httpx" },
@@ -239,6 +248,7 @@ search = [
 [package.dev-dependencies]
 dev = [
     { name = "bos-ai", extra = ["all"] },
+    { name = "claude-agent-sdk" },
     { name = "ipdb" },
     { name = "mcp" },
     { name = "openai-codex" },
@@ -253,9 +263,11 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "beautifulsoup4", marker = "extra == 'search'", specifier = "==4.14.3" },
+    { name = "bos-ai", extras = ["gateway"], marker = "extra == 'claude-code'" },
     { name = "bos-ai", extras = ["gateway"], marker = "extra == 'cli'" },
     { name = "bos-ai", extras = ["gateway"], marker = "extra == 'codex'" },
     { name = "bos-ai", extras = ["litellm", "gateway", "search", "lark", "cli"], marker = "extra == 'all'" },
+    { name = "claude-agent-sdk", marker = "extra == 'claude-code'", specifier = "==0.2.159" },
     { name = "click", marker = "extra == 'cli'", specifier = "==8.3.2" },
     { name = "ddgs", marker = "extra == 'search'", specifier = "==9.14.4" },
     { name = "filelock", specifier = "==3.25.2" },
@@ -263,6 +275,7 @@ requires-dist = [
     { name = "jsonschema", specifier = ">=4.21" },
     { name = "lark-oapi", marker = "extra == 'lark'", specifier = "==1.6.8" },
     { name = "litellm", marker = "extra == 'litellm'", specifier = "==1.84.0" },
+    { name = "mcp", marker = "extra == 'claude-code'", specifier = ">=2,<3" },
     { name = "mcp", marker = "extra == 'codex'", specifier = ">=2,<3" },
     { name = "openai-codex", marker = "extra == 'codex'", specifier = "==0.156.1" },
     { name = "prompt-toolkit", marker = "extra == 'cli'", specifier = "==3.0.52" },
@@ -277,11 +290,12 @@ requires-dist = [
     { name = "uvicorn", marker = "extra == 'gateway'", specifier = "==0.53.0" },
     { name = "websockets", marker = "extra == 'gateway'", specifier = "==15.0.1" },
 ]
-provides-extras = ["litellm", "gateway", "search", "lark", "cli", "codex", "all"]
+provides-extras = ["litellm", "gateway", "search", "lark", "cli", "codex", "claude-code", "all"]
 
 [package.metadata.requires-dev]
 dev = [
     { name = "bos-ai", extras = ["all"] },
+    { name = "claude-agent-sdk", specifier = "==0.2.159" },
     { name = "ipdb", specifier = "==0.13.13" },
     { name = "mcp", specifier = ">=2,<3" },
     { name = "openai-codex", specifier = "==0.156.1" },
@@ -460,6 +474,25 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/7a/1d/29d32e0fb40864b1f878c7f5a0b343ae676c6e2b271a2d55cc3a152391da/charset_normalizer-3.4.7-cp314-cp314t-win_amd64.whl", hash = "sha256:03853ed82eeebbce3c2abfdbc98c96dc205f32a79627688ac9a27370ea61a49c", size = 174168, upload-time = "2026-04-02T09:27:49.795Z" },
     { url = "https://files.pythonhosted.org/packages/de/32/d92444ad05c7a6e41fb2036749777c163baf7a0301a040cb672d6b2b1ae9/charset_normalizer-3.4.7-cp314-cp314t-win_arm64.whl", hash = "sha256:c35abb8bfff0185efac5878da64c45dafd2b37fb0383add1be155a763c1f083d", size = 153018, upload-time = "2026-04-02T09:27:51.116Z" },
     { url = "https://files.pythonhosted.org/packages/db/8f/61959034484a4a7c527811f4721e75d02d653a35afb0b6054474d8185d4c/charset_normalizer-3.4.7-py3-none-any.whl", hash = "sha256:3dce51d0f5e7951f8bb4900c257dad282f49190fdbebecd4ba99bcc41fef404d", size = 61958, upload-time = "2026-04-02T09:28:37.794Z" },
+]
+
+[[package]]
+name = "claude-agent-sdk"
+version = "0.2.159"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "anyio" },
+    { name = "jsonschema" },
+    { name = "mcp" },
+    { name = "sniffio" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/db/b2/81eb389ace55434f0119b99b62c10a7ac206def6c92ee0768eb389b0c900/claude_agent_sdk-0.2.159.tar.gz", hash = "sha256:e1905e2637b27971bb561bb6ad317aeb3d50619be5261bfa7ff2e9c2be0f0fd1", size = 354571, upload-time = "2026-09-23T20:26:37.386Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ec/06/87d76aced98f7b71cede2ebf4ae7808e52df9d3819c7f4c7b8c3d2a225b6/claude_agent_sdk-0.2.159-py3-none-macosx_11_0_arm64.whl", hash = "sha256:ba7f152560dca5001a0bc46ed13b7da14eb14b419faed25bb1af821bfa95d3de", size = 91937244, upload-time = "2026-09-23T20:26:41.375Z" },
+    { url = "https://files.pythonhosted.org/packages/f4/cf/c65a1f2419fa4b2085a53e91cef41569fde4910057c3709b8ab4303be1fd/claude_agent_sdk-0.2.159-py3-none-macosx_11_0_x86_64.whl", hash = "sha256:87f553fda74e2f57e00f2bcb1705ab9311a937f97571f4f9eceea2bd411b6e32", size = 96294436, upload-time = "2026-09-23T20:26:45.117Z" },
+    { url = "https://files.pythonhosted.org/packages/f1/20/f01e211524f3d8edfe7c2ea26ac595d21afab443810cbedeca5c76f7ead0/claude_agent_sdk-0.2.159-py3-none-manylinux_2_17_aarch64.whl", hash = "sha256:b03683d12d217b0b6c189c88a3d260a045171e7fdc9f23e2d0dfb05ff3276834", size = 101405973, upload-time = "2026-09-23T20:26:48.799Z" },
+    { url = "https://files.pythonhosted.org/packages/bf/d5/de876f9b05c2a94c1d03222b6a5908b1d27f695cf862b237f04d92008d62/claude_agent_sdk-0.2.159-py3-none-manylinux_2_17_x86_64.whl", hash = "sha256:d3ba57c187b07c87702b94e2b62dd7c61ed874899defcbb35bb5cef4cb94ace1", size = 101764831, upload-time = "2026-09-23T20:26:53.25Z" },
+    { url = "https://files.pythonhosted.org/packages/5f/f2/b315c307a4199cb698a6b6f9e0e90cb8da4b0c8b3d00c68e9007c4a778d1/claude_agent_sdk-0.2.159-py3-none-win_amd64.whl", hash = "sha256:cc1b92ae56f42ade2d083ef2d2e5edb4aa8c7a6d856818a9b8f60cf6ae746f3a", size = 104353298, upload-time = "2026-09-23T20:26:57.913Z" },
 ]
 
 [[package]]

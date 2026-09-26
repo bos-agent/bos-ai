@@ -29,6 +29,7 @@ Python package you can install in any BOS project.
 | 4 | [Delegate to sub-agents](subagents.md) | Create specialist agents in Markdown files and wire them up with `SubagentPlugin` so the main agent can delegate tasks. |
 | 5 | [Connect a channel](channels.md) | Attach a Telegram bot so users can talk to your agent from their phone. |
 | 6 | [Package & share extensions](package-extension.md) | Turn your extensions into an installable Python package that registers itself automatically in any BOS project. |
+| 7 | [Run Claude Code or Codex as an agent](external-agents.md) | Back a named agent with Claude Code or Codex, confine it with `permission`, give it a BOS tool over MCP, and read its native transcript. |
 
 ## How the tutorials fit together
 
@@ -36,9 +37,9 @@ Python package you can install in any BOS project.
 Tutorial 1 ──► Tutorial 2 ──► Tutorial 3 ──► Tutorial 4
   (install)      (project)      (tools)       (sub-agents)
                                                   │
-                                          Tutorial 5 ──► Tutorial 6
-                                          (channels)     (packaging)
+                                          Tutorial 5 ──► Tutorial 6 ──► Tutorial 7
+                                          (channels)     (packaging)    (Claude Code / Codex)
 ```
 
-Tutorials 3–6 all build on the project created in Tutorial 2. Keep the
+Tutorials 3–7 all build on the project created in Tutorial 2. Keep the
 `my-agent/` directory around as you work through the track.

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+import logging
+
 import pytest
 
 from bos.core.agent import Message
@@ -69,8 +72,9 @@ async def test_an_unknown_chat_has_no_session(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_a_chat_from_another_runtime_has_no_session_for_this_one(tmp_path):
-    """Switching runtimes starts a new native session rather than reusing one."""
+async def test_a_chat_from_another_runtime_has_no_session_for_this_one(tmp_path, caplog):
+    """Switching runtimes starts a new native session rather than reusing one, and says so
+    (BEP 19 §3.6, §2.2.4): a WARNING naming the chat, the runtime it last ran on and this one."""
     from bos.extensions.runtimes._shared import commit_external_turn, read_native_session_id
 
     store = await _make_store(tmp_path)
@@ -78,7 +82,55 @@ async def test_a_chat_from_another_runtime_has_no_session_for_this_one(tmp_path)
         store, "chat-1", turn_id="t1", user_content="a", response="b",
         runtime="codex", native_session_id="thread_abc",
     )
-    assert await read_native_session_id(store, "chat-1", runtime="claude-code") is None
+    with caplog.at_level(logging.WARNING, logger="bos.extensions.runtimes._shared"):
+        assert await read_native_session_id(store, "chat-1", runtime="claude-code") is None
+
+    [record] = [r for r in caplog.records if r.name == "bos.extensions.runtimes._shared"]
+    assert record.levelno == logging.WARNING
+    message = record.getMessage()
+    assert "'chat-1'" in message and "'codex'" in message and "'claude-code'" in message
+
+
+@pytest.mark.asyncio
+async def test_switching_back_does_not_resume_the_session_it_left(tmp_path, caplog):
+    """codex -> claude-code -> codex: the newest external turn decides, so the Codex thread the
+    chat left is not silently resumed — it has not seen the Claude Code turns in between."""
+    from bos.extensions.runtimes._shared import commit_external_turn, read_native_session_id
+
+    store = await _make_store(tmp_path)
+    for turn, runtime, session in (("t1", "codex", "thread_abc"), ("t2", "claude-code", "session-1")):
+        await commit_external_turn(
+            store,
+            "chat-1",
+            turn_id=turn,
+            user_content="a",
+            response="b",
+            runtime=runtime,
+            native_session_id=session,
+        )
+    with caplog.at_level(logging.WARNING, logger="bos.extensions.runtimes._shared"):
+        assert await read_native_session_id(store, "chat-1", runtime="codex") is None
+
+    assert any("'claude-code'" in r.getMessage() for r in caplog.records if r.levelno == logging.WARNING)
+
+
+@pytest.mark.asyncio
+async def test_a_chat_that_never_had_an_external_runtime_has_no_session_and_no_warning(tmp_path, caplog):
+    from bos.extensions.runtimes._shared import read_native_session_id
+
+    store = await _make_store(tmp_path)
+    await store.commit_turn(
+        "chat-1",
+        [
+            Message(llm_message={"role": "user", "content": "a"}, turn_id="t1"),
+            Message(llm_message={"role": "assistant", "content": "b"}, turn_id="t1"),
+        ],
+        turn_id="t1",
+    )
+    with caplog.at_level(logging.WARNING, logger="bos.extensions.runtimes._shared"):
+        assert await read_native_session_id(store, "chat-1", runtime="codex") is None
+
+    assert [r for r in caplog.records if r.name == "bos.extensions.runtimes._shared"] == []
 
 
 @pytest.mark.asyncio
@@ -124,17 +176,18 @@ def test_agent_result_carries_usage_and_finish_reason():
 
 
 @pytest.mark.asyncio
-async def test_a_store_read_failure_returns_none_rather_than_raising(tmp_path):
-    """The `except Exception` in read_native_session_id had no test: every
-    other "no session" case reaches it via an empty or non-matching message
-    list, never via the store itself raising. A corrupt chat file exercises
-    the except clause directly."""
+async def test_a_store_read_failure_propagates(tmp_path):
+    """A store that fails to read raises; it is not "no session". Answering None here once
+    turned a corrupt chat file into a fresh native session under the same chat_id, whose turn
+    was then appended to that file (BEP 19 §3.6). Both built-in stores answer [] for an
+    unknown chat (test_an_unknown_chat_has_no_session), so an exception is a real failure."""
     from bos.extensions.runtimes._shared import read_native_session_id
 
     store = await _make_store(tmp_path)
     store._chat_path("chat-1").write_text("not valid json\n", encoding="utf-8")
 
-    assert await read_native_session_id(store, "chat-1", runtime="codex") is None
+    with pytest.raises(json.JSONDecodeError):
+        await read_native_session_id(store, "chat-1", runtime="codex")
 
 
 @pytest.mark.asyncio

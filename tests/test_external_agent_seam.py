@@ -311,11 +311,12 @@ async def test_a_missing_extra_names_the_extra_to_install(tmp_path, monkeypatch)
 async def test_a_missing_vendor_module_names_the_extra(tmp_path, monkeypatch):
     """The friendly message is for a missing VENDOR module, and only that.
 
-    `bos.extensions.runtimes.codex` doesn't exist yet (Task 3 adds it), so
-    there is no real module whose own `import openai_codex` can fail here.
-    Standing in with a dotted path that *is* the vendor module makes
-    `_load_external_runtime` see the same `exc.name == "openai_codex"` that a
-    real codex.py's failed import would produce once that module exists.
+    The kind points straight at the blocked vendor module, so the import that
+    fails is `openai_codex` itself and `_load_external_runtime` sees
+    `exc.name == "openai_codex"` — the same name codex.py's own module-level
+    `from openai_codex import ...` raises when the extra is missing. Pointing at
+    codex.py instead would depend on whether an earlier test already left it in
+    `sys.modules`, in which case nothing would be imported and nothing would fail.
     """
     import sys
 
@@ -332,6 +333,38 @@ async def test_a_missing_vendor_module_names_the_extra(tmp_path, monkeypatch):
         with pytest.raises(RuntimeError) as excinfo:
             await harness.create_agent("codex", agent_cfg={"permission": "read-only"})
     assert "bos-ai[codex]" in str(excinfo.value)
+
+
+@pytest.mark.asyncio
+async def test_a_missing_claude_agent_sdk_names_the_claude_code_extra(tmp_path, monkeypatch):
+    """The claude-code half of the test above. The kind points at a throwaway
+    module whose first line is ``import claude_agent_sdk`` — the shape of a
+    runtime module whose vendor import fails — so the ``ModuleNotFoundError``
+    reaches ``_load_external_runtime`` from inside a runtime module, carrying
+    ``name == "claude_agent_sdk"``, whether or not the real runtime module exists.
+    """
+    import sys
+
+    from conftest import BlockImport
+
+    from bos.core import harness as harness_mod
+    from bos.core.harness import AgentHarness
+
+    probe_dir = tmp_path / "probe"
+    probe_dir.mkdir()
+    (probe_dir / "bos_t1_claude_runtime_probe.py").write_text("import claude_agent_sdk  # noqa: F401\n")
+    monkeypatch.syspath_prepend(str(probe_dir))
+    monkeypatch.setattr(sys, "meta_path", [BlockImport("claude_agent_sdk"), *sys.meta_path])
+    monkeypatch.delitem(sys.modules, "claude_agent_sdk", raising=False)
+    monkeypatch.delitem(sys.modules, "bos_t1_claude_runtime_probe", raising=False)
+    monkeypatch.setitem(harness_mod.EXTERNAL_AGENT_KINDS, "claude-code", "bos_t1_claude_runtime_probe:ClaudeCodeAgent")
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    async with AgentHarness(bos_dir=workspace, workspace=workspace) as harness:
+        with pytest.raises(RuntimeError) as excinfo:
+            await harness.create_agent("claude-code", agent_cfg={"permission": "read-only"})
+    assert "bos-ai[claude-code]" in str(excinfo.value)
 
 
 @pytest.mark.asyncio

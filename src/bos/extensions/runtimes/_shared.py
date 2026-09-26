@@ -19,8 +19,8 @@ logger = logging.getLogger(__name__)
 
 PERMISSIONS = ("read-only", "workspace-write", "full-access")
 
-# Keys an external runtime honours. Anything else in the agent config is either
-# dropped (below) or an error.
+# Keys both external runtimes honour. Anything else in the agent config is one
+# runtime's own key, dropped, or an error (the two sets below).
 _KNOWN_KEYS = {
     "cwd", "permission", "system_prompt", "base_instructions", "model",
     "auth", "timeout_seconds", "mcp_tools", "native_options",
@@ -29,10 +29,18 @@ _KNOWN_KEYS = {
     "external_runtime",
 }
 
-# BOS-agent keys with no counterpart in either runtime (BEP 19 §3.9). Dropped with
-# one log line rather than rejected: they arrive from [agents.*] and agent files
-# that a project may legitimately share, and failing on them would make an
-# external agent unable to sit alongside normal ones in the same config shape.
+# Claude Code's alone: which of the CLI's settings files load (BEP 19 §3.5.3). Known
+# to that runtime only, so a Codex config naming it still fails as unknown instead of
+# being silently ignored; `ClaudeCodeAgent` reads and validates the value itself.
+_CLAUDE_CODE_KEYS = {"setting_sources"}
+
+# BOS-agent keys with no counterpart in either runtime (BEP 19 §3.9) — except
+# `max_iterations`, which Claude Code honours as `max_turns`: `ClaudeCodeAgent` takes
+# it out of its config before calling `parse_external_config`, so the drop below
+# reaches only Codex. Dropped with one log line rather than rejected: they arrive
+# from [agents.*] and agent files that a project may legitimately share, and failing
+# on them would make an external agent unable to sit alongside normal ones in the
+# same config shape.
 _DROPPED_KEYS = {
     "max_tokens", "max_iterations", "max_iteration_handoff", "shutdown_handoff",
     "tool_noise_filter", "history_attribution", "reasoning_effort",
@@ -70,11 +78,11 @@ def parse_external_config(
     reserved key has to fail at construction rather than at the first turn. An
     entry may be `"key"` or one level of `"key.subkey"`.
     """
-    unknown = set(cfg) - _KNOWN_KEYS - _DROPPED_KEYS
+    known = (_KNOWN_KEYS | _CLAUDE_CODE_KEYS) if runtime == "claude-code" else _KNOWN_KEYS
+    unknown = set(cfg) - known - _DROPPED_KEYS
     if unknown:
         raise ValueError(
-            f"Unknown config key(s) for the {runtime!r} runtime: {sorted(unknown)}. "
-            f"Known: {sorted(_KNOWN_KEYS)}."
+            f"Unknown config key(s) for the {runtime!r} runtime: {sorted(unknown)}. Known: {sorted(known)}."
         )
 
     if dropped := sorted(set(cfg) & _DROPPED_KEYS):
@@ -241,25 +249,44 @@ def _reserved_clashes(native_options: dict[str, Any], reserved: Collection[str])
 async def read_native_session_id(store: ChatStore, chat_id: str, *, runtime: str) -> str | None:
     """The native session this chat is bound to, or None to start a fresh one.
 
-    Read from the metadata of the newest committed message that names *runtime*
-    (BEP 19 §3.6) — no second store and no schema change. Returns None rather
-    than raising for an unknown chat, a chat that predates this feature, or a
-    turn whose metadata was written incompletely: the caller's correct response
-    to all three is to start a new native session.
+    Decided by the newest committed message that names an external runtime (BEP 19 §3.6) —
+    no second store and no schema change:
+
+    - When that runtime is *runtime*, its ``native_session_id`` — or None when the id is
+      missing, not a string, or blank, since a turn whose metadata was written incompletely
+      can name no session to resume.
+    - When it is another runtime, the chat has switched runtimes: None, with a WARNING naming
+      the chat and both runtimes, so the new session is said so rather than claimed to carry
+      the conversation over (§2.2.4). A chat that switches back is not handed the session it
+      left, which has not seen the turns in between.
+    - When no message names one — an unknown chat, for which both built-in stores answer
+      ``[]``, or a chat that never ran an external turn — None, silently.
+
+    A store that fails to read raises. Answering None would start a fresh session under the
+    same chat_id, which §3.6 forbids.
     """
-    try:
-        # active_only=False: a summary written over this chat must not make a
-        # live vendor session unrecoverable. Returning None here means
-        # abandoning that session, not merely re-reading trimmed history, so
-        # the full log is scanned rather than risking a false "no session".
-        messages = await store.get_messages(chat_id, active_only=False)
-    except Exception:
-        logger.debug("No chat %r to recover a %s session from", chat_id, runtime, exc_info=True)
-        return None
+    # active_only=False: a summary written over this chat must not make a live vendor
+    # session unrecoverable. Returning None here means abandoning that session, not merely
+    # re-reading trimmed history, so the full log is scanned rather than risking a false
+    # "no session".
+    messages = await store.get_messages(chat_id, active_only=False)
     for message in reversed(messages):
         metadata = message.metadata or {}
-        if metadata.get("external_runtime") != runtime:
+        previous = metadata.get("external_runtime")
+        if not previous:
             continue
+        if previous != runtime:
+            logger.warning(
+                "Chat %r last ran on the %r runtime, so it has no %r session: a %r turn on it starts a new one, "
+                "which does not carry that runtime's conversation over, and there is no %r transcript to read "
+                "(BEP 19 §2.2.4)",
+                chat_id,
+                previous,
+                runtime,
+                runtime,
+                runtime,
+            )
+            return None
         session_id = metadata.get("native_session_id")
         # A blank or whitespace-only value is as good as absent: it can never
         # be a real vendor session id. `.strip()` here only tests for

@@ -1839,9 +1839,10 @@ class CodexAgent:
 
         - **No native session means no transcript, not a missing one.**
           ``read_native_session_id`` returning ``None`` says this chat never
-          ran a native turn (or has no chat store at all). That is an empty
-          transcript: ``[]``, logged at DEBUG. A session id that exists and
-          cannot be read is the opposite case, and raises.
+          ran a Codex turn, or ran one on another runtime since (which that
+          function logs at WARNING), or this agent has no chat store at all.
+          That is an empty transcript: ``[]``, logged at DEBUG. A session id
+          that exists and cannot be read is the opposite case, and raises.
         - **A turn Codex did not fully load becomes a visible gap.**
           ``Turn.items_view`` is ``notLoaded``/``summary``/``full``, and on
           anything but full the ``items`` are absent or summarized. Projecting

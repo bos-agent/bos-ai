@@ -153,6 +153,50 @@ Take `workspace` from `app.workspace`, or build one yourself with
 registers them, and doing it the other way round drops every agent file with no
 error. That is why this exists as one function rather than two calls you repeat.
 
+### An agent backed by Claude Code or Codex
+
+An agent can hand its turns to Claude Code or Codex instead of BOS's own loop — see
+[External agents](../concepts/external-agents.md). Install `bos-ai[claude-code]` or
+`bos-ai[codex]`, log in with the vendor's CLI, and build one like any other kind:
+
+```python
+async with BosApp(CONFIG, bos_dir="/var/lib/myapp/.bos") as app:
+    coder = await app.build_agent("codex", agent_cfg={
+        "permission": "workspace-write",   # required
+        "cwd": "services/api",
+        "mcp_tools": ["CreateTicket"],     # your @ep_tools, exposed over MCP
+        "timeout_seconds": 1200,
+    })
+    result = await coder.run("ticket-981", "Add a health endpoint and run the tests.")
+    for message in await app.get_messages("ticket-981"):   # the runtime's own transcript
+        print(message.llm_message["role"], message.llm_message["content"])
+```
+
+**It is an `AgentPort`, not an `Agent`.** `app.agent(kind)`, `app.build_agent(kind, ...)`
+and `harness.create_agent(kind, agent_cfg)` all return the port: `run()`, `ask()`,
+`request_stop()` and `name` behave as they do for a BOS agent, and the same `chat_id`
+resumes the same native session on the next call — across restarts too, when the chat
+store persists. An agent your config declares with `_parent = "codex"` (or
+`"claude-code"`) is prebuilt and reached with `app.agent("<name>")`, as is a bare
+`[agents.codex]` table. Without one, the bare kinds `codex` and `claude-code` are built
+with `build_agent`, whose `agent_cfg` carries the agent's keys; for a second variant,
+give it a new name with `agent_cfg={"_parent": "codex", ...}`.
+
+**Its config is checked when it is built.** A missing `permission`, an unknown key, or a
+host the runtime refuses (a Claude Code subscription agent with `ANTHROPIC_API_KEY` in the
+environment, say) raises from `build_agent` — or from `async with BosApp(...)` itself for
+an agent your config names. `cwd` resolves against the workspace root, which for
+`BosApp(dict, bos_dir=...)` is the process's current directory: pass a `Workspace` to fix
+it elsewhere.
+
+**Two records of the conversation.** BOS stores two messages per turn — the user message
+and the final answer — and `app.get_messages(chat_id, source="bos")` returns that record,
+the one BOS guarantees. `source="native"` reads the runtime's own transcript, which holds
+more and promises nothing: the runtime prunes and compacts it on its own schedule. The
+default, `source="auto"`, returns the native transcript for a chat an external agent
+served and BOS's record otherwise. Tool calls are in neither: they stream to an
+`event_sink` while the turn runs.
+
 ---
 
 ## Mode 2 — mount the gateway

@@ -59,10 +59,12 @@ nav:
       - 4. Delegate to sub-agents: tutorials/subagents.md
       - 5. Connect a channel: tutorials/channels.md
       - 6. Package & share extensions: tutorials/package-extension.md
+      - 7. Run Claude Code or Codex as an agent: tutorials/external-agents.md
   - Concepts:
       - Overview: concepts/index.md
       - Runtime & gateway: concepts/runtime.md
       - Agents & actors: concepts/agents-and-actors.md
+      - "External agents: Claude Code & Codex": concepts/external-agents.md
       - Memory & skills: concepts/memory-and-skills.md
   - Configuration: configuration/index.md
   - Extending BOS:
