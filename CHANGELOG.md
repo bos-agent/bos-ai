@@ -2,6 +2,29 @@
 
 <!-- version list -->
 
+## v2.2.0 (2026-09-26)
+
+### Bug Fixes
+
+- **config**: An agent does not inherit its parent's agent_name
+  ([#108](https://github.com/bos-agent/bos-ai/pull/108),
+  [`078deb8`](https://github.com/bos-agent/bos-ai/commit/078deb8c993adac5836860c2be3adc278bbbd89f))
+
+### Features
+
+- **core**: External agent runtimes — BEP 19 platform layer (Layers 1-3)
+  ([#106](https://github.com/bos-agent/bos-ai/pull/106),
+  [`a76715f`](https://github.com/bos-agent/bos-ai/commit/a76715f292f209270a080395a1b8584986709d7c))
+
+- **runtimes**: Claude Code as an external agent runtime — BEP 19 Layer 4b
+  ([#109](https://github.com/bos-agent/bos-ai/pull/109),
+  [`5811644`](https://github.com/bos-agent/bos-ai/commit/58116443f3e965841d57466df6d1f89a14007854))
+
+- **runtimes**: Codex as an external agent runtime — BEP 19 Layer 4
+  ([#107](https://github.com/bos-agent/bos-ai/pull/107),
+  [`e2fc2a3`](https://github.com/bos-agent/bos-ai/commit/e2fc2a33a6a3dd96275b658797215e08183f0c28))
+
+
 ## v2.1.0 (2026-09-23)
 
 ### Bug Fixes
