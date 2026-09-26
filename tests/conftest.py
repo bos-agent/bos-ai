@@ -325,7 +325,9 @@ def _default_turn_notifications(thread_id: str, turn_id: str, result: Any) -> li
     if result.final_response:
         item = ThreadItem(
             AgentMessageThreadItem(
-                id=f"{turn_id}-response", text=result.final_response, phase=MessagePhase.final_answer,
+                id=f"{turn_id}-response",
+                text=result.final_response,
+                phase=MessagePhase.final_answer,
                 type="agentMessage",
             )
         )
@@ -622,6 +624,84 @@ def fake_anthropic(monkeypatch):
     fake = FakeAnthropic()
     yield fake
     fake.close()
+
+
+class FakeClaudeClient:
+    """Stands in for ``claude_agent_sdk.ClaudeSDKClient`` at ``claude_code._CLIENT_FACTORY``.
+
+    Fakes the transport, never the vendor's data: ``receive_response`` yields what a test
+    armed in ``messages``, and those are the SDK's own message dataclasses
+    (``SystemMessage``, ``AssistantMessage``, ``ResultMessage``, …), so a shape the vendor
+    changes breaks the tests instead of a look-alike drifting from it. Only the methods
+    ``ClaudeCodeAgent`` calls exist here.
+
+    One instance per turn, as the runtime builds one client per turn (BEP 19 §3.10.1), so
+    every knob is per instance: arm it through the ``fake_claude`` fixture before the turn
+    that builds it. ``connect_error`` is raised by ``connect()`` — where the real SDK
+    raises a startup refusal, such as a ``resume`` the CLI cannot honour. ``release``, when
+    set, holds ``receive_response`` open until the test sets it, with ``waiting`` set once
+    it is held.
+    """
+
+    def __init__(self, options: Any) -> None:
+        self.options = options
+        self.messages: list[Any] = []
+        self.connect_error: BaseException | None = None
+        self.release: asyncio.Event | None = None
+        self.waiting = asyncio.Event()
+        self.prompts: list[Any] = []
+        self.connected = False
+        self.disconnected = False
+
+    async def connect(self, prompt: Any = None) -> None:
+        if self.connect_error is not None:
+            raise self.connect_error
+        self.connected = True
+
+    async def query(self, prompt: Any, session_id: str = "default") -> None:
+        # An AsyncIterable prompt is collected into the message dicts it yields.
+        self.prompts.append(prompt if isinstance(prompt, str) else [message async for message in prompt])
+
+    async def receive_response(self):
+        from claude_agent_sdk import ResultMessage
+
+        if self.release is not None:
+            self.waiting.set()
+            await self.release.wait()
+        for message in self.messages:
+            yield message
+            if isinstance(message, ResultMessage):  # as the SDK's own receive_response stops
+                return
+
+    async def disconnect(self) -> None:
+        self.disconnected = True
+
+
+@pytest.fixture
+def fake_claude(monkeypatch):
+    """Point ClaudeCodeAgent's client factory at FakeClaudeClient. Records every instance
+    in ``instances``; ``arm(**knobs)`` sets knobs on the next instance built."""
+    import bos.extensions.runtimes.claude_code as claude_code_mod
+
+    class _Registry:
+        def __init__(self) -> None:
+            self.instances: list[FakeClaudeClient] = []
+            self._pending: dict[str, Any] = {}
+
+        def arm(self, **knobs: Any) -> None:
+            self._pending.update(knobs)
+
+        def __call__(self, options: Any) -> FakeClaudeClient:
+            instance = FakeClaudeClient(options)
+            for name, value in self._pending.items():
+                setattr(instance, name, value)
+            self._pending.clear()
+            self.instances.append(instance)
+            return instance
+
+    registry = _Registry()
+    monkeypatch.setattr(claude_code_mod, "_CLIENT_FACTORY", registry)
+    return registry
 
 
 def claude_cli_env(tmp_path: Path, fake: FakeAnthropic) -> dict[str, str]:

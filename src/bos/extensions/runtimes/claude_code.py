@@ -20,16 +20,20 @@ brings, such as ``mcp``, ahead of it would report a missing extra as a broken ru
 module. ``test_a_missing_extra_is_named_by_the_real_runtime_module`` pins the order
 against ``mcp``.
 
-What exists so far is construction: the config, the permission mapping, the per-client
+What exists so far is construction — the config, the permission mapping, the per-client
 settings nonce, no repository settings unless a host opts in, the ``native_options``
-allowlist, and the fail-closed preflights. Every check that reads the host runs here, and
-none starts the CLI. No turn runs yet, and the hook and ``can_use_tool`` are not built, so
+allowlist, and the fail-closed preflights; every check that reads the host runs there, and
+none starts the CLI — and a turn: ``run()`` resumes the chat's native session, runs one CLI
+child to the end of the turn and commits the two-message record (BEP 19 §3.6, §3.7, §3.9).
+A turn is not yet streamed as ``TurnEvent``s, polled for an ``interrupt``, bounded by
+``timeout_seconds`` or schema-checked, and the hook and ``can_use_tool`` are not built, so
 nothing in this module confines anything yet.
 """
 
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import os
@@ -37,16 +41,43 @@ import shutil
 import stat
 import sys
 import uuid
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from dataclasses import replace
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, cast, get_args
 
-from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, PermissionMode, SandboxSettings, SettingSource
+from claude_agent_sdk import (
+    AssistantMessage,
+    ClaudeAgentOptions,
+    ClaudeSDKClient,
+    ClaudeSDKError,
+    PermissionMode,
+    ResultError,
+    ResultMessage,
+    SandboxSettings,
+    SettingSource,
+)
 from claude_agent_sdk.types import SystemPromptPreset
 
-from bos.core.agent import AgentResult, ChatStore, MessageContent, StructuredValidator, TurnEventSink
-from bos.extensions.runtimes._shared import ExternalAgentConfig, parse_external_config
+from bos.core.agent import (
+    SHUTDOWN_CONTENT,
+    AgentResult,
+    ChatStore,
+    MessageContent,
+    StructuredValidator,
+    TurnEventSink,
+    _compact,
+    content_as_parts,
+    image_source_to_model_url,
+)
+from bos.extensions.runtimes._shared import (
+    ExternalAgentConfig,
+    commit_external_turn,
+    external_agent_result,
+    parse_external_config,
+    read_native_session_id,
+)
 
 # Safe at module scope: `mcp_egress` defers every third-party import into the
 # method that needs it, so naming it here costs nothing and requires no extra.
@@ -540,11 +571,108 @@ def _opened_path(fd: int) -> Path | None:
     return None
 
 
+def _content_to_claude_prompt(content: MessageContent) -> str | list[dict[str, Any]]:
+    """BOS ``MessageContent`` -> the content of the user message a turn sends the CLI
+    (BEP 19 §3.9).
+
+    A plain string passes straight through: ``ClaudeSDKClient.query`` wraps it in a user
+    message itself. A list of BOS parts becomes a list of Messages API content blocks, part by
+    part:
+
+    - ``TextPart`` -> a text block.
+    - ``ImagePart`` -> an image block (:func:`_image_source`).
+    - ``FilePart`` -> its path, or url, in a text block — ``[attachment: <value> (<mime_type>)]``,
+      the text BOS's own default provider sends for one — so the model reads the file with its
+      own tools, as it reads any other (BEP 19 §3.5.3 bounds where those reach).
+
+    ``content_as_parts`` validates as well as normalizes, so every part reaching the loop below
+    is one of exactly ``text``/``image``/``file``.
+    """
+    if isinstance(content, str):
+        return content
+    blocks: list[dict[str, Any]] = []
+    for part in content_as_parts(content):
+        if part["type"] == "text":
+            blocks.append({"type": "text", "text": part["text"]})
+        elif part["type"] == "image":
+            blocks.append({"type": "image", "source": _image_source(part["source"])})
+        elif part["type"] == "file":
+            blocks.append({"type": "text", "text": f"[attachment: {part['source']['value']} ({part['mime_type']})]"})
+    return blocks
+
+
+def _image_source(source: Mapping[str, Any]) -> dict[str, Any]:
+    """An ``ImagePart``'s source as a Messages API image source.
+
+    A url goes as a url, except a ``data:`` url, which the API takes only as base64. A path is
+    read and base64-encoded by BOS in its own process, as BOS's own default provider reads one
+    (``image_source_to_model_url``, which also refuses a file that is missing or not an image
+    by its name): the path comes from the host, and an image block is what BEP 19 §3.9 sends,
+    not a path for the model to open with file tools that §3.5.3 bounds. Measured against the
+    CLI 2.1.281, not pinned: both forms reach the model unchanged, and for a base64 image the
+    CLI also saves a copy under its own temporary directory and adds a text block naming that
+    path.
+    """
+    url = image_source_to_model_url(source)
+    if not url.startswith("data:"):
+        return {"type": "url", "url": url}
+    header, _, data = url.partition(",")
+    if not header.endswith(";base64"):
+        raise ValueError(
+            f"{_RUNTIME} runtime: an image sent as a data: URL must be base64-encoded, which is the only form the "
+            f"Messages API takes; got one whose header is {header!r}."
+        )
+    return {"type": "base64", "media_type": header.removeprefix("data:").split(";")[0], "data": data}
+
+
+async def _user_message(blocks: list[dict[str, Any]]) -> AsyncIterator[dict[str, Any]]:
+    """*blocks* as one user message, shaped as ``ClaudeSDKClient.query`` sends a str prompt:
+    ``query`` takes content blocks only as a stream of such messages."""
+    yield {"type": "user", "message": {"role": "user", "content": blocks}, "parent_tool_use_id": None}
+
+
+def _usage(usage: Mapping[str, Any] | None) -> dict[str, int] | None:
+    """``ResultMessage.usage`` under the keys ``CodexAgent`` reports, each meaning what it
+    means there (BEP 19 §3.9), or None when the CLI reported none.
+
+    Measured against the CLI 2.1.281, not pinned: the counts are the turn's, summed over its
+    model calls, and not the session's. The Anthropic counts are split three ways — ``input_tokens`` leaves
+    out what was read from the cache (``cache_read_input_tokens``) and what was written to it
+    (``cache_creation_input_tokens``) — while the ``input_tokens`` Codex reports is OpenAI's,
+    every input token with the cached ones among them. So ``input_tokens`` here is the sum of
+    all three, ``cached_input_tokens`` and ``cache_write_input_tokens`` are the cache reads and
+    writes, ``total_tokens`` is input plus output, and ``reasoning_output_tokens`` is the part
+    of ``output_tokens`` the CLI reports as thinking (``output_tokens_details``), present only
+    when it reports one.
+
+    No counterpart, so not carried: ``server_tool_use`` (web search and fetch request counts),
+    ``service_tier``, ``cache_creation`` (the cache writes split by lifetime),
+    ``inference_geo``, ``iterations`` and ``speed``.
+    """
+    if not usage:
+        return None
+    cache_read = usage.get("cache_read_input_tokens") or 0
+    cache_write = usage.get("cache_creation_input_tokens") or 0
+    input_tokens = (usage.get("input_tokens") or 0) + cache_read + cache_write
+    output_tokens = usage.get("output_tokens") or 0
+    mapped = {
+        "input_tokens": input_tokens,
+        "cached_input_tokens": cache_read,
+        "cache_write_input_tokens": cache_write,
+        "output_tokens": output_tokens,
+        "total_tokens": input_tokens + output_tokens,
+    }
+    thinking = (usage.get("output_tokens_details") or {}).get("thinking_tokens")
+    if isinstance(thinking, int):
+        mapped["reasoning_output_tokens"] = thinking
+    return mapped
+
+
 class ClaudeCodeAgent:
     """``ExternalRuntime`` adapter over the Claude Code vendor SDK (BEP 19 §3.4, §3.5).
 
-    One instance per ``create_agent`` call. It holds no client: each turn is to build its
-    own ``ClaudeSDKClient``, and with it a CLI child, from :meth:`_options` (§3.10.1).
+    One instance per ``create_agent`` call. It holds no client: each turn builds its own
+    ``ClaudeSDKClient``, and with it a CLI child, from :meth:`_options` (§3.10.1).
     Constructing an agent must never start the CLI.
     """
 
@@ -626,6 +754,9 @@ class ClaudeCodeAgent:
 
         self._stop_requested = asyncio.Event()
         self._claude_md_warned: set[tuple[Path, str]] = set()  # `_root_claude_md`'s once-only WARNINGs
+        # The chat_ids with a turn running (BEP 19 §3.10.1's busy guard), taken the instant
+        # run() is entered, before any await could let a second call for the chat_id in.
+        self._in_flight: set[str] = set()
 
     @property
     def name(self) -> str:
@@ -743,10 +874,176 @@ class ClaudeCodeAgent:
         schema: dict[str, Any] | None = None,
         max_schema_retries: int = 1,
     ) -> AgentResult:
-        raise NotImplementedError("ClaudeCodeAgent does not run turns yet (BEP 19 §6 step 10 is in progress)")
+        """Run one Claude Code turn to completion and persist it (BEP 19 §3.6, §3.7, §3.9).
+
+        One ``ClaudeSDKClient``, and with it one CLI child, per turn (§3.10.1): built from
+        :meth:`_options` plus the turn's own fields — ``resume`` when the chat has a native
+        session on record (§3.6), ``llm_args["model"]`` as ``model`` and
+        ``llm_args["reasoning_effort"]`` as ``effort``, whose values BOS's ``low``/``medium``/
+        ``high`` are among — and disconnected however the turn ends.
+
+        The answer is ``ResultMessage.result``. ``usage`` is mapped by :func:`_usage`, and
+        ``finish_reason`` is the CLI's ``terminal_reason``, or its ``stop_reason`` when it
+        reports none, verbatim. The turn is committed as two messages, the assistant's carrying
+        the session id the CLI answered from. A turn that does not end in a ``ResultMessage``
+        with ``is_error`` false raises and commits nothing — a failed turn is not history — and
+        so does one that ends on a session other than the one it resumed (§3.6).
+
+        Two concurrent turns on one ``chat_id`` are refused rather than queued: a native session
+        is single-threaded (§3.10.1). A turn started after :meth:`request_stop` or
+        :meth:`aclose` returns ``SHUTDOWN_CONTENT`` before any client is built.
+        """
+        # Accepted but not acted on yet, each until its task lands: `event_sink` and
+        # `ctx_metadata` (Task 6: streamed TurnEvents, BEP 19 §3.9); `interrupt` (Task 7, §3.9),
+        # which is not polled, so a message a caller queues mid-turn stays in its queue; and the
+        # config's `timeout_seconds` (Task 7, §3.10.2), so nothing bounds a turn yet.
+        # `max_schema_retries` has nothing to count without `schema` (Task 5), refused below.
+        turn_id = turn_id or uuid.uuid4().hex
+        # Before anything that costs, as `CodexAgent.run` does and for its reason: a turn
+        # started after `request_stop()` cannot succeed, so it starts no CLI and no billable
+        # turn. `Agent`'s own marker, so a host needs no second string; nothing is committed;
+        # and the flag is never cleared, as `Agent`'s is not.
+        if self._stop_requested.is_set():
+            logger.info(
+                "%s runtime %r: chat %r asked for a turn after request_stop(); returning the shutdown marker "
+                "without starting one",
+                self._config.runtime,
+                self._kind,
+                chat_id,
+            )
+            return external_agent_result(output=SHUTDOWN_CONTENT, turn_id=turn_id, usage=None, finish_reason="shutdown")
+        if schema is not None:
+            # Refused rather than dropped: without it the turn would hand back unvalidated text
+            # where the caller asked for a validated object.
+            raise NotImplementedError(
+                f"{self._config.runtime} runtime {self._kind!r}: `schema` is not supported yet; the structured "
+                f"output of BEP 19 §3.9 is still to be built."
+            )
+        if chat_id in self._in_flight:
+            raise RuntimeError(
+                f"Agent {self._kind!r} already has a turn running on chat {chat_id!r}. A Claude Code session is "
+                f"single-threaded; wait for the turn to finish."
+            )
+        self._in_flight.add(chat_id)  # taken synchronously: no await before this line
+        try:
+            native_session_id = (
+                await read_native_session_id(self._chat_store, chat_id, runtime=self._config.runtime)
+                if self._chat_store is not None
+                else None
+            )
+            llm = llm_args or {}
+            options = replace(
+                self._options(),
+                **_compact(resume=native_session_id, model=llm.get("model"), effort=llm.get("reasoning_effort")),
+            )
+            prompt = _content_to_claude_prompt(content)
+
+            # ponytail: a client per turn costs one CLI spawn (~1s). A per-chat_id session pool
+            # is the upgrade if that latency shows up; resume= makes the stateless version correct.
+            client = _CLIENT_FACTORY(options)
+            result: ResultMessage | None = None
+            answer_uuid: str | None = None
+            try:
+                try:
+                    await client.connect()
+                except ResultError as exc:
+                    if native_session_id is None:
+                        raise
+                    # BEP 19 §3.6. Given a `resume` it has no session for, the CLI refuses at
+                    # startup — "No conversation found with session ID: <id>", exit code 1 —
+                    # before any model call and without starting a session, and the SDK raises
+                    # that out of connect() as a ResultError (measured against the CLI 2.1.281;
+                    # test_the_real_cli_refuses_a_session_it_does_not_have_and_bos_says_so pins
+                    # it). A value that is not a UUID is refused the same way, unless the CLI
+                    # finds a session with that title (its message says so; not measured) — the
+                    # session check below catches the turn that follows.
+                    raise RuntimeError(
+                        f"{self._config.runtime} runtime {self._kind!r}: session {native_session_id!r} for chat "
+                        f"{chat_id!r} could not be resumed, and BOS does not silently start a fresh session "
+                        f"under the same chat_id (BEP 19 §3.6): {exc}"
+                    ) from exc
+                await client.query(prompt if isinstance(prompt, str) else _user_message(prompt))
+                async for message in client.receive_response():
+                    if isinstance(message, AssistantMessage) and message.parent_tool_use_id is None:
+                        # Recorded as `native_turn_id`, since the stream names no turn: the turn's
+                        # last top-level assistant message, a transcript entry, which
+                        # `get_session_messages` returns under this uuid (pinned by
+                        # test_a_second_turn_resumes_the_first_by_session_id_against_the_real_cli).
+                        # `ResultMessage.uuid` is in no transcript, and the prompt's own entry is not
+                        # in the stream (both measured, not pinned).
+                        answer_uuid = message.uuid
+                    elif isinstance(message, ResultMessage):
+                        result = message
+            except ClaudeSDKError as exc:
+                # The SDK's typed errors, with the runtime, agent, turn and chat they belong to.
+                # In a few places the SDK raises a bare Exception instead — a control request
+                # that times out, the initialize handshake's among them — which passes through as
+                # it is.
+                raise RuntimeError(
+                    f"{self._config.runtime} runtime {self._kind!r}: turn {turn_id!r} for chat {chat_id!r} failed: "
+                    f"{exc}"
+                ) from exc
+            finally:
+                await client.disconnect()
+
+            if result is None:
+                raise RuntimeError(
+                    f"{self._config.runtime} runtime {self._kind!r}: turn {turn_id!r} for chat {chat_id!r} ended "
+                    f"without a result"
+                )
+            if result.is_error:
+                # The SDK documents an API failure as arriving under subtype "success", its prose in
+                # `result`; an error the CLI raises itself names its subtype and carries `errors` —
+                # measured for `max_turns`, which ends a turn as "error_max_turns". All four go out.
+                raise RuntimeError(
+                    f"{self._config.runtime} runtime {self._kind!r}: turn {turn_id!r} for chat {chat_id!r} failed: "
+                    f"subtype={result.subtype!r}, errors={result.errors!r}, "
+                    f"api_error_status={result.api_error_status!r}, result={result.result!r}"
+                )
+            if native_session_id is not None and result.session_id != native_session_id:
+                # Never a silent new session under the same chat_id (BEP 19 §3.6). A resumed turn
+                # answers from the session it resumed — measured: the ResultMessage carries that
+                # id — and the SDK documents a new id only under `fork_session`, which
+                # `native_options` refuses. So this fires only if the CLI stops doing so, or
+                # resumed another session by that name; the turn ran, and is not committed.
+                raise RuntimeError(
+                    f"{self._config.runtime} runtime {self._kind!r}: turn {turn_id!r} resumed session "
+                    f"{native_session_id!r} for chat {chat_id!r}, but the CLI answered from session "
+                    f"{result.session_id!r}. BOS does not move a chat to another session silently (BEP 19 §3.6), "
+                    f"so it committed nothing."
+                )
+
+            text = result.result or ""
+            usage = _usage(result.usage)
+            if self._chat_store is not None:
+                commit = await commit_external_turn(
+                    self._chat_store,
+                    chat_id,
+                    turn_id=turn_id,
+                    user_content=content,
+                    response=text,
+                    runtime=self._config.runtime,
+                    native_session_id=result.session_id,
+                    native_turn_id=answer_uuid,
+                    usage=usage,
+                )
+                if commit_observer is not None:
+                    observed = commit_observer(commit)
+                    if inspect.isawaitable(observed):
+                        await observed
+
+            return external_agent_result(
+                output=text,
+                turn_id=turn_id,
+                usage=usage,
+                finish_reason=result.terminal_reason or result.stop_reason,
+            )
+        finally:
+            self._in_flight.discard(chat_id)
 
     async def aclose(self) -> None:
-        """Set the same one-way stop flag :meth:`request_stop` sets (BEP 19 §3.10.2).
-        There is no client to close: each lives only as long as the turn that built it
-        (§3.10.1)."""
+        """Set the same one-way stop flag :meth:`request_stop` sets (BEP 19 §3.10.2), so a
+        turn started afterwards returns the shutdown marker. The agent keeps no client to
+        close: each turn disconnects its own when it ends (§3.10.1). A turn already running is
+        not interrupted, and aclose() does not wait for it."""
         self._stop_requested.set()

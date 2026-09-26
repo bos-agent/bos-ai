@@ -1,18 +1,21 @@
 """BEP 19 Layer 4b: the Claude Code runtime.
 
-Construction so far (BEP 19 §3.4, §3.5, §3.5.3, §3.10.3): the config, the permission
+So far: construction (BEP 19 §3.4, §3.5, §3.5.3, §3.10.3) — the config, the permission
 mapping, the per-client settings nonce, the ``native_options`` allowlist, and the
-fail-closed preflights. No turn runs yet.
+fail-closed preflights — and one turn (§3.6, §3.7, §3.9): ``run()``, session continuity and
+the two-message commit.
 
-Most tests here build options and never start the CLI. Where the CLI's own behaviour is
-the point — the settings file its bash sandbox binds, and what a hostile repository's own
-configuration can do — the test drives the real bundled CLI against the fake Messages API
+Most tests here build options, or run a turn against ``FakeClaudeClient`` (conftest), and
+never start the CLI. Where the CLI's own behaviour is the point — the settings file its bash
+sandbox binds, what a hostile repository's own configuration can do, and whether a turn
+resumes a session — the test drives the real bundled CLI against the fake Messages API
 (tests/fake_anthropic.py), as the vendor-fact tests do.
 """
 
 from __future__ import annotations
 
 import asyncio
+import base64
 import dataclasses
 import hashlib
 import json
@@ -23,19 +26,32 @@ import shutil
 import sys
 import tempfile
 import threading
+import uuid
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import pytest
-from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, ResultMessage
+from claude_agent_sdk import (
+    AssistantMessage,
+    ClaudeAgentOptions,
+    ClaudeSDKClient,
+    ResultError,
+    ResultMessage,
+    SystemMessage,
+    TextBlock,
+    get_session_messages,
+)
 from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport
 from conftest import BlockImport, claude_cli_env
 from fake_anthropic import FakeAnthropic
 from test_claude_code_vendor_facts import _bash, _tool_results
 from test_external_agent_seam import _write_workspace
 
+from bos.core.agent import SHUTDOWN_CONTENT
+from bos.extensions.chat_stores.in_memory import InMemChatStore
 from bos.extensions.runtimes import claude_code
+from bos.extensions.runtimes._shared import commit_external_turn
 from bos.extensions.runtimes.claude_code import ClaudeCodeAgent
 
 _WORKSPACE_WRITE_SANDBOX = {"enabled": True, "allowUnsandboxedCommands": False, "failIfUnavailable": True}
@@ -90,14 +106,16 @@ def _no_mcp_server() -> Any:
 
 def _agent(tmp_path: Path, **cfg: Any) -> ClaudeCodeAgent:
     """A ClaudeCodeAgent over *tmp_path*, ``permission="read-only"`` unless given. Its
-    ``mcp`` accessor raises: construction must never ask for the MCP server (BEP 19 §3.1)."""
+    ``mcp`` accessor raises: construction must never ask for the MCP server (BEP 19 §3.1).
+    ``chat_store`` is taken out of *cfg* and handed to the constructor; it defaults to None."""
     from bos.core.defaults.structured_validator import JsonSchemaValidator
 
+    chat_store = cfg.pop("chat_store", None)
     cfg.setdefault("permission", "read-only")
     return ClaudeCodeAgent(
         kind="george",
         cfg=cfg,
-        chat_store=None,
+        chat_store=chat_store,
         workspace=tmp_path,
         mcp=_no_mcp_server,
         structured_validator=JsonSchemaValidator(),
@@ -1225,3 +1243,556 @@ def test_an_empty_variable_is_not_set(tmp_path, monkeypatch):
         monkeypatch.setenv(name, "")
 
     _agent(tmp_path)
+
+
+# ── One turn: run(), ask(), session continuity, persistence (BEP 19 §3.6, §3.7, §3.9) ──
+#
+# BOS's side of a turn, driven through FakeClaudeClient (conftest), which yields the SDK's
+# own message dataclasses. Two tests at the end drive the real CLI against the fake
+# Messages API instead: session continuity (§7.16), and the CLI refusing a session it does
+# not have (§3.6).
+
+# ResultMessage.usage as the CLI 2.1.281 reported one model call against the fake Messages
+# API (measured).
+_CLI_USAGE = {
+    "input_tokens": 5,
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0,
+    "output_tokens": 3,
+    "output_tokens_details": {"thinking_tokens": 0},
+    "server_tool_use": {"web_search_requests": 0, "web_fetch_requests": 0},
+    "service_tier": "standard",
+    "cache_creation": {"ephemeral_1h_input_tokens": 0, "ephemeral_5m_input_tokens": 0},
+    "inference_geo": "",
+    "iterations": [],
+    "speed": "standard",
+}
+# ...and what BOS reports for it, under the keys CodexAgent reports.
+_MAPPED_USAGE = {
+    "input_tokens": 5,
+    "cached_input_tokens": 0,
+    "cache_write_input_tokens": 0,
+    "output_tokens": 3,
+    "reasoning_output_tokens": 0,
+    "total_tokens": 8,
+}
+
+
+def _turn(text: str = "done", *, session_id: str = "session-1", **result: Any) -> list[Any]:
+    """One turn as the CLI streams it (measured against the fake Messages API): the init
+    ``SystemMessage``, the model's ``AssistantMessage``, then the ``ResultMessage`` — the SDK's
+    own dataclasses. *result* overrides ``ResultMessage`` fields."""
+    return [
+        SystemMessage(subtype="init", data={"type": "system", "subtype": "init", "session_id": session_id}),
+        AssistantMessage(
+            content=[TextBlock(text=text)], model="claude-opus-4-5", session_id=session_id, uuid="assistant-1"
+        ),
+        ResultMessage(**{
+            "subtype": "success",
+            "duration_ms": 1,
+            "duration_api_ms": 1,
+            "is_error": False,
+            "num_turns": 1,
+            "session_id": session_id,
+            "stop_reason": "end_turn",
+            "terminal_reason": "completed",
+            "total_cost_usd": 8e-05,
+            "usage": _CLI_USAGE,
+            "result": text,
+            "uuid": "result-1",
+            **result,
+        }),
+    ]
+
+
+@pytest.fixture
+def mem_store() -> InMemChatStore:
+    return InMemChatStore()
+
+
+async def _bind(store: InMemChatStore, *, session_id: str, chat_id: str = "chat-1") -> None:
+    """Make *chat_id* a chat whose last turn ran on Claude Code session *session_id*."""
+    await commit_external_turn(
+        store,
+        chat_id,
+        turn_id="t0",
+        user_content="a",
+        response="b",
+        runtime="claude-code",
+        native_session_id=session_id,
+    )
+
+
+async def _poll_until(predicate: Any, *, timeout: float = 2.0) -> None:
+    async with asyncio.timeout(timeout):
+        while not predicate():
+            await asyncio.sleep(0.01)
+
+
+@pytest.mark.asyncio
+async def test_a_turn_returns_the_answer_and_commits_two_messages(tmp_path, fake_claude, mem_store):
+    agent = _agent(tmp_path, chat_store=mem_store)
+    fake_claude.arm(messages=_turn("done"))
+
+    result = await agent.run("chat-1", "do it", turn_id="t1")
+
+    assert (result.output, result.structured, result.iterations, result.turn_id) == ("done", False, 1, "t1")
+    assert result.finish_reason == "completed", "the CLI's terminal_reason, verbatim"
+    assert result.usage == _MAPPED_USAGE
+    user, assistant = await mem_store.get_messages("chat-1")
+    assert user.llm_message == {"role": "user", "content": "do it"}
+    assert assistant.llm_message == {"role": "assistant", "content": "done"}
+    assert {key: value for key, value in assistant.metadata.items() if key != "chat_revision"} == {
+        "external_runtime": "claude-code",
+        "native_session_id": "session-1",
+        "native_turn_id": "assistant-1",
+        "usage": _MAPPED_USAGE,
+    }
+    (client,) = fake_claude.instances
+    assert client.options.resume is None, "a chat with no session on record starts one"
+    assert client.prompts == ["do it"], "a str prompt stays a str"
+    assert client.connected and client.disconnected
+
+
+@pytest.mark.asyncio
+async def test_the_native_turn_id_is_the_last_top_level_assistant_message(tmp_path, fake_claude, mem_store):
+    """The stream names no turn, so BOS records the uuid of the turn's last top-level assistant
+    message, a transcript entry. A subagent's message (``parent_tool_use_id`` set) is in the
+    subagent's own transcript, so it is never the one recorded."""
+    *head, result = _turn("done")
+    last = AssistantMessage(content=[TextBlock(text="done")], model="claude-opus-4-5", uuid="assistant-2")
+    subagent = AssistantMessage(
+        content=[TextBlock(text="sub")], model="claude-opus-4-5", uuid="subagent-1", parent_tool_use_id="tu_1"
+    )
+    fake_claude.arm(messages=[*head, last, subagent, result])
+
+    await _agent(tmp_path, chat_store=mem_store).run("chat-1", "do it")
+
+    assert (await mem_store.get_messages("chat-1"))[1].metadata["native_turn_id"] == "assistant-2"
+
+
+def test_usage_maps_onto_the_keys_codex_reports():
+    """Anthropic's ``input_tokens`` leaves out what was read from or written to the cache;
+    the ``input_tokens`` Codex reports counts every input token. Keys with no counterpart are
+    not carried."""
+    usage = {
+        **_CLI_USAGE,
+        "input_tokens": 5,
+        "cache_read_input_tokens": 7,
+        "cache_creation_input_tokens": 11,
+        "output_tokens": 13,
+        "output_tokens_details": {"thinking_tokens": 2},
+    }
+
+    assert claude_code._usage(usage) == {
+        "input_tokens": 23,
+        "cached_input_tokens": 7,
+        "cache_write_input_tokens": 11,
+        "output_tokens": 13,
+        "reasoning_output_tokens": 2,
+        "total_tokens": 36,
+    }
+    assert "reasoning_output_tokens" not in claude_code._usage({"input_tokens": 1, "output_tokens": 1})
+    assert claude_code._usage(None) is None
+
+
+@pytest.mark.asyncio
+async def test_finish_reason_falls_back_to_the_stop_reason(tmp_path, fake_claude):
+    fake_claude.arm(messages=_turn(terminal_reason=None))
+
+    result = await _agent(tmp_path).run("chat-1", "do it")
+
+    assert result.finish_reason == "end_turn"
+
+
+@pytest.mark.asyncio
+async def test_a_second_turn_resumes_the_session_the_first_started(tmp_path, fake_claude, mem_store):
+    """BEP 19 §3.6: the id comes from the ResultMessage, is committed with the turn, and the
+    next turn's client resumes it."""
+    agent = _agent(tmp_path, chat_store=mem_store)
+    fake_claude.arm(messages=_turn("one", session_id="session-9"))
+    await agent.run("chat-1", "a", turn_id="t1")
+    fake_claude.arm(messages=_turn("two", session_id="session-9"))
+    await agent.run("chat-1", "b", turn_id="t2")
+
+    first, second = fake_claude.instances
+    assert (first.options.resume, second.options.resume) == (None, "session-9")
+    messages = await mem_store.get_messages("chat-1")
+    assert [m.llm_message["content"] for m in messages] == ["a", "one", "b", "two"]
+    assert messages[-1].metadata["native_session_id"] == "session-9"
+
+
+@pytest.mark.asyncio
+async def test_each_turn_builds_and_closes_a_client_of_its_own(tmp_path, fake_claude):
+    """BEP 19 §3.10.1: a client per turn, each from options built afresh — so each turn's
+    settings carry their own nonce — and each disconnected when its turn ends. Adding the
+    per-turn fields keeps the overrides of inherited variables in ``env``."""
+    agent = _agent(tmp_path)
+    for _ in range(2):
+        fake_claude.arm(messages=_turn())
+        await agent.run("chat-1", "go")
+
+    first, second = fake_claude.instances
+    assert first.options.settings != second.options.settings
+    assert first.disconnected and second.disconnected
+    assert claude_code._INHERITED_ENV_OVERRIDES.items() <= second.options.env.items()
+
+
+@pytest.mark.asyncio
+async def test_llm_args_model_and_reasoning_effort_reach_the_options(tmp_path, fake_claude):
+    agent = _agent(tmp_path, model="claude-opus-4-5")
+    fake_claude.arm(messages=_turn())
+    await agent.run("chat-1", "go")
+    fake_claude.arm(messages=_turn())
+    await agent.run("chat-1", "go", llm_args={"model": "claude-sonnet-4-5", "reasoning_effort": "low"})
+
+    first, second = fake_claude.instances
+    assert (first.options.model, first.options.effort) == ("claude-opus-4-5", None)
+    assert (second.options.model, second.options.effort) == ("claude-sonnet-4-5", "low")
+
+
+def _refusal(session_id: str) -> ResultError:
+    """What the SDK raises out of ``connect()`` when the CLI will not resume *session_id*
+    (measured; pinned against the real CLI below)."""
+    reason = f"No conversation found with session ID: {session_id}"
+    data = {
+        "type": "result",
+        "subtype": "error_during_execution",
+        "is_error": True,
+        "errors": [reason],
+        "session_id": session_id,
+    }
+    return ResultError(f"Claude Code returned an error result: {reason}", data=data, exit_code=1)
+
+
+@pytest.mark.asyncio
+async def test_a_session_the_cli_will_not_resume_is_reported_not_replaced(tmp_path, fake_claude, mem_store):
+    """BEP 19 §3.6: an error naming the runtime and the id, and no fresh session started
+    under the same chat_id — no second client, nothing committed."""
+    await _bind(mem_store, session_id="session-gone")
+    refusal = _refusal("session-gone")
+    fake_claude.arm(connect_error=refusal)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await _agent(tmp_path, chat_store=mem_store).run("chat-1", "hello?", turn_id="t1")
+
+    message = str(excinfo.value)
+    assert "could not be resumed" in message and "§3.6" in message, "the session-continuity error, not a failed turn"
+    assert "claude-code" in message and "session-gone" in message and "chat-1" in message
+    assert "No conversation found" in message, "the CLI's own reason is carried"
+    assert excinfo.value.__cause__ is refusal
+    (client,) = fake_claude.instances
+    assert client.options.resume == "session-gone"
+    assert len(await mem_store.get_messages("chat-1")) == 2, "nothing committed after the bound turn"
+
+
+@pytest.mark.asyncio
+async def test_a_startup_failure_on_a_new_chat_is_not_reported_as_a_resume(tmp_path, fake_claude):
+    fake_claude.arm(connect_error=_refusal("session-x"))
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await _agent(tmp_path).run("chat-1", "go", turn_id="t1")
+
+    message = str(excinfo.value)
+    assert "could not be resumed" not in message
+    assert "claude-code" in message and "chat-1" in message and "t1" in message
+
+
+@pytest.mark.asyncio
+async def test_a_resumed_turn_that_comes_back_on_another_session_is_refused(tmp_path, fake_claude, mem_store):
+    """Never a silent new session under the same chat_id (BEP 19 §3.6), whatever made the
+    CLI answer from another one."""
+    await _bind(mem_store, session_id="session-1")
+    fake_claude.arm(messages=_turn(session_id="session-2"))
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await _agent(tmp_path, chat_store=mem_store).run("chat-1", "go", turn_id="t1")
+
+    assert "session-1" in str(excinfo.value) and "session-2" in str(excinfo.value)
+    assert len(await mem_store.get_messages("chat-1")) == 2, "the chat stays bound to session-1"
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        # An API failure: the CLI reports it under subtype "success", its prose in `result`.
+        {"subtype": "success", "errors": [], "result": "API Error: 529 overloaded", "api_error_status": 529},
+        # A terminal error the CLI raises itself.
+        {"subtype": "error_max_turns", "errors": ["Reached maximum number of turns (1)"], "result": None},
+    ],
+    ids=["api-error", "cli-error"],
+)
+@pytest.mark.asyncio
+async def test_an_error_result_raises_and_commits_nothing(tmp_path, fake_claude, mem_store, error):
+    agent = _agent(tmp_path, chat_store=mem_store)
+    fake_claude.arm(messages=_turn(is_error=True, **error))
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await agent.run("chat-1", "do it", turn_id="t1")
+
+    message = str(excinfo.value)
+    for value in (error["subtype"], *error["errors"], error.get("api_error_status"), error["result"]):
+        assert value is None or str(value) in message
+    assert "claude-code" in message and "george" in message and "chat-1" in message and "t1" in message
+    assert await mem_store.get_messages("chat-1") == [], "a failed turn is not history"
+    assert fake_claude.instances[0].disconnected
+
+    fake_claude.arm(messages=_turn())
+    assert (await agent.run("chat-1", "again")).output == "done", "a failed turn does not leave the chat busy"
+
+
+@pytest.mark.asyncio
+async def test_a_turn_that_ends_without_a_result_raises(tmp_path, fake_claude, mem_store):
+    fake_claude.arm(messages=_turn()[:-1])
+
+    with pytest.raises(RuntimeError, match="without a result"):
+        await _agent(tmp_path, chat_store=mem_store).run("chat-1", "do it", turn_id="t1")
+
+    assert await mem_store.get_messages("chat-1") == []
+    assert fake_claude.instances[0].disconnected
+
+
+@pytest.mark.asyncio
+async def test_a_completed_turn_with_no_text_is_an_empty_string_not_none(tmp_path, fake_claude):
+    fake_claude.arm(messages=_turn(result=None))
+
+    assert (await _agent(tmp_path).run("chat-1", "do it")).output == ""
+
+
+@pytest.mark.asyncio
+async def test_run_generates_a_turn_id_when_none_is_given(tmp_path, fake_claude, mem_store):
+    fake_claude.arm(messages=_turn())
+
+    result = await _agent(tmp_path, chat_store=mem_store).run("chat-1", "do it")
+
+    assert result.turn_id
+    assert (await mem_store.get_messages("chat-1"))[0].turn_id == result.turn_id
+
+
+@pytest.mark.asyncio
+async def test_a_turn_without_a_chat_store_still_returns_a_result(tmp_path, fake_claude):
+    fake_claude.arm(messages=_turn("hi"))
+
+    assert (await _agent(tmp_path).run("chat-1", "do it")).output == "hi"
+
+
+@pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])
+@pytest.mark.asyncio
+async def test_commit_observer_is_called_with_the_commit(tmp_path, fake_claude, mem_store, asynchronous):
+    """A sync or an async observer, as ``Agent.run`` takes either."""
+    seen: list[Any] = []
+
+    async def observe(commit: Any) -> None:
+        seen.append(commit)
+
+    fake_claude.arm(messages=_turn())
+    observer = observe if asynchronous else seen.append
+    await _agent(tmp_path, chat_store=mem_store).run("chat-1", "do it", turn_id="t1", commit_observer=observer)
+
+    assert [commit.chat_id for commit in seen] == ["chat-1"]
+
+
+@pytest.mark.asyncio
+async def test_ask_delegates_to_run_and_returns_the_text(tmp_path, fake_claude):
+    fake_claude.arm(messages=_turn("hi"))
+
+    assert await _agent(tmp_path).ask("chat-1", "do it", turn_id="t1") == "hi"
+
+
+def test_ask_and_run_take_every_agent_port_keyword():
+    """AgentActor and _HarnessAgentRunner pass these by name; a renamed one is a TypeError that
+    ``isinstance`` against the runtime-checkable protocol cannot catch."""
+    import inspect
+
+    from bos.core.agent import AgentPort
+
+    for name in ("ask", "run"):
+        port = set(inspect.signature(getattr(AgentPort, name)).parameters)
+        assert set(inspect.signature(getattr(ClaudeCodeAgent, name)).parameters) == port
+
+
+@pytest.mark.parametrize("stop", ["request_stop", "aclose"])
+@pytest.mark.asyncio
+async def test_a_turn_started_after_a_stop_costs_nothing(tmp_path, fake_claude, mem_store, stop):
+    """BEP 19 §3.9, §3.10.2: the shutdown marker, before any client is built — so no CLI is
+    started and no billable turn begins. Both set the same one-way flag."""
+    agent = _agent(tmp_path, chat_store=mem_store)
+    if stop == "request_stop":
+        agent.request_stop()
+    else:
+        await agent.aclose()
+
+    first = await agent.run("chat-1", "do it", turn_id="t1")
+    second = await agent.run("chat-2", "do it", turn_id="t2")
+
+    assert first.output == second.output == SHUTDOWN_CONTENT
+    assert (first.finish_reason, first.usage) == ("shutdown", {})
+    assert fake_claude.instances == [], "no client was built, so no CLI was started"
+    assert await mem_store.get_messages("chat-1") == []
+
+
+@pytest.mark.asyncio
+async def test_busy_rejects_a_second_turn_on_the_same_chat_but_not_a_different_one(tmp_path, fake_claude):
+    """BEP 19 §3.10.1: a native session is single-threaded, so a second turn on a chat_id
+    already running one is refused, not queued — and a different chat_id is not blocked."""
+    agent = _agent(tmp_path)
+    release = asyncio.Event()
+    fake_claude.arm(messages=_turn("one"), release=release)
+    first = asyncio.ensure_future(agent.run("chat-1", "a"))
+    await _poll_until(lambda: fake_claude.instances and fake_claude.instances[0].waiting.is_set())
+
+    with pytest.raises(RuntimeError, match="chat-1"):
+        await agent.run("chat-1", "b")
+    assert len(fake_claude.instances) == 1, "the refused turn built no client"
+
+    fake_claude.arm(messages=_turn("two"), release=release)
+    second = asyncio.ensure_future(agent.run("chat-2", "c"))
+    await _poll_until(lambda: len(fake_claude.instances) == 2 and fake_claude.instances[1].waiting.is_set())
+    release.set()
+    results = await asyncio.wait_for(asyncio.gather(first, second), timeout=5)
+
+    assert [result.output for result in results] == ["one", "two"]
+    fake_claude.arm(messages=_turn("three"))
+    assert (await agent.run("chat-1", "d")).output == "three", "a finished turn frees its chat"
+
+
+@pytest.mark.asyncio
+async def test_schema_is_refused_until_structured_output_is_built(tmp_path, fake_claude):
+    """Dropping ``schema`` would hand back unvalidated text where the caller asked for an object."""
+    with pytest.raises(NotImplementedError, match="§3.9"):
+        await _agent(tmp_path).run("chat-1", "go", schema={"type": "object"})
+
+    assert fake_claude.instances == []
+
+
+def test_a_plain_string_prompt_passes_through_unchanged():
+    assert claude_code._content_to_claude_prompt("do it") == "do it"
+
+
+@pytest.mark.parametrize(
+    ("part", "block"),
+    [
+        ({"type": "text", "text": "hi"}, {"type": "text", "text": "hi"}),
+        (
+            {"type": "image", "source": {"kind": "url", "value": "https://x/y.png"}},
+            {"type": "image", "source": {"type": "url", "url": "https://x/y.png"}},
+        ),
+        (
+            {"type": "image", "source": {"kind": "url", "value": "data:image/png;base64,iVBORw0K"}},
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "iVBORw0K"}},
+        ),
+        (
+            {"type": "file", "mime_type": "text/plain", "source": {"kind": "path", "value": "/tmp/a/b.txt"}},
+            {"type": "text", "text": "[attachment: /tmp/a/b.txt (text/plain)]"},
+        ),
+        (
+            {"type": "file", "mime_type": "application/pdf", "source": {"kind": "url", "value": "https://x/a.pdf"}},
+            {"type": "text", "text": "[attachment: https://x/a.pdf (application/pdf)]"},
+        ),
+    ],
+    ids=["text", "image-url", "image-data-url", "file-path", "file-url"],
+)
+def test_each_bos_part_becomes_a_content_block(part, block):
+    """BEP 19 §3.9's Claude column."""
+    assert claude_code._content_to_claude_prompt([part]) == [block]
+
+
+def test_an_image_path_is_read_and_sent_as_base64(tmp_path):
+    image = tmp_path / "cat.png"
+    image.write_bytes(b"\x89PNG not really")
+
+    [block] = claude_code._content_to_claude_prompt([
+        {"type": "image", "source": {"kind": "path", "value": str(image)}}
+    ])
+
+    data = base64.b64encode(b"\x89PNG not really").decode()
+    assert block == {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": data}}
+
+
+def test_a_data_url_image_that_is_not_base64_is_refused():
+    part = {"type": "image", "source": {"kind": "url", "value": "data:image/svg+xml;utf8,<svg/>"}}
+
+    with pytest.raises(ValueError, match="base64"):
+        claude_code._content_to_claude_prompt([part])
+
+
+@pytest.mark.asyncio
+async def test_a_multipart_turn_reaches_the_cli_as_one_user_message(tmp_path, fake_claude, mem_store):
+    content: Any = [
+        {"type": "text", "text": "look"},
+        {"type": "image", "source": {"kind": "url", "value": "https://x/y.png"}},
+    ]
+    fake_claude.arm(messages=_turn())
+
+    await _agent(tmp_path, chat_store=mem_store).run("chat-1", content, turn_id="t1")
+
+    blocks = [{"type": "text", "text": "look"}, {"type": "image", "source": {"type": "url", "url": "https://x/y.png"}}]
+    user_message = {"type": "user", "message": {"role": "user", "content": blocks}, "parent_tool_use_id": None}
+    assert fake_claude.instances[0].prompts == [[user_message]]
+    assert (await mem_store.get_messages("chat-1"))[0].llm_message["content"] == content
+
+
+def _point_the_cli_at(fake: FakeAnthropic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """``run()`` builds its own options, so the fake's environment goes in this process's:
+    the SDK hands the CLI the whole of it. Hence ``auth = "api_key"`` in the agents below —
+    under the default the preflight refuses the key this puts there, as it should."""
+    for name, value in claude_cli_env(tmp_path, fake).items():
+        monkeypatch.setenv(name, value)
+
+
+@pytest.mark.asyncio
+async def test_a_second_turn_resumes_the_first_by_session_id_against_the_real_cli(
+    tmp_path, fake_anthropic, monkeypatch
+):
+    """BEP 19 §7.16 in CI, with the real CLI: the second turn on a chat_id continues the first
+    turn's native session — asserted by the session id, which the second client resumed and the
+    CLI answered from, not by what the model replied. The second model request carrying the
+    first prompt shows the CLI loaded that session's history. Each turn's ``native_turn_id`` is
+    an entry of that session's transcript, where a host can find it."""
+    _point_the_cli_at(fake_anthropic, tmp_path, monkeypatch)
+    built: list[ClaudeAgentOptions] = []
+
+    def factory(options: ClaudeAgentOptions) -> ClaudeSDKClient:
+        built.append(options)
+        return ClaudeSDKClient(options)
+
+    monkeypatch.setattr(claude_code, "_CLIENT_FACTORY", factory)
+    store = InMemChatStore()
+    (tmp_path / "ws").mkdir()
+    agent = _agent(tmp_path, cwd="ws", auth="api_key", chat_store=store)
+    fake_anthropic.script([[{"type": "text", "text": "noted"}], [{"type": "text", "text": "still here"}]])
+
+    async with asyncio.timeout(120):
+        await agent.run("chat-1", "remember the word PINEAPPLE", turn_id="t1")
+        await agent.run("chat-1", "what was the word?", turn_id="t2")
+
+    messages = await store.get_messages("chat-1")
+    first, second = messages[1].metadata["native_session_id"], messages[3].metadata["native_session_id"]
+    assert first == second
+    assert [options.resume for options in built] == [None, first]
+    assert "PINEAPPLE" in json.dumps(fake_anthropic.requests[1]["messages"])
+    transcript = {message.uuid for message in get_session_messages(first, directory=str(tmp_path / "ws"))}
+    assert {messages[1].metadata["native_turn_id"], messages[3].metadata["native_turn_id"]} <= transcript
+
+
+@pytest.mark.asyncio
+async def test_the_real_cli_refuses_a_session_it_does_not_have_and_bos_says_so(tmp_path, fake_anthropic, monkeypatch):
+    """What the CLI does with a ``resume`` it cannot honour, pinned: it refuses at startup,
+    before any model call and without starting a session, and BOS reports that as BEP 19
+    §3.6's error — the runtime, the id and the CLI's reason — committing nothing."""
+    _point_the_cli_at(fake_anthropic, tmp_path, monkeypatch)
+    store = InMemChatStore()
+    unknown = str(uuid.uuid4())
+    await _bind(store, session_id=unknown)
+    agent = _agent(tmp_path, auth="api_key", chat_store=store)
+
+    async with asyncio.timeout(60):
+        with pytest.raises(RuntimeError) as excinfo:
+            await agent.run("chat-1", "hello?", turn_id="t1")
+
+    message = str(excinfo.value)
+    assert "could not be resumed" in message and "claude-code" in message and unknown in message
+    assert f"No conversation found with session ID: {unknown}" in message
+    assert fake_anthropic.requests == [], "refused before any model call"
+    assert list((tmp_path / "claude-config").rglob("*.jsonl")) == [], "no session was started"
+    assert len(await store.get_messages("chat-1")) == 2
