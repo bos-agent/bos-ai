@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import importlib
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -602,17 +603,30 @@ def fake_codex(monkeypatch):
 _XDG_HOMES = ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME")
 
 
-@pytest.fixture(autouse=True)
-def _no_host_claude_code_files(monkeypatch):
+def _move_claude_code_host_files(monkeypatch: pytest.MonkeyPatch) -> None:
     """``ClaudeCodeAgent`` refuses construction on two host files: the CLI's well-known API key
     file (under ``auth = "subscription"``) and the administrator's enterprise ``managed-mcp.json``
     (always). A developer's machine may have either, which would fail every Claude Code test at
     construction, so both point at a path that cannot exist — a child of ``/dev/null``. Tests
-    that want a file there point the path at one themselves."""
-    from bos.extensions.runtimes import claude_code
-
+    that want a file there point the path at one themselves. Without the ``claude-code`` extra
+    there is no runtime to patch, and nothing is done."""
+    try:
+        claude_code = importlib.import_module("bos.extensions.runtimes.claude_code")
+    except ImportError:
+        return
     monkeypatch.setattr(claude_code, "_WELL_KNOWN_API_KEY_FILE", Path(os.devnull, "no-well-known-api-key"))
     monkeypatch.setattr(claude_code, "_MANAGED_MCP_FILE", Path(os.devnull, "no-managed-mcp.json"))
+
+
+@pytest.fixture(autouse=True)
+def _claude_code_isolation(monkeypatch, tmp_path):
+    """Every test, whether or not it is about Claude Code: ``CLAUDE_CONFIG_DIR`` points under the
+    test's own *tmp_path* — the directory ``claude_cli_env`` also names — so nothing that computes
+    the CLI's config directory (the hook's ``_cli_config_dir``, ``get_session_messages``) resolves
+    the developer's own ``~/.claude``; tests of the unset fallback unset it and patch ``HOME``
+    themselves. And the host files ``_move_claude_code_host_files`` names are moved away."""
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-config"))
+    _move_claude_code_host_files(monkeypatch)
 
 
 @pytest.fixture
@@ -629,9 +643,13 @@ def fake_anthropic(monkeypatch):
     shell may export ``ANTHROPIC_*`` credentials or an ``XDG_CONFIG_HOME`` holding real
     ones. CI is not clean either: GitHub's Ubuntu runner image sets ``XDG_CONFIG_HOME``.
     Scrubbing makes every run hand the child the same environment. A test that needs one
-    of these set for the test process itself sets it after this fixture has run.
+    of these set for the test process itself sets it after this fixture has run. Kept:
+    ``CLAUDE_CONFIG_DIR``, which ``_claude_code_isolation`` has already pointed under the
+    test's own directory, replacing any inherited value.
     """
     for name in list(os.environ):
+        if name == "CLAUDE_CONFIG_DIR":
+            continue
         if name.startswith(("CLAUDE", "ANTHROPIC", "MCP_")) or name in _XDG_HOMES:
             monkeypatch.delenv(name)
     fake = FakeAnthropic()

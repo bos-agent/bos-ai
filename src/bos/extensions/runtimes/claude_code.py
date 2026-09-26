@@ -2299,10 +2299,16 @@ class ClaudeCodeAgent:
 
             # ponytail: a client per turn costs one CLI spawn (~1s). A per-chat_id session pool
             # is the upgrade if that latency shows up; resume= makes the stateless version correct.
-            turn = _Turn(_CLIENT_FACTORY(options))
+            try:
+                turn = _Turn(_CLIENT_FACTORY(options))
+            except BaseException:
+                # No turn, so no `_teardown` will remove the directory: remove it here.
+                if tmpdir_override is not None:
+                    shutil.rmtree(tmpdir_override, ignore_errors=True)
+                raise
+            turn.tmpdir = tmpdir_override  # removed in `_teardown` once the client has disconnected
             turn.mcp_unchecked = bool(options.mcp_servers)  # BEP 19 §3.8: read its status from the init
             turn.sandbox_tripped = tripped  # the list the tripwire appends to (BEP 19 §3.5.3)
-            turn.tmpdir = tmpdir_override  # removed in `_teardown` once the client has disconnected
             phase = "at startup"  # connect(): the CLI starting, the resumed session loading
             structured_output: Any = None
             structured_ok = False

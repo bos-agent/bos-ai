@@ -98,7 +98,7 @@ _REAL_MANAGED_MCP_FILE = claude_code._MANAGED_MCP_FILE  # likewise
 def _clean_environment(monkeypatch):
     """The subscription preflight reads this process's environment, and a developer's shell may
     export any of the variables it refuses (the host files it reads are moved away by conftest's
-    ``_no_host_claude_code_files``). BOS's CLAUDE.md read obeys the CLI's switches for memory
+    ``_claude_code_isolation``). BOS's CLAUDE.md read obeys the CLI's switches for memory
     files. Tests that want any of them arrange it themselves."""
     for name in {*_SUBSCRIPTION_BYPASS, *claude_code._SUBSCRIPTION_BYPASS_VARS, *claude_code._CLAUDE_MD_SWITCHES}:
         monkeypatch.delenv(name, raising=False)
@@ -247,6 +247,28 @@ async def test_a_missing_extra_is_named_by_the_real_runtime_module(tmp_path, mon
         with pytest.raises(RuntimeError) as excinfo:
             await harness.create_agent("claude-code", agent_cfg={"permission": "read-only"})
     assert "bos-ai[claude-code]" in str(excinfo.value)
+
+
+def test_the_conftest_isolation_does_nothing_without_the_extra(monkeypatch):
+    """conftest's autouse ``_claude_code_isolation`` runs for every test, so a run without the
+    ``claude-code`` extra must not fail there: with ``claude_agent_sdk`` unimportable, moving the
+    runtime's host files does nothing and raises nothing."""
+    from conftest import _move_claude_code_host_files
+
+    monkeypatch.setattr(sys, "meta_path", [BlockImport("claude_agent_sdk"), *sys.meta_path])
+    for name in list(sys.modules):
+        if name == "bos.extensions.runtimes.claude_code" or name.split(".")[0] == "claude_agent_sdk":
+            monkeypatch.delitem(sys.modules, name)
+
+    _move_claude_code_host_files(monkeypatch)
+    assert "bos.extensions.runtimes.claude_code" not in sys.modules
+
+
+def test_no_test_resolves_the_developers_own_claude_config_dir(tmp_path, fake_anthropic):
+    """conftest points ``CLAUDE_CONFIG_DIR`` under each test's own *tmp_path*, and
+    ``fake_anthropic``'s scrub keeps it, so the CLI's config directory the hook computes
+    (``_cli_config_dir``) is never the developer's own ``~/.claude`` — in CI or on their machine."""
+    assert claude_code._cli_config_dir() == (tmp_path / "claude-config").resolve()
 
 
 @pytest.mark.parametrize(
@@ -1620,6 +1642,26 @@ async def test_malformed_content_is_the_callers_error_and_starts_no_cli(
 
     assert fake_claude.instances == []
     assert [path for path in made if Path(path).exists()] == [], "a per-turn TMPDIR outlived the failed turn"
+
+
+@pytest.mark.asyncio
+async def test_a_client_that_cannot_be_built_leaves_no_per_turn_tmpdir(tmp_path, monkeypatch, sandbox_available):
+    """Under ``workspace-write`` the turn's own TMPDIR is made before the client, and a client
+    that cannot be built leaves no turn for a teardown to run on, so ``run()`` removes the
+    directory itself (BEP 19 §3.5.3, R14) — and frees the chat."""
+    made: list[str] = []
+
+    def factory(options: Any) -> Any:
+        made.append(options.env["TMPDIR"])
+        raise RuntimeError("the client could not be built")
+
+    monkeypatch.setattr(claude_code, "_CLIENT_FACTORY", factory)
+    agent = _agent(tmp_path, permission="workspace-write")
+    with pytest.raises(RuntimeError, match="could not be built"):
+        await agent.run("chat-1", "go")
+
+    assert made and not Path(made[0]).exists(), f"the per-turn TMPDIR outlived the failed turn: {made}"
+    assert agent._in_flight == {}, "the chat is free for its next turn"
 
 
 @pytest.mark.asyncio
