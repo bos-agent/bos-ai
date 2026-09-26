@@ -603,7 +603,9 @@ Anatomy & rules (`bos.core.registry`, `bos.extensions.tools.filesystem`):
   the short schema description. `parallel_safe` (metadata) gates concurrent execution.
 - **`ToolContext` injection**: declare a parameter named `context: ToolContext | None`. The
   harness passes it; it carries the parent turn (e.g. `context.parent` for spawning
-  subagents). (See `AskSubagent` in `bos.plugins.subagent`.)
+  subagents; see `AskSubagent` in `bos.plugins.subagent`) and `context.workspace`, the
+  agent's workspace root — resolve a model-supplied relative path against it, not the
+  process cwd. It is `None` for a call with no agent behind it (MCP egress, direct calls).
 - **Per-tool config** comes from `[exts.ep_tool.<Name>]`, merged in as defaults/kwargs.
   Example: the filesystem search tools read `replace_ignore` / `extend_ignore` /
   `remove_ignore` from `[exts.ep_tool.GrepSearch]`.
@@ -611,7 +613,10 @@ Anatomy & rules (`bos.core.registry`, `bos.extensions.tools.filesystem`):
   `[…tools].usages`.
 
 Built-in tool families: filesystem (`ReadFile`, `WriteFile`, `EditFile`, `GlobSearch`,
-`GrepSearch`), system, knowledge/web search.
+`GrepSearch`), system, knowledge/web search. The file and shell tools resolve a relative
+`path` or `cwd` against the agent's workspace, not the process cwd, and search hits under a
+relative `cwd` come back relative to it; absolute paths are taken as given — nothing confines
+them. `WriteFile`'s read-before-overwrite check is per chat.
 
 ### 7.2 Providers — `@ep_provider`
 

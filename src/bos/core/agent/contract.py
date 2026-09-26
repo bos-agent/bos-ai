@@ -584,3 +584,7 @@ class ToolContext:
     # Escape hatch for plugin/runtime-specific context that is intentionally
     # not modeled as a core ToolContext field.
     extra_data: Mapping[str, Any] = field(default_factory=dict)
+    # The calling agent's workspace root: what a tool resolves a relative path
+    # against. Not the process cwd — an embedding host owns that. None: no
+    # workspace, so the process cwd it is.
+    workspace: str | None = None

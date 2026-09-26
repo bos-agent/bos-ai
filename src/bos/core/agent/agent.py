@@ -923,6 +923,7 @@ class Agent:
                 agent_name=self._name,
                 event_sink=params.pop("event_sink", None),
             ),
+            workspace=self._workspace,
         )
         if self._tools.has(tool_name):
             return await self._tools.invoke(tool_name, params | {"context": context})

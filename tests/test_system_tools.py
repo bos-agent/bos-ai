@@ -61,3 +61,19 @@ async def test_bash_cancellation_terminates_subprocess_group(tmp_path):
     with pytest.raises(asyncio.CancelledError):
         await task
     await _wait_for_path(terminated_path)
+
+
+@pytest.mark.asyncio
+async def test_bash_runs_in_the_workspace_not_the_process_cwd(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    from bos.core import ParentTurn, ToolContext
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    monkeypatch.chdir(tmp_path)
+    ctx = ToolContext(parent=ParentTurn(chat_id="c", turn_id="t", agent_name="a"), workspace=str(workspace))
+
+    out = await tool_bash(f"{shlex.quote(sys.executable)} -c 'import os; print(os.getcwd())'", context=ctx)
+
+    assert Path(out).resolve() == workspace.resolve()
