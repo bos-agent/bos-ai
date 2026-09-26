@@ -170,16 +170,22 @@ SYSPROMPT_INSTRUCTION = (
 AGENTS_START: dict[str, dict[str, Any]] = {
     "mcp": {"_parent": "claude-code", "permission": "workspace-write", "mcp_tools": [EXPOSED_TOOL]},
     "rw": {"_parent": "claude-code", "permission": "workspace-write"},
-    # Item 7 gets an agent of its own because `request_stop()` is one-way: `_stop_requested` is an
-    # `asyncio.Event` that is set and never cleared, so every later turn on the same instance would
-    # end instantly. Sharing `rw` here would silently break every item that runs after it.
+    # An item that changes an agent instance gets one of its own, so nothing it does to that
+    # instance can leak into another item's verdict. Item 7: `request_stop()` is one-way —
+    # `_stop_requested` is an `asyncio.Event` that is set and never cleared, so every later turn on
+    # the same instance would end instantly.
     "stop": {"_parent": "claude-code", "permission": "workspace-write"},
-    "ro": {"_parent": "claude-code", "permission": "read-only", "mcp_tools": [EXPOSED_TOOL]},
+    "ro": {"_parent": "claude-code", "permission": "read-only"},
+    # Items 11 and 5 wrap their instance's `_hook`/`_can_use_tool` for good (`install_gate_tap`), so
+    # each taps an agent no other item runs a turn on: `ro-mcp` here, `trusted` below.
+    "ro-mcp": {"_parent": "claude-code", "permission": "read-only", "mcp_tools": [EXPOSED_TOOL]},
     "full": {"_parent": "claude-code", "permission": "full-access"},
     "slow": {"_parent": "claude-code", "permission": "workspace-write", "timeout_seconds": 5.0},
     # setting_sources=["project"]: the CLI loads CLAUDE.md and the repo's own .claude/settings.json
-    # itself (BEP 19 §3.4.1.4, §3.5.3) — items 5 and 13 both use it, item 5 only under --repo-trusted.
+    # itself (BEP 19 §3.4.1.4, §3.5.3) — item 13 on `project`, item 5 (only under --repo-trusted) on
+    # `trusted`, the same settings on an instance of its own.
     "project": {"_parent": "claude-code", "permission": "workspace-write", "setting_sources": ["project"]},
+    "trusted": {"_parent": "claude-code", "permission": "workspace-write", "setting_sources": ["project"]},
     "sysprompt": {"_parent": "claude-code", "permission": "workspace-write", "system_prompt": SYSPROMPT_INSTRUCTION},
 }
 
@@ -280,9 +286,9 @@ class Ctx:
 async def turn(
     agent: Any, chat_id: str, prompt: str, **kwargs: Any
 ) -> tuple[Any | None, BaseException | None, Capture, float]:
-    """One turn, never raising. Returns ``(result, error, capture, seconds)``. Swallowing the
-    exception is the point: half this checklist is about *which* error a live CLI produces, so an
-    error is data here, not a failure."""
+    """One turn, never raising. Returns ``(result, error, capture, seconds)``, for the items that
+    measure the error itself (8, 15 and 19); every other item needs the turn to complete and calls
+    :func:`completed` instead."""
     cap = Capture()
     started = time.monotonic()
     try:
@@ -290,6 +296,21 @@ async def turn(
         return result, None, cap, time.monotonic() - started
     except BaseException as exc:  # noqa: BLE001 - the error is the observation
         return None, exc, cap, time.monotonic() - started
+
+
+class TurnRaised(Exception):
+    """A turn an item needs raised, so the item observed nothing it measures. :func:`run_item`
+    marks it ERROR — never PASS or FAIL, which a crashed turn can fake: a write that was never
+    attempted reads exactly like one the hook denied."""
+
+
+async def completed(agent: Any, chat_id: str, prompt: str, **kwargs: Any) -> tuple[Any, Capture, float]:
+    """:func:`turn` for an item whose verdict needs the turn to complete: ``(result, capture,
+    seconds)``, or :class:`TurnRaised` when the turn raised."""
+    result, exc, cap, secs = await turn(agent, chat_id, prompt, **kwargs)
+    if exc is not None:
+        raise TurnRaised(f"the turn on {chat_id!r} raised, so this item observed nothing: {describe(exc)}") from exc
+    return result, cap, secs
 
 
 def describe(exc: BaseException | None) -> str:
@@ -336,7 +357,9 @@ def install_gate_tap(agent: Any) -> GateTap:
     """Wrap *agent*'s `_hook`/`_can_use_tool` methods, once, to record whether the CLI asked them
     and what they decided (BEP 19 §3.5.3). `_options()` calls both once per turn to build a fresh
     closure, so the wrap goes on the bound *method*, which every turn's `_options()` call reaches,
-    not on one turn's own closure."""
+    not on one turn's own closure. Each wrapper passes on whatever arguments `_options()` gives, so
+    it follows the method's signature (it once took none, and every tapped turn raised when the
+    runtime began passing `mcp_tools`); `self-check` drives it through the real `_options()`."""
     existing: GateTap | None = getattr(agent, "_gate_tap", None)
     if existing is not None:
         return existing
@@ -344,8 +367,8 @@ def install_gate_tap(agent: Any) -> GateTap:
     orig_hook = agent._hook
     orig_can_use_tool = agent._can_use_tool
 
-    def hook_factory() -> Callable[..., Any]:
-        fn = orig_hook()
+    def hook_factory(*args: Any, **kwargs: Any) -> Callable[..., Any]:
+        fn = orig_hook(*args, **kwargs)
 
         async def wrapped(input_data: Any, tool_use_id: Any, context: Any) -> Any:
             decision = await fn(input_data, tool_use_id, context)
@@ -355,8 +378,8 @@ def install_gate_tap(agent: Any) -> GateTap:
 
         return wrapped
 
-    def can_use_tool_factory() -> Callable[..., Any] | None:
-        fn = orig_can_use_tool()
+    def can_use_tool_factory(*args: Any, **kwargs: Any) -> Callable[..., Any] | None:
+        fn = orig_can_use_tool(*args, **kwargs)
         if fn is None:
             return None
 
@@ -413,11 +436,9 @@ def start_header_capture_server() -> http.server.ThreadingHTTPServer:
 
 @check(1, "§7.15", "start", 1, "A turn starts, streams events, returns non-empty usage")
 async def check_01(ctx: Ctx) -> Outcome:
-    result, exc, cap, secs = await turn(
+    result, cap, secs = await completed(
         ctx.agent("mcp"), MAIN_CHAT, "Read NOTES.md in your working directory and reply with its first line only."
     )
-    if result is None:
-        return FAIL, f"the first turn did not complete — {describe(exc)}"
     ctx.facts["first_usage"] = dict(result.usage or {})
     mark = PASS if result.usage else FAIL
     return mark, (
@@ -429,11 +450,10 @@ async def check_01(ctx: Ctx) -> Outcome:
 @check(2, "§7.16", "start", 1, "A second ask() on the same chat_id continues the same native session")
 async def check_02(ctx: Ctx) -> Outcome:
     before = await native_session_id_of(ctx, MAIN_CHAT)
-    _, exc, _, _ = await turn(ctx.agent("mcp"), MAIN_CHAT, "Reply with the single word CONTINUED.")
+    ctx.facts["session_id"] = before  # what the store still names if the turn below raises
+    await completed(ctx.agent("mcp"), MAIN_CHAT, "Reply with the single word CONTINUED.")
     after = await native_session_id_of(ctx, MAIN_CHAT)
     ctx.facts["session_id"] = after
-    if exc is not None:
-        return FAIL, f"the second turn did not complete — {describe(exc)}"
     if before and after and before == after:
         return PASS, f"same Claude Code session across both turns: {after!r} (asserted on the id, not the reply)"
     return FAIL, f"session id changed: {before!r} -> {after!r}"
@@ -444,35 +464,35 @@ async def check_03(ctx: Ctx) -> Outcome:
     inside = ctx.workspace / "inside-write.txt"
     outside = ctx.outside / "outside-write.txt"
     outside_full = ctx.outside / "outside-write-full.txt"
-    _, exc_ro, _, _ = await turn(
+    await completed(
         ctx.agent("ro"),
         ctx.chat("confine-ro"),
         f"Create a file named readonly-write.txt in {ctx.workspace} containing OK. "
         "If you cannot, say exactly DENIED and the reason.",
     )
     ro_wrote = (ctx.workspace / "readonly-write.txt").exists()
-    _, exc_in, _, _ = await turn(
+    await completed(
         ctx.agent("rw"),
         ctx.chat("confine-rw-in"),
         f"Create a file named {inside.name} in your working directory containing OK.",
     )
-    _, exc_out, _, _ = await turn(
+    await completed(
         ctx.agent("rw"),
         ctx.chat("confine-rw-out"),
         f"Create a file at the absolute path {outside} containing OK. "
         "If you cannot, say exactly DENIED and the reason.",
     )
-    _, exc_full, _, _ = await turn(
+    await completed(
         ctx.agent("full"),
         ctx.chat("confine-full-out"),
         f"Create a file at the absolute path {outside_full} containing OK.",
     )
     good = not ro_wrote and inside.exists() and not outside.exists() and outside_full.exists()
     detail = (
-        f"read-only wrote={ro_wrote} ({describe(exc_ro)}); "
-        f"workspace-write in-root written={inside.exists()} ({describe(exc_in)}); "
-        f"workspace-write out-of-root written={outside.exists()} at {outside} ({describe(exc_out)}); "
-        f"full-access out-of-root written={outside_full.exists()} at {outside_full} ({describe(exc_full)})"
+        f"read-only wrote={ro_wrote}; "
+        f"workspace-write in-root written={inside.exists()}; "
+        f"workspace-write out-of-root written={outside.exists()} at {outside}; "
+        f"full-access out-of-root written={outside_full.exists()} at {outside_full}"
     )
     return (PASS if good else FAIL), detail
 
@@ -484,7 +504,7 @@ async def check_04(ctx: Ctx) -> Outcome:
     tmp_probe = Path(tempfile.mkdtemp(dir="/tmp", prefix="bos-claude-code-tmp-probe-"))
     tmp_target = tmp_probe / "bash-tmp.txt"
     try:
-        _, exc, cap, _ = await turn(
+        _, cap, _ = await completed(
             ctx.agent("rw"),
             ctx.chat("bash-confine"),
             "Use the Bash tool to run these three commands in order and report each result in one line: "
@@ -499,7 +519,7 @@ async def check_04(ctx: Ctx) -> Outcome:
         f"in-root written={inside.exists()}; out-of-root written={outside.exists()} at {outside}; "
         f"/tmp written={tmp_written} at {tmp_target} (Claude Code confines /tmp too, unlike Codex's sandbox — "
         "BEP 19 §3.5); "
-        f"{describe(exc)}; tool events={[k for k in cap.kinds() if k.startswith('tool')] or 'none'}"
+        f"tool events={[k for k in cap.kinds() if k.startswith('tool')] or 'none'}"
     )
 
 
@@ -518,18 +538,17 @@ async def check_05(ctx: Ctx) -> Outcome:
             "the login). To arrange: run `claude` by hand once inside that directory, accept its trust prompt, "
             "then re-run this phase with --repo-trusted."
         )
-    tap = install_gate_tap(ctx.agent("project"))
+    tap = install_gate_tap(ctx.agent("trusted"))
     target = ctx.outside / "trusted-repo-write.txt"
-    _, exc, _, _ = await turn(
-        ctx.agent("project"),
+    await completed(
+        ctx.agent("trusted"),
         ctx.chat("trust-case"),
         f"Create a file at the absolute path {target} containing OK. If you cannot, say exactly DENIED and the reason.",
     )
     wrote = target.exists()
     return (FAIL if wrote else PASS), (
         f"out-of-root write under a (claimed) trusted repo whose .claude/settings.json allows Write: "
-        f"wrote={wrote}; hook calls={tap.hook_calls[-3:]}; can_use_tool calls={tap.can_use_tool_calls[-3:]}; "
-        f"{describe(exc)}"
+        f"wrote={wrote}; hook calls={tap.hook_calls[-3:]}; can_use_tool calls={tap.can_use_tool_calls[-3:]}"
     )
 
 
@@ -571,8 +590,10 @@ async def check_07(ctx: Ctx) -> Outcome:
         agent.request_stop()
 
     task = asyncio.create_task(stop_soon())
-    result, exc, _, secs = await turn(agent, ctx.chat("stop"), prompt)
-    await task
+    try:
+        result, _, secs = await completed(agent, ctx.chat("stop"), prompt)
+    finally:
+        await task
     at_return = len(list(marker.glob("*.txt")))
     time.sleep(ctx.args.settle)
     after_settle = len(list(marker.glob("*.txt")))
@@ -584,8 +605,8 @@ async def check_07(ctx: Ctx) -> Outcome:
         if reason == "interrupted"
         else f"finish_reason={reason!r}"
     )
-    return (PASS if (quiet and exc is None and expected) else FAIL), (
-        f"returned after {secs:.1f}s, {reason_note}, {describe(exc)}; files at return={at_return}, after "
+    return (PASS if (quiet and expected) else FAIL), (
+        f"returned after {secs:.1f}s, {reason_note}; files at return={at_return}, after "
         f"{ctx.args.settle}s={after_settle} ({'quiet' if quiet else 'STILL WRITING'})"
     )
 
@@ -597,10 +618,11 @@ async def check_08(ctx: Ctx) -> Outcome:
         ctx.chat("timeout"),
         "Use the Bash tool to run exactly this command: sleep 40. Then reply DONE.",
     )
-    raised = isinstance(exc, TimeoutError)
-    return (PASS if raised else FAIL), (
-        f"after {secs:.1f}s against timeout_seconds=5.0: {describe(exc)}; {len(cap.events)} event(s) first"
-    )
+    if exc is None:
+        return FAIL, f"the turn completed after {secs:.1f}s against timeout_seconds=5.0 — nothing expired"
+    if not isinstance(exc, TimeoutError):
+        return ERROR, f"the turn raised something other than the timeout, so no expiry was observed: {describe(exc)}"
+    return PASS, f"after {secs:.1f}s against timeout_seconds=5.0: {describe(exc)}; {len(cap.events)} event(s) first"
 
 
 @check(9, "§7.21", "start", 1, "schema= returns validated structured output")
@@ -611,11 +633,9 @@ async def check_09(ctx: Ctx) -> Outcome:
         "required": ["city", "population"],
         "additionalProperties": False,
     }
-    result, exc, _, _ = await turn(
+    result, _, _ = await completed(
         ctx.agent("rw"), ctx.chat("schema"), "Give the city of Paris and its approximate population.", schema=schema
     )
-    if result is None:
-        return FAIL, describe(exc)
     ok = bool(result.structured) and isinstance(result.output, dict)
     return (PASS if ok else FAIL), f"structured={result.structured}, output={result.output!r}"
 
@@ -624,13 +644,13 @@ async def check_09(ctx: Ctx) -> Outcome:
 async def check_10(ctx: Ctx) -> Outcome:
     mcp = ctx.agent("mcp")
     before = len(TOOL_CALLS)
-    _, exc_call, cap, _ = await turn(
+    _, cap, _ = await completed(
         mcp,
         ctx.chat("mcp-call"),
         f"Call the {EXPOSED_TOOL} tool with text='hello from claude code', then reply with the tool's exact result.",
     )
     called = [name for name, _ in TOOL_CALLS[before:]]
-    _, exc_deny, _, _ = await turn(
+    await completed(
         mcp,
         ctx.chat("mcp-deny"),
         f"List every tool you can call. Then try to call a tool named {WITHHELD_TOOL} with text='x'. Report "
@@ -640,8 +660,7 @@ async def check_10(ctx: Ctx) -> Outcome:
     good = EXPOSED_TOOL in called and not reached_withheld
     return (PASS if good else FAIL), (
         f"host-side invocations: {called or 'NONE'}; {WITHHELD_TOOL} reached={reached_withheld}; "
-        f"tool events={[k for k in cap.kinds() if k.startswith('tool')] or 'none'}; "
-        f"call turn {describe(exc_call)}; deny turn {describe(exc_deny)}"
+        f"tool events={[k for k in cap.kinds() if k.startswith('tool')] or 'none'}"
     )
 
 
@@ -649,10 +668,10 @@ async def check_10(ctx: Ctx) -> Outcome:
 async def check_11(ctx: Ctx) -> Outcome:
     """Correct by design — the sandbox and the hook confine the filesystem, not BOS's own tool
     surface — and the thing an operator is most likely to assume the other way round."""
-    tap = install_gate_tap(ctx.agent("ro"))
+    tap = install_gate_tap(ctx.agent("ro-mcp"))
     before = len(TOOL_CALLS)
-    result, exc, cap, _ = await turn(
-        ctx.agent("ro"),
+    result, cap, _ = await completed(
+        ctx.agent("ro-mcp"),
         ctx.chat("ro-mcp"),
         f"Call the {EXPOSED_TOOL} tool with text='mutation from a read-only agent', then reply with its result.",
     )
@@ -663,7 +682,7 @@ async def check_11(ctx: Ctx) -> Outcome:
         f"BOS tool events: {[k for k in cap.kinds() if k.startswith('tool')] or 'none'}; "
         f"hook calls for this tool: {mcp_hook_calls or 'none'}; "
         f"can_use_tool calls: {tap.can_use_tool_calls or 'none'}; "
-        f"finish_reason={getattr(result, 'finish_reason', None)!r}, {describe(exc)}"
+        f"finish_reason={result.finish_reason!r}"
     )
 
 
@@ -673,18 +692,17 @@ async def check_12(ctx: Ctx) -> Outcome:
     as an *append* — reflected in the reply — while the harness's own tool guidance still works,
     rather than one crowding out the other."""
     target = ctx.workspace / "sysprompt-ok.txt"
-    result, exc, _, _ = await turn(
+    result, _, _ = await completed(
         ctx.agent("sysprompt"),
         ctx.chat("sysprompt"),
         f"Identify yourself as instructed, then create a file named {target.name} in your working directory "
         "containing OK.",
     )
-    reply = str(getattr(result, "output", "")) or describe(exc)
+    reply = str(result.output)
     reflected = SYSPROMPT_PHRASE in reply
     wrote = target.exists()
     return (PASS if (reflected and wrote) else FAIL), (
-        f"system_prompt reflected={reflected} (reply: {reply[:160]!r}); tool guidance intact (file written)="
-        f"{wrote}; {describe(exc)}"
+        f"system_prompt reflected={reflected} (reply: {reply[:160]!r}); tool guidance intact (file written)={wrote}"
     )
 
 
@@ -697,12 +715,13 @@ async def check_12(ctx: Ctx) -> Outcome:
 )
 async def check_13(ctx: Ctx) -> Outcome:
     marker = ctx.hook_marks / "session-start-ran"
-    result, exc, _, _ = await turn(
+    marker.unlink(missing_ok=True)  # item 5's turn, on the same repo settings, runs the same hook
+    result, _, _ = await completed(
         ctx.agent("project"),
         ctx.chat("project-settings"),
         "What is the project codeword? Reply with the single word only.",
     )
-    reply = str(getattr(result, "output", "")) or describe(exc)
+    reply = str(result.output)
     reflected = CODEWORD in reply.upper()
     hook_ran = marker.exists()
     warned = bool(ctx.warnings.matching("setting_sources"))
@@ -710,7 +729,7 @@ async def check_13(ctx: Ctx) -> Outcome:
     return (PASS if good else FAIL), (
         f"construction WARNING logged={warned}; CLAUDE.md reflected via the CLI's own loading={reflected} "
         f"(reply: {reply[:120]!r}); the repository's own SessionStart hook ran on the host={hook_ran} "
-        f"(marker {marker}); {describe(exc)}"
+        f"(marker {marker})"
     )
 
 
@@ -723,15 +742,13 @@ async def check_14(ctx: Ctx) -> Outcome:
     overrides all three off (§3.12) unconditionally. This is a model self-report, not a wire
     capture (a live run has no fake proxy to inspect the request payload the way CI does), so it is
     corroborating evidence, not proof — recorded as OBSERVED either way."""
-    result, exc, _, _ = await turn(
+    result, _, _ = await completed(
         ctx.agent("mcp"),
         ctx.chat("tool-enum"),
         "List the literal names of every tool you currently have access to, one per line. Include any MCP "
         "tool whose name starts with mcp__, and include any tool related to deferred tool search, Chrome, or "
         "a connector if one is present. Do not omit any.",
     )
-    if result is None:
-        return NOT_ARRANGED, f"the enumeration turn did not complete — {describe(exc)}"
     text = str(result.output)
     lowered = text.lower()
     flagged = [w for w in ("deferredtoolplaceholder", "toolsearch", "chrome", "connector") if w in lowered]
@@ -761,10 +778,17 @@ async def check_15(ctx: Ctx) -> Outcome:
         else:
             os.environ["ANTHROPIC_BASE_URL"] = prior
         server.shutdown()
+    if not captured and exc is not None:
+        # The probe server answers 503, so a turn that reached it raises too; one that raised with
+        # nothing captured may never have started, and observed nothing.
+        return ERROR, (
+            f"no HTTP request reached the local probe server in {secs:.1f}s and the turn raised, so nothing "
+            f"was observed: {describe(exc)}"
+        )
     if not captured:
         return NOT_ARRANGED, (
             f"no HTTP request reached the local probe server in {secs:.1f}s, so token exposure under a "
-            f"redirected ANTHROPIC_BASE_URL was not observed this run. Turn ended: {describe(exc)}"
+            "redirected ANTHROPIC_BASE_URL was not observed this run; the turn completed without it."
         )
     credential_headers = sorted({k for h in captured for k in h if k.lower() in ("authorization", "x-api-key")})
     return OBSERVED, (
@@ -800,26 +824,25 @@ async def check_17(ctx: Ctx) -> Outcome:
     )
 
 
-_MANAGED_MCP_PATHS: dict[str, Path] = {
-    "darwin": Path("/Library/Application Support/ClaudeCode/managed-mcp.json"),
-    "linux": Path("/etc/claude-code/managed-mcp.json"),
-}
-
-
-@check(18, "§3.8/§8.2", "start", 0, "An enterprise managed-mcp.json would make the CLI refuse --strict-mcp-config")
+@check(18, "§3.8/§8.2", "start", 0, "An enterprise managed-mcp.json makes BOS refuse to build a Claude Code agent")
 async def check_18(ctx: Ctx) -> Outcome:
-    """Carried item 6. BOS does not guard this yet (§8.2) — it is read here only to say whether
-    this host can even exercise it, never to work around it."""
-    path = next((p for plat, p in _MANAGED_MCP_PATHS.items() if sys.platform.startswith(plat)), None)
-    if path is None or not path.exists():
+    """Carried item 6. The CLI refuses the `--strict-mcp-config` BOS sends while the administrator's
+    `managed-mcp.json` exists, so `ClaudeCodeAgent` refuses construction while it exists (BEP 19
+    §8.2) — at the path the runtime itself checks, read here, never worked around. `BosApp` builds
+    every agent as it opens, so on a host that has the file this phase — and `self-check` — stops
+    there, with a traceback ending in that `ValueError`, which names the file, and prints no items
+    at all. This item therefore reports only a host without the file."""
+    from bos.extensions.runtimes.claude_code import _MANAGED_MCP_FILE
+
+    if not os.path.exists(_MANAGED_MCP_FILE):
         return NOT_ARRANGED, (
-            "no enterprise managed-mcp.json at the conventional path"
-            f"{f' ({path})' if path else ' for this platform'} — the normal case outside a managed fleet."
+            f"no enterprise managed-mcp.json at {_MANAGED_MCP_FILE} — the normal case outside a managed fleet. On "
+            "a host that has one, BOS refuses to build a Claude Code agent (BEP 19 §8.2), so this phase stops as "
+            "BosApp opens, with a ValueError naming the file, before any item runs."
         )
-    return OBSERVED, (
-        f"a readable {path} exists; BOS sends strict_mcp_config on every client and does not yet guard this "
-        "(§8.2), so every Claude Code turn on this host is expected to be refused at CLI startup with "
-        "'You cannot use --strict-mcp-config when an enterprise MCP config is present'."
+    return ERROR, (
+        f"{_MANAGED_MCP_FILE} exists, yet this phase's agents were built: either the file appeared after BosApp "
+        "opened or BOS no longer refuses it (BEP 19 §8.2) — re-run the phase to tell which."
     )
 
 
@@ -845,6 +868,10 @@ async def check_19(ctx: Ctx) -> Outcome:
             f"({str(getattr(result, 'output', ''))[:80]!r}) — the account is not in that state, so nothing "
             "was measured"
         )
+    if not isinstance(exc, RuntimeError):
+        # The runtime raises a RuntimeError for every failure the CLI reports; anything else — its
+        # own timeout, a bug here — did not come from the account, so says nothing about it.
+        return ERROR, f"the turn raised something other than a CLI failure, so nothing was observed: {describe(exc)}"
     text = str(exc).lower()
     billed = any(word in text for word in ("api key", "api_key", "anthropic_api_key", "falling back"))
     return (PASS if not billed else FAIL), (
@@ -864,12 +891,10 @@ async def check_20(ctx: Ctx) -> Outcome:
     before = await native_session_id_of(ctx, MAIN_CHAT)
     if before is None:
         return NOT_ARRANGED, f"no Claude Code session recorded for {MAIN_CHAT!r} — run the `start` phase first"
-    result, exc, _, _ = await turn(
+    result, _, _ = await completed(
         ctx.agent("mcp"), MAIN_CHAT, "In one short sentence, what have we discussed in this thread so far?"
     )
     after = await native_session_id_of(ctx, MAIN_CHAT)
-    if result is None:
-        return FAIL, f"resume failed: {describe(exc)} (session on record was {before!r})"
     same = before == after and (expected is None or expected == after)
     return (PASS if same else FAIL), (
         f"recovered session {before!r} from the store in a fresh process and resumed it; after the turn "
@@ -904,7 +929,7 @@ async def check_21(ctx: Ctx) -> Outcome:
 @check(22, "§7.22", "resume", 1, "Does a RESUMED chat still get the MCP tools?")
 async def check_22(ctx: Ctx) -> Outcome:
     before = len(TOOL_CALLS)
-    _, exc, cap, _ = await turn(
+    _, cap, _ = await completed(
         ctx.agent("mcp"),
         MAIN_CHAT,
         f"Call the {EXPOSED_TOOL} tool with text='after resume', then reply with the tool's exact result.",
@@ -912,7 +937,7 @@ async def check_22(ctx: Ctx) -> Outcome:
     called = [name for name, _ in TOOL_CALLS[before:]]
     return (PASS if EXPOSED_TOOL in called else FAIL), (
         f"on a chat resumed from the store: host-side invocations {called or 'NONE'}; "
-        f"tool events {[k for k in cap.kinds() if k.startswith('tool')] or 'none'}; {describe(exc)}"
+        f"tool events {[k for k in cap.kinds() if k.startswith('tool')] or 'none'}"
     )
 
 
@@ -1123,6 +1148,15 @@ def remove_outside(outside: Path, created: bool) -> None:
         pass
 
 
+async def run_item(item: Item, ctx: Ctx) -> Outcome:
+    """One item's mark and note, as a phase records them. A check that raises — a
+    :class:`TurnRaised` among them — is ERROR, never another mark, and does not lose the rest."""
+    try:
+        return await item.fn(ctx)
+    except Exception as exc:  # noqa: BLE001 - one broken check must not lose the rest
+        return ERROR, f"the check itself raised — {describe(exc)}"
+
+
 async def _run_items(
     phase: str,
     args: argparse.Namespace,
@@ -1146,10 +1180,7 @@ async def _run_items(
         ctx.facts["session_id_from_start"] = state.get("session_id")
         for item in items:
             print(f"\n-- item {item.n} ({item.criterion}): {item.title}")
-            try:
-                item.mark, item.note = await item.fn(ctx)
-            except Exception as exc:  # noqa: BLE001 - one broken check must not lose the rest
-                item.mark, item.note = ERROR, f"the check itself raised — {describe(exc)}"
+            item.mark, item.note = await run_item(item, ctx)
             print(f"   {item.mark}: {item.note}")
 
     runtime_log.removeHandler(warnings)
@@ -1269,39 +1300,140 @@ async def _check_configs_build() -> None:
     """Open a real ``BosApp`` over ``AGENTS_START`` and assert what every agent resolved to.
     Construction is lazy (BEP 19 §3.1) — no CLI child, no login — so this costs nothing and still
     catches a bad ``_parent``, a rejected ``system_prompt``/``setting_sources`` combination, a
-    permission BOS refuses, or an ``mcp_tools`` name the host has no ``ep_tool`` for."""
+    permission BOS refuses, or an ``mcp_tools`` name the host has no ``ep_tool`` for — and then
+    drives the gate tap through one of the agents it built (:func:`_check_gate_tap`)."""
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp) / "ws"
         root.mkdir()
         ws = Workspace(workspace=root, bos_dir=root / ".bos", config=workspace_config(AGENTS_START))
-        async with BosApp(ws) as app:
-            for kind, wanted in AGENTS_START.items():
-                cfg = dict(claude_code_agent(app, kind).resolved_config)
-                assert cfg["external_runtime"] == "claude-code", f"{kind} did not dispatch to the Claude Code runtime"
-                assert cfg["permission"] == wanted["permission"], kind
-                assert cfg["cwd"] == str(root), f"{kind} cwd resolved to {cfg['cwd']}, not the workspace"
-                assert cfg["auth"] == "subscription", f"{kind} must use the login, not an API key"
-                assert not cfg["mcp_tools_unavailable"], (
-                    f"{kind} asks for {cfg['mcp_tools_unavailable']}, which no ep_tool in this script registers"
+        # The hook resolves the CLI's config directory as it is built; pointed here, the self-check
+        # never resolves the owner's own ~/.claude.
+        prior = os.environ.get("CLAUDE_CONFIG_DIR")
+        os.environ["CLAUDE_CONFIG_DIR"] = str(Path(tmp) / "claude-config")
+        try:
+            async with BosApp(ws) as app:
+                for kind, wanted in AGENTS_START.items():
+                    cfg = dict(claude_code_agent(app, kind).resolved_config)
+                    assert cfg["external_runtime"] == "claude-code", (
+                        f"{kind} did not dispatch to the Claude Code runtime"
+                    )
+                    assert cfg["permission"] == wanted["permission"], kind
+                    assert cfg["cwd"] == str(root), f"{kind} cwd resolved to {cfg['cwd']}, not the workspace"
+                    assert cfg["auth"] == "subscription", f"{kind} must use the login, not an API key"
+                    assert not cfg["mcp_tools_unavailable"], (
+                        f"{kind} asks for {cfg['mcp_tools_unavailable']}, which no ep_tool in this script registers"
+                    )
+                    assert claude_code_agent(app, kind)._in_flight == {}, (
+                        f"building {kind} started a turn (§3.1 forbids it)"
+                    )
+                for kind in ("mcp", "ro-mcp"):
+                    assert claude_code_agent(app, kind).resolved_config["mcp_tools"] == [EXPOSED_TOOL], (
+                        f"{kind} must be granted {EXPOSED_TOOL} and never {WITHHELD_TOOL}, or items 10 and 11 prove "
+                        "nothing"
+                    )
+                for kind in ("project", "trusted"):
+                    assert claude_code_agent(app, kind).resolved_config["setting_sources"] == ["project"], kind
+                assert claude_code_agent(app, "sysprompt").resolved_config["system_prompt"] == SYSPROMPT_INSTRUCTION
+                assert type(app.harness.chat_store).__name__ == "JsonlChatStore", (
+                    "item 20 needs a store that outlives the process"
                 )
-                assert claude_code_agent(app, kind)._in_flight == {}, (
-                    f"building {kind} started a turn (§3.1 forbids it)"
-                )
-            assert claude_code_agent(app, "mcp").resolved_config["mcp_tools"] == [EXPOSED_TOOL]
-            assert WITHHELD_TOOL not in claude_code_agent(app, "mcp").resolved_config["mcp_tools"], (
-                "the withheld tool must never be granted, or item 10 proves nothing"
-            )
-            assert claude_code_agent(app, "project").resolved_config["setting_sources"] == ["project"]
-            assert claude_code_agent(app, "sysprompt").resolved_config["system_prompt"] == SYSPROMPT_INSTRUCTION
-            assert type(app.harness.chat_store).__name__ == "JsonlChatStore", (
-                "item 20 needs a store that outlives the process"
-            )
+                await _check_gate_tap(claude_code_agent(app, "ro-mcp"), root)
+        finally:
+            if prior is None:
+                os.environ.pop("CLAUDE_CONFIG_DIR", None)
+            else:
+                os.environ["CLAUDE_CONFIG_DIR"] = prior
+
+
+async def _check_gate_tap(agent: Any, workspace: Path) -> None:
+    """``install_gate_tap`` on a real ``ClaudeCodeAgent``, driven through the runtime's own
+    ``_options()`` — the call ``run()`` makes every turn — so a change in how the runtime calls
+    ``_hook``/``_can_use_tool`` fails here, offline, instead of raising in every tapped turn of a
+    live run. The tap must record each decision and change none."""
+    granted = f"mcp__bos-tools__{EXPOSED_TOOL}"
+    grant = ("http://127.0.0.1:9/mcp", "not-a-token", frozenset({granted}))
+
+    def gates(options: Any) -> tuple[Any, Any]:
+        return options.hooks["PreToolUse"][0].hooks[0], options.can_use_tool
+
+    real_hook, real_can_use_tool = gates(agent._options(grant))
+    tap = install_gate_tap(agent)
+    assert install_gate_tap(agent) is tap, "install_gate_tap must be idempotent per agent"
+    hook, can_use_tool = gates(agent._options(grant))
+    for data in (
+        {"tool_name": "Read", "tool_input": {"file_path": str(workspace / "NOTES.md")}},
+        {"tool_name": "Read", "tool_input": {"file_path": str(workspace.parent / "elsewhere.txt")}},
+        {"tool_name": granted, "tool_input": {"text": "x"}},
+    ):
+        assert await hook(data, "id", None) == await real_hook(data, "id", None), f"the tap changed {data}'s decision"
+    assert tap.hook_calls == [("Read", False), ("Read", True), (granted, False)], tap.hook_calls
+    for name in ("Read", "Bash", granted):
+        tapped, real = await can_use_tool(name, {}, None), await real_can_use_tool(name, {}, None)
+        assert type(tapped) is type(real), f"the tap changed {name}'s answer"
+    assert tap.can_use_tool_calls == [("Read", True), ("Bash", False), (granted, True)], tap.can_use_tool_calls
+
+
+class _RaisingAgent:
+    """Every agent in :func:`_check_raising_turns_are_errors`: each turn raises the ``TypeError`` the
+    gate tap's drift once raised in every tapped turn."""
+
+    def _hook(self, *args: Any, **kwargs: Any) -> None:
+        return None
+
+    def _can_use_tool(self, *args: Any, **kwargs: Any) -> None:
+        return None
+
+    def request_stop(self) -> None:
+        pass
+
+    async def run(self, *args: Any, **kwargs: Any) -> Any:
+        raise TypeError("hook_factory() takes 0 positional arguments but 1 was given (simulated)")
+
+
+class _EmptyApp:
+    """A ``BosApp`` stand-in with no history: ``harness.chat_store`` is itself, and every read is empty."""
+
+    def __init__(self) -> None:
+        self.harness = self
+        self.chat_store = self
+
+    def agent(self, kind: str) -> _RaisingAgent:
+        return _RaisingAgent()
+
+    async def get_messages(self, chat_id: str, **kwargs: Any) -> list[Any]:
+        return []
+
+
+async def _check_raising_turns_are_errors() -> None:
+    """Every item, run as a phase runs it, against agents whose every turn raises: each item that
+    runs a turn comes out ERROR — never PASS or FAIL, which a crashed turn once faked (a write never
+    attempted read as "the hook denied it") — and no item passes."""
+    runs_a_turn = {1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12, 13, 14, 15, 19, 22}
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        (root / "outside").mkdir()
+        (root / "marks").mkdir()
+        args = argparse.Namespace(repo_trusted=True, account_state="exhausted", stop_after=0.0, settle=0.0)
+        ctx = Ctx(
+            app=_EmptyApp(),
+            workspace=root,
+            outside=root / "outside",
+            hook_marks=root / "marks",
+            warnings=WarningLog(),
+            args=args,
+        )
+        for item in CHECKS:
+            mark, note = await run_item(item, ctx)
+            assert mark != PASS, f"item {item.n} passed on turns that raised: {note}"
+            if item.n in runs_a_turn:
+                assert mark == ERROR, f"item {item.n} marked a turn that raised {mark}, not ERROR: {note}"
 
 
 def self_check() -> int:
     """Everything here that does not need the network, asserted. Nobody can run this script end to
     end without a Claude login, so its correctness has to come from somewhere: the registry's
-    shape, the report renderer, the banner, and the gate-tap wiring items 5 and 11 read. Deliberately
+    shape, the report renderer, the banner, the gate-tap wiring items 5 and 11 read — driven through
+    a real ``ClaudeCodeAgent`` — and that every item marks a turn that raised ERROR. Deliberately
     NOT a pytest file — this script must stay uncollectable."""
     numbers = sorted(i.n for i in CHECKS) + [23]
     assert sorted(numbers) == list(range(1, 24)), f"checklist 1-23 must each appear once, got {sorted(numbers)}"
@@ -1375,43 +1507,11 @@ def self_check() -> int:
         assert [i.mark for i in restored] == [PASS]
         assert restore_items({}, "start") == []
 
-    # `GateTap` must not change the hook's or `can_use_tool`'s decisions, only record them — checked
-    # against the real classes' shape rather than by driving a CLI, which self-check must not do.
-    from claude_agent_sdk import PermissionResultAllow
-
-    class _FakeAgent:
-        def _hook(self) -> Callable[..., Awaitable[Any]]:
-            async def hook(input_data: Any, tool_use_id: Any, context: Any) -> Any:
-                return (
-                    {}
-                    if input_data.get("tool_name") == "Read"
-                    else {"hookSpecificOutput": {"permissionDecision": "deny", "permissionDecisionReason": "no"}}
-                )
-
-            return hook
-
-        def _can_use_tool(self) -> Callable[..., Awaitable[Any]]:
-            async def can_use_tool(tool_name: str, tool_input: dict[str, Any], context: Any) -> Any:
-                return PermissionResultAllow()
-
-            return can_use_tool
-
-    fake = _FakeAgent()
-    tap = install_gate_tap(fake)
-    assert install_gate_tap(fake) is tap, "install_gate_tap must be idempotent per agent"
-    hook = fake._hook()
-    assert asyncio.run(hook({"tool_name": "Read"}, "id", None)) == {}
-    assert tap.hook_calls == [("Read", False)]
-    denied = asyncio.run(hook({"tool_name": "Write"}, "id", None))
-    assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
-    assert tap.hook_calls[-1] == ("Write", True)
-    can_use_tool = fake._can_use_tool()
-    assert type(asyncio.run(can_use_tool("Read", {}, None))).__name__ == "PermissionResultAllow"
-    assert tap.can_use_tool_calls == [("Read", True)]
-
     # The one thing worth more than all of the above: that the config in this file really does
-    # build every agent through a real BosApp.
+    # build every agent through a real BosApp, and that the gate tap follows the real runtime.
     asyncio.run(_check_configs_build())
+    # And that no check turns a turn that raised into a verdict.
+    asyncio.run(_check_raising_turns_are_errors())
 
     assert describe(None) == "no error"
     assert describe(ValueError("boom")).startswith("ValueError: boom")
