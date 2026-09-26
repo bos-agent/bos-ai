@@ -181,9 +181,9 @@ _REPO_SETTING_SOURCES = {"project": ".claude/settings.json", "local": ".claude/s
 # variable's parser there, since an override can only switch a variable off if the CLI reads
 # the value as off: `M.bool` counts a value as set only when, trimmed and lower-cased, it is
 # 1, true, yes or on; `M.triBool` reads 0, false, no and off as an explicit false; `M.str`
-# reads an empty value as unset. None of these variables is read as set by its mere presence,
-# which an override could not undo — the SDK cannot unset a variable — and BOS would have to
-# refuse instead.
+# reads an empty value as unset; a few are read raw, by the same rule as `M.bool`. None of
+# these variables is read as set by its mere presence, which an override could not undo —
+# the SDK cannot unset a variable — and BOS would have to refuse instead.
 _INHERITED_ENV_OVERRIDES: Mapping[str, str] = MappingProxyType({
     # Measured against the real CLI with BOS's options; tests pin each one:
     # loads plugin folders as inline plugins, whose hooks then ran at `read-only`.
@@ -220,14 +220,47 @@ _INHERITED_ENV_OVERRIDES: Mapping[str, str] = MappingProxyType({
     # claude.ai login and the extension to measure). An explicit false is read before the
     # global config's `claudeInChromeDefaultEnabled`, so that cannot turn it back on either.
     "CLAUDE_CODE_ENABLE_CFC": "0",
+    # Read from the source and not measured, found by checking this list against the CLI's
+    # whole environment catalog (see the closing note below). Each decides something BOS
+    # owns: what a resumed session does with a stopped turn, the tools, agents and sessions
+    # beyond the twenty tools the confinement was measured against, what BOS reads back.
+    # when a session is resumed, carries on a turn that was interrupted in it instead of the
+    # turn BOS asked for, and BOS interrupts turns on purpose, on timeout and on stop (BEP 19
+    # §3.10.2); with it, a permission left pending is adopted without asking.
+    "CLAUDE_CODE_RESUME_INTERRUPTED_TURN": "",
+    "CLAUDE_CODE_ADOPT_UNDERIVABLE_PARKED_PERMISSION": "",
+    # offer tools beyond the twenty: one that proposes and saves skills, and the advisor.
+    "CLAUDE_CODE_SKILL_PROPOSALS": "",
+    "CLAUDE_CODE_ENABLE_EXPERIMENTAL_ADVISOR_TOOL": "",
+    # start agents or sessions of their own: agent teams, observer agents and forked
+    # subagents (an explicit false, since that parser is three-way).
+    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "",
+    "CLAUDE_CODE_EXPERIMENTAL_OBSERVER_AGENTS": "",
+    "CLAUDE_CODE_FORK_SUBAGENT": "0",
+    # the variables behind two fields `native_options` refuses, `forward_subagent_text` and
+    # `enable_file_checkpointing`, for the reasons given there.
+    "CLAUDE_CODE_FORWARD_SUBAGENT_TEXT": "",
+    "CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING": "",
+    # upgrades a package manager's Claude Code install on the host — a change outside
+    # `permission`, to a CLI BOS does not run (it runs the one bundled with the SDK).
+    "CLAUDE_CODE_PACKAGE_MANAGER_AUTO_UPDATE": "",
+    # a second gate for memory context in the CLI's reminders; auto-memory is off above.
+    "SYSTEM_REMINDER_MEMORY_CONTEXT": "",
 })
 # Read on those paths and left alone, because under BOS's default each is inert or loads
 # nothing from outside the session:
 # - compiled out of this build, their readers returning nothing: CLAUDE_CODE_MANAGED_
 #   SETTINGS_PATH and CLAUDE_CODE_REMOTE_SETTINGS_PATH; with no reader at all:
-#   CLAUDE_CODE_MOCK_REMOTE_SETTINGS and ALLOW_ANT_COMPUTER_USE_MCP.
+#   CLAUDE_CODE_MOCK_REMOTE_SETTINGS, ALLOW_ANT_COMPUTER_USE_MCP, CLAUDE_CODE_ENABLE_DESIGN_
+#   SYNC and CLAUDE_CODE_AUTO_MODE_EXTERNAL_PERMISSIONS.
 # - where the CLI keeps its own login and global config: CLAUDE_CONFIG_DIR and
 #   CLAUDE_SECURESTORAGE_CONFIG_DIR. What they hold that the default excludes stays excluded.
+# - CLAUDE_CODE_ENABLE_PROXY_AUTH_HELPER, which runs a proxy-auth helper only a settings file
+#   names — under the default, only managed settings, the administrator's policy.
+# - the operator's shaping of each API request, which loads nothing and reaches nothing on
+#   the host: CLAUDE_CODE_EXTRA_BODY and CLAUDE_CODE_EXTRA_METADATA.
+# - git's own variables (GIT_CONFIG_GLOBAL, GIT_CONFIG_COUNT and the rest): the operator's git
+#   configuration, which the git the CLI runs honours like any other.
 # - relocations of what only a settings file enables: CLAUDE_CODE_PLUGIN_CACHE_DIR, and
 #   CLAUDE_CODE_USE_COWORK_PLUGINS, which renames the user settings file and plugin cache.
 # - acting only on plugins a settings file enables — how and when those install, refresh,
@@ -237,22 +270,29 @@ _INHERITED_ENV_OVERRIDES: Mapping[str, str] = MappingProxyType({
 #   TRUSTED. Under the default no repo settings load for trust to gate.
 # - feature switches, which change what the CLI offers rather than load anything:
 #   CLAUDE_CODE_ENABLE_FUNCTION_HOOKS, CLAUDE_CODE_WORKFLOWS, CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT,
-#   and CLAUDE_CODE_COORDINATOR_EXTRA_TOOLS (coordinator mode only).
+#   CLAUDE_CODE_COORDINATOR_EXTRA_TOOLS (coordinator mode only), and CLAUDE_CODE_WEB_FETCH_
+#   AGENT, which changes how the WebFetch the CLI already offers does its work.
 # - CLAUDE_CODE_BRIDGE_CHILD_MACHINE_SETTINGS, read in an ordinary session too, but only by
 #   Claude in Chrome's gate, after CLAUDE_CODE_ENABLE_CFC's explicit false has closed it.
 # - read only by modes BOS never starts: the other bridge-child variables, the
 #   self-hosted runner (SELF_HOSTED_RUNNER_*, its lifecycle hooks included), the
 #   environment-delivered workflow subcommand (CLAUDE_REMOTE_WORKFLOW_SCRIPT and _ARGS), and
-#   the `claude agents` view (CLAUDE_AGENTS_SELECT, CLAUDE_CODE_AGENT).
+#   the `claude agents` view (CLAUDE_AGENTS_SELECT, CLAUDE_CODE_AGENT); and the Remote
+#   Control worker, whose early hydrate, agent proxy and directory sync (CLAUDE_CODE_REMOTE,
+#   the CCR_* and CLAUDE_CODE_DIR_SYNC_* families) start only under `--sdk-url`, a flag the
+#   SDK never sends. Inherited alone, CLAUDE_CODE_REMOTE loads nothing the default excludes.
 # - the rest of the CLI's memory features, which relocate or extend the auto-memory switched
 #   off above: CLAUDE_MEMORY_STORES, CLAUDE_CODE_REMOTE_MEMORY_DIR, CLAUDE_COWORK_MEMORY_*
 #   and CLAUDE_CODE_POST_TURN_MEMORY*.
 # - CLAUDE_AGENT_SDK_MCP_NO_PREFIX, which renames the tools of in-process SDK MCP servers
 #   only, and BOS's MCP server is an HTTP one (§3.8).
 # - restrictions only: CLAUDE_CODE_DISABLE_* and CLAUDE_CODE_SKIP_PLUGIN_MCP_SERVERS*.
-# Every other variable on those paths was classified by its name alone, and not read one by
-# one: those named as a timeout, size, batch, cgroup or display setting. Each name that reads
-# as a trigger — sync, install, update, fetch, enable, load — was read where it is used.
+# The list was then checked against the CLI's whole environment catalog, the 1030 names its
+# environment module declares: each of the 225 whose names put them on a loading path or
+# read as a trigger (sync, install, update, fetch, enable, load) was classified, its use
+# sites read wherever it could load, widen, fetch or bill. Those that matter are named
+# above; the rest are timeouts, sizes, caches, telemetry, display settings, TLS and tool
+# paths, further restrictions, and internals of the modes named above.
 
 # BEP 19 §3.10.3: under `auth = "subscription"`, each of these in BOS's environment makes the
 # CLI stop using the subscription login — the CLI inherits that environment whole (§3.12) —

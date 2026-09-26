@@ -928,7 +928,7 @@ async def test_a_host_that_opts_into_repo_settings_runs_the_repos_commands(
 def test_every_client_switches_off_the_inherited_variables_that_load_what_the_default_leaves_out(tmp_path):
     """BEP 19 §3.12: the values BOS sends over whatever it inherited. Spelled out here, so an
     override dropped from claude_code.py fails. Five are measured by the test below; the other
-    six are read from the CLI source, and this is all that can be pinned of them here."""
+    seventeen are read from the CLI source, and this is all that can be pinned of them here."""
     assert _agent(tmp_path)._options().env == {
         "CLAUDE_CODE_PLUGIN_DIRS": "",
         "CLAUDE_BG_SESSION_PERMISSION_RULES": "",
@@ -941,6 +941,17 @@ def test_every_client_switches_off_the_inherited_variables_that_load_what_the_de
         "CLAUDE_CODE_SYNC_SESSION_REFS": "",
         "ENABLE_CLAUDEAI_MCP_SERVERS": "false",
         "CLAUDE_CODE_ENABLE_CFC": "0",
+        "CLAUDE_CODE_RESUME_INTERRUPTED_TURN": "",
+        "CLAUDE_CODE_ADOPT_UNDERIVABLE_PARKED_PERMISSION": "",
+        "CLAUDE_CODE_SKILL_PROPOSALS": "",
+        "CLAUDE_CODE_ENABLE_EXPERIMENTAL_ADVISOR_TOOL": "",
+        "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "",
+        "CLAUDE_CODE_EXPERIMENTAL_OBSERVER_AGENTS": "",
+        "CLAUDE_CODE_FORK_SUBAGENT": "0",
+        "CLAUDE_CODE_FORWARD_SUBAGENT_TEXT": "",
+        "CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING": "",
+        "CLAUDE_CODE_PACKAGE_MANAGER_AUTO_UPDATE": "",
+        "SYSTEM_REMINDER_MEMORY_CONTEXT": "",
     }
 
 
