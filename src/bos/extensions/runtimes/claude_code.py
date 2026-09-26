@@ -34,6 +34,7 @@ import json
 import logging
 import os
 import shutil
+import stat
 import sys
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
@@ -243,6 +244,16 @@ _SUBSCRIPTION_BYPASS_VARS: Mapping[str, str] = MappingProxyType({
 # CLAUDE_CODE_OAUTH_TOKEN is.
 _WELL_KNOWN_API_KEY_FILE = Path("/home/claude/.claude/remote/.api_key")
 
+# BEP 19 §3.4.1.4: the root CLAUDE.md BOS reads and appends when the CLI would not load it —
+# that is, when `setting_sources` has no `project`. The cap is where Claude Code itself calls
+# a memory file large: it warns once one passes about 5% of the context window, with a floor
+# of 40,000 characters (read from the CLI 2.1.281 source). BOS truncates there rather than
+# warn and send it all, because it pays for the file in the system prompt of every turn.
+# Counted in bytes, so it never admits more than 40,000 characters.
+_CLAUDE_MD_MAX_BYTES = 40_000
+_CLAUDE_MD_HEADING = "# CLAUDE.md in the working directory"
+_CLAUDE_MD_TRUNCATED = f"[BOS truncated this CLAUDE.md at {_CLAUDE_MD_MAX_BYTES} bytes.]"
+
 # macOS: the binary the CLI runs every sandboxed command through (read from the CLI
 # 2.1.281 source; no macOS host has measured it).
 _SANDBOX_EXEC = "/usr/bin/sandbox-exec"
@@ -378,15 +389,94 @@ def _refuse_native_options(native_options: Mapping[str, Any]) -> None:
         )
 
 
-def _system_prompt(config: ExternalAgentConfig) -> str | SystemPromptPreset:
+def _system_prompt(config: ExternalAgentConfig, claude_md: str | None) -> str | SystemPromptPreset:
     """BEP 19 §3.4.1: ``system_prompt`` is appended to Claude Code's own prompt and
     ``base_instructions`` replaces it. With neither, the preset goes out bare — never
-    ``None``, which the SDK turns into an *empty* prompt (§3.4.1.3, fact 8)."""
+    ``None``, which the SDK turns into an *empty* prompt (§3.4.1.3, fact 8).
+
+    *claude_md* is the working directory's CLAUDE.md as BOS read it (``_root_claude_md``),
+    appended after the agent's own instructions under a heading of its own. Never to
+    ``base_instructions``: that key means the host owns the whole prompt, and BOS adding the
+    repository's text to it would break that (§3.4.1.4)."""
     if config.base_instructions is not None:
         return config.base_instructions
-    if config.system_prompt is not None:
-        return {"type": "preset", "preset": "claude_code", "append": config.system_prompt}
-    return {"type": "preset", "preset": "claude_code"}
+    parts = [config.system_prompt] if config.system_prompt is not None else []
+    if claude_md is not None:
+        parts.append(f"{_CLAUDE_MD_HEADING}\n\n{claude_md}")
+    if not parts:
+        return {"type": "preset", "preset": "claude_code"}
+    return {"type": "preset", "preset": "claude_code", "append": "\n\n".join(parts)}
+
+
+def _root_claude_md(cwd: Path) -> str | None:
+    """The agent's own ``<cwd>/CLAUDE.md`` as text, for BOS to append to its instructions — or
+    None when there is none, or it is refused (BEP 19 §3.4.1.4).
+
+    Only that one file. Not Claude Code's memory loading: no ``@import`` is expanded, and no
+    CLAUDE.md in a subdirectory, no CLAUDE.local.md and no user-level file is read.
+
+    Contained, because BOS reads this in its own process, outside every confinement, and sends
+    it to the model provider: a repository whose CLAUDE.md is a symlink to ~/.ssh/id_rsa must
+    not get the key read and shipped. The path is resolved, symlinks included, and must be a
+    regular file inside *cwd*, which ``parse_external_config`` has already resolved. On Linux
+    and macOS the check runs again on the file actually opened, since a process in the same
+    directory could swap a directory for a symlink in between; elsewhere only the first check
+    runs. The open follows no final symlink and does not block, so a FIFO swapped in cannot
+    hang the turn. Refused with a WARNING that names the path.
+
+    Read per turn, because each turn starts its own CLI, which reads memory afresh when it
+    starts; an agent that edits the file changes what its next turn sees.
+    """
+    candidate = cwd / "CLAUDE.md"
+    if not os.path.lexists(candidate):
+        return None
+    resolved = candidate.resolve()
+    if cwd not in resolved.parents or not resolved.is_file():
+        logger.warning(
+            "%s resolves to %s, which is not a regular file inside %s; BOS did not read it", candidate, resolved, cwd
+        )
+        return None
+    try:
+        fd = os.open(resolved, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+    except OSError as exc:
+        logger.warning("%s could not be opened (%s); BOS did not read it", candidate, exc)
+        return None
+    try:
+        # Checked on the bare descriptor: `os.fdopen` itself raises for a directory.
+        opened = _opened_path(fd)
+        if not stat.S_ISREG(os.fstat(fd).st_mode) or (opened is not None and cwd not in opened.parents):
+            logger.warning(
+                "%s was no longer a regular file inside %s once BOS opened it (it opened %s); BOS did not read it",
+                candidate,
+                cwd,
+                opened,
+            )
+            return None
+        with os.fdopen(fd, "rb", closefd=False) as file:
+            data = file.read(_CLAUDE_MD_MAX_BYTES + 1)
+    finally:
+        os.close(fd)
+    text = data[:_CLAUDE_MD_MAX_BYTES].decode("utf-8", errors="replace")
+    if len(data) > _CLAUDE_MD_MAX_BYTES:
+        logger.warning(
+            "%s is over %d bytes; BOS appended only the first %d", candidate, _CLAUDE_MD_MAX_BYTES, _CLAUDE_MD_MAX_BYTES
+        )
+        text += f"\n\n{_CLAUDE_MD_TRUNCATED}"
+    return text
+
+
+def _opened_path(fd: int) -> Path | None:
+    """Where the kernel says open file *fd* is — on Linux and macOS — or None elsewhere."""
+    try:
+        if sys.platform.startswith("linux"):
+            return Path(os.readlink(f"/proc/self/fd/{fd}"))
+        if sys.platform == "darwin":
+            import fcntl
+
+            return Path(fcntl.fcntl(fd, fcntl.F_GETPATH, bytes(1024)).split(b"\0", 1)[0].decode())
+    except OSError:
+        return None
+    return None
 
 
 class ClaudeCodeAgent:
@@ -507,8 +597,9 @@ class ClaudeCodeAgent:
         ``can_use_tool``, the stderr tripwire and the MCP egress are not built yet, so
         nothing sets them.
 
-        Built afresh for every client, never cached, because each call's settings carry
-        a new nonce (``_SETTINGS_NONCE_VAR``).
+        Built afresh for every client, never cached: each call's settings carry a new nonce
+        (``_SETTINGS_NONCE_VAR``), and each call reads the working directory's CLAUDE.md again
+        (``_root_claude_md``).
         """
         # `env` carries `_INHERITED_ENV_OVERRIDES`, and deliberately no `CLAUDE_CODE_SANDBOXED`
         # override. The CLI source reads an inherited one as "trusted", but in everything
@@ -517,6 +608,9 @@ class ClaudeCodeAgent:
         # does not reach, and with `project` loaded, the repo's hooks, MCP servers, settings
         # `env` and apiKeyHelper ran without any trust at all.
         config = self._config
+        # BEP 19 §3.4.1.4: the CLI loads CLAUDE.md itself under `project`, and `base_instructions`
+        # means the host owns the whole prompt, so only otherwise does BOS read the file.
+        reads_claude_md = config.base_instructions is None and "project" not in self._setting_sources
         sandbox = (
             cast(SandboxSettings, dict(_WORKSPACE_WRITE_SANDBOX)) if config.permission == "workspace-write" else None
         )
@@ -526,7 +620,7 @@ class ClaudeCodeAgent:
             sandbox=sandbox,
             settings=json.dumps({"env": {_SETTINGS_NONCE_VAR: uuid.uuid4().hex}}),
             setting_sources=list(self._setting_sources),
-            system_prompt=_system_prompt(config),
+            system_prompt=_system_prompt(config, _root_claude_md(config.cwd) if reads_claude_md else None),
             max_turns=self._max_turns,
             model=config.model,
             strict_mcp_config=True,

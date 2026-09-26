@@ -21,6 +21,7 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -227,7 +228,9 @@ async def test_a_missing_extra_is_named_by_the_real_runtime_module(tmp_path, mon
 def test_the_prompt_flags_on_the_built_command(tmp_path, prompt_cfg, system_prompt, append):
     """BEP 19 §7.13, asserted on the command BOS's options produce rather than on the
     resolved config: §3.4.1.3's trap — ``None`` sends an *empty* prompt — is invisible at
-    the config layer. Fact 8 pins the SDK's half; this pins BOS's."""
+    the config layer. Fact 8 pins the SDK's half; this pins BOS's. With no CLAUDE.md in the
+    working directory: when there is one, the "neither" case carries ``--append-system-prompt``
+    too, since BOS appends the file (``test_the_root_claude_md_is_appended_after_...``)."""
     command = _command(_agent(tmp_path, **prompt_cfg)._options())
 
     assert _flag(command, "--system-prompt") == system_prompt
@@ -324,6 +327,254 @@ def test_max_iterations_must_be_a_positive_integer(tmp_path, max_iterations):
     arrive as no limit at all."""
     with pytest.raises(ValueError, match="max_iterations"):
         _agent(tmp_path, max_iterations=max_iterations)
+
+
+# ── The root CLAUDE.md, read by BOS (BEP 19 §3.4.1.4) ───────────────────────
+
+_HEADING = "# CLAUDE.md in the working directory"
+
+
+def _append(agent: ClaudeCodeAgent) -> str | None:
+    """The ``--append-system-prompt`` BOS's options produce for *agent*, or None."""
+    return _flag(_command(agent._options()), "--append-system-prompt")
+
+
+@pytest.mark.parametrize(
+    ("prompt_cfg", "expected"),
+    [
+        ({"system_prompt": "You are the implementer."}, f"You are the implementer.\n\n{_HEADING}\n\nUse tabs.\n"),
+        ({}, f"{_HEADING}\n\nUse tabs.\n"),
+    ],
+    ids=["after-system_prompt", "alone"],
+)
+def test_the_root_claude_md_is_appended_after_the_agents_own_instructions(tmp_path, prompt_cfg, expected):
+    """Under the default the CLI loads no CLAUDE.md, so BOS reads the root one as text and
+    appends it to Claude Code's own prompt — after the agent's own ``system_prompt`` when there
+    is one, and as the whole append when there is not. Never ``--system-prompt``: the harness
+    keeps its prompt."""
+    (tmp_path / "CLAUDE.md").write_text("Use tabs.\n")
+    command = _command(_agent(tmp_path, **prompt_cfg)._options())
+
+    assert _flag(command, "--append-system-prompt") == expected
+    assert "--system-prompt" not in command
+
+
+def test_the_root_claude_md_never_joins_base_instructions(tmp_path):
+    """``base_instructions`` means the host owns the whole prompt; BOS adding the repository's
+    text to it would break that."""
+    (tmp_path / "CLAUDE.md").write_text("Use tabs.\n")
+    command = _command(_agent(tmp_path, base_instructions="Replace it.")._options())
+
+    assert _flag(command, "--system-prompt") == "Replace it."
+    assert "--append-system-prompt" not in command and "Use tabs." not in " ".join(command)
+    agent = _agent(tmp_path, base_instructions="Replace it.")
+    assert claude_code._system_prompt(agent._config, "Use tabs.\n") == "Replace it.", "even when handed the file"
+
+
+@pytest.mark.parametrize("prompt_cfg", [{"base_instructions": "Replace it."}, {"setting_sources": ["project"]}])
+def test_the_root_claude_md_is_not_even_read_when_it_could_not_be_used(tmp_path, caplog, prompt_cfg):
+    """Under ``base_instructions`` or ``project`` BOS does not read the file at all, so an escaping
+    one is not even looked at: no WARNING about it."""
+    secret = tmp_path / "id_rsa"
+    secret.write_text("CANARY-private-key\n")
+    (tmp_path / "ws").mkdir()
+    (tmp_path / "ws" / "CLAUDE.md").symlink_to(secret)
+
+    with caplog.at_level(logging.WARNING, logger="bos.extensions.runtimes.claude_code"):
+        _agent(tmp_path, cwd="ws", **prompt_cfg)._options()
+    assert not [r for r in caplog.records if "CLAUDE.md" in r.getMessage()]
+
+
+def test_the_root_claude_md_is_left_to_the_cli_when_project_settings_load(tmp_path):
+    """Under ``project`` the CLI loads CLAUDE.md itself; BOS must not send it a second time."""
+    (tmp_path / "CLAUDE.md").write_text("Use tabs.\n")
+
+    assert _append(_agent(tmp_path, setting_sources=["project"])) is None
+
+
+def test_no_claude_md_no_append(tmp_path):
+    assert _append(_agent(tmp_path)) is None
+
+
+def test_only_the_root_claude_md_is_read(tmp_path):
+    """Not Claude Code's memory loading: an ``@import`` stays literal text, and CLAUDE.local.md
+    and a subdirectory's CLAUDE.md are never read."""
+    (tmp_path / "CLAUDE.md").write_text("Use tabs. See @other.md\n")
+    (tmp_path / "other.md").write_text("CANARY-imported\n")
+    (tmp_path / "CLAUDE.local.md").write_text("CANARY-local\n")
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "CLAUDE.md").write_text("CANARY-sub\n")
+
+    appended = _append(_agent(tmp_path)) or ""
+    assert "Use tabs. See @other.md" in appended
+    assert not [canary for canary in ("CANARY-imported", "CANARY-local", "CANARY-sub") if canary in appended]
+
+
+def test_a_symlink_that_stays_inside_the_root_is_followed(tmp_path):
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "agents.md").write_text("Use tabs.\n")
+    (tmp_path / "CLAUDE.md").symlink_to(tmp_path / "docs" / "agents.md")
+
+    assert _append(_agent(tmp_path)) == f"{_HEADING}\n\nUse tabs.\n"
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [
+        "symlink-outside",
+        "directory",
+        "dangling-symlink",
+        pytest.param("fifo", marks=pytest.mark.skipif(sys.platform == "win32", reason="POSIX FIFO")),
+    ],
+)
+def test_a_claude_md_that_is_not_a_regular_file_inside_the_root_is_not_read(tmp_path, caplog, shape):
+    """Security-critical: BOS reads the file in its own process, outside every confinement,
+    and sends it to the model provider. Whatever the name resolves to must be a regular file
+    inside the agent's root; anything else is left unread, with a WARNING that names it and
+    where it leads. Refused by the first check, before anything is opened, so the check after
+    the open (``test_a_claude_md_swapped_after_the_check_is_still_not_read``) cannot mask it."""
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    secret = tmp_path / "id_rsa"
+    secret.write_text("CANARY-private-key\n")
+    leads_to = ws / "CLAUDE.md"
+    if shape == "symlink-outside":
+        (ws / "CLAUDE.md").symlink_to(secret)
+        leads_to = secret
+    elif shape == "directory":
+        (ws / "CLAUDE.md").mkdir()
+    elif shape == "fifo":
+        os.mkfifo(ws / "CLAUDE.md")  # reading it would block the turn
+    else:
+        (ws / "CLAUDE.md").symlink_to(ws / "missing.md")
+        leads_to = ws / "missing.md"
+
+    with caplog.at_level(logging.WARNING, logger="bos.extensions.runtimes.claude_code"):
+        appended = _append(_agent(tmp_path, cwd="ws"))
+    assert appended is None
+    warnings = [r.getMessage() for r in caplog.records if r.name == "bos.extensions.runtimes.claude_code"]
+    assert len(warnings) == 1 and f"{ws / 'CLAUDE.md'} resolves to {leads_to}," in warnings[0], warnings
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX FIFOs and symlinks")
+@pytest.mark.parametrize("swap", ["fifo", "directory", "symlink-outside"])
+def test_a_claude_md_swapped_after_the_check_is_still_not_read(tmp_path, monkeypatch, caplog, swap):
+    """The race the second check is for: the name passes the first check, and something in
+    the same directory swaps it before BOS opens it. The kernel's answer for the opened file is
+    withheld here, as on a platform without one, so what refuses each swap is the open — no
+    final symlink followed, no waiting on a FIFO — and ``fstat``. A blocking open would wait
+    for a writer forever; a late writer stands in for one, and says so."""
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    secret = tmp_path / "id_rsa"
+    secret.write_text("CANARY-private-key\n")
+    target = ws / "CLAUDE.md"
+    target.write_text("Use tabs.\n")
+    real_open = os.open
+
+    def swap_then_open(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+        if Path(path) == target:
+            target.unlink()
+            if swap == "fifo":
+                os.mkfifo(target)
+            elif swap == "directory":
+                target.mkdir()
+            else:
+                target.symlink_to(secret)
+        return real_open(path, flags, *args, **kwargs)
+
+    done, blocked = threading.Event(), threading.Event()
+
+    def late_writer() -> None:
+        if not done.wait(10):
+            blocked.set()
+            os.close(real_open(target, os.O_WRONLY))
+
+    monkeypatch.setattr(claude_code, "_opened_path", lambda fd: None)
+    monkeypatch.setattr(os, "open", swap_then_open)
+    threading.Thread(target=late_writer, daemon=True).start()
+    try:
+        with caplog.at_level(logging.WARNING, logger="bos.extensions.runtimes.claude_code"):
+            appended = _append(_agent(tmp_path, cwd="ws"))
+    finally:
+        done.set()
+
+    assert not blocked.is_set(), "opening the FIFO waited for a writer"
+    assert appended is None, appended
+    warnings = [r.getMessage() for r in caplog.records if r.name == "bos.extensions.runtimes.claude_code"]
+    assert len(warnings) == 1 and str(target) in warnings[0], warnings
+
+
+def test_the_file_actually_opened_is_checked_again(tmp_path, monkeypatch, caplog):
+    """A process in the same directory could swap a directory for a symlink between the check
+    and the open. On Linux and macOS BOS asks the kernel where the opened file is and refuses
+    one outside the root — here made to answer as a swap would."""
+    (tmp_path / "CLAUDE.md").write_text("Use tabs.\n")
+    monkeypatch.setattr(claude_code, "_opened_path", lambda fd: Path("/home/someone/.ssh/id_rsa"))
+
+    with caplog.at_level(logging.WARNING, logger="bos.extensions.runtimes.claude_code"):
+        assert _append(_agent(tmp_path)) is None
+    assert any("/home/someone/.ssh/id_rsa" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="reads /proc/self/fd")
+def test_the_kernel_names_the_file_actually_opened(tmp_path):
+    (tmp_path / "real.md").write_text("x")
+    (tmp_path / "link.md").symlink_to(tmp_path / "real.md")
+    with open(tmp_path / "link.md") as file:
+        assert claude_code._opened_path(file.fileno()) == (tmp_path / "real.md").resolve()
+
+
+def test_an_oversized_claude_md_is_truncated_with_a_marker_and_a_warning(tmp_path, caplog):
+    cap = claude_code._CLAUDE_MD_MAX_BYTES
+    (tmp_path / "CLAUDE.md").write_text("x" * (cap + 100))
+
+    with caplog.at_level(logging.WARNING, logger="bos.extensions.runtimes.claude_code"):
+        appended = _append(_agent(tmp_path)) or ""
+    assert appended == f"{_HEADING}\n\n{'x' * cap}\n\n[BOS truncated this CLAUDE.md at {cap} bytes.]"
+    warnings = [r.getMessage() for r in caplog.records if r.name == "bos.extensions.runtimes.claude_code"]
+    assert len(warnings) == 1 and str(tmp_path / "CLAUDE.md") in warnings[0] and str(cap) in warnings[0]
+
+
+def test_a_claude_md_that_is_not_utf8_is_decoded_with_replacements(tmp_path):
+    (tmp_path / "CLAUDE.md").write_bytes(b"Use \xff tabs.\n")
+
+    assert _append(_agent(tmp_path)) == f"{_HEADING}\n\nUse \ufffd tabs.\n"
+
+
+def test_the_root_claude_md_is_read_again_for_every_turn(tmp_path):
+    """Each turn starts its own CLI, which reads memory afresh when it starts; an agent that
+    edits CLAUDE.md changes what its next turn sees."""
+    agent = _agent(tmp_path)
+    (tmp_path / "CLAUDE.md").write_text("Use tabs.\n")
+    first = _append(agent)
+    (tmp_path / "CLAUDE.md").write_text("Use spaces.\n")
+
+    assert (first, _append(agent)) == (f"{_HEADING}\n\nUse tabs.\n", f"{_HEADING}\n\nUse spaces.\n")
+
+
+@pytest.mark.asyncio
+async def test_a_claude_md_symlinked_outside_the_root_never_reaches_the_model(tmp_path, fake_anthropic, caplog):
+    """The containment rule end to end, against the real CLI: a repository whose CLAUDE.md is a
+    symlink to a file outside the agent's root — here standing in for ~/.ssh/id_rsa — does not
+    get that file read and sent. The canary appears in no request the model received."""
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    secret = tmp_path / "id_rsa"
+    secret.write_text("CANARY-private-key-8b0e\n")
+    (ws / "CLAUDE.md").symlink_to(secret)
+
+    with caplog.at_level(logging.WARNING, logger="bos.extensions.runtimes.claude_code"):
+        options = _for_the_fake(_agent(tmp_path, cwd="ws")._options(), tmp_path, fake_anthropic)
+    async with asyncio.timeout(60):
+        async with ClaudeSDKClient(options) as client:
+            await client.query("go")
+            messages = [message async for message in client.receive_response()]
+
+    assert isinstance(messages[-1], ResultMessage) and not messages[-1].is_error, messages[-1]
+    assert fake_anthropic.requests, "the turn reached the model"
+    assert not any("CANARY-private-key-8b0e" in json.dumps(body) for body in fake_anthropic.requests)
+    assert any(str(ws / "CLAUDE.md") in r.getMessage() for r in caplog.records)
 
 
 # ── The permission mapping (BEP 19 §3.5) ─────────────────────────────────────
@@ -495,9 +746,18 @@ async def _turn_in_hostile_repo(tmp_path: Path, fake: FakeAnthropic, permission:
     return marker
 
 
-def _reached_the_model(fake: FakeAnthropic) -> list[str]:
-    """Which of the hostile repository's memory files reached the model."""
-    return [name for name, canary in _CANARIES.items() if any(canary in json.dumps(body) for body in fake.requests)]
+def _where_the_memory_files_reached(fake: FakeAnthropic) -> dict[str, list[str]]:
+    """For each of the hostile repository's memory files, which part of the model's requests
+    carried it: ``messages``, where the CLI puts a memory file it loads itself, or ``system``,
+    where BOS's appended instructions go. Measured: each lands only in its own part."""
+    return {
+        name: [
+            part
+            for part in ("system", "messages")
+            if any(canary in json.dumps(body.get(part)) for body in fake.requests)
+        ]
+        for name, canary in _CANARIES.items()
+    }
 
 
 @pytest.mark.asyncio
@@ -505,11 +765,13 @@ def _reached_the_model(fake: FakeAnthropic) -> list[str]:
 async def test_by_default_nothing_the_repo_authors_runs_or_reaches_the_model(tmp_path, fake_anthropic, permission):
     """R15, against the real CLI with BOS's default options: none of the hostile repository's
     commands runs — not the hooks or the apiKeyHelper of either settings file, not its .mcp.json
-    server — and neither memory file reaches the model."""
+    server — and the CLI loads neither memory file. The root CLAUDE.md still reaches the model,
+    in the system prompt, because BOS reads it as text and appends it (BEP 19 §3.4.1.4);
+    CLAUDE.local.md does not reach it at all."""
     marker = await _turn_in_hostile_repo(tmp_path, fake_anthropic, permission)
 
     assert [name for name, path in marker.items() if path.exists()] == []
-    assert _reached_the_model(fake_anthropic) == []
+    assert _where_the_memory_files_reached(fake_anthropic) == {"CLAUDE.md": ["system"], "CLAUDE.local.md": []}
 
 
 @pytest.mark.asyncio
@@ -528,14 +790,19 @@ async def test_a_host_that_opts_into_repo_settings_runs_the_repos_commands(
     """The control that keeps the test above from passing vacuously, and the cost the opt-in
     warning names. Under ``setting_sources = ["project"]`` the repository's .claude/settings.json
     runs its hooks and its apiKeyHelper on the host, outside the sandbox, at every level, and
-    its CLAUDE.md reaches the model; ``["local"]`` does the same with .claude/settings.local.json
-    and CLAUDE.local.md. The .mcp.json server still does not start: ``strict_mcp_config`` is
-    always sent."""
+    the CLI loads CLAUDE.md itself, so BOS does not append it a second time. ``["local"]`` runs
+    .claude/settings.local.json's instead and loads CLAUDE.local.md, and since that leaves out
+    ``project``, BOS appends CLAUDE.md. The .mcp.json server still does not start:
+    ``strict_mcp_config`` is always sent."""
     marker = await _turn_in_hostile_repo(tmp_path, fake_anthropic, permission, setting_sources=[source])
 
     ran = [name for name, path in marker.items() if path.exists()]
     assert ran == [f"{source}:SessionStart", f"{source}:PreToolUse", f"{source}:apiKeyHelper"]
-    assert _reached_the_model(fake_anthropic) == ["CLAUDE.md" if source == "project" else "CLAUDE.local.md"]
+    if source == "project":
+        assert _where_the_memory_files_reached(fake_anthropic) == {"CLAUDE.md": ["messages"], "CLAUDE.local.md": []}
+    else:
+        reached = {"CLAUDE.md": ["system"], "CLAUDE.local.md": ["messages"]}
+        assert _where_the_memory_files_reached(fake_anthropic) == reached
 
 
 def test_every_client_switches_off_the_inherited_variables_that_load_what_the_default_leaves_out(tmp_path):
