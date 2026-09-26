@@ -40,6 +40,9 @@ from claude_agent_sdk import (
     ResultMessage,
     SystemMessage,
     TextBlock,
+    ToolResultBlock,
+    ToolUseBlock,
+    UserMessage,
     get_session_messages,
 )
 from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport
@@ -2002,3 +2005,259 @@ async def test_structured_output_arrives_from_the_synthetic_tool_against_the_rea
     assert tool["input_schema"] == _ANSWER_SCHEMA, "the CLI offers the model exactly BOS's own schema"
     messages = await store.get_messages("chat-1")
     assert json.loads(messages[1].llm_message["content"]) == {"answer": "42"}, "the committed text is the tool's input"
+
+
+# ── Task 6: streaming TurnEvents (BEP 19 §3.9) ──────────────────────────────
+
+
+class CaptureSink:
+    def __init__(self) -> None:
+        self.events: list[Any] = []
+
+    async def emit(self, event: Any) -> None:
+        self.events.append(event)
+
+
+class RaisingSink:
+    """Fails on every emit. ``events`` still records each attempt (appended before the raise),
+    so a test can prove the turn keeps emitting past a failure instead of quietly giving up."""
+
+    def __init__(self) -> None:
+        self.events: list[Any] = []
+
+    async def emit(self, event: Any) -> None:
+        self.events.append(event)
+        raise RuntimeError("sink exploded")
+
+
+def _tool_turn(
+    *,
+    name: str = "Read",
+    input: dict[str, Any] | None = None,
+    tool_id: str = "tu_1",
+    is_error: bool = False,
+    text: str = "done",
+    session_id: str = "session-1",
+    **result: Any,
+) -> list[Any]:
+    """One turn as the CLI streams it when the model calls a tool the CLI runs itself: the
+    ``ToolUseBlock``, the matching ``ToolResultBlock`` in a ``UserMessage``, then whatever
+    ``_turn()`` streams for the model's final text and the ``ResultMessage``."""
+    return [
+        AssistantMessage(
+            content=[ToolUseBlock(id=tool_id, name=name, input=input or {})],
+            model="claude-opus-4-5",
+            session_id=session_id,
+            uuid="assistant-tool",
+        ),
+        UserMessage(content=[ToolResultBlock(tool_use_id=tool_id, content="ok", is_error=is_error)]),
+        *_turn(text, session_id=session_id, **result),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_stream_emits_tool_and_response_events_in_order(tmp_path, fake_claude):
+    """BEP 19 §3.9's own mapping: a tool call started and finished, the model's text, the turn
+    finished — asserted in order, by type/phase/name, with chat_id/turn_id/agent_name on each."""
+    fake_claude.arm(messages=_tool_turn(name="Read", input={"file_path": "notes.txt"}, text="read it"))
+    sink = CaptureSink()
+
+    result = await _agent(tmp_path).run("chat-1", "read notes.txt", turn_id="t1", event_sink=sink)
+
+    assert result.output == "read it"
+    assert [(e.event_type, e.phase) for e in sink.events] == [
+        ("tool", "start"),
+        ("tool", "finish"),
+        ("response", "finish"),
+        ("turn", "finish"),
+    ]
+    assert sink.events[0].tool_name == sink.events[1].tool_name == "Read"
+    assert sink.events[2].content == "read it"
+    for event in sink.events:
+        assert (event.chat_id, event.turn_id, event.agent_name) == ("chat-1", "t1", "george")
+
+
+@pytest.mark.asyncio
+async def test_a_failed_tool_result_is_a_fail_event(tmp_path, fake_claude):
+    fake_claude.arm(messages=_tool_turn(name="Bash", is_error=True))
+    sink = CaptureSink()
+
+    await _agent(tmp_path).run("chat-1", "go", turn_id="t1", event_sink=sink)
+
+    tool_events = [e for e in sink.events if e.event_type == "tool"]
+    assert [e.phase for e in tool_events] == ["start", "fail"]
+    assert all(e.tool_name == "Bash" for e in tool_events)
+
+
+@pytest.mark.asyncio
+async def test_ctx_metadata_is_carried_on_every_event(tmp_path, fake_claude):
+    fake_claude.arm(messages=_tool_turn())
+    sink = CaptureSink()
+
+    await _agent(tmp_path).run("chat-1", "go", turn_id="t1", event_sink=sink, ctx_metadata={"session": "abc"})
+
+    assert sink.events, "the turn produced events to check"
+    assert all(e.metadata == {"session": "abc"} for e in sink.events)
+
+
+@pytest.mark.asyncio
+async def test_a_sink_that_raises_does_not_end_the_turn(tmp_path, fake_claude):
+    """Emitting is best-effort: a sink that raises must not kill the turn, and must not stop
+    later messages from being attempted either — asserted via the sink's own event count."""
+    fake_claude.arm(messages=_tool_turn(text="done reading"))
+    sink = RaisingSink()
+
+    result = await _agent(tmp_path).run("chat-1", "go", turn_id="t1", event_sink=sink)
+
+    assert result.output == "done reading"
+    assert len(sink.events) == 4, "every message's event was attempted despite each emit raising"
+
+
+@pytest.mark.asyncio
+async def test_stream_with_no_sink_still_returns_a_result(tmp_path, fake_claude):
+    fake_claude.arm(messages=_tool_turn())
+
+    result = await _agent(tmp_path).run("chat-1", "go", turn_id="t1")  # event_sink omitted -> None
+
+    assert result.output == "done"
+
+
+@pytest.mark.asyncio
+async def test_a_turn_that_spends_max_turns_emits_the_agents_own_closure_event(tmp_path, fake_claude):
+    """BEP 19 §3.9: mirrors what BOS's own ``Agent`` emits at
+    ``_close_with_handoff("max_iterations")`` (agent.py) — ``turn``/``fail``, stage and detail
+    both ``max_iteration``, the static marker as content — instead of an ordinary ``turn``/
+    ``finish``. The preceding text block still becomes its own ``response``/``finish`` event: only
+    the ``ResultMessage``'s own event changes shape."""
+    fake_claude.arm(messages=_turn(subtype="error_max_turns", is_error=True, result=None, terminal_reason="max_turns"))
+    sink = CaptureSink()
+
+    result = await _agent(tmp_path, max_iterations=1).run("chat-1", "go", turn_id="t1", event_sink=sink)
+
+    assert result.output == MAX_ITERATION_CONTENT
+    assert [(e.event_type, e.phase) for e in sink.events] == [("response", "finish"), ("turn", "fail")]
+    closure = sink.events[-1]
+    assert (closure.stage, closure.detail, closure.content) == ("max_iteration", "max_iteration", MAX_ITERATION_CONTENT)
+    assert closure.metadata == {"max_iterations": 1, "closure_reason": "max_iterations"}
+
+
+@pytest.mark.asyncio
+async def test_a_schema_retry_streams_events_for_every_attempt(tmp_path, fake_claude):
+    """BEP 19 §3.9: as CodexAgent's own retry loop re-runs `_run_turn`/`_emit_stream` in full for
+    every retry (each being a brand-new native turn), every retry here streams its own events too
+    — not just the winning attempt's — simply by re-entering the same per-message loop."""
+    fake_claude.arm(messages=[*_turn("not json"), *_turn('{"answer": "42"}')])
+    sink = CaptureSink()
+
+    result = await _agent(tmp_path).run(
+        "chat-1", "go", turn_id="t1", event_sink=sink, schema=_ANSWER_SCHEMA, max_schema_retries=1
+    )
+
+    assert (result.output, result.structured) == ({"answer": "42"}, True)
+    assert [(e.event_type, e.phase) for e in sink.events] == [
+        ("response", "finish"),
+        ("turn", "finish"),
+        ("response", "finish"),
+        ("turn", "finish"),
+    ]
+    assert [e.content for e in sink.events if e.event_type == "response"] == ["not json", '{"answer": "42"}']
+
+
+@pytest.mark.asyncio
+async def test_the_structured_output_tools_own_call_and_result_are_not_tool_events(tmp_path, fake_claude):
+    """BEP 19 §3.9: the CLI's synthetic `StructuredOutput` tool is the CLI answering itself, not
+    a tool the agent chose, so neither its `ToolUseBlock` nor its `ToolResultBlock` becomes a
+    `tool` event — through `run()`'s own loop, not just the pure mapping function."""
+    fake_claude.arm(
+        messages=[
+            AssistantMessage(
+                content=[ToolUseBlock(id="tu_so", name="StructuredOutput", input={"answer": "42"})],
+                model="claude-opus-4-5",
+            ),
+            UserMessage(
+                content=[ToolResultBlock(tool_use_id="tu_so", content="Structured output provided successfully")]
+            ),
+            ResultMessage(
+                subtype="success",
+                duration_ms=1,
+                duration_api_ms=1,
+                is_error=False,
+                num_turns=1,
+                session_id="session-1",
+                result='{"answer": "42"}',
+            ),
+        ]
+    )
+    sink = CaptureSink()
+
+    result = await _agent(tmp_path).run("chat-1", "go", turn_id="t1", event_sink=sink, schema=_ANSWER_SCHEMA)
+
+    assert (result.output, result.structured) == ({"answer": "42"}, True)
+    assert [e.event_type for e in sink.events] == ["turn"], "no tool event for the CLI's own mechanism"
+
+
+def test_events_for_message_skips_a_plain_text_user_message(tmp_path):
+    """The CLI's own one-shot "[structured-output-enforce]" nudge on a schema turn (BEP 19 §3.9)
+    arrives as a plain-string `UserMessage`; it needs no special case, since only
+    `ToolResultBlock` is ever matched inside one."""
+    agent = _agent(tmp_path)
+    nudge = UserMessage(content="[structured-output-enforce] You MUST call the StructuredOutput tool now.")
+
+    assert agent._events_for_message(nudge, {}, chat_id="c", turn_id="t", metadata=None) == []
+
+
+def test_events_for_message_skips_a_system_message(tmp_path):
+    agent = _agent(tmp_path)
+    init = SystemMessage(subtype="init", data={"type": "system", "subtype": "init", "session_id": "s"})
+
+    assert agent._events_for_message(init, {}, chat_id="c", turn_id="t", metadata=None) == []
+
+
+def test_events_for_message_skips_the_structured_output_tools_own_call_and_result(tmp_path):
+    """The pure mapping function in isolation: never tracked in `pending_tools`, so the matching
+    `ToolResultBlock` later finds no pending id and is skipped the same way any untracked id
+    would be — no check on its name is needed at that end."""
+    agent = _agent(tmp_path)
+    pending: dict[str, str] = {}
+    call = AssistantMessage(
+        content=[ToolUseBlock(id="tu_so", name="StructuredOutput", input={"answer": "42"})], model="m"
+    )
+    outcome = UserMessage(
+        content=[ToolResultBlock(tool_use_id="tu_so", content="Structured output provided successfully")]
+    )
+
+    assert agent._events_for_message(call, pending, chat_id="c", turn_id="t", metadata=None) == []
+    assert pending == {}, "the CLI's own tool is never tracked, so it leaves nothing pending"
+    assert agent._events_for_message(outcome, pending, chat_id="c", turn_id="t", metadata=None) == []
+
+
+@pytest.mark.asyncio
+async def test_the_real_cli_streams_a_tool_call_as_turn_events_against_the_real_cli(
+    tmp_path, fake_anthropic, monkeypatch
+):
+    """BEP 19 §3.9 against the real CLI: a ``Read`` of a file inside ``cwd`` runs unasked at the
+    default ``read-only`` permission (fact 3), so this is the one shape in this section a fake
+    client cannot produce — the CLI's own tool_result, not one a test hand-builds."""
+    _point_the_cli_at(fake_anthropic, tmp_path, monkeypatch)
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "notes.txt").write_text("hello\n")
+    agent = _agent(tmp_path, cwd="ws", auth="api_key")
+    read = {"type": "tool_use", "id": "tu_read", "name": "Read", "input": {"file_path": str(ws / "notes.txt")}}
+    fake_anthropic.script([[read], [{"type": "text", "text": "read it"}]])
+    sink = CaptureSink()
+
+    async with asyncio.timeout(60):
+        result = await agent.run("chat-1", "read notes.txt", turn_id="t1", event_sink=sink)
+
+    assert result.output == "read it"
+    assert [(e.event_type, e.phase) for e in sink.events] == [
+        ("tool", "start"),
+        ("tool", "finish"),
+        ("response", "finish"),
+        ("turn", "finish"),
+    ]
+    assert sink.events[0].tool_name == sink.events[1].tool_name == "Read"
+    assert sink.events[2].content == "read it"
+    for event in sink.events:
+        assert (event.chat_id, event.turn_id, event.agent_name) == ("chat-1", "t1", "george")

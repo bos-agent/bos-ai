@@ -25,11 +25,12 @@ settings nonce, no repository settings unless a host opts in, the ``native_optio
 allowlist, and the fail-closed preflights; every check that reads the host runs there, and
 none starts the CLI — a turn: ``run()`` resumes the chat's native session, runs one CLI
 child to the end of the turn and commits the two-message record (BEP 19 §3.6, §3.7, §3.9) —
-and structured output: a ``schema`` turn validates the CLI's answer locally and retries with a
-correction message on failure, up to ``max_schema_retries`` (§3.9, BEP 12).
-A turn is not yet streamed as ``TurnEvent``s, polled for an ``interrupt`` or bounded by
-``timeout_seconds``, and the hook and ``can_use_tool`` are not built, so nothing in this module
-confines anything yet.
+structured output: a ``schema`` turn validates the CLI's answer locally and retries with a
+correction message on failure, up to ``max_schema_retries`` (§3.9, BEP 12) — and the turn
+streamed live: ``receive_response()`` is translated into ``TurnEvent``s for ``event_sink`` as it
+arrives, one attempt (a schema retry included) at a time (§3.9). A turn is not yet polled for an
+``interrupt`` or bounded by ``timeout_seconds``, and the hook and ``can_use_tool`` are not built,
+so nothing in this module confines anything yet.
 """
 
 from __future__ import annotations
@@ -58,17 +59,26 @@ from claude_agent_sdk import (
     ResultMessage,
     SandboxSettings,
     SettingSource,
+    TextBlock,
+    ToolResultBlock,
+    ToolUseBlock,
+    UserMessage,
 )
 from claude_agent_sdk.types import SystemPromptPreset
 
 from bos.core.agent import (
     SHUTDOWN_CONTENT,
+    AgentEventType,
     AgentResult,
     ChatStore,
     MessageContent,
     StructuredOutputError,
     StructuredValidator,
+    TurnEvent,
+    TurnEventDetail,
+    TurnEventPhase,
     TurnEventSink,
+    TurnEventStage,
     _compact,
     content_as_parts,
     image_source_to_model_url,
@@ -711,6 +721,14 @@ def _usage(usage: Mapping[str, Any] | None) -> dict[str, int] | None:
     return mapped
 
 
+# BEP 19 §3.9: the name of the CLI's own synthetic tool for `output_format` (measured against
+# CLI 2.1.281; pinned by test_structured_output_arrives_from_the_synthetic_tool_against_the_real_cli
+# in tests/test_claude_code_runtime.py). Its `ToolUseBlock`/`ToolResultBlock` are the CLI answering
+# itself, not a tool the agent chose, so `_events_for_message` excludes them from the `tool` event
+# stream rather than reporting a call BOS never dispatched and a result BOS never received.
+_STRUCTURED_OUTPUT_TOOL = "StructuredOutput"
+
+
 class ClaudeCodeAgent:
     """``ExternalRuntime`` adapter over the Claude Code vendor SDK (BEP 19 §3.4, §3.5).
 
@@ -903,6 +921,181 @@ class ClaudeCodeAgent:
         )
         return str(result.output)
 
+    def _event(
+        self,
+        *,
+        chat_id: str,
+        turn_id: str,
+        event_type: str,
+        phase: str,
+        stage: str | None = None,
+        detail: str | None = None,
+        tool_name: str | None = None,
+        content: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> TurnEvent:
+        """Build one ``TurnEvent``, ``chat_id``/``turn_id``/``agent_name`` filled in exactly as
+        ``CodexAgent._event`` fills them (BEP 19 §3.9). ``stage`` is the one field that method has
+        no use for — Codex's own mapping never sets it — and Claude Code needs it for exactly one
+        event, the ``max_turns`` closure below."""
+        return TurnEvent(
+            event_type=event_type,
+            phase=phase,
+            chat_id=chat_id,
+            turn_id=turn_id,
+            agent_name=self._kind,
+            stage=stage,
+            detail=detail,
+            tool_name=tool_name,
+            content=content,
+            metadata=dict(metadata or {}),
+        )
+
+    def _events_for_message(
+        self,
+        message: Any,
+        pending_tools: dict[str, str],
+        *,
+        chat_id: str,
+        turn_id: str,
+        metadata: dict[str, Any] | None,
+    ) -> list[TurnEvent]:
+        """BEP 19 §3.9's mapping: one message from ``receive_response()`` -> zero or more
+        ``TurnEvent``s.
+
+        - A ``ToolUseBlock`` inside an ``AssistantMessage`` -> ``tool``/``start``, its name the
+          block's own.
+        - A ``TextBlock`` inside an ``AssistantMessage`` -> ``response``/``finish``, carrying the
+          block's text. Every assistant text block gets one — there is no commentary/final-answer
+          split to read here the way Codex's ``MessagePhase`` gives it one, so a host that wants
+          *the* answer reads ``AgentResult.output`` (``ResultMessage.result``, via ``run()``'s
+          return value), never this stream.
+        - The ``ToolResultBlock`` inside a ``UserMessage`` that matches a pending ``ToolUseBlock``
+          by ``tool_use_id`` -> ``tool``/``finish``, or ``tool``/``fail`` when ``is_error`` — using
+          the name *pending_tools* recorded when its ``ToolUseBlock`` streamed by, since a result
+          block carries no name of its own.
+        - A ``ResultMessage`` -> ``turn``/``finish`` — unless the CLI ended the turn on
+          ``max_turns`` (``subtype == "error_max_turns"``), in which case it is the same event
+          BOS's own ``Agent`` emits at ``_close_with_handoff("max_iterations")`` (``agent.py``):
+          ``turn``/``fail``, ``stage`` and ``detail`` both ``max_iteration``, ``content`` the
+          static ``MAX_ITERATION_CONTENT`` marker. Of that call's own metadata keys
+          (``iteration``, ``max_iterations``, ``handoff``, ``closure_reason``), only two carry a
+          meaning here and are added beside whatever ``metadata`` the caller supplied:
+          ``max_iterations`` (``self._max_turns``, the CLI's own budget) and ``closure_reason``
+          (always ``"max_iterations"``, since nothing hands an external runtime a reason to
+          close on ``"shutdown"`` the way ``Agent`` can). ``iteration`` has no counterpart —
+          BOS does not see the CLI's own internal turn count — and ``handoff`` is dropped rather
+          than always sent as ``False``: no external runtime is ever handed a consolidator, so it
+          could never be anything else.
+
+        Everything else is skipped rather than half-mapped, as ``CodexAgent._event_for_notification``
+        skips a ``ThreadItem`` variant it has no ``tool`` vocabulary for: a ``SystemMessage``; a
+        ``ThinkingBlock`` or server-tool block inside an ``AssistantMessage``; a plain-text
+        ``UserMessage`` — the CLI's own one-shot "[structured-output-enforce]" nudge on a schema
+        turn (BEP 19 §3.9) arrives this way and needs no special case, since only
+        ``ToolResultBlock`` is ever matched inside a ``UserMessage`` at all. The CLI's synthetic
+        ``StructuredOutput`` tool call (``_STRUCTURED_OUTPUT_TOOL``) is excluded the same
+        deliberate way twice over: its ``ToolUseBlock`` is never turned into an event and never
+        added to *pending_tools*, so its ``ToolResultBlock`` is later found to match no pending
+        id and is skipped exactly as an untracked id would be — no check on its name is needed at
+        that end.
+
+        *pending_tools* is threaded in by the caller (``run()``) rather than owned here, so one
+        map survives across every message of one ``run()`` call, a schema retry's fresh
+        ``receive_response()`` round included — the same round trip that makes a retry re-enter
+        this method for its own tool calls, so a turn with retries emits every attempt's events,
+        not just the winning one, mirroring ``CodexAgent``'s own retry loop, which re-runs
+        ``_run_turn``/``_emit_stream`` in full for every retry because each is a brand-new native
+        turn.
+        """
+        if isinstance(message, AssistantMessage):
+            events: list[TurnEvent] = []
+            for block in message.content:
+                if isinstance(block, ToolUseBlock):
+                    if block.name == _STRUCTURED_OUTPUT_TOOL:
+                        continue
+                    pending_tools[block.id] = block.name
+                    events.append(
+                        self._event(
+                            chat_id=chat_id,
+                            turn_id=turn_id,
+                            event_type=AgentEventType.tool,
+                            phase=TurnEventPhase.start,
+                            tool_name=block.name,
+                            metadata=metadata,
+                        )
+                    )
+                elif isinstance(block, TextBlock):
+                    events.append(
+                        self._event(
+                            chat_id=chat_id,
+                            turn_id=turn_id,
+                            event_type=AgentEventType.response,
+                            phase=TurnEventPhase.finish,
+                            content=block.text,
+                            metadata=metadata,
+                        )
+                    )
+            return events
+        if isinstance(message, UserMessage):
+            blocks = message.content if isinstance(message.content, list) else []
+            events = []
+            for block in blocks:
+                if not isinstance(block, ToolResultBlock):
+                    continue
+                tool_name = pending_tools.pop(block.tool_use_id, None)
+                if tool_name is None:
+                    continue
+                events.append(
+                    self._event(
+                        chat_id=chat_id,
+                        turn_id=turn_id,
+                        event_type=AgentEventType.tool,
+                        phase=TurnEventPhase.fail if block.is_error else TurnEventPhase.finish,
+                        tool_name=tool_name,
+                        metadata=metadata,
+                    )
+                )
+            return events
+        if isinstance(message, ResultMessage):
+            if message.subtype == "error_max_turns":
+                return [
+                    self._event(
+                        chat_id=chat_id,
+                        turn_id=turn_id,
+                        event_type=AgentEventType.turn,
+                        phase=TurnEventPhase.fail,
+                        stage=TurnEventStage.max_iteration,
+                        detail=TurnEventDetail.max_iteration,
+                        content=MAX_ITERATION_CONTENT,
+                        metadata={
+                            **(metadata or {}),
+                            "max_iterations": self._max_turns,
+                            "closure_reason": "max_iterations",
+                        },
+                    )
+                ]
+            return [
+                self._event(
+                    chat_id=chat_id,
+                    turn_id=turn_id,
+                    event_type=AgentEventType.turn,
+                    phase=TurnEventPhase.finish,
+                    metadata=metadata,
+                )
+            ]
+        return []
+
+    async def _emit(self, sink: TurnEventSink | None, event: TurnEvent) -> None:
+        """Best-effort dispatch to *sink*: a sink that raises must not end the turn, mirroring
+        ``CodexAgent._emit_stream`` and ``Agent._emit_event`` (BEP 19 §3.9)."""
+        if sink is None:
+            return
+        try:
+            await sink.emit(event)
+        except Exception:
+            logger.debug("Claude Code event sink emit error", exc_info=True)
+
     async def run(
         self,
         chat_id: str,
@@ -964,8 +1157,7 @@ class ClaudeCodeAgent:
         is single-threaded (§3.10.1). A turn started after :meth:`request_stop` or
         :meth:`aclose` returns ``SHUTDOWN_CONTENT`` before any client is built.
         """
-        # Accepted but not acted on yet, each until its task lands: `event_sink` and
-        # `ctx_metadata` (Task 6: streamed TurnEvents, BEP 19 §3.9); `interrupt` (Task 7, §3.9),
+        # Accepted but not acted on yet, each until its task lands: `interrupt` (Task 7, §3.9),
         # which is not polled, so a message a caller queues mid-turn stays in its queue; and the
         # config's `timeout_seconds` (Task 7, §3.10.2), so nothing bounds a turn yet.
         turn_id = turn_id or uuid.uuid4().hex
@@ -1019,6 +1211,11 @@ class ClaudeCodeAgent:
             structured_ok = False
             ran_out = False
             retries = 0
+            # BEP 19 §3.9: `tool_use_id` -> name, for every `ToolUseBlock` not yet matched by its
+            # `ToolResultBlock` — see `_events_for_message`. One map for the whole call, a schema
+            # retry's fresh `receive_response()` round included, since it is the same connected
+            # client and ids do not repeat across rounds.
+            pending_tools: dict[str, str] = {}
 
             def _vendor_failure(exc: Exception) -> RuntimeError:
                 # Every vendor failure on the turn path gets the runtime, agent, chat and turn, the
@@ -1084,6 +1281,14 @@ class ClaudeCodeAgent:
                                 answer_uuid = message.uuid
                             elif isinstance(message, ResultMessage):
                                 result = message
+                            # BEP 19 §3.9: every attempt streams its own events, this one included,
+                            # by nothing more than being run through this same per-message loop. No
+                            # sink, as CodexAgent._emit_stream also checks, means nothing to build.
+                            if event_sink is not None:
+                                for event in self._events_for_message(
+                                    message, pending_tools, chat_id=chat_id, turn_id=turn_id, metadata=ctx_metadata
+                                ):
+                                    await self._emit(event_sink, event)
                     except Exception as exc:
                         raise _vendor_failure(exc) from exc
 
