@@ -964,7 +964,7 @@ def test_every_client_switches_off_the_inherited_variables_that_load_what_the_de
     """BEP 19 §3.12: the values BOS sends over whatever it inherited. Spelled out here, so an
     override dropped from claude_code.py fails. Six are measured — five by the route test below, and
     ENABLE_TOOL_SEARCH by test_bos_pins_tool_search_off_so_the_full_tool_surface_is_offered
-    (tests/test_claude_code_confinement.py) — and the other eighteen are read from the CLI source."""
+    (tests/test_claude_code_confinement.py) — and the other twenty are read from the CLI source."""
     assert _agent(tmp_path)._options().env == {
         "CLAUDE_CODE_PLUGIN_DIRS": "",
         "CLAUDE_BG_SESSION_PERMISSION_RULES": "",
@@ -992,6 +992,8 @@ def test_every_client_switches_off_the_inherited_variables_that_load_what_the_de
         # Not an inherited loader: pins the tool surface the confinement and MCP egress were measured
         # against (§3.5.3); with tool search on, the CLI offers a DeferredToolPlaceholder (the pin's test).
         "ENABLE_TOOL_SEARCH": "false",
+        "CLAUDE_CODE_MESSAGING_SOCKET": "",
+        "CLAUDE_CODE_MESSAGING_TOKEN": "",
     }
 
 

@@ -468,6 +468,13 @@ _INHERITED_ENV_OVERRIDES: Mapping[str, str] = MappingProxyType({
     # "standard". Measured against CLI 2.1.281; pinned by
     # test_bos_pins_tool_search_off_so_the_full_tool_surface_is_offered.
     "ENABLE_TOOL_SEARCH": "false",
+    # Not a loader either: the socket and token a Claude Code session messages other local
+    # sessions through, exported by that session and so inherited by a BOS process started in
+    # its terminal (BEP 19 §8.3). Read through the CLI's own `udsInboxShape` accessor, where both
+    # are `M.str`, so an empty value is unset (read from the CLI 2.1.281 source). Switched off so
+    # no CLI child BOS starts acts on another session's messaging channel.
+    "CLAUDE_CODE_MESSAGING_SOCKET": "",
+    "CLAUDE_CODE_MESSAGING_TOKEN": "",
 })
 # Read on those paths and left alone, because under BOS's default each is inert or loads
 # nothing from outside the session:

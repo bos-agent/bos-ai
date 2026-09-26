@@ -310,10 +310,11 @@ login, and sends it to the proxy.
     terminal — not from a Claude Code session's terminal or its Bash tool. A session exports
     variables of its own, and every CLI child BOS starts inherits them: the SDK passes
     BOS's whole environment on and can override a variable but not remove one. The CLI
-    reads several of them — the session's id, and the socket and token Claude Code
-    sessions message each other through, among them — and what they do in a child BOS
-    starts has not been measured (read from the CLI source). BOS neither detects nor
-    refuses this. If you must start BOS there, unset the session's variables first:
+    reads several of them. BOS switches off the two that would matter most — the socket
+    and token Claude Code sessions message each other through — in every client it starts;
+    what the rest (the session's id among them) do in a child BOS starts has not been
+    measured (read from the CLI source). BOS neither detects nor refuses this. If you must
+    start BOS there, unset the session's variables first:
 
     ```bash
     env -u CLAUDECODE -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION \

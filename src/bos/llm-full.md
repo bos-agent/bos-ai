@@ -1250,7 +1250,9 @@ check. BOS stores no token.
   `CLAUDE_CODE_CHILD_SESSION`, `CLAUDE_CODE_MESSAGING_SOCKET`/`_TOKEN`,
   `CLAUDE_CODE_ENTRYPOINT`, `MCP_CONNECTION_NONBLOCKING` and others; the SDK drops only
   `CLAUDECODE`, every CLI child inherits the rest, and the CLI reads several of them (read
-  from source; their effect in a BOS child is not measured). If unavoidable:
+  from source; their effect in a BOS child is not measured). BOS overrides the messaging
+  pair to `""` in every client (`_INHERITED_ENV_OVERRIDES`; `M.str`, so empty is unset); the
+  rest it leaves. If unavoidable:
   `env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_MESSAGING_SOCKET -u CLAUDE_CODE_MESSAGING_TOKEN … boscli …`
   (`env | grep -E '^(CLAUDE|MCP_)'` lists what to unset).
 - **Codex, on the first turn** (or first `native_messages`): `_preflight_auth` calls
