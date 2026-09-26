@@ -51,7 +51,6 @@ from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
     ClaudeSDKClient,
-    ClaudeSDKError,
     PermissionMode,
     ResultError,
     ResultMessage,
@@ -71,6 +70,7 @@ from bos.core.agent import (
     content_as_parts,
     image_source_to_model_url,
 )
+from bos.core.agent.agent import MAX_ITERATION_CONTENT
 from bos.extensions.runtimes._shared import (
     ExternalAgentConfig,
     commit_external_turn,
@@ -925,9 +925,13 @@ class ClaudeCodeAgent:
         The answer is ``ResultMessage.result``. ``usage`` is mapped by :func:`_usage`, and
         ``finish_reason`` is the CLI's ``terminal_reason``, or its ``stop_reason`` when it
         reports none, verbatim. The turn is committed as two messages, the assistant's carrying
-        the session id the CLI answered from. A turn that does not end in a ``ResultMessage``
-        with ``is_error`` false raises and commits nothing — a failed turn is not history — and
-        so does one that ends on a session other than the one it resumed (§3.6).
+        the session id the CLI answered from. A turn that spends its ``max_turns`` closes as
+        BOS's own ``Agent`` closes at ``max_iterations``, answering ``MAX_ITERATION_CONTENT``,
+        and is committed too (§3.9). Any other error result raises and commits nothing — a
+        failed turn is not history — and so does a turn that ends without a result, or on a
+        session other than the one it resumed (§3.6). A vendor failure raises with the turn's
+        runtime, agent, chat and turn, and whether it came at startup; a caller's malformed
+        content raises its own error, before any client is built.
 
         Two concurrent turns on one ``chat_id`` are refused rather than queued: a native session
         is single-threaded (§3.10.1). A turn started after :meth:`request_stop` or
@@ -983,25 +987,10 @@ class ClaudeCodeAgent:
             client = _CLIENT_FACTORY(options)
             result: ResultMessage | None = None
             answer_uuid: str | None = None
+            phase = "at startup"  # connect(): the CLI starting, the resumed session loading
             try:
-                try:
-                    await client.connect()
-                except ResultError as exc:
-                    if native_session_id is None:
-                        raise
-                    # BEP 19 §3.6. Given a `resume` it has no session for, the CLI refuses at
-                    # startup — "No conversation found with session ID: <id>", exit code 1 —
-                    # before any model call and without starting a session, and the SDK raises
-                    # that out of connect() as a ResultError (measured against the CLI 2.1.281;
-                    # test_the_real_cli_refuses_a_session_it_does_not_have_and_bos_says_so pins
-                    # it). A value that is not a UUID is refused the same way, unless the CLI
-                    # finds a session with that title (its message says so; not measured) — the
-                    # session check below catches the turn that follows.
-                    raise RuntimeError(
-                        f"{self._config.runtime} runtime {self._kind!r}: session {native_session_id!r} for chat "
-                        f"{chat_id!r} could not be resumed, and BOS does not silently start a fresh session "
-                        f"under the same chat_id (BEP 19 §3.6): {exc}"
-                    ) from exc
+                await client.connect()
+                phase = "during the turn"
                 await client.query(prompt if isinstance(prompt, str) else _user_message(prompt))
                 async for message in client.receive_response():
                     if isinstance(message, AssistantMessage) and message.parent_tool_use_id is None:
@@ -1014,14 +1003,42 @@ class ClaudeCodeAgent:
                         answer_uuid = message.uuid
                     elif isinstance(message, ResultMessage):
                         result = message
-            except ClaudeSDKError as exc:
-                # The SDK's typed errors, with the runtime, agent, turn and chat they belong to.
-                # In a few places the SDK raises a bare Exception instead — a control request
-                # that times out, the initialize handshake's among them — which passes through as
-                # it is.
+            except Exception as exc:
+                # Every vendor failure on the turn path gets the runtime, agent, chat and turn, the
+                # cause chained, as CodexAgent's do — the SDK's typed errors, and the bare
+                # Exception it raises for a control request that times out (the initialize
+                # handshake's among them) or is answered with an error. A caller's malformed
+                # content is not among them: it was converted, and refused, before the client.
+                #
+                # BEP 19 §3.6, and only for the measured refusal. Given a `resume` it has no
+                # session for, the CLI refuses at startup — "No conversation found with session
+                # ID: <id>", exit code 1 — before any model call and without starting a session,
+                # and the SDK raises that out of connect() as a ResultError (measured against the
+                # CLI 2.1.281; test_the_real_cli_refuses_a_session_it_does_not_have_and_bos_says_so
+                # pins it). Matched on that statement, which the ResultError carries in `errors`
+                # and which names the id. Not on the ResultError's `session_id`: it is the resumed
+                # id in the refusal too — the CLI reports the id it was asked for as its own — so
+                # another failure at startup on the resume path would likely carry it as well
+                # (inferred, not measured). Any other error result at startup is reported below as
+                # the startup failure it is, with the CLI's own text — a value that is not a UUID
+                # among them ("--resume requires a valid session ID or session title"), unless the
+                # CLI finds a session with that title (its message says it would; not measured),
+                # which the session check below catches — because reporting it as a lost session
+                # sends an operator looking for one (§3.10.2).
+                refusal = f"No conversation found with session ID: {native_session_id}"
+                if (
+                    native_session_id is not None
+                    and isinstance(exc, ResultError)
+                    and any(refusal in error for error in exc.errors)
+                ):
+                    raise RuntimeError(
+                        f"{self._config.runtime} runtime {self._kind!r}: session {native_session_id!r} for chat "
+                        f"{chat_id!r} could not be resumed, and BOS does not silently start a fresh session "
+                        f"under the same chat_id (BEP 19 §3.6): {exc}"
+                    ) from exc
                 raise RuntimeError(
-                    f"{self._config.runtime} runtime {self._kind!r}: turn {turn_id!r} for chat {chat_id!r} failed: "
-                    f"{exc}"
+                    f"{self._config.runtime} runtime {self._kind!r}: turn {turn_id!r} for chat {chat_id!r} failed "
+                    f"{phase}: {exc}"
                 ) from exc
             finally:
                 await client.disconnect()
@@ -1031,10 +1048,17 @@ class ClaudeCodeAgent:
                     f"{self._config.runtime} runtime {self._kind!r}: turn {turn_id!r} for chat {chat_id!r} ended "
                     f"without a result"
                 )
-            if result.is_error:
+            # BEP 19 §3.9: `max_iterations` is a budget, not an error. The CLI ends a turn that
+            # spends `max_turns` as an error result, subtype "error_max_turns" (pinned by
+            # test_a_turn_that_spends_max_iterations_closes_like_bos_agent_against_the_real_cli),
+            # and BOS closes it as its own Agent closes at `max_iterations`: MAX_ITERATION_CONTENT,
+            # with no handoff, since nothing hands an external runtime a consolidator, and
+            # committed with the session that ran it, so the next turn resumes there.
+            ran_out = result.subtype == "error_max_turns"
+            if result.is_error and not ran_out:
                 # The SDK documents an API failure as arriving under subtype "success", its prose in
-                # `result`; an error the CLI raises itself names its subtype and carries `errors` —
-                # measured for `max_turns`, which ends a turn as "error_max_turns". All four go out.
+                # `result`; an error the CLI raises itself names its subtype and carries `errors`,
+                # as the measured resume refusal does. All four go out.
                 raise RuntimeError(
                     f"{self._config.runtime} runtime {self._kind!r}: turn {turn_id!r} for chat {chat_id!r} failed: "
                     f"subtype={result.subtype!r}, errors={result.errors!r}, "
@@ -1053,7 +1077,7 @@ class ClaudeCodeAgent:
                     f"so it committed nothing."
                 )
 
-            text = result.result or ""
+            text = MAX_ITERATION_CONTENT if ran_out else (result.result or "")
             usage = _usage(result.usage)
             if self._chat_store is not None:
                 commit = await commit_external_turn(

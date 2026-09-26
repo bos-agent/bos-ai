@@ -49,6 +49,7 @@ from test_claude_code_vendor_facts import _bash, _tool_results
 from test_external_agent_seam import _write_workspace
 
 from bos.core.agent import SHUTDOWN_CONTENT
+from bos.core.agent.agent import MAX_ITERATION_CONTENT
 from bos.extensions.chat_stores.in_memory import InMemChatStore
 from bos.extensions.runtimes import claude_code
 from bos.extensions.runtimes._shared import commit_external_turn
@@ -1506,7 +1507,89 @@ async def test_a_startup_failure_on_a_new_chat_is_not_reported_as_a_resume(tmp_p
 
     message = str(excinfo.value)
     assert "could not be resumed" not in message
+    assert "at startup" in message
     assert "claude-code" in message and "chat-1" in message and "t1" in message
+
+
+@pytest.mark.asyncio
+async def test_another_startup_failure_on_a_resumed_chat_is_not_reported_as_a_lost_session(
+    tmp_path, fake_claude, mem_store
+):
+    """Only the measured refusal is BEP 19 §3.6's error. Any other error result at startup is
+    reported as the startup failure it is, with the CLI's own text — even one carrying the
+    resumed session's id, as a failure after the CLI adopted it would — so an operator is not
+    sent looking for a lost session (§3.10.2)."""
+    await _bind(mem_store, session_id="session-1")
+    reason = "Error: a failure at startup that is not about the session"
+    data = {
+        "type": "result",
+        "subtype": "error_during_execution",
+        "is_error": True,
+        "errors": [reason],
+        "session_id": "session-1",
+    }
+    failure = ResultError(f"Claude Code returned an error result: {reason}", data=data, exit_code=1)
+    fake_claude.arm(connect_error=failure)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await _agent(tmp_path, chat_store=mem_store).run("chat-1", "go", turn_id="t1")
+
+    message = str(excinfo.value)
+    assert "could not be resumed" not in message and "§3.6" not in message
+    assert "at startup" in message and reason in message
+    assert excinfo.value.__cause__ is failure
+
+
+@pytest.mark.asyncio
+async def test_a_bare_exception_from_the_sdk_carries_the_turns_context(tmp_path, fake_claude):
+    """The SDK raises a bare Exception for a control request that times out — the initialize
+    handshake's among them — and for an error control response (`_internal/query.py`). Like
+    every vendor failure on the turn path, it reaches the caller with the runtime, agent, chat
+    and turn, and the cause chained, as CodexAgent's failures do."""
+    timeout = Exception("Control request timeout: initialize")
+    fake_claude.arm(connect_error=timeout)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await _agent(tmp_path).run("chat-1", "go", turn_id="t1")
+
+    message = str(excinfo.value)
+    assert "claude-code" in message and "george" in message and "chat-1" in message and "t1" in message
+    assert "Control request timeout: initialize" in message
+    assert excinfo.value.__cause__ is timeout
+
+
+@pytest.mark.parametrize(
+    ("content", "error"),
+    [
+        ([{"type": "video", "source": {"kind": "url", "value": "https://x/y.mp4"}}], TypeError),
+        ([{"type": "image", "source": {"kind": "url", "value": "data:image/svg+xml;utf8,<svg/>"}}], ValueError),
+    ],
+    ids=["unknown-part", "non-base64-data-url"],
+)
+@pytest.mark.asyncio
+async def test_malformed_content_is_the_callers_error_and_starts_no_cli(tmp_path, fake_claude, content, error):
+    """Content is converted before any client is built, outside the catch that gives vendor
+    failures the turn's context, so a caller's malformed content raises the caller's own error,
+    as CodexAgent leaves it — and no CLI starts."""
+    with pytest.raises(error):
+        await _agent(tmp_path).run("chat-1", content)
+
+    assert fake_claude.instances == []
+
+
+@pytest.mark.asyncio
+async def test_a_chat_store_that_fails_to_read_fails_the_turn_before_any_client(tmp_path, fake_claude):
+    """A store failure is not "no session" (BEP 19 §3.6): the turn fails before a client is
+    built, so a chat whose record cannot be read never gets a fresh session under its id."""
+
+    class BrokenStore(InMemChatStore):
+        async def get_messages(self, chat_id: str, *, active_only: bool = True) -> list[Any]:
+            raise OSError("the chat store could not be read")
+
+    with pytest.raises(OSError, match="could not be read"):
+        await _agent(tmp_path, chat_store=BrokenStore()).run("chat-1", "go")
+
+    assert fake_claude.instances == []
 
 
 @pytest.mark.asyncio
@@ -1526,10 +1609,10 @@ async def test_a_resumed_turn_that_comes_back_on_another_session_is_refused(tmp_
 @pytest.mark.parametrize(
     "error",
     [
-        # An API failure: the CLI reports it under subtype "success", its prose in `result`.
+        # An API failure, as the SDK documents one: subtype "success", its prose in `result`.
         {"subtype": "success", "errors": [], "result": "API Error: 529 overloaded", "api_error_status": 529},
-        # A terminal error the CLI raises itself.
-        {"subtype": "error_max_turns", "errors": ["Reached maximum number of turns (1)"], "result": None},
+        # A terminal error the CLI raises itself, under the subtype its measured resume refusal uses.
+        {"subtype": "error_during_execution", "errors": ["the turn failed while it ran"], "result": None},
     ],
     ids=["api-error", "cli-error"],
 )
@@ -1807,3 +1890,33 @@ async def test_the_real_cli_refuses_a_session_it_does_not_have_and_bos_says_so(t
     assert fake_anthropic.requests == [], "refused before any model call"
     assert list((tmp_path / "claude-config").rglob("*.jsonl")) == [], "no session was started"
     assert len(await store.get_messages("chat-1")) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_turn_that_spends_max_iterations_closes_like_bos_agent_against_the_real_cli(
+    tmp_path, fake_anthropic, monkeypatch
+):
+    """BEP 19 §3.9: `max_iterations` is a budget, not an error. The CLI ends a turn that spends
+    `max_turns` as an error result, subtype "error_max_turns"; BOS closes it as its own Agent
+    closes at `max_iterations` — MAX_ITERATION_CONTENT, no handoff — with the CLI's
+    `finish_reason`, and commits it with the session the CLI ran, which the next turn resumes."""
+    _point_the_cli_at(fake_anthropic, tmp_path, monkeypatch)
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "notes.txt").write_text("hello\n")
+    store = InMemChatStore()
+    agent = _agent(tmp_path, cwd="ws", auth="api_key", max_iterations=1, chat_store=store)
+    read = {"type": "tool_use", "id": "tu_read", "name": "Read", "input": {"file_path": str(ws / "notes.txt")}}
+    fake_anthropic.script([[read], [{"type": "text", "text": "read it"}]])
+
+    async with asyncio.timeout(120):
+        first = await agent.run("chat-1", "read notes.txt", turn_id="t1")
+        second = await agent.run("chat-1", "and now?", turn_id="t2")
+
+    assert (first.output, first.finish_reason) == (MAX_ITERATION_CONTENT, "max_turns")
+    assert first.usage["total_tokens"] > 0, "the turn ran, and its usage is reported"
+    [transcript] = list((tmp_path / "claude-config").rglob("*.jsonl"))
+    messages = await store.get_messages("chat-1")
+    assert messages[1].llm_message["content"] == MAX_ITERATION_CONTENT
+    assert messages[1].metadata["native_session_id"] == transcript.stem, "committed with the session the CLI ran"
+    assert (second.output, messages[3].metadata["native_session_id"]) == ("read it", transcript.stem)
