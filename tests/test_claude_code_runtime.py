@@ -100,7 +100,8 @@ def _clean_environment(monkeypatch):
     export any of the variables it refuses (the host files it reads are moved away by conftest's
     ``_claude_code_isolation``). BOS's CLAUDE.md read obeys the CLI's switches for memory
     files. Tests that want any of them arrange it themselves."""
-    for name in {*_SUBSCRIPTION_BYPASS, *claude_code._SUBSCRIPTION_BYPASS_VARS, *claude_code._CLAUDE_MD_SWITCHES}:
+    scrubbed = {*_SUBSCRIPTION_BYPASS, *claude_code._SUBSCRIPTION_BYPASS_VARS, *claude_code._CLAUDE_MD_SWITCHES}
+    for name in scrubbed | {"ANTHROPIC_BASE_URL"}:
         monkeypatch.delenv(name, raising=False)
 
 
@@ -1256,6 +1257,47 @@ def test_subscription_auth_refuses_the_well_known_api_key_file(tmp_path, monkeyp
     assert "sk-ant-not-a-real-key" not in str(excinfo.value)
     _agent(tmp_path, auth="api_key")
     assert _REAL_API_KEY_FILE == Path("/home/claude/.claude/remote/.api_key")
+
+
+@pytest.mark.parametrize(
+    ("value", "says"),
+    [
+        ("https://user:s3cret@proxy.example.com:8443/v1", "names the host proxy.example.com:8443"),
+        ("https://api.anthropic.com:8443", "names the host api.anthropic.com:8443"),
+        # Python's urlsplit reads api.anthropic.com here; WHATWG, which the CLI parses with,
+        # ends the host at the backslash.
+        ("https://user:s3cret@proxy.example.com\\@api.anthropic.com", "cannot read an http or https host"),
+        ("api.anthropic.com", "cannot read an http or https host"),  # no scheme: `new URL` throws
+        ("//api.anthropic.com", "cannot read an http or https host"),
+        ("https://user:s3cret@[::1", "cannot read an http or https host"),
+    ],
+)
+def test_subscription_auth_refuses_a_base_url_that_is_not_anthropics(tmp_path, monkeypatch, value, says):
+    """BEP 19 §3.10.3: the live run saw the CLI send the login's ``Authorization`` header to
+    whatever host ANTHROPIC_BASE_URL names (§8.1, item 15). Refused unless the host is
+    Anthropic's by the CLI's own check, and wherever BOS cannot read the host as the CLI would.
+    The message names the host or says why, never the URL, which can carry a password."""
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", value)
+
+    with pytest.raises(ValueError) as excinfo:
+        _agent(tmp_path)
+    message = str(excinfo.value)
+    assert "ANTHROPIC_BASE_URL" in message and says in message and 'auth = "api_key"' in message
+    assert "s3cret" not in message and "user:" not in message
+    _agent(tmp_path, auth="api_key")
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["https://api.anthropic.com", "HTTPS://user@API.Anthropic.com:443/v1/", "http://api.anthropic.com:80", "", " \t"],
+)
+def test_subscription_auth_accepts_anthropics_host_and_an_empty_base_url(tmp_path, monkeypatch, value):
+    """The CLI's check compares the URL's host — lower-cased, the scheme's default port dropped —
+    with api.anthropic.com. A blank value is unset: the CLI reads it trimmed and then sends to its
+    default, https://api.anthropic.com."""
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", value)
+
+    _agent(tmp_path)
 
 
 @pytest.mark.parametrize("auth", ["subscription", "api_key"])

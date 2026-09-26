@@ -22,7 +22,7 @@ Four modes, three of which spend quota:
 
     uv run python scripts/validate_claude_code_runtime.py start --yes [WORKSPACE]
     uv run python scripts/validate_claude_code_runtime.py resume --yes     # prints the full table
-    uv run python scripts/validate_claude_code_runtime.py auth-preflight --yes   # item 23, ZERO quota
+    uv run python scripts/validate_claude_code_runtime.py auth-preflight --yes   # items 15, 23, ZERO quota
 
 ``start`` prints the exact ``resume`` command to run next, because item 20 (§7.17) asks what
 survives a process restart. ``resume`` merges ``start``'s recorded results with its own and prints
@@ -33,11 +33,12 @@ Two more modes cost nothing and need no network or login at all::
     uv run python scripts/validate_claude_code_runtime.py self-check   # asserts the script's own wiring
     uv run python scripts/validate_claude_code_runtime.py plan --yes   # the banner and item list only
 
-``auth-preflight`` also costs nothing: BEP 19 §3.10.3 says an inherited credential variable is
-refused at *construction*, before any CLI is ever spawned, so proving that needs no login either —
-it plants an obviously-fake ``ANTHROPIC_API_KEY`` in this process's own environment (never a real
-key, never printed) and checks that building a ``claude-code`` agent under the default
-``auth = "subscription"`` raises immediately.
+``auth-preflight`` also costs nothing: BEP 19 §3.10.3 says an inherited credential variable, and an
+``ANTHROPIC_BASE_URL`` whose host is not Anthropic's, are refused at *construction*, before any CLI
+is ever spawned, so proving that needs no login either — it plants each in this process's own
+environment in turn (a loopback listener's URL, which must receive nothing; an obviously-fake
+``ANTHROPIC_API_KEY``, never a real key, never printed) and checks that building a ``claude-code``
+agent under the default ``auth = "subscription"`` raises immediately.
 
 **Nothing here ever invents a result.** An item the script could not arrange prints
 ``NOT ARRANGED`` with the reason — "needs the owner's own interactive trust decision", "no
@@ -51,8 +52,8 @@ host-conditional and are marked ``NOT ARRANGED`` on an ordinary Linux dev box by
 not a gap in the script, it is the honest answer for a fact this host cannot exhibit.
 
 Security, held to throughout: this script never prints, logs or writes a token or credential —
-even the deliberate ``ANTHROPIC_BASE_URL`` probe (item 15) redacts every header value and reports
-only header *names*; it never touches the owner's real ``~/.claude``, ``~/.claude.json`` or
+the ``ANTHROPIC_BASE_URL`` item (15) only counts the requests its listener gets, and passes only
+when there are none; it never touches the owner's real ``~/.claude``, ``~/.claude.json`` or
 ``~/.config/anthropic`` — the one item that would ask about the last of those (item 16, the ``ant``
 profile store) is answered from BEP source text instead, precisely so nothing here has to open that
 directory; and its workspaces live under a temp directory it creates and reports, with a second,
@@ -297,7 +298,7 @@ async def turn(
     agent: Any, chat_id: str, prompt: str, **kwargs: Any
 ) -> tuple[Any | None, BaseException | None, Capture, float]:
     """One turn, never raising. Returns ``(result, error, capture, seconds)``, for the items that
-    measure the error itself (8, 15 and 19); every other item needs the turn to complete and calls
+    measure the error itself (8 and 19); every other item needs the turn to complete and calls
     :func:`completed` instead."""
     cap = Capture()
     started = time.monotonic()
@@ -444,15 +445,14 @@ def judged(parts: list[Part], not_attempted: str = "the model did not attempt th
     return mark, "; ".join(f"{label}: {words[ok]}" for label, ok in parts)
 
 
-class _HeaderCapture(http.server.BaseHTTPRequestHandler):
-    """Item 15's local double for "somewhere else": records every header of every request it gets,
-    then answers with a benign, obviously-synthetic error — never proxies anywhere, never has
-    internet access, and this process never sees the CLI's real request past its headers."""
+class _Listener(http.server.BaseHTTPRequestHandler):
+    """Item 15's stand-in for a proxy: counts the requests it gets and answers each with a benign,
+    obviously-synthetic error. It never proxies anywhere, and keeps no header."""
 
-    captured: list[dict[str, str]] = []
+    hits = 0
 
-    def _capture(self) -> None:
-        _HeaderCapture.captured.append(dict(self.headers.items()))
+    def _answer(self) -> None:
+        _Listener.hits += 1
         body = b'{"type":"error","error":{"type":"api_error","message":"validation probe: not a real endpoint"}}'
         self.send_response(503)
         self.send_header("Content-Type", "application/json")
@@ -461,20 +461,20 @@ class _HeaderCapture(http.server.BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler's own naming
-        self._capture()
+        self._answer()
 
     def do_GET(self) -> None:  # noqa: N802
-        self._capture()
+        self._answer()
 
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A002 - silence stdlib's stderr logging
         pass
 
 
-def start_header_capture_server() -> http.server.ThreadingHTTPServer:
+def start_listener() -> http.server.ThreadingHTTPServer:
     """An ephemeral, loopback-only HTTP server for item 15. Stdlib only — this is a local double,
     not a real endpoint, so nothing beyond `http.server` is warranted."""
-    _HeaderCapture.captured = []
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _HeaderCapture)
+    _Listener.hits = 0
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Listener)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server
 
@@ -883,44 +883,6 @@ async def check_14(ctx: Ctx) -> Outcome:
         "model's self-reported tool list (self-report, not a wire capture): "
         f"{text[:500]!r}; flagged substrings found={flagged or 'none'}; "
         f"{EXPOSED_TOOL} mentioned={EXPOSED_TOOL.lower() in lowered}"
-    )
-
-
-@check(15, "§3.10.3", "start", 1, "Whether the CLI sends the subscription token to a non-Anthropic ANTHROPIC_BASE_URL")
-async def check_15(ctx: Ctx) -> Outcome:
-    """Carried item 2. `ANTHROPIC_BASE_URL` is examined and *not* refused at construction (BEP 19
-    §3.10.3): it changes where requests go but is not one of the CLI's own bypass-login checks. So
-    it can be redirected to a local double while `auth = "subscription"` stays in force, and
-    whatever header the CLI sends is exactly what would otherwise go to Anthropic. Only header
-    *names* are ever reported — never values."""
-    server = start_header_capture_server()
-    prior = os.environ.get("ANTHROPIC_BASE_URL")
-    os.environ["ANTHROPIC_BASE_URL"] = f"http://127.0.0.1:{server.server_port}"
-    try:
-        _, exc, _, secs = await turn(ctx.agent("rw"), ctx.chat("base-url-probe"), "Reply with the word PING.")
-        captured = list(_HeaderCapture.captured)
-    finally:
-        if prior is None:
-            os.environ.pop("ANTHROPIC_BASE_URL", None)
-        else:
-            os.environ["ANTHROPIC_BASE_URL"] = prior
-        server.shutdown()
-    if not captured and exc is not None:
-        # The probe server answers 503, so a turn that reached it raises too; one that raised with
-        # nothing captured may never have started, and observed nothing.
-        return ERROR, (
-            f"no HTTP request reached the local probe server in {secs:.1f}s and the turn raised, so nothing "
-            f"was observed: {describe(exc)}"
-        )
-    if not captured:
-        return NOT_ARRANGED, (
-            f"no HTTP request reached the local probe server in {secs:.1f}s, so token exposure under a "
-            "redirected ANTHROPIC_BASE_URL was not observed this run; the turn completed without it."
-        )
-    credential_headers = sorted({k for h in captured for k in h if k.lower() in ("authorization", "x-api-key")})
-    return OBSERVED, (
-        f"{len(captured)} request(s) reached the redirected ANTHROPIC_BASE_URL; header name(s) carrying a "
-        f"credential: {credential_headers or 'NONE'} (values redacted, never printed); turn ended: {describe(exc)}"
     )
 
 
@@ -1351,46 +1313,81 @@ async def _unrunnable(ctx: Ctx) -> Outcome:
     raise AssertionError("a restored item from an earlier phase is a record, not a check to re-run")
 
 
-# ── The `auth-preflight` phase — item 23, offline, zero quota ───────────────
+# ── The `auth-preflight` phase — items 15 and 23, offline, zero quota ───────
 
 _FAKE_API_KEY = "sk-ant-validate-placeholder-not-a-real-key"
 
 
-async def run_auth_preflight_phase(workspace: Path) -> Item:
-    """BEP 19 §3.10.3: under the default `auth = "subscription"`, `ClaudeCodeAgent.__init__`
-    refuses at construction when an inherited credential variable (`ANTHROPIC_API_KEY` among them)
-    would take the run off the subscription login — synchronously, before any CLI is spawned and
-    before any network call. Proving that needs no login and spends nothing: this plants an
-    obviously-fake key in this process's own environment, tries to build the agent, and expects
-    the refusal. The key is never a real credential and is never printed."""
+async def _construct_with(workspace: Path, variable: str, value: str) -> BaseException | None:
+    """Open a ``BosApp`` over one ``claude-code`` agent under the default ``auth = "subscription"``,
+    with *variable* set to *value* in this process's own environment for the duration, and return
+    what that raised, or None. Construction is lazy (BEP 19 §3.1): no CLI child, no network call."""
     workspace.mkdir(parents=True, exist_ok=True)
     ws = Workspace(
         workspace=workspace,
         bos_dir=workspace / ".bos",
         config=workspace_config({"probe": {"_parent": "claude-code", "permission": "read-only"}}),
     )
-    prior = os.environ.get("ANTHROPIC_API_KEY")
-    os.environ["ANTHROPIC_API_KEY"] = _FAKE_API_KEY
+    prior = os.environ.get(variable)
+    os.environ[variable] = value
     try:
         async with BosApp(ws):
-            pass
-    except ValueError as exc:
-        text = str(exc)
-        good = "ANTHROPIC_API_KEY" in text and 'auth = "api_key"' in text
-        mark, note = (
-            (PASS if good else FAIL),
-            (f"construction raised ValueError naming the variable and the escape hatch={good}. {describe(exc)}"),
-        )
-    except Exception as exc:  # noqa: BLE001 - the wrong exception type is itself the finding
-        mark, note = FAIL, f"construction raised the wrong exception type — {describe(exc)}"
-    else:
-        mark, note = FAIL, "construction succeeded with ANTHROPIC_API_KEY set — the refusal did not fire"
+            return None
+    except Exception as exc:  # noqa: BLE001 - what construction raised is the observation
+        return exc
     finally:
         if prior is None:
-            os.environ.pop("ANTHROPIC_API_KEY", None)
+            os.environ.pop(variable, None)
         else:
-            os.environ["ANTHROPIC_API_KEY"] = prior
-    return Item(
+            os.environ[variable] = prior
+
+
+def _refusal(exc: BaseException | None, variable: str, *needles: str) -> Outcome:
+    """PASS only for a ``ValueError`` naming *variable*, the ``auth = "api_key"`` escape hatch and
+    each of *needles*."""
+    if exc is None:
+        return FAIL, f"construction succeeded with {variable} set — the refusal did not fire"
+    if not isinstance(exc, ValueError):
+        return FAIL, f"construction raised the wrong exception type — {describe(exc)}"
+    good = all(needle in str(exc) for needle in (variable, 'auth = "api_key"', *needles))
+    return (PASS if good else FAIL), (
+        f"construction raised ValueError naming {', '.join((variable, *needles))} and the escape hatch={good}. "
+        f"{describe(exc)}"
+    )
+
+
+async def run_auth_preflight_phase(workspace: Path) -> list[Item]:
+    """BEP 19 §3.10.3: under the default ``auth = "subscription"``, ``ClaudeCodeAgent.__init__``
+    refuses at construction — synchronously, before any CLI is spawned and before any network call
+    — when the inherited environment would take the run off the subscription login or send its
+    credential to another host. Proving that needs no login and spends nothing.
+
+    Item 15: ``ANTHROPIC_BASE_URL`` pointed at a loopback listener, which the live run of
+    2026-09-26 saw receive every request with the login's ``Authorization`` header (§8.1). PASS only
+    when construction refuses naming the variable and the listener's host, and nothing reached the
+    listener. Item 23: an obviously-fake ``ANTHROPIC_API_KEY``, never a real credential and never
+    printed."""
+    server = start_listener()
+    host = f"127.0.0.1:{server.server_port}"
+    try:
+        exc = await _construct_with(workspace, "ANTHROPIC_BASE_URL", f"http://{host}")
+    finally:
+        server.shutdown()
+    mark, note = _refusal(exc, "ANTHROPIC_BASE_URL", host)
+    if _Listener.hits:
+        mark, note = FAIL, f"{_Listener.hits} request(s) reached the listener. {note}"
+    base_url = Item(
+        n=15,
+        criterion="§3.10.3",
+        phase="auth-preflight",
+        turns=0,
+        title='Construction refuses auth="subscription" when ANTHROPIC_BASE_URL names a host that is not Anthropic\'s',
+        fn=_unrunnable,
+        mark=mark,
+        note=note,
+    )
+    mark, note = _refusal(await _construct_with(workspace, "ANTHROPIC_API_KEY", _FAKE_API_KEY), "ANTHROPIC_API_KEY")
+    api_key = Item(
         n=23,
         criterion="§3.10.3",
         phase="auth-preflight",
@@ -1400,6 +1397,7 @@ async def run_auth_preflight_phase(workspace: Path) -> Item:
         mark=mark,
         note=note,
     )
+    return [base_url, api_key]
 
 
 def auth_preflight_banner(workspace: Path) -> str:
@@ -1408,10 +1406,11 @@ def auth_preflight_banner(workspace: Path) -> str:
         f"BEP 19 Layer 4b live validation — phase 'auth-preflight' — {date.today().isoformat()}",
         "=" * 78,
         "",
-        "This phase spends NO quota and needs NO login: it sets a throwaway, obviously-fake",
-        'ANTHROPIC_API_KEY ("sk-ant-validate-placeholder-not-a-real-key") in this process\'s own',
-        "environment — never a real credential, never printed — and confirms BOS refuses",
-        '`auth = "subscription"` at construction, before any CLI is ever spawned.',
+        "This phase spends NO quota and needs NO login. In this process's own environment it sets,",
+        "one at a time, ANTHROPIC_BASE_URL to a loopback listener it starts (item 15) and a throwaway,",
+        'obviously-fake ANTHROPIC_API_KEY ("sk-ant-validate-placeholder-not-a-real-key", item 23) —',
+        'never a real credential, never printed — and confirms BOS refuses `auth = "subscription"`',
+        "at construction each time, before any CLI is ever spawned.",
         "",
         f"  claude-agent-sdk    : {sdk_version()}",
         f"  claude CLI          : {cli_version()}",
@@ -1573,7 +1572,7 @@ async def _check_no_verdict_without_evidence() -> None:
     item whose verdict rests on a write or call being attempted is NOT ARRANGED, saying the model did
     not attempt it — never PASS, which nothing happening once earned. And item 8 does not pass a
     timeout that expired before the turn streamed."""
-    runs_a_turn = {1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12, 13, 14, 15, 19, 22}
+    runs_a_turn = {1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12, 13, 14, 19, 22}
     for n, (mark, note) in (await _every_item_against(_RaisingAgent)).items():
         assert mark != PASS, f"item {n} passed on turns that raised: {note}"
         if n in runs_a_turn:
@@ -1598,9 +1597,9 @@ def self_check() -> int:
     shape, the report renderer, the banner, the gate-tap wiring items 5 and 11 read — driven through
     a real ``ClaudeCodeAgent`` — and that no item reaches a verdict without evidence. Deliberately
     NOT a pytest file — this script must stay uncollectable."""
-    numbers = sorted(i.n for i in CHECKS) + [23]
+    numbers = sorted(i.n for i in CHECKS) + [15, 23]
     assert sorted(numbers) == list(range(1, 24)), f"checklist 1-23 must each appear once, got {sorted(numbers)}"
-    assert {i.phase for i in CHECKS} == {"start", "resume"}, "unknown phase on some item (23 is handled separately)"
+    assert {i.phase for i in CHECKS} == {"start", "resume"}, "unknown phase on some item (15, 23 are separate)"
     for item in CHECKS:
         assert item.criterion.startswith("§"), f"item {item.n} has no BEP reference"
         assert item.turns >= 0 and item.title, f"item {item.n} is missing metadata"
@@ -1644,7 +1643,7 @@ def self_check() -> int:
         assert "external_runtime" not in cfg, "BOS writes external_runtime; config must not"
     assert len(AGENTS_RESUME) == 1, "item 21 needs exactly one claude-code agent for get_messages to route"
     assert {i.n for i in items_for("resume")} == {20, 21, 22}
-    assert {i.n for i in items_for("start")} == set(range(1, 20))
+    assert {i.n for i in items_for("start")} == set(range(1, 20)) - {15}
 
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp) / "ws"
@@ -1685,23 +1684,21 @@ def self_check() -> int:
     asyncio.run(cap.emit(event))
     assert cap.kinds() == ["response/finish"]
 
-    # Item 15 must never leak a header's value into the report — only its name.
-    server = start_header_capture_server()
+    # Item 15 fails on any request reaching its listener, so the listener must see one when it comes.
+    server = start_listener()
     try:
         import urllib.error
         import urllib.request
 
-        url = f"http://127.0.0.1:{server.server_port}/"
-        req = urllib.request.Request(url, headers={"Authorization": "Bearer sekrit"})
         try:
-            urllib.request.urlopen(req, timeout=5)
+            urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}/", timeout=5)
         except urllib.error.HTTPError:
             pass
-        assert _HeaderCapture.captured and _HeaderCapture.captured[0].get("Authorization") == "Bearer sekrit"
+        assert _Listener.hits == 1, _Listener.hits
     finally:
         server.shutdown()
 
-    print(f"self-check OK — {len(CHECKS) + 1} items, ~{sum(i.turns for i in CHECKS)} model turns across all phases")
+    print(f"self-check OK — {len(CHECKS) + 2} items, ~{sum(i.turns for i in CHECKS)} model turns across all phases")
     print(f"claude-agent-sdk {sdk_version()}; claude CLI {cli_version()}")
     return 0
 
@@ -1798,10 +1795,11 @@ async def amain_auth_preflight(args: argparse.Namespace, workspace: Path) -> int
     if not args.yes:
         print("Refusing to run without --yes. Re-read the paths above first.")
         return 1
-    item = await run_auth_preflight_phase(workspace)
-    print(f"\n-- item {item.n} ({item.criterion}): {item.title}")
-    print(f"   {item.mark}: {item.note}")
-    print(render([item], ["auth-preflight"]))
+    items = await run_auth_preflight_phase(workspace)
+    for item in items:
+        print(f"\n-- item {item.n} ({item.criterion}): {item.title}")
+        print(f"   {item.mark}: {item.note}")
+    print(render(items, ["auth-preflight"]))
     return 0
 
 

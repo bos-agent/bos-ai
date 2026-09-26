@@ -286,9 +286,18 @@ while anything there would move the run off the subscription login, naming each 
 `ANTHROPIC_ORGANIZATION_ID`, `ANTHROPIC_UNIX_SOCKET`, `CLAUDE_CODE_SIMPLE`, and the
 `CLAUDE_CODE_USE_*` provider switches (Bedrock, Vertex, Foundry, the AWS and Google Cloud
 platforms, Mantle, a gateway) — or the key file `/home/claude/.claude/remote/.api_key`
-exists. An empty value is not refused; `CLAUDE_CODE_OAUTH_TOKEN` (a subscription token)
-and `ANTHROPIC_BASE_URL` are not refused. There is no login check: a missing login
-surfaces at the first turn, from the CLI.
+exists. An empty value is not refused, and neither is `CLAUDE_CODE_OAUTH_TOKEN` (a
+subscription token). There is no login check: a missing login surfaces at the first turn,
+from the CLI.
+
+`ANTHROPIC_BASE_URL` is refused by host instead. It keeps the login in use but sends every
+request to the host it names, with the login's credential — observed live — so under
+`auth = "subscription"` it is refused unless that host is Anthropic's, `api.anthropic.com`,
+by the CLI's own check. An empty value counts as unset, and a value BOS cannot read an
+http or https host from is refused too. The message names the host, never the URL. To go
+through a proxy, set `auth = "api_key"` and give the proxy its own credential in
+`ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN`: with neither set, the CLI still uses the
+login, and sends it to the proxy.
 
 !!! tip "A project `.env` counts"
     `[platform].envfile` and `[platform.envs]` write into BOS's environment, which the
@@ -309,6 +318,7 @@ at 30 seconds.
 | Refusal | Runtime | What to do |
 |---|---|---|
 | A credential or provider variable in the environment, or the well-known key file, under `auth = "subscription"` | Claude Code | Remove it from the environment BOS runs in, or set `auth = "api_key"`. |
+| `ANTHROPIC_BASE_URL` naming a host other than `api.anthropic.com`, or one BOS cannot read a host from, under `auth = "subscription"` | Claude Code | Unset it (empty counts as unset). For a proxy, set `auth = "api_key"` and give the proxy its own credential. |
 | `workspace-write` without the bash sandbox (missing `bwrap`/`socat`, missing `sandbox-exec`, or Windows) | Claude Code | Install what the message names, or use `read-only` / `full-access`. |
 | An enterprise MCP config, `managed-mcp.json`, exists (`/etc/claude-code/managed-mcp.json` on Linux) | Claude Code | The CLI then refuses the `--strict-mcp-config` BOS always sends. BOS does not work around the administrator's policy: run the agent on a host without that file. |
 | `native_options` naming a key outside the allowlist | Claude Code | Remove it; the message gives each key's reason. |
@@ -529,6 +539,7 @@ An interrupted or failed turn that BOS did not ask for raises, and commits nothi
 | *`cwd` resolves to …, which is outside the workspace …* | `cwd` escapes the workspace root. | Use a path inside the directory holding `.bos/`. |
 | *Agent '…' sets `external_runtime`, which BOS writes, not config.* | A hand-written `external_runtime`. | Use `_parent = "<runtime>"`. |
 | *`auth = "subscription"` (the default), but the Claude Code CLI inherits this process's environment …* | A credential or provider variable is set — often from a project `.env`. | Remove what it names, or set `auth = "api_key"`. |
+| … *ANTHROPIC_BASE_URL names the host …, which is not Anthropic's* (or *… is set to a value BOS cannot read an http or https host from*) | `ANTHROPIC_BASE_URL` points at a proxy or another host, where the CLI would send the subscription login. | Unset it; for a proxy, set `auth = "api_key"` and give the proxy its own key. |
 | *`permission = "workspace-write"` is refused on this host: …* | No bash sandbox: `bwrap`/`socat` missing, or Windows. | Install what it names (`apt install bubblewrap socat`), or change `permission`. |
 | *… managed-mcp.json exists: this host's administrator gives an enterprise MCP config exclusive control …* | An enterprise MCP config on the host. | Run the Claude Code agent on another host. |
 | *`native_options` for the 'claude-code' runtime may carry only […]* / *`native_options` may not set […]* | A refused `native_options` key. | Remove it; the message gives the reason. |

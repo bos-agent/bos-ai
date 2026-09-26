@@ -1234,12 +1234,17 @@ check. BOS stores no token.
   `ANTHROPIC_CONFIG_DIR`, `ANTHROPIC_FEDERATION_RULE_ID`, `ANTHROPIC_ORGANIZATION_ID`,
   `ANTHROPIC_UNIX_SOCKET`, `CLAUDE_CODE_SIMPLE`, `CLAUDE_CODE_USE_{BEDROCK,VERTEX,FOUNDRY,
   ANTHROPIC_AWS,ANTHROPIC_GOOGLE_CLOUD,MANTLE,GATEWAY}` — or while
-  `/home/claude/.claude/remote/.api_key` exists. `CLAUDE_CODE_OAUTH_TOKEN` and
-  `ANTHROPIC_BASE_URL` are allowed. `[platform].envfile`/`envs` count (they write
-  `os.environ`). No login check exists: a missing login fails the first turn in the CLI.
-  Any Claude Code agent is also refused while `managed-mcp.json` exists
-  (`/etc/claude-code/` on Linux): the CLI would refuse the `--strict-mcp-config` BOS always
-  sends.
+  `/home/claude/.claude/remote/.api_key` exists. `CLAUDE_CODE_OAUTH_TOKEN` is allowed.
+  `ANTHROPIC_BASE_URL` is refused by host (`_base_url_route`): the CLI keeps the login and
+  sends it to whatever host that names (observed live), so `subscription` needs the host
+  to be `api.anthropic.com` (the CLI's own first-party check: `new URL(v).host`, default
+  port dropped) or the value empty; a value with no readable http(s) host is refused too.
+  The message names the host, never the URL. A proxy takes `auth = "api_key"` plus its own
+  `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN` (with neither, the CLI still sends the login).
+  `[platform].envfile`/`envs` count (they write `os.environ`). No login check exists: a
+  missing login fails the first turn in the CLI. Any Claude Code agent is also refused
+  while `managed-mcp.json` exists (`/etc/claude-code/` on Linux): the CLI would refuse the
+  `--strict-mcp-config` BOS always sends.
 - **Codex, on the first turn** (or first `native_messages`): `_preflight_auth` calls
   `account()` (bounded 30 s) once per agent; no account → *"auth="subscription" but no Codex
   account is logged in. Run `codex login`, or set auth="api_key" to opt out of this check."*

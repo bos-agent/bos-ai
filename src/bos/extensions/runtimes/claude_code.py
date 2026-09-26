@@ -74,6 +74,7 @@ from dataclasses import replace
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, cast, get_args
+from urllib.parse import urlsplit
 
 from claude_agent_sdk import (
     AssistantMessage,
@@ -525,10 +526,10 @@ _INHERITED_ENV_OVERRIDES: Mapping[str, str] = MappingProxyType({
 # the CLI is stricter: it reads the provider flags as booleans, starts OIDC federation only
 # with both of its variables, and uses a profile only if the profile store holds one.
 # Examined and not refused: CLAUDE_CODE_OAUTH_TOKEN, a subscription token (what `claude
-# setup-token` makes for a headless login); ANTHROPIC_BASE_URL, which changes where requests
-# go but is not among `Ec()`'s inputs; and the per-provider credentials and targets
+# setup-token` makes for a headless login); and the per-provider credentials and targets
 # (AWS_BEARER_TOKEN_BEDROCK, ANTHROPIC_VERTEX_PROJECT_ID and the like), which the CLI reads
-# only once a flag below has chosen that provider.
+# only once a flag below has chosen that provider. ANTHROPIC_BASE_URL is not among `Ec()`'s
+# inputs either, but it sends the login elsewhere, and is refused by host (`_base_url_route`).
 _OTHER_CREDENTIAL = "bills another credential in place of the subscription login"
 _SUBSCRIPTION_BYPASS_VARS: Mapping[str, str] = MappingProxyType({
     # `Ec()`: a first-party credential used instead of the login.
@@ -564,6 +565,19 @@ _SUBSCRIPTION_BYPASS_VARS: Mapping[str, str] = MappingProxyType({
 # not. Its sibling `.oauth_token` is a subscription token, excluded for the reason
 # CLAUDE_CODE_OAUTH_TOKEN is.
 _WELL_KNOWN_API_KEY_FILE = Path("/home/claude/.claude/remote/.api_key")
+
+# BEP 19 §3.10.3: the route that keeps the login but sends it elsewhere. For a subscriber the
+# CLI builds its API client with the login's OAuth token and `baseURL: a.ANTHROPIC_BASE_URL`,
+# which `M.str` reads trimmed, a blank value as unset and the client's default
+# https://api.anthropic.com then applying (read from the CLI 2.1.281 source: `Rho()` and the
+# client built after it). The live run saw every request to a redirected base URL carry the
+# `Authorization` header (§8.1, item 15). Anthropic's host is the CLI's own first-party check,
+# `nw()`, which `Ss()` and so `Qg()` rest on: `["api.anthropic.com"].includes(new URL(e).host)`,
+# false where `new URL` throws (read from the same source). `Ss()` also answers yes whenever
+# `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL` is set; that changes what the CLI believes, not where
+# it sends, so BOS ignores it.
+_ANTHROPIC_API_HOST = "api.anthropic.com"
+_DEFAULT_PORTS = {"http": 80, "https": 443}
 
 # BEP 19 §8.2: the administrator's enterprise MCP config, beside managed settings. While a valid
 # one exists the CLI refuses `--strict-mcp-config`, which BOS sends on every client, and while a
@@ -717,6 +731,40 @@ def _bash_sandbox_unavailable(platform: str) -> str | None:
         packages = " and ".join(_LINUX_SANDBOX_TOOLS[tool] for tool in missing)
         return f"{' and '.join(missing)} not found on PATH — install {packages} (e.g. `apt install {packages}`)"
     return f"the SDK documents Claude Code's bash sandbox for macOS and Linux only, not {platform!r}"
+
+
+def _base_url_route(value: str) -> str | None:
+    """Why an ``ANTHROPIC_BASE_URL`` of *value* would send the subscription login's credential
+    to a host that is not Anthropic's — or None, when it is empty or names Anthropic's host.
+    Names the host, never the URL, which can carry a password.
+
+    ``urlsplit`` is not the WHATWG parser ``new URL`` is, so where the two could read different
+    hosts BOS refuses, as for a value that does not parse: a backslash, where WHATWG ends an
+    http(s) host and ``urlsplit`` does not; a scheme other than http or https; no host. Where
+    WHATWG is the looser — it percent-decodes and IDNA-maps a host — BOS refuses a host the CLI
+    would accept, which is the safe side.
+    """
+    value = value.strip(_JS_WHITESPACE)
+    if not value:
+        return None
+    try:
+        parts = urlsplit(value)
+        port = parts.port
+    except ValueError:
+        parts = port = None
+    if parts is None or parts.scheme not in _DEFAULT_PORTS or not parts.hostname or "\\" in value:
+        return (
+            "ANTHROPIC_BASE_URL is set to a value BOS cannot read an http or https host from the way the CLI "
+            "would, so BOS cannot rule out that the CLI sends the subscription credential to another host; "
+            'to use a proxy, set `auth = "api_key"`'
+        )
+    if parts.hostname == _ANTHROPIC_API_HOST and port in (None, _DEFAULT_PORTS[parts.scheme]):
+        return None
+    return (
+        f"ANTHROPIC_BASE_URL names the host {parts.netloc.rpartition('@')[2]}, which is not Anthropic's "
+        f"({_ANTHROPIC_API_HOST}), and the CLI would send the subscription credential there; to use a proxy, "
+        f'set `auth = "api_key"`'
+    )
 
 
 def _refuse_native_options(native_options: Mapping[str, Any]) -> None:
@@ -1213,8 +1261,12 @@ class ClaudeCodeAgent:
         # these in the CLI 2.1.281 source trims or tests truthiness, or both.
         if self._config.auth == "subscription":
             routes = [
-                f"{name} is set, which {why}" for name, why in _SUBSCRIPTION_BYPASS_VARS.items() if os.environ.get(name)
+                f"{name} is set, which {why} (refused whatever its value)"
+                for name, why in _SUBSCRIPTION_BYPASS_VARS.items()
+                if os.environ.get(name)
             ]
+            if route := _base_url_route(os.environ.get("ANTHROPIC_BASE_URL", "")):
+                routes.append(route)
             # Not Path.exists(), which raises where a parent cannot be searched; the CLI,
             # running as this same user, could not read the file there either.
             if os.path.exists(_WELL_KNOWN_API_KEY_FILE):
@@ -1222,8 +1274,8 @@ class ClaudeCodeAgent:
             if routes:
                 raise ValueError(
                     f'`auth = "subscription"` (the default), but the Claude Code CLI inherits this process\'s '
-                    f"environment and filesystem, where BOS found what can take a run off the subscription login, "
-                    f"each refused whatever its value: {'; '.join(routes)}. "
+                    f"environment and filesystem, where BOS found what can take a run off the subscription login "
+                    f"or send its credential to another host: {'; '.join(routes)}. "
                     f'Remove {"it" if len(routes) == 1 else "them"}, or set `auth = "api_key"` to run that way '
                     f"deliberately."
                 )
