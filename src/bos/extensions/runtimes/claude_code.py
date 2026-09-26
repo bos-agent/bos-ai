@@ -146,7 +146,13 @@ _REPO_SETTING_SOURCES = {"project": ".claude/settings.json", "local": ".claude/s
 # `env`, with the value that switches each off. Enumerated from the CLI 2.1.281 source (the
 # version test_what_was_read_from_the_cli_source_is_pinned_to_its_version pins): the
 # variables it reads whose names put them on its plugin, hook, settings, MCP, skill or agent
-# loading paths, each then read where it is used.
+# loading paths, each then read where it is used. Each value is checked against that
+# variable's parser there, since an override can only switch a variable off if the CLI reads
+# the value as off: `M.bool` counts a value as set only when, trimmed and lower-cased, it is
+# 1, true, yes or on; `M.triBool` reads 0, false, no and off as an explicit false; `M.str`
+# reads an empty value as unset. None of these variables is read as set by its mere presence,
+# which an override could not undo — the SDK cannot unset a variable — and BOS would have to
+# refuse instead.
 _INHERITED_ENV_OVERRIDES: Mapping[str, str] = MappingProxyType({
     # Measured against the real CLI with BOS's options; tests pin each one:
     # loads plugin folders as inline plugins, whose hooks then ran at `read-only`.
@@ -158,17 +164,31 @@ _INHERITED_ENV_OVERRIDES: Mapping[str, str] = MappingProxyType({
     "CLAUDE_RELAUNCH_SESSION_ADD_DIRS": "",
     # loads CLAUDE.md and rules files from those added directories.
     "CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD": "",
+    # an opt-out, and on unless a settings file says otherwise: the CLI loads the operator's
+    # auto-memory index from <CLAUDE_CONFIG_DIR>/projects/<slug>/memory/ into every turn, as
+    # instructions, and tells the model to write there. This switches the loading and the
+    # instructions off; the CLI still lets a `read-only` agent's Write into that directory
+    # through unasked, which BOS's PreToolUse hook is to deny (BEP 19 §3.5.3). A settings
+    # file cannot turn it back on over this: the variable is read first.
+    "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
     # Read from the source and not measured, each overridden because BOS loads no plugins,
     # skills or other MCP servers by default:
     # extra roots the CLI searches for installed plugins (whether a plugin found there loads
     # without a settings file enabling it was not measured).
     "CLAUDE_CODE_PLUGIN_SEED_DIR": "",
-    # fetch the account's plugins and skills at startup (needs an account to measure).
+    # fetch the account's plugins and skills at startup (needs an account to measure); the
+    # third is a second trigger for both.
     "CLAUDE_CODE_SYNC_PLUGINS": "",
     "CLAUDE_CODE_SYNC_SKILLS": "",
+    "CLAUDE_CODE_SYNC_SESSION_REFS": "",
     # opt-out: the claude.ai account's MCP connectors load unless this is false (needs a
     # claude.ai login to measure). The CLI's own confined-evaluation environment sets it so.
     "ENABLE_CLAUDEAI_MCP_SERVERS": "false",
+    # under the subscription login, wires in the Claude in Chrome MCP server, which drives the
+    # operator's browser, past `strict_mcp_config` and with its tools pre-allowed (needs a
+    # claude.ai login and the extension to measure). An explicit false is read before the
+    # global config's `claudeInChromeDefaultEnabled`, so that cannot turn it back on either.
+    "CLAUDE_CODE_ENABLE_CFC": "0",
 })
 # Read on those paths and left alone, because under BOS's default each is inert or loads
 # nothing from outside the session:
@@ -179,22 +199,29 @@ _INHERITED_ENV_OVERRIDES: Mapping[str, str] = MappingProxyType({
 #   CLAUDE_SECURESTORAGE_CONFIG_DIR. What they hold that the default excludes stays excluded.
 # - relocations of what only a settings file enables: CLAUDE_CODE_PLUGIN_CACHE_DIR, and
 #   CLAUDE_CODE_USE_COWORK_PLUGINS, which renames the user settings file and plugin cache.
+# - acting only on plugins a settings file enables — how and when those install, refresh,
+#   update or are watched: CLAUDE_CODE_SYNC_PLUGIN_INSTALL, CLAUDE_CODE_ENABLE_BACKGROUND_
+#   PLUGIN_REFRESH, FORCE_AUTOUPDATE_PLUGINS and CLAUDE_CODE_PLUGIN_DIR_WATCH.
 # - background-session mode and trust: CLAUDE_CODE_SESSION_KIND and CLAUDE_BG_WORKSPACE_
 #   TRUSTED. Under the default no repo settings load for trust to gate.
 # - feature switches, which change what the CLI offers rather than load anything:
 #   CLAUDE_CODE_ENABLE_FUNCTION_HOOKS, CLAUDE_CODE_WORKFLOWS, CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT,
 #   and CLAUDE_CODE_COORDINATOR_EXTRA_TOOLS (coordinator mode only).
-# - read only by modes BOS never starts: bridge children (CLAUDE_CODE_BRIDGE_CHILD_*), the
+# - CLAUDE_CODE_BRIDGE_CHILD_MACHINE_SETTINGS, read in an ordinary session too, but only by
+#   Claude in Chrome's gate, after CLAUDE_CODE_ENABLE_CFC's explicit false has closed it.
+# - read only by modes BOS never starts: the other bridge-child variables, the
 #   self-hosted runner (SELF_HOSTED_RUNNER_*, its lifecycle hooks included), the
 #   environment-delivered workflow subcommand (CLAUDE_REMOTE_WORKFLOW_SCRIPT and _ARGS), and
 #   the `claude agents` view (CLAUDE_AGENTS_SELECT, CLAUDE_CODE_AGENT).
-# - the CLI's own memory features: CLAUDE_MEMORY_STORES, CLAUDE_CODE_REMOTE_MEMORY_DIR,
-#   CLAUDE_COWORK_MEMORY_* and CLAUDE_CODE_POST_TURN_MEMORY*.
+# - the rest of the CLI's memory features, which relocate or extend the auto-memory switched
+#   off above: CLAUDE_MEMORY_STORES, CLAUDE_CODE_REMOTE_MEMORY_DIR, CLAUDE_COWORK_MEMORY_*
+#   and CLAUDE_CODE_POST_TURN_MEMORY*.
 # - CLAUDE_AGENT_SDK_MCP_NO_PREFIX, which renames the tools of in-process SDK MCP servers
 #   only, and BOS's MCP server is an HTTP one (§3.8).
 # - restrictions only: CLAUDE_CODE_DISABLE_* and CLAUDE_CODE_SKIP_PLUGIN_MCP_SERVERS*.
-# Every other variable on those paths was classified by its name alone as a timeout, size,
-# batch, cgroup or display setting, or as another restriction, and was not read one by one.
+# Every other variable on those paths was classified by its name alone, and not read one by
+# one: those named as a timeout, size, batch, cgroup or display setting. Each name that reads
+# as a trigger — sync, install, update, fetch, enable, load — was read where it is used.
 
 # BEP 19 §3.10.3: under `auth = "subscription"`, each of these in BOS's environment makes the
 # CLI stop using the subscription login — the CLI inherits that environment whole (§3.12) —
@@ -227,14 +254,15 @@ _SUBSCRIPTION_BYPASS_VARS: Mapping[str, str] = MappingProxyType({
     # `Ec()`: requests through a local socket, and bare mode, which ignores the login.
     "ANTHROPIC_UNIX_SOCKET": "sends requests through a local socket, billed to whatever credential serves it",
     "CLAUDE_CODE_SIMPLE": "puts the CLI in bare mode, which does not use the login at all",
-    # `He()`: another provider, billed by that provider; the names are the CLI's own labels.
+    # `He()`: another provider, billed by that provider; the names are the CLI's own labels
+    # (its `FR` map).
     "CLAUDE_CODE_USE_BEDROCK": "moves the run to Amazon Bedrock, billed there instead",
     "CLAUDE_CODE_USE_VERTEX": "moves the run to Google Vertex AI, billed there instead",
     "CLAUDE_CODE_USE_FOUNDRY": "moves the run to Microsoft Foundry, billed there instead",
     "CLAUDE_CODE_USE_ANTHROPIC_AWS": "moves the run to Claude Platform on AWS, billed there instead",
     "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD": "moves the run to Claude Platform on Google Cloud, billed there instead",
-    "CLAUDE_CODE_USE_MANTLE": "moves the run to Bedrock Mantle, billed there instead",
-    "CLAUDE_CODE_USE_GATEWAY": "moves the run to a gateway, billed to the gateway's credential",
+    "CLAUDE_CODE_USE_MANTLE": "moves the run to Amazon Bedrock (Mantle), billed there instead",
+    "CLAUDE_CODE_USE_GATEWAY": "moves the run to a Cloud gateway, billed to the gateway's credential",
 })
 
 # BEP 19 §3.10.3: a route that is a file, not a variable. The CLI reads an API key from this
@@ -254,12 +282,19 @@ _WELL_KNOWN_API_KEY_FILE = Path("/home/claude/.claude/remote/.api_key")
 _CLAUDE_MD_MAX_BYTES = 40_000
 _CLAUDE_MD_HEADING = "# CLAUDE.md in the working directory"
 _CLAUDE_MD_TRUNCATED = f"[BOS truncated this CLAUDE.md at {_CLAUDE_MD_MAX_BYTES} bytes.]"
-# The CLI's own switch for the memory loading BOS's read stands in for, so BOS's read obeys it
-# too, by the CLI's rule for this variable: `M.bool`, which counts it as set only when the
-# value, trimmed and lower-cased, is 1, true, yes or on (read from the CLI 2.1.281 source). It
-# is also how a host keeps repository text out of the prompt, with no BOS key of its own.
-_DISABLE_CLAUDE_MDS_VAR = "CLAUDE_CODE_DISABLE_CLAUDE_MDS"
+# The CLI's own switches for the memory loading BOS's read stands in for, so BOS's read obeys
+# them too: its memory gate (`aH()` in the CLI 2.1.281 source) is off under the first, under
+# safe mode, and under bare mode when no directory is added — and `add_dirs` is refused below,
+# as is the `--bare` flag, through `extra_args`. The first is also how a host keeps repository
+# text out of the prompt, with no BOS key of its own.
+_CLAUDE_MD_SWITCHES = ("CLAUDE_CODE_DISABLE_CLAUDE_MDS", "CLAUDE_CODE_SAFE_MODE", "CLAUDE_CODE_SIMPLE")
+# The CLI's rule for each (`Oe`): set only when the value, lower-cased and trimmed, is 1, true,
+# yes or on. Trimmed as JavaScript's `trim()` trims, which is not Python's `strip()`.
 _CLI_TRUE = frozenset({"1", "true", "yes", "on"})
+_JS_WHITESPACE = (
+    "\t\n\v\f\r \u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a"
+    "\u2028\u2029\u202f\u205f\u3000\ufeff"
+)
 
 # macOS: the binary the CLI runs every sandboxed command through (read from the CLI
 # 2.1.281 source; no macOS host has measured it).
@@ -559,12 +594,15 @@ class ClaudeCodeAgent:
             routes = [
                 f"{name} is set, which {why}" for name, why in _SUBSCRIPTION_BYPASS_VARS.items() if os.environ.get(name)
             ]
-            if _WELL_KNOWN_API_KEY_FILE.exists():
+            # Not Path.exists(), which raises where a parent cannot be searched; the CLI,
+            # running as this same user, could not read the file there either.
+            if os.path.exists(_WELL_KNOWN_API_KEY_FILE):
                 routes.append(f"{_WELL_KNOWN_API_KEY_FILE} exists, and the CLI reads an API key from it and bills that")
             if routes:
                 raise ValueError(
                     f'`auth = "subscription"` (the default), but the Claude Code CLI inherits this process\'s '
-                    f"environment and filesystem, and it would not use the subscription login: {'; '.join(routes)}. "
+                    f"environment and filesystem, where BOS found what can take a run off the subscription login, "
+                    f"each refused whatever its value: {'; '.join(routes)}. "
                     f'Remove {"it" if len(routes) == 1 else "them"}, or set `auth = "api_key"` to run that way '
                     f"deliberately."
                 )
@@ -636,12 +674,14 @@ class ClaudeCodeAgent:
         # `env` and apiKeyHelper ran without any trust at all.
         config = self._config
         # BEP 19 §3.4.1.4: the CLI loads CLAUDE.md itself under `project`, `base_instructions`
-        # means the host owns the whole prompt, and the CLI's own switch for memory files turns
+        # means the host owns the whole prompt, and the CLI's own switches for memory files turn
         # BOS's read off too, so only otherwise does BOS read the file.
         reads_claude_md = (
             config.base_instructions is None
             and "project" not in self._setting_sources
-            and os.environ.get(_DISABLE_CLAUDE_MDS_VAR, "").strip().lower() not in _CLI_TRUE
+            and not any(
+                os.environ.get(name, "").lower().strip(_JS_WHITESPACE) in _CLI_TRUE for name in _CLAUDE_MD_SWITCHES
+            )
         )
         sandbox = (
             cast(SandboxSettings, dict(_WORKSPACE_WRITE_SANDBOX)) if config.permission == "workspace-write" else None
