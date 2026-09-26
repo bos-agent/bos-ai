@@ -970,6 +970,7 @@ Observed rather than asserted, and recorded where each belongs: no orphaned turn
 
 ### 8.2 Unresolved
 
+- **A Claude Code child's own cross-session inbox (read from source, not measured).** Found while tracing the messaging variables (§8.3): when a vendor feature flag is on, the CLI's `setup()` starts a messaging inbox of the child's own, and the CLI's own log text says other sessions can write user messages into it. If a CLI child BOS starts reaches that code, another local session could put a message into a BOS agent's turn, wherever BOS was started from — the kind of cross-session reach §3.5.3 excludes. Which flag gates it, and whether an SDK-started child reaches it, were not traced.
 - **Whether `full-access` should exist at all.** Kept because a trusted local dev loop is a real use case, but it is the one level where BOS enforces nothing. Candidate for requiring an explicit second opt-in.
 - **Where process-global BOS state should live so a host can hold several workspaces at once.** `AgentRegistry`'s class dict, the `[exts]` defaults merged into `ExtensionPoint` objects, and `[platform.envs]` writing `os.environ` are the three (§3.12). A BEP 18 / BEP 6 question, listed here because the first host wants it and because BEP 19's §7.27 is the guard that this BEP does not add a fourth.
 - **Claude Code `session_store`.** Would make transcripts workspace-local and portable (§3.7). Deferred; the argument for doing it is that `~/.claude/projects/` is the wrong home for a server's data.
