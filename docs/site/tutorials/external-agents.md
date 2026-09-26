@@ -64,6 +64,12 @@ you already use the runtime on this machine as that user, you are logged in.
         instead. Move the key out of the environment BOS runs in, or add
         `auth: api_key` to the agent below to bill it deliberately.
 
+    !!! warning "Run `boscli` from an ordinary terminal"
+        Not from inside a Claude Code session — its terminal or its Bash tool. The
+        session's own variables would reach the CLI that BOS starts.
+        [External agents → Auth](../concepts/external-agents.md#auth) has the `env -u …`
+        line to use if you must.
+
 === "Codex"
 
     ```bash

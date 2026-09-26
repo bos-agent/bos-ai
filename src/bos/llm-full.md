@@ -1245,6 +1245,14 @@ check. BOS stores no token.
   missing login fails the first turn in the CLI. Any Claude Code agent is also refused
   while `managed-mcp.json` exists (`/etc/claude-code/` on Linux): the CLI would refuse the
   `--strict-mcp-config` BOS always sends.
+- **Start BOS from an ordinary shell, not inside a Claude Code session** (documented, not
+  enforced). A session exports `CLAUDECODE`, `CLAUDE_CODE_SESSION_ID`,
+  `CLAUDE_CODE_CHILD_SESSION`, `CLAUDE_CODE_MESSAGING_SOCKET`/`_TOKEN`,
+  `CLAUDE_CODE_ENTRYPOINT`, `MCP_CONNECTION_NONBLOCKING` and others; the SDK drops only
+  `CLAUDECODE`, every CLI child inherits the rest, and the CLI reads several of them (read
+  from source; their effect in a BOS child is not measured). If unavoidable:
+  `env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_MESSAGING_SOCKET -u CLAUDE_CODE_MESSAGING_TOKEN … boscli …`
+  (`env | grep -E '^(CLAUDE|MCP_)'` lists what to unset).
 - **Codex, on the first turn** (or first `native_messages`): `_preflight_auth` calls
   `account()` (bounded 30 s) once per agent; no account → *"auth="subscription" but no Codex
   account is logged in. Run `codex login`, or set auth="api_key" to opt out of this check."*

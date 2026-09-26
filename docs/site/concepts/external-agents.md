@@ -305,6 +305,28 @@ login, and sends it to the proxy.
     agents will have its subscription Claude Code agents refused — remove the key from
     the environment BOS runs in, or set `auth = "api_key"` to bill it deliberately.
 
+!!! warning "Start BOS from an ordinary shell, not inside a Claude Code session"
+    Start the gateway, `boscli ask`, or the program that embeds BOS from an ordinary
+    terminal — not from a Claude Code session's terminal or its Bash tool. A session exports
+    variables of its own, and every CLI child BOS starts inherits them: the SDK passes
+    BOS's whole environment on and can override a variable but not remove one. The CLI
+    reads several of them — the session's id, and the socket and token Claude Code
+    sessions message each other through, among them — and what they do in a child BOS
+    starts has not been measured (read from the CLI source). BOS neither detects nor
+    refuses this. If you must start BOS there, unset the session's variables first:
+
+    ```bash
+    env -u CLAUDECODE -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION \
+        -u CLAUDE_CODE_MESSAGING_SOCKET -u CLAUDE_CODE_MESSAGING_TOKEN \
+        -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_EXECPATH -u CLAUDE_CODE_SESSION_ATTENDED \
+        -u CLAUDE_PID -u CLAUDE_EFFORT -u CLAUDE_AGENT_SDK_VERSION \
+        -u CLAUDE_CODE_ENABLE_TASKS -u MCP_CONNECTION_NONBLOCKING \
+        boscli ask --agent coder "…"
+    ```
+
+    Those are the names one session was seen to export; the set can change between
+    Claude Code versions, so check with `env | grep -E '^(CLAUDE|MCP_)'` in that terminal.
+
 **Codex** checks the login itself, on the agent's first turn (or first native transcript
 read) rather than at build time, because the check is a call to the `codex app-server`
 child, which BOS starts lazily. With no account logged in, that turn fails with
@@ -540,6 +562,7 @@ An interrupted or failed turn that BOS did not ask for raises, and commits nothi
 | *Agent '…' sets `external_runtime`, which BOS writes, not config.* | A hand-written `external_runtime`. | Use `_parent = "<runtime>"`. |
 | *`auth = "subscription"` (the default), but the Claude Code CLI inherits this process's environment …* | A credential or provider variable is set — often from a project `.env`. | Remove what it names, or set `auth = "api_key"`. |
 | … *ANTHROPIC_BASE_URL names the host …, which is not Anthropic's* (or *… is set to a value BOS cannot read an http or https host from*) | `ANTHROPIC_BASE_URL` points at a proxy or another host, where the CLI would send the subscription login. | Unset it; for a proxy, set `auth = "api_key"` and give the proxy its own key. |
+| No message: BOS was started from a Claude Code session's terminal or Bash tool | The CLI children inherit that session's variables, its messaging socket among them. | Start BOS from an ordinary shell, or unset the session's variables first ([Auth](#auth)). |
 | *`permission = "workspace-write"` is refused on this host: …* | No bash sandbox: `bwrap`/`socat` missing, or Windows. | Install what it names (`apt install bubblewrap socat`), or change `permission`. |
 | *… managed-mcp.json exists: this host's administrator gives an enterprise MCP config exclusive control …* | An enterprise MCP config on the host. | Run the Claude Code agent on another host. |
 | *`native_options` for the 'claude-code' runtime may carry only […]* / *`native_options` may not set […]* | A refused `native_options` key. | Remove it; the message gives the reason. |
