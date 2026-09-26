@@ -3577,3 +3577,80 @@ async def test_a_turn_is_read_back_through_native_messages_against_the_real_cli(
     assert bos_messages[1].metadata["native_turn_id"] in {m.metadata["native_item_id"] for m in native}, (
         "the uuid BOS committed as native_turn_id (Task 4) is a real, readable transcript entry"
     )
+
+
+# ── Task 9 fix round 1: the missing-vs-empty inference against a real stop, and a real read
+# failure (BEP 19 §3.7, review Important #1 and Minor #1) ───────────────────────────────────
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="finds the CLI and its tool through /proc")
+async def test_native_messages_does_not_misreport_a_stopped_turn_as_missing_against_the_real_cli(
+    tmp_path, fake_anthropic, monkeypatch
+):
+    """Review Important #1: the missing-vs-empty inference (§3.7's docstring paragraph above) is
+    argued sound because a session id BOS has on record always names a session with at least one
+    real top-level message — proven here against the exact case the review named, not just a
+    session id that never existed (the sibling real-lookup test above). The assistant's only
+    streamed content is a tool call, no text at all — the shape ``_visible_text`` would filter to
+    nothing on its own — and ``request_stop()`` fires while it is still running, mirroring
+    ``test_request_stop_mid_turn_stops_the_cli_and_its_tool_against_the_real_cli``. Even so,
+    ``native_messages()`` must not raise: the CLI logs the user's own prompt as a real, visible
+    entry before it can respond at all, and its own "[Request interrupted by user...]" marker
+    besides. ``permission="full-access"`` only so ``Bash`` runs without a prompt, as in the sibling
+    stop test; it confines nothing and nothing here depends on it doing so."""
+    _point_the_cli_at(fake_anthropic, tmp_path, monkeypatch)
+    ws = (tmp_path / "ws").resolve()
+    ws.mkdir()
+    store = InMemChatStore()
+    agent = _agent(tmp_path, cwd="ws", permission="full-access", auth="api_key", chat_store=store)
+    fake_anthropic.script([[_bash("tu_sleep", "sleep 30")]])
+
+    with _reaping(ws):
+        async with asyncio.timeout(60):
+            turn = asyncio.ensure_future(agent.run("chat-1", "run something slow", turn_id="t1"))
+            await _poll_until(lambda: any("sleep 30" in cmd for cmd in _processes_in(ws).values()), timeout=30)
+            agent.request_stop()
+            result = await turn
+            await _poll_until(lambda: not _processes_in(ws), timeout=10)
+
+    assert result.finish_reason == "aborted_tools"
+
+    native = await agent.native_messages("chat-1")
+
+    assert native, "a stopped turn's transcript is not empty"
+    assert any(m.llm_message["role"] == "user" and "run something slow" in m.llm_message["content"] for m in native), (
+        "the user's own prompt is a real, visible entry regardless of how the turn ended"
+    )
+
+
+@pytest.mark.asyncio
+async def test_native_messages_wraps_a_read_failure_instead_of_a_raw_exception(tmp_path, fake_anthropic, monkeypatch):
+    """Review Minor #1: ``get_session_messages`` is not immune to every failure — a transcript
+    file that exists but cannot be decoded as UTF-8 (never a normal CLI write; only external
+    corruption) raises a bare ``UnicodeDecodeError`` out of the vendor's own reader.
+    ``native_messages`` wraps that the way ``CodexAgent.native_messages`` wraps its own read
+    errors: a ``RuntimeError`` naming the runtime, the agent, the session and the chat, with the
+    original exception chained as its cause — never a bare, contextless traceback. The corrupted
+    file is a real transcript a real turn just wrote, under the test's own sandboxed
+    ``CLAUDE_CONFIG_DIR`` (never the developer's own ``~/.claude``), so the project directory's
+    name is the real one rather than a hand-computed guess at the vendor's sanitizing/hashing."""
+    _point_the_cli_at(fake_anthropic, tmp_path, monkeypatch)
+    store = InMemChatStore()
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    agent = _agent(tmp_path, cwd="ws", auth="api_key", chat_store=store)
+    fake_anthropic.script([[{"type": "text", "text": "hi"}]])
+
+    async with asyncio.timeout(60):
+        await agent.run("chat-1", "hello", turn_id="t1")
+
+    [transcript] = list((tmp_path / "claude-config").rglob("*.jsonl"))
+    transcript.write_bytes(b"\xff\xfe not valid utf-8 \x80\x81\n")
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await agent.native_messages("chat-1")
+
+    message = str(excinfo.value)
+    assert "claude-code" in message and "george" in message and transcript.stem in message and "chat-1" in message
+    assert isinstance(excinfo.value.__cause__, UnicodeDecodeError), "the vendor's own exception is kept as the cause"

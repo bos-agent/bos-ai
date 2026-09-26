@@ -2349,16 +2349,29 @@ class ClaudeCodeAgent:
         **A session id that exists and cannot be read is the opposite case, and raises** — the
         same rule ``CodexAgent.native_messages`` states, and for the same reason (§3.7): "BOS
         cannot read it" and "there is nothing to read" are different answers. Telling them apart
-        here is on this method, not the vendor SDK: ``get_session_messages`` never raises, and it
-        does not tell "no such file" apart from "a real file with nothing visible in it" — both
-        come back ``[]``. So an **empty result for a session id this chat's own record names** is
-        treated as the missing case. That holds because of what a recorded id means: it is
-        written by :func:`commit_external_turn` from a real ``ResultMessage.session_id`` (§3.6),
-        so it never names a session that ran zero turns, and a session that ran at least one
-        always has at least one real top-level message for ``get_session_messages`` to find — an
-        empty result for such an id is therefore always the transcript being gone, pruned, or
-        unreachable under the directory this agent resolved, never a legitimately empty
-        conversation.
+        here is on this method, not the vendor SDK: for each of its three documented misses — the
+        session is not found, the id is not a valid UUID, or the transcript has no visible
+        messages — ``get_session_messages`` returns ``[]`` rather than raising, and does not tell
+        "no such file" apart from "a real file with nothing visible in it": both come back ``[]``.
+        So an **empty result for a session id this chat's own record names** is treated as the
+        missing case. That holds because of what a recorded id means: it is written by
+        :func:`commit_external_turn` from a real ``ResultMessage.session_id`` (§3.6), so it never
+        names a session that ran zero turns, and a session that ran at least one always has at
+        least one real top-level message for ``get_session_messages`` to find — an empty result
+        for such an id is therefore always the transcript being gone, pruned, or unreachable under
+        the directory this agent resolved, never a legitimately empty conversation. A *stopped*
+        turn is not this case either: the CLI logs the user's own prompt as a real, visible entry
+        before it can respond at all, so an interrupted turn's transcript is never empty (real-CLI
+        pinned, both interrupted-before-any-answer and interrupted-mid-tool-call).
+
+        **It is not immune to every failure, though.** A transcript file that exists but cannot be
+        decoded as UTF-8 — never a normal CLI write, only external corruption — raises a bare
+        ``UnicodeDecodeError`` out of the vendor's own reader (``_try_read_session_file``'s
+        ``Path.read_text(encoding="utf-8")``, guarded only against ``OSError``). Such a failure,
+        and any other unexpected one, is wrapped the same way ``CodexAgent.native_messages`` wraps
+        its own read errors: a ``RuntimeError`` naming the runtime, the agent, the session and the
+        chat, with the original exception chained as its cause — never a bare, contextless
+        traceback.
 
         **Messages only, for §3.7's structural reason.** Every ``SessionMessage``
         ``get_session_messages`` returns is already a top-level ``user`` or ``assistant`` entry —
@@ -2373,6 +2386,15 @@ class ClaudeCodeAgent:
         rather than projected as an empty message. **Claude Code has no commentary/final-answer
         phase at all** (unlike Codex's ``MessagePhase``), so every kept assistant text is kept —
         none of it is excluded the way Codex excludes ``commentary``.
+
+        **The CLI's own synthetic entries read as ordinary user text.** On an interrupt, the CLI
+        writes its own plain, ``role="user"`` transcript entry — ``"[Request interrupted by
+        user]"``, or the tool-use variant, ``"[Request interrupted by user for tool use]"``
+        (real-CLI observed) — which :func:`_visible_text` cannot tell apart from text the operator
+        actually typed, so it is projected here like any other user message. Nothing filters it
+        out: BOS has no general policy for telling a vendor's own synthetic transcript text from a
+        real one, and this one is arguably useful context — it says the turn was interrupted —
+        rather than noise to hide. A host rendering this transcript sees it exactly as written.
 
         **One ``Message`` per surviving transcript entry, not per model reply.** CLI 2.1.281
         streams each content block of a reply as its own transcript entry (measured — Task 7), so
@@ -2411,7 +2433,17 @@ class ClaudeCodeAgent:
             )
             return []
 
-        raw = await asyncio.to_thread(get_session_messages, native_session_id, directory=str(self._config.cwd))
+        try:
+            raw = await asyncio.to_thread(get_session_messages, native_session_id, directory=str(self._config.cwd))
+        except Exception as exc:
+            # Not the missing/empty case above — get_session_messages returns [] for that rather
+            # than raising. This is the read genuinely failing (e.g. a transcript file that exists
+            # but is not valid UTF-8), so it is wrapped the same way, naming what BOS was trying to
+            # read rather than surfacing the vendor's bare exception.
+            raise RuntimeError(
+                f"{runtime} runtime {self._kind!r}: the native transcript of session "
+                f"{native_session_id!r} for chat {chat_id!r} could not be read: {exc}"
+            ) from exc
         if not raw:
             raise RuntimeError(
                 f"{runtime} runtime {self._kind!r}: the native transcript of session "
