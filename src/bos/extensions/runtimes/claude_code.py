@@ -994,11 +994,14 @@ class ClaudeCodeAgent:
         ``UserMessage`` — the CLI's own one-shot "[structured-output-enforce]" nudge on a schema
         turn (BEP 19 §3.9) arrives this way and needs no special case, since only
         ``ToolResultBlock`` is ever matched inside a ``UserMessage`` at all. The CLI's synthetic
-        ``StructuredOutput`` tool call (``_STRUCTURED_OUTPUT_TOOL``) is excluded the same
-        deliberate way twice over: its ``ToolUseBlock`` is never turned into an event and never
-        added to *pending_tools*, so its ``ToolResultBlock`` is later found to match no pending
-        id and is skipped exactly as an untracked id would be — no check on its name is needed at
-        that end.
+        ``StructuredOutput`` tool call (``_STRUCTURED_OUTPUT_TOOL``) is excluded too, and so is a
+        subagent's own stream: every message whose ``parent_tool_use_id`` names the ``Agent`` call
+        that started it, since that top-level call's own start and finish already stand for the
+        subagent's work, and its inner tools would otherwise surface as the agent's own. The
+        synthetic tool is excluded the same deliberate way twice over: its ``ToolUseBlock`` is
+        never turned into an event and never added to *pending_tools*, so its ``ToolResultBlock``
+        is later found to match no pending id and is skipped exactly as an untracked id would be
+        — no check on its name is needed at that end.
 
         *pending_tools* is threaded in by the caller (``run()``) rather than owned here, so one
         map survives across every message of one ``run()`` call, a schema retry's fresh
@@ -1008,6 +1011,8 @@ class ClaudeCodeAgent:
         ``_run_turn``/``_emit_stream`` in full for every retry because each is a brand-new native
         turn.
         """
+        if isinstance(message, (AssistantMessage, UserMessage)) and message.parent_tool_use_id is not None:
+            return []
         if isinstance(message, AssistantMessage):
             events: list[TurnEvent] = []
             for block in message.content:

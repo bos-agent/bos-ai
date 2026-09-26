@@ -2213,6 +2213,31 @@ def test_events_for_message_skips_a_system_message(tmp_path):
     assert agent._events_for_message(init, {}, chat_id="c", turn_id="t", metadata=None) == []
 
 
+def test_events_for_message_skips_a_subagents_own_stream(tmp_path):
+    """A subagent's messages carry the id of the `Agent` call that started it. The top-level
+    `Agent` call and its result stand for that work; its inner tool calls are not the agent's."""
+    agent = _agent(tmp_path)
+    pending: dict[str, str] = {}
+    start = AssistantMessage(content=[ToolUseBlock(id="tu_agent", name="Agent", input={})], model="m")
+    inner_call = AssistantMessage(
+        content=[ToolUseBlock(id="tu_inner", name="Read", input={}), TextBlock(text="reading")],
+        model="m",
+        parent_tool_use_id="tu_agent",
+    )
+    inner_result = UserMessage(
+        content=[ToolResultBlock(tool_use_id="tu_inner", content="x")], parent_tool_use_id="tu_agent"
+    )
+    done = UserMessage(content=[ToolResultBlock(tool_use_id="tu_agent", content="found it")])
+
+    def events(message: Any) -> list[tuple[Any, Any, str | None]]:
+        mapped = agent._events_for_message(message, pending, chat_id="c", turn_id="t", metadata=None)
+        return [(e.event_type, e.phase, e.tool_name) for e in mapped]
+
+    assert events(start) == [("tool", "start", "Agent")]
+    assert events(inner_call) == [] and events(inner_result) == []
+    assert events(done) == [("tool", "finish", "Agent")]
+
+
 def test_events_for_message_skips_the_structured_output_tools_own_call_and_result(tmp_path):
     """The pure mapping function in isolation: never tracked in `pending_tools`, so the matching
     `ToolResultBlock` later finds no pending id and is skipped the same way any untracked id
