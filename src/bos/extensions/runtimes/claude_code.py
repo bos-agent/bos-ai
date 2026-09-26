@@ -1248,7 +1248,9 @@ class ClaudeCodeAgent:
           turn's last model call is not dropped: the CLI runs it as a native turn of its own right
           after the ``ResultMessage``. So this reads on past a ``ResultMessage`` while a message
           is pending, and that turn becomes part of this one: its events stream, its answer and
-          its session entry are the ones ``run()`` reports, and its usage is added. Which case a
+          its session entry are the ones ``run()`` reports, and its usage is added. The
+          ``ResultMessage`` read past emits no ``turn`` event of its own — one BOS turn has one
+          ``turn``/``finish``, which a host may take as the end of the turn. Which case a
           message is in shows in the stream: under ``--replay-user-messages`` (:meth:`_options`)
           the CLI echoes it, carrying the uuid BOS put on it, when it takes it into a turn — before
           the ``ResultMessage`` when folded in, after it when it runs as its own turn (measured).
@@ -1286,8 +1288,9 @@ class ClaudeCodeAgent:
                     result = message
                 # BEP 19 §3.9: every attempt streams its own events, by being run through this same
                 # per-message loop. No sink, as CodexAgent._emit_stream also checks, means nothing
-                # to build.
-                if event_sink is not None:
+                # to build; nor does a result this read goes on past (see the docstring).
+                reads_on = message is result and bool(turn.pending) and not turn.stopping
+                if event_sink is not None and not reads_on:
                     for event in self._events_for_message(
                         message, turn.pending_tools, chat_id=chat_id, turn_id=turn_id, metadata=ctx_metadata
                     ):

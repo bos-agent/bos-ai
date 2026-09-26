@@ -2429,12 +2429,16 @@ async def test_a_message_still_pending_at_the_result_is_answered_by_the_next_nat
     follow_up = _turn("answer to the steer", uuid="assistant-2")
     follow_up.insert(1, ECHO)
     fake_claude.arm(messages=[*_turn("first answer", uuid="assistant-1"), *follow_up])
+    sink = CaptureSink()
 
     result = await asyncio.wait_for(
-        agent.run("chat-1", "do it", turn_id="t1", interrupt=_Interrupt("also say banana")), timeout=5
+        agent.run("chat-1", "do it", turn_id="t1", interrupt=_Interrupt("also say banana"), event_sink=sink),
+        timeout=5,
     )
 
     assert result.output == "answer to the steer"
+    turn_events = [(e.phase, e.content) for e in sink.events if e.event_type == "turn"]
+    assert turn_events == [("finish", None)], "one BOS turn, one turn/finish, though the CLI ran two"
     assert result.usage == {key: 2 * value for key, value in _MAPPED_USAGE.items()}, "both native turns' usage"
     messages = await mem_store.get_messages("chat-1")
     assert messages[1].llm_message["content"] == "answer to the steer"
@@ -3080,7 +3084,7 @@ async def test_a_mid_turn_message_after_the_last_model_call_is_answered_in_the_s
     assert result.output == "the second"
     assert len(fake_anthropic.requests) == 2
     assert "BANANA-8" in json.dumps(fake_anthropic.requests[1]["messages"])
-    assert [e.phase for e in sink.events if e.event_type == "turn"] == ["finish", "finish"], "two native turns"
+    assert [e.phase for e in sink.events if e.event_type == "turn"] == ["finish"], "two native turns, one BOS turn"
     answer = (await store.get_messages("chat-1"))[1]
     assert answer.llm_message["content"] == "the second"
     transcript = get_session_messages(answer.metadata["native_session_id"], directory=str(tmp_path))
