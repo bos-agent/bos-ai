@@ -277,10 +277,12 @@ async def read_native_session_id(store: ChatStore, chat_id: str, *, runtime: str
             continue
         if previous != runtime:
             logger.warning(
-                "Chat %r last ran on the %r runtime, so it has no %r session to continue: a %r turn starts a new "
-                "one, which does not carry that runtime's conversation over (BEP 19 §2.2.4)",
+                "Chat %r last ran on the %r runtime, so it has no %r session: a %r turn on it starts a new one, "
+                "which does not carry that runtime's conversation over, and there is no %r transcript to read "
+                "(BEP 19 §2.2.4)",
                 chat_id,
                 previous,
+                runtime,
                 runtime,
                 runtime,
             )
