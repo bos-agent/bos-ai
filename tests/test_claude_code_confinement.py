@@ -450,12 +450,13 @@ async def test_persist_or_move_tools_are_excluded_below_full_access(tmp_path, fa
 
 
 def test_can_use_tool_answers_by_policy(tmp_path, fake_anthropic, monkeypatch):
-    """The backstop's answers, unit-tested: BOS's own MCP tools allowed (Task 10 scopes the name),
-    Bash allowed under ``workspace-write`` (the sandbox confines it), everything else denied; and
+    """The backstop's answers, unit-tested: the MCP tools BOS granted allowed, by exact name (the near
+    misses are pinned in tests/test_claude_code_mcp_wiring.py), Bash allowed under
+    ``workspace-write`` (the sandbox confines it), everything else denied; and
     ``None`` under ``full-access``, which never consults it."""
 
-    async def call(agent: ClaudeCodeAgent, name: str) -> Any:
-        cb = agent._can_use_tool()
+    async def call(agent: ClaudeCodeAgent, name: str, mcp_tools: frozenset[str] = frozenset()) -> Any:
+        cb = agent._can_use_tool(mcp_tools)
         assert cb is not None
         return await cb(name, {}, None)
 
@@ -467,8 +468,10 @@ def test_can_use_tool_answers_by_policy(tmp_path, fake_anthropic, monkeypatch):
     )
     fa = _agent(tmp_path, monkeypatch, fake_anthropic, permission="full-access")
 
-    # read-only allows its own MCP tools and its one allowlisted, hook-vetted tool (Read); denies the rest.
-    assert isinstance(asyncio.run(call(ro, "mcp__bos-tools__save")), PermissionResultAllow)
+    # read-only allows the MCP tools granted it and its one allowlisted, hook-vetted tool (Read); denies the rest.
+    granted = frozenset({"mcp__bos-tools__save"})
+    assert isinstance(asyncio.run(call(ro, "mcp__bos-tools__save", granted)), PermissionResultAllow)
+    assert isinstance(asyncio.run(call(ro, "mcp__bos-tools__save")), PermissionResultDeny), "only if granted"
     assert isinstance(asyncio.run(call(ro, "Read")), PermissionResultAllow)
     assert isinstance(asyncio.run(call(ro, "Bash")), PermissionResultDeny), "Bash not in read-only's allowlist"
     assert isinstance(asyncio.run(call(ro, "WebFetch")), PermissionResultDeny), "web tools excluded below full-access"
@@ -527,7 +530,8 @@ async def test_which_calls_reach_can_use_tool(tmp_path, fake_anthropic, monkeypa
     # autoAllowBashIfSandboxed, fact 6b), so not even the `python3 -c` case that reaches it WITHOUT a
     # sandbox (fact 3) reaches it here; read-only offers no Write/Bash and serves Read without asking.
     # So the callback is the pure backstop §3.5.3 says it is — the only calls it would answer in
-    # practice are BOS's own MCP tools (Task 10), not exercised here.
+    # practice are BOS's own MCP tools, which reach it under `default` and `acceptEdits`
+    # (test_the_model_calls_the_exposed_tool_and_gets_the_hosts_result_against_the_real_cli).
     assert reached == [], f"no in-root file/bash call reaches can_use_tool at {permission!r}: {reached}"
 
 

@@ -37,9 +37,12 @@ the audit of every wait that crosses to the CLI sits above ``_Turn``) — and th
 ``PreToolUse`` hook that path-checks the file tools to ``cwd`` and denies anything outside the
 level's allowlist (``_hook``), a ``can_use_tool`` backstop for the prompts the hook lets through
 (``_can_use_tool``), and a stderr tripwire that ends a ``workspace-write`` turn if the CLI reports
-its bash sandbox disabled (``_sandbox_tripwire``). The MCP egress (§3.8) is the one seam left: its
-tools pass the hook and are allowed by ``can_use_tool``, but ``mcp_servers``/``allowed_tools`` are
-not wired yet (Task 10).
+its bash sandbox disabled (``_sandbox_tripwire``) — and the MCP egress (§3.8): when ``mcp_tools``
+names a tool the host has, each client names BOS's loopback MCP server, its bearer token only in the
+client's environment (``_mcp_egress``, ``_options``). The exact names of the tools that server
+granted pass the hook at every level, and ``can_use_tool`` allows them where the mode asks it (not at
+``full-access``, where nothing does); any other MCP tool the hook denies. A turn whose CLI reports
+BOS's server as not connected logs a WARNING (``_warn_unless_mcp_connected``).
 
 Beside that turn path — not a stage of it — sits ``native_messages`` (Task 9, BEP 19 §3.7): the
 read that projects Claude Code's *own* transcript back into BOS ``Message``s, so a host can render
@@ -60,6 +63,7 @@ import inspect
 import json
 import logging
 import os
+import re
 import shutil
 import stat
 import sys
@@ -76,6 +80,7 @@ from claude_agent_sdk import (
     ClaudeAgentOptions,
     ClaudeSDKClient,
     HookMatcher,
+    McpServerConfig,
     PermissionMode,
     PermissionResultAllow,
     PermissionResultDeny,
@@ -83,6 +88,7 @@ from claude_agent_sdk import (
     ResultMessage,
     SandboxSettings,
     SettingSource,
+    SystemMessage,
     TextBlock,
     ToolResultBlock,
     ToolUseBlock,
@@ -258,6 +264,39 @@ _FILE_TOOL_PATH_ARG: Mapping[str, str] = MappingProxyType({
     "Edit": "file_path",
     "NotebookEdit": "notebook_path",
 })
+
+# BEP 19 §3.8: the name BOS's loopback MCP server takes in `mcp_servers` — Codex's name for it too, and
+# the one the server reports for itself (`Server("bos-tools", …)` in mcp_egress.py). The CLI names each
+# of a server's tools `mcp__<server>__<tool>`, each part rewritten by its `wn` (`Fa` in the CLI 2.1.281
+# source; `_cli_tool_name` replicates it), which leaves this name as it is: BOS's tools are
+# `mcp__bos-tools__<tool>` (measured; pinned by test_bos_computes_the_names_the_cli_gives_its_tools_
+# against_the_real_cli).
+#
+# That prefix does not say which server a tool is from. `wn` turns other server names into it too:
+# `bos-tools_` (and `bos-tools.`, rewritten to it) into `mcp__bos-tools___…`, `bos-tools__evil` into
+# `mcp__bos-tools__evil__…` and `bos-tools..x` into `mcp__bos-tools__x__…` — all but `bos-tools.` pinned by
+# the no-strict control of test_another_mcp_servers_tools_are_not_reachable_against_the_real_cli. The
+# CLI itself goes by the server name it recorded for each tool (`mcpInfo`, in `qc`), falling back to
+# the prefix only when that record is missing. So the hook and `can_use_tool` allow only the exact
+# names of the tools BOS granted (`_mcp_egress`), not the prefix. What stays ambiguous is a granted
+# name that, rewritten, starts with `_` or contains `__`: BOS's `a__b` is also what a server named
+# `bos-tools__a` would call its tool `b`. Only a server that got past `strict_mcp_config` could use that.
+_MCP_SERVER_NAME = "bos-tools"
+_MCP_TOOL_PREFIX = f"mcp__{_MCP_SERVER_NAME}__"
+
+
+def _cli_tool_name(tool: str) -> str:
+    """The name the CLI gives *tool* of BOS's MCP server: ``_MCP_TOOL_PREFIX`` plus the tool's name
+    rewritten as the CLI's ``wn`` rewrites it (CLI 2.1.281 source) — every character outside
+    ``[a-zA-Z0-9_-]`` becomes ``_``, one per UTF-16 code unit as JavaScript counts them, so a
+    character beyond U+FFFF becomes ``__``; and for a name starting ``claude.ai `` runs of ``_`` are
+    then collapsed and one at either end trimmed. Pinned against the real CLI, both of those
+    included, by ``test_bos_computes_the_names_the_cli_gives_its_tools_against_the_real_cli``."""
+    name = re.sub(r"[^a-zA-Z0-9_-]", lambda m: "__" if ord(m.group()) > 0xFFFF else "_", tool)
+    if tool.startswith("claude.ai "):
+        name = re.sub(r"_+", "_", name).strip("_")
+    return _MCP_TOOL_PREFIX + name
+
 
 # BEP 19 §3.5.3, fact 6 (§3.5.3's numbering): the CLI's own "Sandbox disabled" warning on stderr,
 # the substring the tripwire watches for under `workspace-write` (`_sandbox_tripwire`).
@@ -577,12 +616,12 @@ _BOS_OWNED: Mapping[str, str] = MappingProxyType({
     "tools": "set by BOS: the deny-by-default allowlist of tools offered to the model per `permission` (BEP 19 §3.5.3)",
     "disallowed_tools": "reserved for BOS: `tools` is the allowlist BOS uses instead (BEP 19 §3.5.3)",
     "allowed_tools": "reserved for BOS: an entry pre-approves a tool before `can_use_tool` is asked "
-    "(BEP 19 §3.5.3, §3.8)",
-    "mcp_servers": "reserved for BOS's MCP egress, which `mcp_tools` selects for (BEP 19 §3.8)",
-    "strict_mcp_config": "set by BOS, always True, so the CLI loads only the MCP servers BOS passes and never "
-    "a repo's .mcp.json (BEP 19 §3.5.3)",
+    "(BEP 19 §3.5.3); BOS sends none, since `can_use_tool` answers for its own MCP tools (§3.8)",
+    "mcp_servers": "set by BOS: its own loopback MCP server, when `mcp_tools` names a tool the host has (BEP 19 §3.8)",
+    "strict_mcp_config": "set by BOS, always True, so the CLI loads only the MCP servers BOS passes — never a "
+    "repo's .mcp.json or the operator's own servers, even under a `setting_sources` opt-in (BEP 19 §3.5.3, §3.8)",
     "env": "set by BOS, to switch off inherited variables that would load what its default leaves out "
-    "(BEP 19 §3.12); its MCP bearer is to travel there too (§3.8)",
+    "(BEP 19 §3.12), and to carry the bearer token of its MCP server (§3.8)",
     "effort": "reserved for BOS, to set per turn from `llm_args['reasoning_effort']` (BEP 19 §3.9)",
     "resume": "reserved for BOS, to resume the chat's own native session (BEP 19 §3.6)",
     "output_format": "reserved for BOS, to set per turn from `schema=` (BEP 19 §3.9)",
@@ -1031,6 +1070,11 @@ _INTERRUPTED = frozenset({"aborted_tools", "aborted_streaming"})
 #   `_close` runs it in a task of its own, shielded, so a caller's cancellation cannot land there.
 # - `aclose()` waits for the in-flight turns for `_ACLOSE_GRACE_SECONDS`, then closes their clients
 #   with `_close` regardless, all at once, so the SDK's bound is paid once, not per turn.
+# - `_mcp_egress`'s `await server.start()` crosses nothing vendor-side: on the agent's first turn,
+#   before that turn's CLI starts, it binds BOS's own loopback socket in this process — or returns at
+#   once, when another agent already has. Unbounded, as in `CodexAgent`: a bind to 127.0.0.1:0
+#   depends on nothing that can be slow, and it holds `_mcp_lock`, which only this agent's other
+#   first turns wait on.
 # - With `timeout_seconds = None` nothing above is bounded by it, because the caller declined a
 #   deadline; the stop flag, `aclose()` and the SDK's own bounds still hold.
 # - Host code the stream task awaits, the event sink and the interrupt callback, is not the CLI's
@@ -1082,6 +1126,9 @@ class _Turn:
         # shared /tmp/claude-<uid>. `_teardown` removes exactly this path once the client has
         # disconnected.
         self.tmpdir: Path | None = None
+        # BEP 19 §3.8: this turn's options named BOS's MCP server and the CLI's init message has not yet
+        # been read for its status (`ClaudeCodeAgent._warn_unless_mcp_connected`); cleared at the first.
+        self.mcp_unchecked = False
 
 
 def _reads_past(turn: _Turn, result: ResultMessage) -> bool:
@@ -1185,6 +1232,12 @@ class ClaudeCodeAgent:
 
         self._stop_requested = asyncio.Event()
         self._claude_md_warned: set[tuple[Path, str]] = set()  # `_root_claude_md`'s once-only WARNINGs
+        # BEP 19 §3.8: BOS's MCP server for this agent — its url, the agent's bearer token and the CLI's
+        # names for the tools it granted — or None when there is nothing to serve; decided once, on the
+        # first turn, by `_mcp_egress`, under the lock.
+        self._mcp_grant: tuple[str, str, frozenset[str]] | None = None
+        self._mcp_built = False
+        self._mcp_lock = asyncio.Lock()
         # chat_id -> its running turn (BEP 19 §3.10.1's busy guard). Reserved (None) the instant
         # run() is entered, before any await could let a second call for the chat_id in; filled in
         # once the turn's CLI has started, so aclose() has a turn to wait on and a client to close.
@@ -1227,7 +1280,7 @@ class ClaudeCodeAgent:
         building the hook, not pinned)."""
         return sorted(name for name, levels in _TOOL_LEVELS.items() if self._config.permission in levels)
 
-    def _hook(self) -> HookCallback:
+    def _hook(self, mcp_tools: frozenset[str] = frozenset()) -> HookCallback:
         """The ``PreToolUse`` gate on ``HookMatcher(matcher=None)`` (BEP 19 §3.5.3). It fires once
         per tool call in every permission mode, and its deny holds even where ``can_use_tool`` is
         never asked — under ``bypassPermissions`` and against a trusted repo's own allow rules
@@ -1236,12 +1289,19 @@ class ClaudeCodeAgent:
         It never blocks or awaits anything slow: it runs inside the CLI's tool path. It returns a
         decision synchronously, from data captured when the turn's options were built.
 
-        - BOS's own MCP tools (``mcp__…``) pass with no decision: the MCP egress (§3.8) and
-          ``can_use_tool`` gate those, not this hook.
-        - A built-in tool outside this level's allowlist is denied — the per-call half of
+        - *mcp_tools*, the CLI's names for the tools BOS's MCP server granted this agent
+          (:meth:`_mcp_egress`), pass with no decision, at every level: ``permission`` bounds the
+          filesystem, not the tools the host exposed through ``mcp_tools`` (§3.5, §3.8). Exact names,
+          not the ``mcp__bos-tools__`` prefix, which other servers' names can produce
+          (``_MCP_TOOL_PREFIX``). Where the mode asks, ``can_use_tool`` then allows them.
+        - Any other tool outside this level's allowlist is denied — the per-call half of
           deny-by-default, a backstop should ``tools=`` ever fail to exclude it (e.g. a subagent, or
           a future CLI). This is what denies the cross-session tools at every level (R10) and every
-          mutating tool under ``read-only``.
+          mutating tool under ``read-only``, and any MCP tool not in *mcp_tools*, at every level:
+          ``tools=`` does not filter MCP tools, and ``strict_mcp_config`` keeps other servers out,
+          which this backs; at ``full-access``, where ``can_use_tool`` is not asked, it is the only
+          layer that would stop one. A granted name some other server could also produce is the
+          residual ``_MCP_TOOL_PREFIX`` states.
         - Under ``full-access`` nothing else is checked: it confines nothing on the filesystem.
         - For a file tool (``_FILE_TOOL_PATH_ARG``) the path argument is resolved — relative to
           ``cwd``, then through ``Path.resolve()``, so ``..``, a symlink and ``~`` (already
@@ -1253,7 +1313,7 @@ class ClaudeCodeAgent:
         """
         permission = self._config.permission
         cwd = self._config.cwd
-        allowed = frozenset(self._offered_tools())
+        allowed = frozenset(self._offered_tools()) | mcp_tools
         config_dir = _cli_config_dir()
         dot_claude = (cwd / ".claude") if any(s in _REPO_SETTING_SOURCES for s in self._setting_sources) else None
         may_still = {
@@ -1265,11 +1325,11 @@ class ClaudeCodeAgent:
         async def hook(input_data: HookInput, tool_use_id: str | None, context: HookContext) -> HookJSONOutput:
             data = cast(Mapping[str, Any], input_data)
             tool = data.get("tool_name", "")
-            # No decision for BOS's own MCP tools (§3.8; can_use_tool/allowed_tools gate them, Task 10)
-            # or for the CLI's synthetic StructuredOutput tool, which the CLI offers from
+            # No decision for the CLI's synthetic StructuredOutput tool, which the CLI offers from
             # `output_format` and answers itself (§3.9) — not a tool the agent chose, and its input is
-            # re-validated by BOS locally (BEP 12), so it is not the confinement's business.
-            if tool.startswith("mcp__") or tool == _STRUCTURED_OUTPUT_TOOL:
+            # re-validated by BOS locally (BEP 12), so it is not the confinement's business. BOS's own
+            # MCP tools are in `allowed` by their exact names, and pass the checks below with none.
+            if tool == _STRUCTURED_OUTPUT_TOOL:
                 return {}
             if tool not in allowed:
                 return _pretooluse_deny(
@@ -1304,7 +1364,7 @@ class ClaudeCodeAgent:
 
         return hook
 
-    def _can_use_tool(self) -> CanUseTool | None:
+    def _can_use_tool(self, mcp_tools: frozenset[str] = frozenset()) -> CanUseTool | None:
         """The answer to a permission prompt, never the gate (BEP 19 §3.5.3, fact 3). The CLI asks
         it only where it would otherwise prompt a user — a subset the mode, the sandbox and a trusted
         repo's allow rules decide first (the matrix in §3.5.3). The confinement is the hook and the OS
@@ -1314,8 +1374,11 @@ class ClaudeCodeAgent:
         vetted — an allowlisted tool whose path (for a file tool) the hook confined to ``cwd`` — and
         this only answers, at once and without awaiting anyone (§3.5.4):
 
-        - BOS's own MCP tools (``mcp__…``) are allowed — the host chose them and gated them by
-          ``mcp_tools`` and a bearer token (§3.8); Task 10 scopes the name.
+        - *mcp_tools*, the CLI's names for the tools BOS's MCP server granted this agent, are
+          allowed, by exact name as in :meth:`_hook`: the host chose them through ``mcp_tools``, and
+          the server scopes every call to this agent's grant by its bearer token (§3.8). They are the
+          calls measured to reach here under BOS's options: ``default`` and ``acceptEdits`` ask about
+          each. Any other MCP tool is denied — behind the hook, which has already denied it.
         - A tool in this level's allowlist is allowed: the hook already confined it (a file tool's
           path to ``cwd``), and ``Bash`` under ``workspace-write`` is confined by the OS sandbox
           (fact 6b). Answering "yes" here is what lets an in-root edit the mode did not auto-allow,
@@ -1330,10 +1393,10 @@ class ClaudeCodeAgent:
         permission = self._config.permission
         if permission == "full-access":
             return None
-        allowed = frozenset(self._offered_tools())
+        allowed = frozenset(self._offered_tools()) | mcp_tools
 
         async def can_use_tool(tool_name: str, tool_input: dict[str, Any], context: Any) -> Any:
-            if tool_name.startswith("mcp__") or tool_name in allowed:
+            if tool_name in allowed:
                 return PermissionResultAllow()
             return PermissionResultDeny(
                 message=(
@@ -1369,15 +1432,49 @@ class ClaudeCodeAgent:
 
         return stderr
 
-    def _options(self) -> ClaudeAgentOptions:
+    async def _mcp_egress(self) -> tuple[str, str, frozenset[str]] | None:
+        """BOS's loopback MCP server for this agent — its url, this agent's bearer token, and the
+        CLI's names for the tools it granted (``_cli_tool_name``), which are exactly what the hook and
+        ``can_use_tool`` let through — or None when there is nothing for it to serve (BEP 19 §3.8).
+
+        Built once, on the first turn, by ``CodexAgent._mcp_egress_config``'s rules. "Nothing to
+        serve" is an empty ``mcp_tools``, or one whose every name the host has no ``ep_tool`` for,
+        and neither calls the ``mcp`` accessor, which builds the server when called (§3.1).
+        ``unregistered_tools`` answers without a server, so this warns once per unknown name, naming
+        the agent, and hands ``register_agent`` only names that resolve, so it does not warn a
+        second time (§7.5). A build that raises is retried by the next turn, its warnings with it,
+        as Codex's is.
+
+        One grant per agent; each client's options name it under a bearer variable of their own
+        (:meth:`_options`). Under a lock, so two first turns at once register one grant, not two.
+        """
+        async with self._mcp_lock:
+            if not self._mcp_built:
+                unavailable = unregistered_tools(self._config.mcp_tools)
+                for name in unavailable:
+                    logger.warning(
+                        "%s runtime %r: mcp_tools names %r, which is not a registered tool; it is not exposed.",
+                        self._config.runtime,
+                        self._kind,
+                        name,
+                    )
+                if available := [name for name in self._config.mcp_tools if name not in unavailable]:
+                    server = self._mcp()
+                    await server.start()
+                    token = server.register_agent(self._kind, available)
+                    self._mcp_grant = (server.url, token, frozenset(map(_cli_tool_name, available)))
+                self._mcp_built = True
+            return self._mcp_grant
+
+    def _options(self, mcp: tuple[str, str, frozenset[str]] | None = None) -> ClaudeAgentOptions:
         """The options for one client of this agent, apart from the per-turn fields
         (``resume``, a turn's own model or effort, ``output_format``, and the stderr tripwire, which
-        needs the turn's own state so ``run()`` sets it). The MCP egress is not wired here yet
-        (§3.8, Task 10), so ``mcp_servers``/``allowed_tools`` stay at their defaults.
+        needs the turn's own state so ``run()`` sets it). *mcp* is what :meth:`_mcp_egress` returned:
+        given, the client is pointed at BOS's MCP server (§3.8); None, it names no MCP server.
 
         Built afresh for every client, never cached: each call's settings carry a new nonce
-        (``_SETTINGS_NONCE_VAR``), and each call reads the working directory's CLAUDE.md again
-        (``_root_claude_md``).
+        (``_SETTINGS_NONCE_VAR``), each call names the MCP bearer under a new variable, and each call
+        reads the working directory's CLAUDE.md again (``_root_claude_md``).
         """
         # `env` carries `_INHERITED_ENV_OVERRIDES`, and deliberately no `CLAUDE_CODE_SANDBOXED`
         # override. The CLI source reads an inherited one as "trusted", but in everything
@@ -1399,6 +1496,23 @@ class ClaudeCodeAgent:
         sandbox = (
             cast(SandboxSettings, dict(_WORKSPACE_WRITE_SANDBOX)) if config.permission == "workspace-write" else None
         )
+        env = dict(_INHERITED_ENV_OVERRIDES)
+        mcp_servers: dict[str, McpServerConfig] = {}
+        mcp_tools: frozenset[str] = frozenset()
+        if mcp is not None:
+            url, token, mcp_tools = mcp
+            # BEP 19 §3.8, fact 7: the SDK puts `mcp_servers` on the CLI's command line, which other
+            # local users can read, so the entry carries a placeholder the CLI expands from its own
+            # environment, and the token travels only in `env`. The variable is named afresh for each
+            # client, for the reason Codex's is: no MCP server's config — the operator's, a
+            # repository's — can name it in its own `${VAR}` to be handed the token.
+            bearer = f"BOS_MCP_BEARER_{uuid.uuid4().hex}"
+            env[bearer] = token
+            mcp_servers[_MCP_SERVER_NAME] = {
+                "type": "http",
+                "url": url,
+                "headers": {"Authorization": f"Bearer ${{{bearer}}}"},
+            }
         return ClaudeAgentOptions(
             cwd=config.cwd,
             permission_mode=_PERMISSION_MODES[config.permission],
@@ -1410,15 +1524,20 @@ class ClaudeCodeAgent:
             ),
             max_turns=self._max_turns,
             model=config.model,
+            mcp_servers=mcp_servers,
+            # BEP 19 §3.5.3, §3.8: only the servers above. Measured: it keeps out a repository's
+            # .mcp.json and the operator's own user- and local-scope servers, which each load under
+            # the matching `setting_sources` opt-in without it.
             strict_mcp_config=True,
             # BEP 19 §3.5.3: the deny-by-default confinement. `tools=` is the CLI-level allowlist per
             # `permission`; the PreToolUse hook is the per-call gate (path checks; deny anything
             # outside the allowlist); `can_use_tool` answers what `permission` already decided, and
-            # is None under full-access (bypassPermissions never consults it).
+            # is None under full-access (bypassPermissions never consults it). Both let through the
+            # exact names of the MCP tools BOS granted (§3.8), and no other MCP tool.
             tools=self._offered_tools(),
-            hooks={"PreToolUse": [HookMatcher(matcher=None, hooks=[self._hook()])]},
-            can_use_tool=self._can_use_tool(),
-            env=dict(_INHERITED_ENV_OVERRIDES),
+            hooks={"PreToolUse": [HookMatcher(matcher=None, hooks=[self._hook(mcp_tools)])]},
+            can_use_tool=self._can_use_tool(mcp_tools),
+            env=env,
             # BEP 19 §3.9: the CLI echoes each user message BOS sends it, with the uuid BOS put on
             # it, when it takes that message into a turn — how BOS tells a mid-turn message folded
             # into the running turn from one the CLI will run as a turn of its own (`_stream`). The
@@ -1712,6 +1831,9 @@ class ClaudeCodeAgent:
                     turn.pending.discard(message.uuid)  # the CLI took this mid-turn message into a turn
                 elif isinstance(message, ResultMessage):
                     result = message
+                elif isinstance(message, SystemMessage) and message.subtype == "init" and turn.mcp_unchecked:
+                    turn.mcp_unchecked = False  # once per turn: every native turn's init repeats it
+                    self._warn_unless_mcp_connected(message, chat_id=chat_id, turn_id=turn_id)
                 # BEP 19 §3.9: every attempt streams its own events, by being run through this same
                 # per-message loop. No sink, as CodexAgent._emit_stream also checks, means nothing
                 # to build; nor does a result this read goes on past (see the docstring).
@@ -1734,6 +1856,39 @@ class ClaudeCodeAgent:
                 if not turn.pending:
                     turn.busy = False  # nothing running and nothing queued; else the teardown interrupts
                 return result
+
+    def _warn_unless_mcp_connected(self, init: SystemMessage, *, chat_id: str, turn_id: str) -> None:
+        """Log a WARNING when the CLI's init message says BOS's MCP server did not connect (BEP 19
+        §3.8). The CLI carries on without it either way, so the turn runs with none of the agent's
+        ``mcp_tools`` and nothing else says so; this does not fail the turn.
+
+        Measured against CLI 2.1.281: the init message lists each MCP server with its status —
+        ``connected``, or ``failed`` when the server refuses the CLI (a 401) — and repeats it for
+        every native turn; a server an MCP allow or deny list drops is not listed at all (measured
+        with the list in BOS's own flag settings, and in a repository's or the user's settings under a
+        ``setting_sources`` opt-in), while the CLI names it only on stderr, which BOS does not read.
+        An init message with no server list at all tells BOS nothing, and is not warned about."""
+        servers = init.data.get("mcp_servers")
+        if not isinstance(servers, list):
+            return
+        status = next(
+            (s.get("status") for s in servers if isinstance(s, dict) and s.get("name") == _MCP_SERVER_NAME),
+            None,
+        )
+        if status == "connected":
+            return
+        logger.warning(
+            "%s runtime %r: the CLI reports BOS's MCP server %r as %s for turn %r on chat %r, so the agent has "
+            "none of its mcp_tools this turn",
+            self._config.runtime,
+            self._kind,
+            _MCP_SERVER_NAME,
+            repr(status)
+            if status is not None
+            else "not loaded (an MCP allow or deny list in its settings drops it so)",
+            turn_id,
+            chat_id,
+        )
 
     async def _steer(self, turn: _Turn, message: dict[str, Any], *, chat_id: str, turn_id: str) -> None:
         """Send a message the ``interrupt`` poll returned into the running turn (BEP 19 §3.9; see
@@ -1982,10 +2137,12 @@ class ClaudeCodeAgent:
         """Run one Claude Code turn to completion and persist it (BEP 19 §3.6, §3.7, §3.9).
 
         One ``ClaudeSDKClient``, and with it one CLI child, per turn (§3.10.1): built from
-        :meth:`_options` plus the turn's own fields — ``resume`` when the chat has a native
-        session on record (§3.6), ``llm_args["model"]`` as ``model`` and
-        ``llm_args["reasoning_effort"]`` as ``effort``, whose values BOS's ``low``/``medium``/
-        ``high`` are among — and disconnected however the turn ends, schema retries included.
+        :meth:`_options` — pointed at BOS's MCP server when :meth:`_mcp_egress` has one for this
+        agent (§3.8), which it builds on the agent's first turn — plus the turn's own fields —
+        ``resume`` when the chat has a native session on record (§3.6), ``llm_args["model"]`` as
+        ``model`` and ``llm_args["reasoning_effort"]`` as ``effort``, whose values BOS's ``low``/
+        ``medium``/``high`` are among — and disconnected however the turn ends, schema retries
+        included.
 
         The answer is ``ResultMessage.result``. ``usage`` is mapped by :func:`_usage` and summed
         over the attempt's native turns — more than one when a mid-turn message ran as a turn of
@@ -2082,7 +2239,7 @@ class ClaudeCodeAgent:
                 else None
             )
             options = replace(
-                self._options(),
+                self._options(await self._mcp_egress()),
                 **_compact(
                     resume=native_session_id,
                     model=llm.get("model"),
@@ -2117,6 +2274,7 @@ class ClaudeCodeAgent:
             # ponytail: a client per turn costs one CLI spawn (~1s). A per-chat_id session pool
             # is the upgrade if that latency shows up; resume= makes the stateless version correct.
             turn = _Turn(_CLIENT_FACTORY(options))
+            turn.mcp_unchecked = bool(options.mcp_servers)  # BEP 19 §3.8: read its status from the init
             turn.sandbox_tripped = tripped  # the list the tripwire appends to (BEP 19 §3.5.3)
             turn.tmpdir = tmpdir_override  # removed in `_teardown` once the client has disconnected
             phase = "at startup"  # connect(): the CLI starting, the resumed session loading
