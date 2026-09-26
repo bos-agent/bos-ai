@@ -2,6 +2,21 @@
 
 <!-- version list -->
 
+## v2.3.0 (2026-09-26)
+
+### Bug Fixes
+
+- **tools**: Resolve relative paths against the agent's workspace
+  ([#111](https://github.com/bos-agent/bos-ai/pull/111),
+  [`d5071f6`](https://github.com/bos-agent/bos-ai/commit/d5071f6c591f4aa34b25df2a8506268544907a1b))
+
+### Features
+
+- **sdk**: List models and reasoning efforts per agent
+  ([#110](https://github.com/bos-agent/bos-ai/pull/110),
+  [`a15cffe`](https://github.com/bos-agent/bos-ai/commit/a15cffee3320f00e367ef089b62598c628d97b07))
+
+
 ## v2.2.0 (2026-09-26)
 
 ### Bug Fixes
