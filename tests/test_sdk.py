@@ -380,10 +380,11 @@ class _StubExternalAgent:
     belongs to (stored metadata) and which built agent speaks for it
     (`resolved_config["external_runtime"]`, then the duck-typed
     `native_messages`). Those are the only two surfaces it touches, so this
-    carries exactly them — a real `CodexAgent` would drag the vendor SDK into
-    the SDK's own test module without exercising one more line of the routing
-    under test. `CodexAgent` satisfying both is pinned on its own side, by
-    test_codex_runtime.py::test_it_carries_the_two_surfaces_bosapp_routes_on.
+    carries exactly them — a real `CodexAgent` or `ClaudeCodeAgent` would drag
+    a vendor SDK into the SDK's own test module without exercising one more
+    line of the routing under test. Each carries both, pinned on its own side:
+    test_codex_runtime.py::test_it_carries_the_two_surfaces_bosapp_routes_on
+    and test_claude_code_runtime.py's own version of the same test.
     """
 
     def __init__(self, runtime: str, messages: list[Any] | None = None) -> None:

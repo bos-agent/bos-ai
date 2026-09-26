@@ -40,6 +40,16 @@ level's allowlist (``_hook``), a ``can_use_tool`` backstop for the prompts the h
 its bash sandbox disabled (``_sandbox_tripwire``). The MCP egress (§3.8) is the one seam left: its
 tools pass the hook and are allowed by ``can_use_tool``, but ``mcp_servers``/``allowed_tools`` are
 not wired yet (Task 10).
+
+Beside that turn path — not a stage of it — sits ``native_messages`` (Task 9, BEP 19 §3.7): the
+read that projects Claude Code's *own* transcript back into BOS ``Message``s, so a host can render
+a session BOS did not author. Unlike ``CodexAgent.native_messages`` it starts no vendor process at
+all — ``get_session_messages`` (``claude_agent_sdk``) is a plain filesystem read of the session's
+own JSONL, run in a thread since it is blocking I/O, not a call to a client this class owns. It is
+also why ``CLAUDE_CODE_PROJECT_DIR_NAME`` joined ``_INHERITED_ENV_OVERRIDES`` here: that variable
+renames the project folder the CLI writes a transcript under, and ``get_session_messages`` does not
+read it, so a value inherited from BOS's own environment would make this read look in the wrong
+place for a transcript the CLI just wrote.
 """
 
 from __future__ import annotations
@@ -76,6 +86,7 @@ from claude_agent_sdk import (
     ToolResultBlock,
     ToolUseBlock,
     UserMessage,
+    get_session_messages,
 )
 from claude_agent_sdk.types import (
     CanUseTool,
@@ -93,6 +104,7 @@ from bos.core.agent import (
     AgentEventType,
     AgentResult,
     ChatStore,
+    Message,
     MessageContent,
     StructuredOutputError,
     StructuredValidator,
@@ -384,6 +396,19 @@ _INHERITED_ENV_OVERRIDES: Mapping[str, str] = MappingProxyType({
     "CLAUDE_CODE_PACKAGE_MANAGER_AUTO_UPDATE": "",
     # a second gate for memory context in the CLI's reminders; auto-memory is off above.
     "SYSTEM_REMINDER_MEMORY_CONTEXT": "",
+    # Found directly (Task 9, BEP 19 §3.7), not by the catalog check above: renaming a
+    # directory trips none of that check's loading/triggering verbs. Read from source, the
+    # project-dir resolver `Ce(e, s)`: `(s.CLAUDE_CONFIG_DIR ? m$r(s.CLAUDE_CODE_PROJECT_DIR_NAME)
+    # : void 0) ?? uC(r)` — when `CLAUDE_CONFIG_DIR` is set, a `CLAUDE_CODE_PROJECT_DIR_NAME`
+    # matching `^[A-Za-z0-9_-]{1,64}$` (and not a reserved Windows device name) renames the
+    # project folder the CLI writes its transcript under, from the sanitized `cwd` to this
+    # value; `m$r` reads an empty value as unset, same as `M.str` elsewhere in this table.
+    # `get_session_messages()`'s own project-dir lookup (`_get_project_dir`, claude-agent-sdk's
+    # `_internal/sessions.py`) never reads it — only `CLAUDE_CONFIG_DIR` and `cwd` — so a
+    # transcript the CLI wrote under an inherited value would sit in a directory
+    # `native_messages()` (§3.7) never looks in. Switched off so the CLI's write and BOS's
+    # read agree on the project directory's name.
+    "CLAUDE_CODE_PROJECT_DIR_NAME": "",
 })
 # Read on those paths and left alone, because under BOS's default each is inert or loads
 # nothing from outside the session:
@@ -901,6 +926,39 @@ def _add_usage(total: dict[str, int] | None, usage: dict[str, int] | None) -> di
     return {key: total.get(key, 0) + usage.get(key, 0) for key in total.keys() | usage.keys()}
 
 
+def _visible_text(content: Any) -> str | None:
+    """The BOS-visible text of one transcript message's raw Anthropic ``content`` — a plain
+    string as-is (how the CLI records a plain-text turn; measured against CLI 2.1.281), or the
+    concatenation of a content-block list's ``text`` blocks (``ClaudeCodeAgent.native_messages``,
+    BEP 19 §3.7).
+
+    ``tool_use`` and ``tool_result`` blocks, and anything else that is not ``text``, carry no BOS
+    message content and are dropped. ``None`` when nothing survives that — a message that is only
+    such blocks (the assistant's own tool call, or the user turn carrying nothing but its matching
+    ``tool_result``) is not a message BOS projects, the same rule §3.7 applies to Codex's
+    ``tool_use``/``tool_result`` ``ThreadItem``s.
+
+    Multiple surviving ``text`` blocks in one message are not observed against CLI 2.1.281 —
+    Task 7 found it streams each content block of a reply as its own transcript entry, so a
+    reply that both spoke and called a tool is more than one entry, not one entry with two
+    blocks — but nothing guarantees that of every transcript this method may be asked to read
+    (an older CLI's, or one written by a different client entirely), so more than one is joined
+    rather than only the first being kept.
+    """
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return None
+    texts = [
+        block["text"]
+        for block in content
+        if isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str)
+    ]
+    if not texts:
+        return None
+    return texts[0] if len(texts) == 1 else "\n\n".join(texts)
+
+
 # BEP 19 §3.9: the name of the CLI's own synthetic tool for `output_format` (measured against
 # CLI 2.1.281; pinned by test_structured_output_arrives_from_the_synthetic_tool_against_the_real_cli
 # in tests/test_claude_code_runtime.py). Its `ToolUseBlock`/`ToolResultBlock` are the CLI answering
@@ -965,6 +1023,14 @@ _INTERRUPTED = frozenset({"aborted_tools", "aborted_streaming"})
 # - Host code the stream task awaits, the event sink and the interrupt callback, is not the CLI's
 #   and has no bound of its own; a stream task parked there that swallows `_settle`'s cancel is
 #   abandoned, which is why `aclose()` bounds its own wait.
+# - `native_messages`' `get_session_messages()` call (Task 9, BEP 19 §3.7) is not in the list
+#   above, and not for the reason the rest are missing from it: it never crosses to the CLI at
+#   all. It is a plain filesystem read in this process — open, read, `json.loads` over the
+#   session's own `.jsonl` — not a request across a pipe to a child that can choose not to
+#   answer, so there is nothing here for `timeout_seconds` to guard against and it carries no
+#   `wait_for` (contrast `CodexAgent.native_messages`'s `thread.read()`, which is the same
+#   unbounded RPC path every other vendor call there is). It still runs in `asyncio.to_thread`,
+#   since a file read is blocking I/O and this method must not block the event loop for it.
 
 
 class _Turn:
@@ -2217,6 +2283,115 @@ class ClaudeCodeAgent:
             )
         finally:
             self._release(chat_id, turn)
+
+    async def native_messages(self, chat_id: str) -> list[Message]:
+        """Claude Code's own transcript for *chat_id*, projected into BOS ``Message``s (BEP 19
+        §3.7) — what ``BosApp.get_messages(source="native")`` delegates to.
+
+        Reads ``get_session_messages(session_id, directory=str(cwd))`` (``claude_agent_sdk``) in a
+        thread (``asyncio.to_thread``), since it is a filesystem read: it parses the session's own
+        JSONL under ``<CLAUDE_CONFIG_DIR or ~/.claude>/projects/<slug>/`` itself and chains it by
+        ``parentUuid``, so this method never re-derives that chain. That storage is per **OS
+        user**, not per workspace (BEP 19 §3.12 item 2) — reads are still safe because BOS always
+        addresses a session by the id it stored (§3.6) and passes the resolved ``cwd`` as
+        *directory*, so lookups are scoped and ids do not collide across a host's other
+        workspaces. Unlike every other vendor call on this class, and unlike
+        ``CodexAgent.native_messages``, this touches no CLI child at all: reading a transcript
+        starts nothing.
+
+        **No native session means no transcript, not a missing one.** ``read_native_session_id``
+        returning ``None`` says this chat never ran a Claude Code turn, or ran one on another
+        runtime since (logged at WARNING there), or this agent has no chat store at all — an empty
+        transcript, ``[]``, logged at DEBUG.
+
+        **A session id that exists and cannot be read is the opposite case, and raises** — the
+        same rule ``CodexAgent.native_messages`` states, and for the same reason (§3.7): "BOS
+        cannot read it" and "there is nothing to read" are different answers. Telling them apart
+        here is on this method, not the vendor SDK: ``get_session_messages`` never raises, and it
+        does not tell "no such file" apart from "a real file with nothing visible in it" — both
+        come back ``[]``. So an **empty result for a session id this chat's own record names** is
+        treated as the missing case. That holds because of what a recorded id means: it is
+        written by :func:`commit_external_turn` from a real ``ResultMessage.session_id`` (§3.6),
+        so it never names a session that ran zero turns, and a session that ran at least one
+        always has at least one real top-level message for ``get_session_messages`` to find — an
+        empty result for such an id is therefore always the transcript being gone, pruned, or
+        unreachable under the directory this agent resolved, never a legitimately empty
+        conversation.
+
+        **Messages only, for §3.7's structural reason.** Every ``SessionMessage``
+        ``get_session_messages`` returns is already a top-level ``user`` or ``assistant`` entry —
+        its own conversion drops sidechain, meta and every non-message transcript line
+        (attachments, queue and cost bookkeeping, prompt snapshots, …) before this method ever
+        sees one. What remains is filtered again here, to what BOS's tool-call pairing can
+        represent (:func:`_visible_text`): kept for its ``text`` blocks only, or as-is when it is
+        already a plain string, which is how the CLI records a plain-text turn; ``tool_use`` and
+        ``tool_result`` blocks carry no BOS message content and are dropped. A message that is
+        *only* such blocks — the assistant's own tool call, or the user turn carrying nothing but
+        the matching ``tool_result`` — has no text left once they are dropped and is skipped
+        rather than projected as an empty message. **Claude Code has no commentary/final-answer
+        phase at all** (unlike Codex's ``MessagePhase``), so every kept assistant text is kept —
+        none of it is excluded the way Codex excludes ``commentary``.
+
+        **One ``Message`` per surviving transcript entry, not per model reply.** CLI 2.1.281
+        streams each content block of a reply as its own transcript entry (measured — Task 7), so
+        a reply that both spoke and called a tool is more than one entry here, exactly as
+        ``CodexAgent.native_messages`` emits one ``Message`` per ``AgentMessageThreadItem`` rather
+        than one per Codex model turn.
+
+        **``metadata["native_turn_id"]`` is always ``None`` here — never a real id.**
+        ``SessionMessage`` (what ``get_session_messages`` returns) carries no per-entry turn or
+        prompt identifier: unlike Codex's ``Turn.id``, the only id on it is the entry's own
+        ``uuid``, already ``native_item_id``. §3.7's ``native_turn_id`` for Claude Code is a
+        *write-time* label (:meth:`run`, §3.6): the uuid of a turn's last top-level assistant
+        message — and that uuid already appears here as that same entry's own ``native_item_id``,
+        so a host correlating "which transcript entry closed a BOS turn" reads BOS's own
+        committed record (``source="bos"``) and matches its ``native_turn_id`` against this
+        method's ``native_item_id``, rather than this method inventing a value nothing in the
+        transcript records.
+
+        ``Message.turn_id`` is left ``None``: BOS turn ids are minted by :meth:`run`, and a
+        transcript BOS did not (all of) author has none. ``created_at`` is left at its default
+        (now): unlike Codex's ``Turn.started_at``, ``SessionMessage`` carries no timestamp for BOS
+        to prefer instead.
+        """
+        runtime = self._config.runtime
+        native_session_id = (
+            await read_native_session_id(self._chat_store, chat_id, runtime=runtime)
+            if self._chat_store is not None
+            else None
+        )
+        if native_session_id is None:
+            logger.debug(
+                "%s runtime %r: chat %r is bound to no native session, so its native transcript is empty",
+                runtime,
+                self._kind,
+                chat_id,
+            )
+            return []
+
+        raw = await asyncio.to_thread(get_session_messages, native_session_id, directory=str(self._config.cwd))
+        if not raw:
+            raise RuntimeError(
+                f"{runtime} runtime {self._kind!r}: the native transcript of session "
+                f"{native_session_id!r} for chat {chat_id!r} could not be found under "
+                f"{self._config.cwd} — get_session_messages() returned no messages for a session "
+                f"this chat's own record names, so the transcript is missing rather than merely "
+                f"empty."
+            )
+
+        messages: list[Message] = []
+        for entry in raw:
+            content = entry.message.get("content") if isinstance(entry.message, dict) else None
+            text = _visible_text(content)
+            if text is None:
+                continue
+            messages.append(
+                Message(
+                    llm_message={"role": entry.type, "content": text},
+                    metadata={"source": runtime, "native_turn_id": None, "native_item_id": entry.uuid},
+                )
+            )
+        return messages
 
     async def aclose(self) -> None:
         """Stop every in-flight turn, wait for them within a bound, then close their clients

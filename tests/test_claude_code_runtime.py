@@ -23,6 +23,7 @@ import contextlib
 import dataclasses
 import gc
 import hashlib
+import inspect
 import json
 import logging
 import os
@@ -44,6 +45,7 @@ from claude_agent_sdk import (
     ClaudeSDKClient,
     ResultError,
     ResultMessage,
+    SessionMessage,
     SystemMessage,
     TextBlock,
     ToolResultBlock,
@@ -938,7 +940,7 @@ async def test_a_host_that_opts_into_repo_settings_runs_the_repos_commands(
 def test_every_client_switches_off_the_inherited_variables_that_load_what_the_default_leaves_out(tmp_path):
     """BEP 19 §3.12: the values BOS sends over whatever it inherited. Spelled out here, so an
     override dropped from claude_code.py fails. Five are measured by the test below; the other
-    seventeen are read from the CLI source, and this is all that can be pinned of them here."""
+    eighteen are read from the CLI source, and this is all that can be pinned of them here."""
     assert _agent(tmp_path)._options().env == {
         "CLAUDE_CODE_PLUGIN_DIRS": "",
         "CLAUDE_BG_SESSION_PERMISSION_RULES": "",
@@ -962,6 +964,7 @@ def test_every_client_switches_off_the_inherited_variables_that_load_what_the_de
         "CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING": "",
         "CLAUDE_CODE_PACKAGE_MANAGER_AUTO_UPDATE": "",
         "SYSTEM_REMINDER_MEMORY_CONTEXT": "",
+        "CLAUDE_CODE_PROJECT_DIR_NAME": "",
     }
 
 
@@ -3360,3 +3363,204 @@ async def test_a_stop_drops_a_mid_turn_message_the_cli_still_holds_against_the_r
     assert result.finish_reason == "aborted_tools"
     assert len(fake_anthropic.requests) == 1, "the queued message never reached the model"
     assert any("dropped" in record.getMessage() and "t1" in record.getMessage() for record in caplog.records)
+
+
+# ── Task 9: reading a Claude Code transcript back (BEP 19 §3.7) ─────────────
+
+
+def _session_message(entry_type: str, uid: str, content: Any) -> SessionMessage:
+    """One canned transcript entry, shaped as ``get_session_messages`` returns it."""
+    return SessionMessage(  # type: ignore[arg-type]
+        type=entry_type, uuid=uid, session_id="native-1", message={"role": entry_type, "content": content}
+    )
+
+
+@pytest.mark.asyncio
+async def test_native_messages_with_no_native_session_is_empty(tmp_path, mem_store, monkeypatch, caplog):
+    """No session on record is an empty transcript, not a missing one — and, the part worth
+    pinning, nothing is read from disk for it either: there is no session id to look up."""
+    agent = _agent(tmp_path, chat_store=mem_store)
+
+    def fail(*args: Any, **kwargs: Any) -> list[SessionMessage]:
+        raise AssertionError("no native session id, so get_session_messages must not be called")
+
+    monkeypatch.setattr(claude_code, "get_session_messages", fail)
+
+    with caplog.at_level(logging.DEBUG, logger="bos.extensions.runtimes.claude_code"):
+        assert await agent.native_messages("chat-1") == []
+
+    debug = [
+        r for r in caplog.records if r.name == "bos.extensions.runtimes.claude_code" and r.levelno == logging.DEBUG
+    ]
+    assert any("chat-1" in r.getMessage() for r in debug)
+
+
+@pytest.mark.asyncio
+async def test_an_agent_with_no_chat_store_reads_as_an_empty_transcript(tmp_path):
+    """``chat_store=None`` is allowed (``ExternalRuntime``), and with no store there is nowhere a
+    session id could have been recorded."""
+    agent = _agent(tmp_path)
+
+    assert await agent.native_messages("chat-1") == []
+
+
+@pytest.mark.asyncio
+async def test_native_messages_raises_when_the_transcript_is_missing(tmp_path, mem_store, monkeypatch):
+    """The Codex rule (BEP 19 §3.7): a session id this chat's own record names is a different
+    answer from no session at all — but ``get_session_messages`` never raises to say so; it
+    returns ``[]`` for an unknown id exactly as it would for a real file with nothing visible in
+    it. So an empty result for a *recorded* id is what this method treats as missing, and this
+    pins the call it made to reach that answer."""
+    await _bind(mem_store, session_id="session-gone")
+    agent = _agent(tmp_path, chat_store=mem_store)
+    calls: list[tuple[Any, ...]] = []
+
+    def fake(*args: Any, **kwargs: Any) -> list[SessionMessage]:
+        calls.append((args, kwargs))
+        return []
+
+    monkeypatch.setattr(claude_code, "get_session_messages", fake)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await agent.native_messages("chat-1")
+
+    message = str(excinfo.value)
+    assert "claude-code" in message and "george" in message and "session-gone" in message and "chat-1" in message
+    assert calls == [(("session-gone",), {"directory": str(agent.resolved_config["cwd"])})]
+
+
+@pytest.mark.asyncio
+async def test_native_messages_raises_when_the_transcript_is_missing_against_the_real_lookup(
+    tmp_path, mem_store, monkeypatch
+):
+    """The same rule, against the real ``get_session_messages`` rather than a stand-in for it —
+    confirming the assumption the test above is built on: that it truly returns ``[]`` for an id
+    with no transcript on disk, rather than raising. ``HOME``/``CLAUDE_CONFIG_DIR`` are sandboxed
+    under *tmp_path* so this never reads the developer's own ``~/.claude``."""
+    home, config = tmp_path / "home", tmp_path / "claude-config"
+    home.mkdir()
+    config.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config))
+    unknown = str(uuid.uuid4())
+    await _bind(mem_store, session_id=unknown)
+    agent = _agent(tmp_path, chat_store=mem_store)
+
+    with pytest.raises(RuntimeError, match="claude-code"):
+        await agent.native_messages("chat-1")
+
+
+@pytest.mark.asyncio
+async def test_native_messages_drops_tool_blocks_and_keeps_text(tmp_path, mem_store, monkeypatch):
+    """BEP 19 §3.7: user and assistant text only. A ``tool_use``-only assistant reply and a
+    ``tool_result``-only user turn are not messages at all — dropped, not projected as an empty
+    one — and the metadata of what remains carries no ``native_turn_id``: nothing in
+    ``SessionMessage`` records one (unlike Codex's ``Turn.id``), only the entry's own uuid, which
+    is ``native_item_id``."""
+    await _bind(mem_store, session_id="native-1")
+    agent = _agent(tmp_path, chat_store=mem_store)
+    canned = [
+        _session_message("user", "u-1", "hello"),
+        _session_message("assistant", "a-1", [{"type": "tool_use", "id": "tu1", "name": "Read", "input": {}}]),
+        _session_message("user", "u-2", [{"tool_use_id": "tu1", "type": "tool_result", "content": "1\thello\n"}]),
+        _session_message("assistant", "a-2", [{"type": "text", "text": "done"}]),
+    ]
+    monkeypatch.setattr(claude_code, "get_session_messages", lambda *a, **k: canned)
+
+    messages = await agent.native_messages("chat-1")
+
+    assert [(m.llm_message["role"], m.llm_message["content"]) for m in messages] == [
+        ("user", "hello"),
+        ("assistant", "done"),
+    ]
+    assert [m.metadata for m in messages] == [
+        {"source": "claude-code", "native_turn_id": None, "native_item_id": "u-1"},
+        {"source": "claude-code", "native_turn_id": None, "native_item_id": "a-2"},
+    ]
+    assert [m.turn_id for m in messages] == [None, None], "a BOS turn id would be invented, not read"
+
+
+@pytest.mark.asyncio
+async def test_native_messages_keeps_the_text_of_a_reply_that_also_calls_a_tool(tmp_path, mem_store, monkeypatch):
+    """A single entry mixing a text block with a ``tool_use`` block keeps only the text — not
+    observed against CLI 2.1.281 (Task 7 found it streams each content block as its own
+    transcript entry), but nothing guarantees that of every transcript this method may be asked
+    to read."""
+    await _bind(mem_store, session_id="native-1")
+    agent = _agent(tmp_path, chat_store=mem_store)
+    mixed = _session_message(
+        "assistant",
+        "a-1",
+        [{"type": "text", "text": "checking now"}, {"type": "tool_use", "id": "tu1", "name": "Read", "input": {}}],
+    )
+    monkeypatch.setattr(claude_code, "get_session_messages", lambda *a, **k: [mixed])
+
+    messages = await agent.native_messages("chat-1")
+
+    assert [m.llm_message["content"] for m in messages] == ["checking now"]
+
+
+@pytest.mark.asyncio
+async def test_native_messages_reads_in_a_worker_thread(tmp_path, mem_store, monkeypatch):
+    """The task's own requirement: ``get_session_messages`` is a filesystem read, run through
+    ``asyncio.to_thread`` rather than blocking the event loop with it."""
+    await _bind(mem_store, session_id="native-1")
+    agent = _agent(tmp_path, chat_store=mem_store)
+    main_thread = threading.current_thread()
+    seen: list[threading.Thread] = []
+
+    def fake(*args: Any, **kwargs: Any) -> list[SessionMessage]:
+        seen.append(threading.current_thread())
+        return [_session_message("user", "u-1", "hi")]
+
+    monkeypatch.setattr(claude_code, "get_session_messages", fake)
+
+    await agent.native_messages("chat-1")
+
+    assert seen and seen[0] is not main_thread
+
+
+@pytest.mark.asyncio
+async def test_it_carries_the_two_surfaces_bosapp_routes_on(tmp_path):
+    """``BosApp.get_messages(source="native")`` finds this class by two names and nothing else:
+    ``resolved_config["external_runtime"]`` and a duck-typed ``native_messages`` — see
+    test_codex_runtime.py's own version of this test, and test_sdk.py's ``_StubExternalAgent`` for
+    why a stub, not this class, carries the routing tests themselves."""
+    agent = _agent(tmp_path)
+
+    assert agent.resolved_config["external_runtime"] == "claude-code"
+    assert inspect.iscoroutinefunction(agent.native_messages)
+    assert list(inspect.signature(agent.native_messages).parameters) == ["chat_id"]
+
+
+@pytest.mark.asyncio
+async def test_a_turn_is_read_back_through_native_messages_against_the_real_cli(tmp_path, fake_anthropic, monkeypatch):
+    """BEP 19 §3.7's read side, against the real CLI: the tool exchange inside the turn is not
+    projected, only its two texts are, and the uuid BOS committed as ``native_turn_id`` (Task 4)
+    really does address an entry this read finds back — confirming what §3.7 states of it from
+    the read side, not just the write side ``test_a_second_turn_resumes_the_first_by_session_id_
+    against_the_real_cli`` already pins."""
+    _point_the_cli_at(fake_anthropic, tmp_path, monkeypatch)
+    store = InMemChatStore()
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "notes.txt").write_text("hello\n")
+    agent = _agent(tmp_path, cwd="ws", auth="api_key", chat_store=store)
+    read = {"type": "tool_use", "id": "tu_read", "name": "Read", "input": {"file_path": str(ws / "notes.txt")}}
+    fake_anthropic.script([[read], [{"type": "text", "text": "it says hello"}]])
+
+    async with asyncio.timeout(60):
+        await agent.run("chat-1", "read notes.txt please", turn_id="t1")
+
+    bos_messages = await store.get_messages("chat-1")
+    native = await agent.native_messages("chat-1")
+
+    assert [(m.llm_message["role"], m.llm_message["content"]) for m in native] == [
+        ("user", "read notes.txt please"),
+        ("assistant", "it says hello"),
+    ], "the Read call and its tool_result are dropped; only the two texts remain"
+    assert {m.metadata["source"] for m in native} == {"claude-code"}
+    assert all(m.metadata["native_turn_id"] is None for m in native)
+    assert bos_messages[1].metadata["native_turn_id"] in {m.metadata["native_item_id"] for m in native}, (
+        "the uuid BOS committed as native_turn_id (Task 4) is a real, readable transcript entry"
+    )
