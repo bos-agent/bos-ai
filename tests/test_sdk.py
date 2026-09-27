@@ -171,7 +171,7 @@ def test_the_contract_surface_is_importable_and_identical():
 
     expected = {
         "BosApp", "ModelInfo", "open_harness",
-        "Agent", "AgentPort", "AgentHarness", "AgentResult", "Message", "TurnContext",
+        "AbortTurn", "Agent", "AgentPort", "AgentHarness", "AgentResult", "Message", "TurnContext",
         "LLM", "LLMResponse", "ChatStore", "ChatCommit", "ChatMeta",
         "ContextResult", "TokenEstimate", "Consolidator", "ToolSet",
         "ToolAttributes", "ToolCallRequest", "TurnInterceptor",

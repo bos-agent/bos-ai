@@ -138,6 +138,31 @@ The list is hard-coded in BOS and refreshed with its releases, and nothing is
 validated against it: a model it does not list yet still runs when you pass it,
 and a wrong one fails with the provider's own error.
 
+### Adding to a running turn, or stopping it
+
+`run(..., interrupt=poll)` calls `poll()` while the turn runs — before each model
+call for a BOS agent, as each event arrives for Claude Code or Codex. What it
+returns is a message to deliver into the turn, never a request to stop. To stop,
+raise `AbortTurn`:
+
+```python
+from bos.sdk import AbortTurn
+
+def poll():
+    if stop_pressed:
+        raise AbortTurn()                                 # stops the turn
+    if follow_up:
+        return {"role": "user", "content": follow_up}     # delivered into the turn
+    return None                                           # nothing new
+
+result = await agent.run("chat-42", "summarize the repo", interrupt=poll)
+```
+
+A stopped turn returns `(turn aborted before completion) …` as its output, with
+`finish_reason == "aborted"`. Any other truthy value — a dict without `role` and
+`content`, a bare string — raises `TypeError` from `run()` instead of reaching the
+turn (an external runtime raises `RuntimeError`, with the `TypeError` as its cause).
+
 ### No extras required
 
 The base install has no LLM client. Register your own provider and you need
@@ -342,8 +367,9 @@ not, it may move:
 python -c "import bos.sdk; print(len(bos.sdk.__all__))"
 ```
 
-It holds 40 names: `BosApp`, `ModelInfo` (what `list_models` returns) and `open_harness`; the agent surface (`AgentPort`,
-`Agent`, `AgentHarness`, `AgentResult`, `Message`, `TurnContext`); the ports you
+It holds 41 names: `BosApp`, `ModelInfo` (what `list_models` returns) and `open_harness`; the agent surface (`AgentPort`,
+`Agent`, `AgentHarness`, `AgentResult`, `Message`, `TurnContext`, and `AbortTurn`, which
+stops a turn); the ports you
 can implement (`LLM`, `ChatStore`, `Consolidator`, `ToolSet`, `TurnInterceptor`,
 `PromptProvider`, `TurnEventSink`) together with every type those ports' own
 methods take or return, including the message-content types (`MessageContent`,

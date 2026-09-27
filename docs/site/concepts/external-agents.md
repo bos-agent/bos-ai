@@ -526,6 +526,7 @@ can run out before BOS retries.
 |---|---|---|
 | The `interrupt` callback returns a message | The message is delivered into the running turn (Claude Code folds it into the turn; Codex steers the turn), which carries on | — |
 | The `interrupt` callback raises `AbortTurn` | The runtime is told to stop; `(turn aborted before completion) …`, `finish_reason="aborted"` | no |
+| The `interrupt` callback returns a truthy value that is not a message | The runtime is told to stop; `RuntimeError`, caused by a `TypeError` naming the contract | no |
 | `request_stop()` during a turn | The runtime is interrupted; the text produced so far (or `""`) | yes |
 | A turn started after `request_stop()` | `(interrupted: the agent is shutting down)`, `finish_reason="shutdown"`, before any vendor call | no |
 | `timeout_seconds` expires | `TimeoutError` naming the phase — mid-turn, after the runtime is interrupted | no |

@@ -31,7 +31,7 @@ from ._utils import (
     _strip_think,
     _xml_attr,
 )
-from .agent import ABORTED_TURN_CONTENT, SHUTDOWN_CONTENT, AbortTurn, Agent
+from .agent import ABORTED_TURN_CONTENT, SHUTDOWN_CONTENT, AbortTurn, Agent, _poll_interrupt
 from .contract import (
     LLM,
     AgentEventType,
@@ -119,6 +119,7 @@ __all__ = [
     "_as_parts",
     "_build_params",
     "_compact",
+    "_poll_interrupt",
     "_strip_reply_artifacts",
     "_strip_think",
     "_xml_attr",

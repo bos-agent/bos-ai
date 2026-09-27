@@ -2781,6 +2781,28 @@ async def test_any_other_callback_exception_interrupts_the_cli_and_fails_the_tur
 
 
 @pytest.mark.asyncio
+async def test_a_truthy_return_that_is_not_a_message_fails_the_turn_instead_of_being_sent(
+    tmp_path, fake_claude, mem_store
+):
+    """#113: a return with no ``"content"`` used to go to the CLI as an empty user message, so a
+    host that returned a reason to mean "stop" had its stop dropped. The shared poll refuses it, and
+    the refusal fails the turn like any other exception from the callback — the CLI told to stop."""
+    agent = _agent(tmp_path, chat_store=mem_store)
+    fake_claude.arm(messages=_turn("unused"))
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await asyncio.wait_for(
+            agent.run("chat-1", "do it", turn_id="t1", interrupt=lambda: {"reason": "user stop"}), timeout=5
+        )
+
+    assert isinstance(excinfo.value.__cause__, TypeError)
+    client = fake_claude.instances[0]
+    assert client.steers == []
+    assert client.control_requests == [_INTERRUPT_REQUEST]
+    assert await mem_store.get_messages("chat-1") == []
+
+
+@pytest.mark.asyncio
 async def test_the_abort_path_is_bounded_when_the_interrupt_never_answers(tmp_path, fake_claude, monkeypatch):
     """A caller waits on this path, so the interrupt gets the grace every interrupt here gets
     rather than becoming a way for a wedged CLI to hang ``run()``."""
