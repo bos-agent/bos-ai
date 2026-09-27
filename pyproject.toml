@@ -99,11 +99,11 @@ version_toml = ["pyproject.toml:project.version"]
 # in the release commit instead of going stale by one version every release.
 # uv is pinned to the version the lock is maintained with: another uv rewrites the
 # file's format (0.12 took `revision` 3 -> 4 and dropped `[package.metadata]`), and
-# the next local `uv run` rewrites it back. Bump the pin when you upgrade your uv.
+# the next local `uv run` rewrites it back. Keep it equal to [tool.uv] required-version.
 assets = ["uv.lock"]
 commit_author = "github-actions[bot] <github-actions[bot]@users.noreply.github.com>"
 commit_message = "chore(release): {version} [skip ci]"
-build_command = "python -m ensurepip --upgrade && python -m pip install build uv==0.8.22 && python -m uv lock && python -m build"
+build_command = "python -m ensurepip --upgrade && python -m pip install build uv==0.12.19 && python -m uv lock && python -m build"
 commit_parser = "conventional"
 commit_parser_options = { parse_squash_commits = false, ignore_merge_commits = true }
 
@@ -115,5 +115,8 @@ insertion_flag = "<!-- version list -->"
 mask_initial_release = false
 
 [tool.uv]
+# One uv everywhere: an older uv rewrites uv.lock back to its own format
+# (0.8 wrote `revision = 3`, 0.12 writes 4). Moves with the pin in build_command.
+required-version = ">=0.12.19"
 preview = true
 add-bounds = "exact"
