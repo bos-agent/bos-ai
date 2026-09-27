@@ -171,6 +171,11 @@ async with BosApp(config_dict, bos_dir="/var/lib/myapp/.bos") as app:
   `@ep_agent` factory registers — or a bare reserved runtime kind (§13.2) — needs
   `await app.build_agent(kind, agent_cfg=None)`; `agent_cfg` is the top config layer
   for that first build, and a kind already cached refuses one.
+- **A kind that fails to build costs only itself.** The resolved default is built first
+  and its failure fails `__aenter__`. Any other kind's `Exception` is logged and recorded
+  in `app.failed_agents` (`dict[kind, Exception]`), and the app opens without it:
+  `agent(kind)` raises `RuntimeError` chained to it, and `build_agent(kind)` (with
+  `agent_cfg` if given) builds it again, removing the record on success.
 - There is **no `BosApp.ask()`** and no wrapper over `Agent.run()` (BEP 18
   §2.2.1): `run()` has ten parameters, so a façade would either mirror them
   forever or push callers down a layer. `app.harness` / `app.workspace` expose
@@ -1158,7 +1163,8 @@ You are George, the implementer for the payments service.
   `[runtime.actors.<a>].agent_cfg` → the `agent_cfg` passed to `build_agent`/`create_agent`.
 - Config is validated at construction — `BosApp.__aenter__` for kinds in `config.agents`, an
   actor's start, `boscli ask`, `build_agent` — and construction never starts a vendor
-  process.
+  process. Under `BosApp` a refused non-default kind is recorded in `failed_agents`, not
+  raised from the entry (§3).
 
 ### 13.3 Config keys
 
