@@ -103,6 +103,51 @@ async def test_an_ambiguous_default_does_not_prevent_entry(tmp_path):
             app.agent()
 
 
+# Refused at construction while ANTHROPIC_API_KEY is set, under the default
+# `auth = "subscription"` (BEP 19 §3.10.3). read-only, so whether this host has
+# bwrap for workspace-write plays no part.
+_CLAUDE_CODE = {"_parent": "claude-code", "permission": "read-only"}
+
+
+@pytest.mark.asyncio
+async def test_an_agent_that_cannot_be_built_costs_only_itself(tmp_path, monkeypatch):
+    """Whether an agent builds can turn on the host, not the config. A Claude Code
+    agent refusing the environment must not close the app on `solo`, which has
+    nothing to do with it: `agent("cc")` raises the refusal instead, and once the
+    cause is gone `build_agent` builds it without reopening the app (BEP 18 §3.4)."""
+    from bos.extensions.runtimes import claude_code
+    from bos.sdk import BosApp
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-dummy")
+    config = _config() | {"default_agent": "solo", "agents": {"solo": {"system_prompt": "hi"}, "cc": _CLAUDE_CODE}}
+    async with BosApp(config, bos_dir=tmp_path / ".bos") as app:
+        assert app.agent() is app.agent("solo")
+        assert list(app.failed_agents) == ["cc"]
+        with pytest.raises(RuntimeError, match=r"build_agent\('cc'\)") as excinfo:
+            app.agent("cc")
+        assert isinstance(excinfo.value.__cause__, ValueError)
+        assert "ANTHROPIC_API_KEY" in str(excinfo.value)
+
+        for name in [*claude_code._SUBSCRIPTION_BYPASS_VARS, "ANTHROPIC_BASE_URL"]:
+            monkeypatch.delenv(name, raising=False)
+        rebuilt = await app.build_agent("cc")
+        assert app.agent("cc") is rebuilt
+        assert app.failed_agents == {}
+
+
+@pytest.mark.asyncio
+async def test_a_default_agent_that_cannot_be_built_still_fails_entry(tmp_path, monkeypatch):
+    """The isolation stops at the default: `app.agent()` is what the host runs on,
+    so an app without it does not open (BEP 18 §3.4)."""
+    from bos.sdk import BosApp
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-dummy")
+    config = _config() | {"default_agent": "cc", "agents": {"solo": {"system_prompt": "hi"}, "cc": _CLAUDE_CODE}}
+    with pytest.raises(ValueError, match="ANTHROPIC_API_KEY"):
+        async with BosApp(config, bos_dir=tmp_path / ".bos"):
+            pass
+
+
 @pytest.mark.asyncio
 async def test_agent_before_entering_says_so(tmp_path):
     """Review Focus 3: no harness yet — a message, not AttributeError on None."""

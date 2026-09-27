@@ -118,6 +118,8 @@ class BosApp:
     def agent(self, kind: str | None = None) -> Agent: ...
     async def build_agent(self, kind: str) -> Agent: ...
     @property
+    def failed_agents(self) -> dict[str, Exception]: ...
+    @property
     def harness(self) -> AgentHarness: ...
     @property
     def workspace(self) -> Workspace: ...
@@ -126,6 +128,8 @@ class BosApp:
 `agent()` returns a cached `Agent`, built on first request for that kind and reused after — which is the pattern `examples/embed_fastapi.py` already demonstrates by hand. With no argument it uses `workspace.resolve_default_agent()` (§3.5).
 
 `agent()` is synchronous and `create_agent` is not, so the agents are built during `__aenter__`: every kind in `config.agents` plus the resolved default. A kind that exists only in `AgentRegistry` (an `@ep_agent` factory) and is not named in config is built on first `agent(kind)` call — which then needs an await. **Resolution:** `agent()` raises for an unbuilt kind and names `await app.build_agent(kind)`, rather than returning a coroutine from a method that usually returns an `Agent`. Two shapes from one method is worse than one extra method.
+
+**An agent that cannot be built costs only itself.** Whether an agent builds can turn on the host rather than the config: a Claude Code agent under the default `auth = "subscription"` refuses an `ANTHROPIC_API_KEY` in the environment (BEP 19 §3.10.3), its `permission = "workspace-write"` is refused on a Linux host without `bwrap` or `socat` (BEP 19 §3.5.3), and a runtime whose extra is not installed fails its import. Those facts change independently of the config — a user adds `ANTHROPIC_API_KEY` to `.env` to reach Anthropic models through litellm — so they must not close the app on agents that have nothing to do with them. `__aenter__` therefore builds the resolved default first, and its failure still fails the entry, because the host runs on it. Every other kind it builds with its failure isolated: an `Exception` from `create_agent` is logged at WARNING and recorded against that kind, and the entry carries on. For a recorded kind, `agent(kind)` raises a `RuntimeError` chained to the original exception; `failed_agents` returns the record, `kind → exception`, so a host can show which agents are unavailable and why; and `build_agent(kind)`, which finds nothing cached for the kind, builds it again — with `agent_cfg`, if given — and a success removes the record. Only `Exception` is caught: a cancellation still aborts the entry. Such a failure still surfaces at startup, in the log and in `failed_agents`; what changed is that it no longer takes the other kinds down with it.
 
 `harness` and `workspace` are exposed deliberately: dropping to the lower layer must not be a different path, it must be the same objects `BosApp` is using.
 
@@ -216,6 +220,8 @@ async with BosApp(CONFIG, bos_dir=".bos") as app:
 
 Chat continuity is passing the same `chat_id`. Streaming, structured output and interrupts are `Agent.run`'s own parameters — nothing is hidden. Dropping to the lower layer is `app.harness` and `app.workspace`, the same objects.
 
+If an agent other than the default cannot be built — a Claude Code agent refusing the environment, say — the block still opens with every other agent. `app.agent("that-kind")` raises the reason, `app.failed_agents` lists it for a UI to grey out, and once the cause is fixed `await app.build_agent("that-kind")` builds it without reopening the app (§3.4). If the default cannot be built, `async with BosApp(...)` raises.
+
 ### 4.2 End user — the CLI
 
 `boscli ask "…"` runs the project's default agent. In a scaffolded project that is `[agents.main]`; in a preset it is the preset's `default_agent`. `--agent` and `--actor` are the two explicit overrides (§3.6).
@@ -248,6 +254,7 @@ No shipped config demonstrates this — the `team` preset did and was deleted (B
 - `--agent` keeps its name, meaning and validation.
 - Gateway behaviour, actor semantics, the wire protocol, and all other `boscli` commands.
 - Scaffolded projects: they generate `[agents.main]`, so §3.5's rule 3 covers them with no config change.
+- A non-default agent that cannot be built no longer fails `async with BosApp(...)` (§3.4, added 2026-09-27). Every app that opened before still opens, with the same agents. A host that relied on the entry failing to learn that a non-default agent was broken reads `failed_agents` instead, or catches the error `agent(kind)` raises.
 - Ring topology. The seven existing guards pass unmodified; an eighth is added.
 
 ### 5.4 Third-party impact
@@ -280,6 +287,7 @@ None known. `bos.sdk` is additive.
 7. Given a mode-1 project run to completion: no `mailboxes/` directory exists under its `bos_dir`.
 8. `import bos.sdk` on a base install (no extras) succeeds.
 9. `uv run pytest -q`, `uv run ruff check src tests examples`, and `npx -y pyright src` are green, with pyright at zero errors.
+10. Given a config whose default is a BOS agent, plus a non-default Claude Code agent with `permission = "read-only"` and the default `auth`, and `ANTHROPIC_API_KEY` set: `async with BosApp(...)` opens, `app.agent()` works, `failed_agents` lists only the Claude Code kind, and `agent(kind)` for it raises chained to the refusal; with the variable then removed, `build_agent(kind)` builds it and `failed_agents` is empty (`tests/test_sdk.py::test_an_agent_that_cannot_be_built_costs_only_itself`). Given the same config with the Claude Code agent as `default_agent`: entry raises the refusal (`::test_a_default_agent_that_cannot_be_built_still_fails_entry`).
 
 ---
 
@@ -295,6 +303,7 @@ None outstanding.
 
 ## 9. Revision history
 
+- 2026-09-27 — An agent that cannot be built costs only itself (#117; §3.4, §4.1, §5.3, criterion 10). `__aenter__` built every kind `[agents]` names, and any one failing failed the whole entry, so a Claude Code agent refusing an `ANTHROPIC_API_KEY` that a user had added to `.env` for litellm took down the BOS agent beside it. The default is now built first and its failure still fails the entry; every other kind's failure is logged, recorded, and raised from `agent(kind)` chained to its cause. The record is exposed as `BosApp.failed_agents` (a property on `BosApp`, which is not a Protocol, so the contract's name count is unchanged), and `build_agent(kind)` rebuilds a recorded kind without reopening the app. Building external kinds lazily, the issue's other option, was not taken: it would move every configured external agent from `agent()` to `await build_agent()`, and it would defer their errors from startup to the first request.
 - 2026-09-27 — Widened 40 → 41 by `AbortTurn` (#113). It is the one way to stop a turn through `run(interrupt=…)` — the callback's truthy return is a message to deliver, never a stop — and it was reachable only as `bos.core.AbortTurn`, outside the promise; a host that guessed the contract from the parameter's name returned a reason instead, and BOS ran the turn on. An exception, not a port-method type, so the drift test does not force it: promised by hand, as `ModelInfo` was. §3.8 is updated in place.
 - 2026-09-26 — Widened 39 → 40 by `ModelInfo`, the value type of the new `BosApp.list_models(kind=None)`: the models an agent can be asked for per turn (`llm_args["model"]`), each with its `llm_args["reasoning_effort"]` values and whether it is the agent's default, from a catalog hard-coded in `bos/sdk/_model_catalog.py` and never checked against. Not a port-method type — `BosApp` is not a Protocol — so the drift test does not force it; it is promised because a host building a picker annotates with it. §3.8 is updated in place.
 - 2026-09-24 — Widened by BEP 19, 34 → 39. `AgentPort` (BEP 19 §3.3 — the port a host relies on for an agent, whichever runtime backs it) forces three more names into the same drift the 26 → 34 widening below already names: `AgentPort.ask`/`run` annotate their `content` parameter as `MessageContent`, a bare `TypeAlias` (`str | list[TextPart | ImagePart | FilePart]`), and `typing.get_type_hints()` inlines a plain `TypeAlias` at the call site — so `test_promised_ports_are_implementable_from_the_contract_alone` never sees the name `MessageContent` itself, only the `TextPart`/`ImagePart`/`FilePart` TypedDicts it expands to, and those three are what the test actually requires `__all__` to carry. `MessageContent` is the fifth new name, promised by hand rather than forced, alongside `ToolCallRequest`: an implementer building a non-string `content` value from the contract alone needs the union's own name, not just the leaves it expands to, and promising the leaves without it would be an odd contract to hand someone. §3.8 above is updated in place to the 39-name list rather than left describing 34.

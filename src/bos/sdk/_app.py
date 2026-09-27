@@ -50,6 +50,7 @@ class BosApp:
         self._stack: contextlib.AsyncExitStack | None = None
         self._harness: AgentHarness | None = None
         self._agents: dict[str, AgentPort] = {}
+        self._failed: dict[str, Exception] = {}
 
     async def __aenter__(self) -> BosApp:
         global _ACTIVE
@@ -76,18 +77,30 @@ class BosApp:
             # ValueError is swallowed. A project that did write the key meant it:
             # `default_agent = "typoo"` is a config error, and startup is what it
             # should surface at, not the first agent() deep in a request handler.
-            # Everything else propagates either way, including a kind that
-            # resolves but cannot be built.
-            for kind in self._workspace.config.agents or {}:
-                self._agents[kind] = await self._harness.create_agent(kind=kind)
+            # Everything else propagates either way, including a default that
+            # resolves but cannot be built: the host runs on it.
             try:
                 default_kind: str | None = self._workspace.resolve_default_agent()
             except ValueError:
                 if self._workspace.config.default_agent:
                     raise
                 default_kind = None
-            if default_kind is not None and default_kind not in self._agents:
+            if default_kind is not None:
                 self._agents[default_kind] = await self._harness.create_agent(kind=default_kind)
+            # The other kinds are built but not required. Whether one builds can turn
+            # on the host rather than the config — a Claude Code agent refuses an
+            # ANTHROPIC_API_KEY in the environment, workspace-write needs bwrap —
+            # so one that cannot is recorded for agent() to raise, and the others
+            # still open (BEP 18 §3.4). `except Exception`: a cancellation still
+            # aborts the entry.
+            for kind in self._workspace.config.agents or {}:
+                if kind in self._agents:
+                    continue
+                try:
+                    self._agents[kind] = await self._harness.create_agent(kind=kind)
+                except Exception as exc:
+                    logger.warning("Agent %r failed to build; the app opens without it.", kind, exc_info=True)
+                    self._failed[kind] = exc
         except BaseException:
             # _aclose() (bos/core/_utils.py) already catches and logs an ordinary
             # Exception from a resource's own close, so this rarely fires. It stays
@@ -107,6 +120,7 @@ class BosApp:
                 _ACTIVE = None
                 self._harness = None
                 self._agents.clear()
+                self._failed.clear()
             raise
         self._stack = stack
         return self
@@ -120,6 +134,7 @@ class BosApp:
             self._stack = None
             self._harness = None
             self._agents.clear()
+            self._failed.clear()
             if _ACTIVE is self:
                 _ACTIVE = None
 
@@ -130,6 +145,12 @@ class BosApp:
             kind = self._workspace.resolve_default_agent()
         if kind in self._agents:
             return self._agents[kind]
+        if kind in self._failed:
+            exc = self._failed[kind]
+            raise RuntimeError(
+                f"Agent {kind!r} failed to build when the app opened. Fix the cause and "
+                f"`await app.build_agent({kind!r})` to try again. {type(exc).__name__}: {exc}"
+            ) from exc
         from bos.core import AgentRegistry
 
         if AgentRegistry.has_registered(kind):
@@ -158,6 +179,10 @@ class BosApp:
         registered agent (`build_agent("martha", agent_cfg={"_parent":
         "codex", ...})`), or a `_parent` instance in config (BEP 19
         §3.4.1.1).
+
+        A kind your config names that failed to build at entry (see
+        `failed_agents`) was never cached, so this builds it again — with
+        *agent_cfg*, if given — and a success takes it off `failed_agents`.
         """
         harness = self._require_open()
         if kind in self._agents:
@@ -173,6 +198,7 @@ class BosApp:
                 )
             return self._agents[kind]
         self._agents[kind] = await harness.create_agent(kind=kind, agent_cfg=agent_cfg)
+        self._failed.pop(kind, None)
         return self._agents[kind]
 
     def list_models(self, kind: str | None = None) -> dict[str, ModelInfo]:
@@ -322,6 +348,17 @@ class BosApp:
                 f'implement native_messages(), so its transcript cannot be read back. Use source="bos".'
             )
         return await native_messages(chat_id)
+
+    @property
+    def failed_agents(self) -> dict[str, Exception]:
+        """The kinds your config names that failed to build when the app opened, and why.
+
+        Never the default: its failure fails the entry. For each kind here,
+        `agent(kind)` raises chained to this exception, until a
+        `build_agent(kind)` succeeds.
+        """
+        self._require_open()
+        return dict(self._failed)
 
     @property
     def harness(self) -> AgentHarness:

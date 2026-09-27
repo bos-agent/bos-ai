@@ -141,7 +141,10 @@ refused in an actor's `agent_cfg`: declare the variant in `[agents.*]` and selec
 
 **When it is built.** An agent your config names is built when `BosApp` opens, when an
 actor starts, or when `boscli ask` runs. Every construction-time refusal on this page
-surfaces there, before any turn and before any vendor process starts.
+surfaces there, before any turn and before any vendor process starts. Under `BosApp` a
+refused agent costs only itself: the app opens without it, `app.agent(name)` raises the
+refusal, and `app.failed_agents` lists it — unless it is the default agent, whose refusal
+fails the open ([Embedding](../embedding/index.md)).
 
 ---
 

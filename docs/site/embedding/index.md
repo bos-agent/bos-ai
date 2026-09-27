@@ -80,11 +80,19 @@ the second turn sees the first in its history. There is no session object to
 create, hold or close. Use your own conversation key.
 
 **Agents are built once, at `__aenter__`, and cached.** `app.agent()` is
-synchronous because of that. Every kind named in `config["agents"]` is ready when
+synchronous because of that. Every kind named in `config["agents"]` is built as
 the block opens; with no argument you get the default (the top-level
 `default_agent` key, or the only agent, or one named `main`). For a kind that
 only an `@ep_agent` factory registers — not named in your config — build it once
 with `await app.build_agent("kind")`.
+
+**An agent that cannot be built costs only itself.** If a kind your config names
+fails to build — a Claude Code agent refusing an `ANTHROPIC_API_KEY` in the
+environment, say — the block still opens with every other agent. The failure is
+logged, `app.failed_agents` maps the kind to its exception (for a picker to grey
+out), and `app.agent(kind)` raises chained to it. Fix the cause and
+`await app.build_agent(kind)` builds it without reopening the app. The default is
+the exception: if it cannot be built, `async with BosApp(...)` raises.
 
 **One `BosApp` per process.** Bootstrap writes `os.environ` and rebuilds the
 agent registry, both process-global, so opening a second while the first is live
@@ -241,10 +249,10 @@ give it a new name with `agent_cfg={"_parent": "codex", ...}`.
 
 **Its config is checked when it is built.** A missing `permission`, an unknown key, or a
 host the runtime refuses (a Claude Code subscription agent with `ANTHROPIC_API_KEY` in the
-environment, say) raises from `build_agent` — or from `async with BosApp(...)` itself for
-an agent your config names. `cwd` resolves against the workspace root, which for
-`BosApp(dict, bos_dir=...)` is the process's current directory: pass a `Workspace` to fix
-it elsewhere.
+environment, say) raises from `build_agent`. For an agent your config names, it raises
+when the block opens if that agent is the default, and from `app.agent(name)` otherwise
+(above). `cwd` resolves against the workspace root, which for `BosApp(dict, bos_dir=...)`
+is the process's current directory: pass a `Workspace` to fix it elsewhere.
 
 **Two records of the conversation.** BOS stores two messages per turn — the user message
 and the final answer — and `app.get_messages(chat_id, source="bos")` returns that record,
