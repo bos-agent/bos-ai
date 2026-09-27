@@ -1214,6 +1214,26 @@ async def test_any_callback_exception_also_tells_codex_to_stop(tmp_path, fake_co
 
 
 @pytest.mark.asyncio
+async def test_a_truthy_return_that_is_not_a_message_fails_the_turn_instead_of_steering(
+    tmp_path, fake_codex, mem_store
+):
+    """#113: a return with no "content" used to be steered as an empty input, so a host that
+    returned a reason to mean "stop" had its stop dropped and the turn ran on. The shared poll
+    refuses it, and the refusal unwinds like any other exception from the callback."""
+    agent = _agent(tmp_path, fake_codex, chat_store=mem_store)
+    _arm_notifications(fake_codex, [_item_completed(_agent_message_item("msg-1", "done")), _turn_completed()])
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await agent.run("chat-1", "do it", turn_id="t1", interrupt=lambda: {"reason": "user stop"})
+
+    handle = fake_codex.instances[-1].turn_handles[-1]
+    assert handle.steered == []
+    assert handle.interrupted is True
+    assert isinstance(excinfo.value.__cause__, TypeError)
+    assert await mem_store.get_messages("chat-1") == []
+
+
+@pytest.mark.asyncio
 async def test_an_aborted_turn_does_not_hang_on_a_wedged_interrupt(tmp_path, fake_codex, mem_store, monkeypatch):
     """The interrupt D adds is on the abort path, which is a path a caller is
     waiting on — so it gets the same bound as every other interrupt in this

@@ -122,8 +122,8 @@ from bos.core.agent import (
     TurnEvent,
     TurnEventPhase,
     TurnEventSink,
-    _apply_async,
     _compact,
+    _poll_interrupt,
     content_as_parts,
 )
 from bos.extensions.runtimes._shared import (
@@ -1283,6 +1283,9 @@ class CodexAgent:
           Either way :meth:`_run_turn` interrupts the native turn on its way
           past (fix round 3, D) — unwinding BOS-side alone would leave the
           child running against ``cwd`` with nothing left that knows about it.
+          A truthy return that is not a message takes this path too:
+          ``_poll_interrupt`` refuses it with a ``TypeError`` before anything
+          is steered.
         - **A falsy return does nothing.** No steer, no interrupt, no
           state change — the turn is not even aware the callback fired.
 
@@ -1335,7 +1338,7 @@ class CodexAgent:
                     # (AbortTurn or anything else) is meant to propagate, per
                     # this method's own docstring — only the steer RPC below
                     # is best-effort, and even that is logged, not silent.
-                    steer_message = await _apply_async(interrupt, {})
+                    steer_message = await _poll_interrupt(interrupt)
                     if steer_message:
                         steer_input = _content_to_codex_input(steer_message.get("content", ""))
                         try:

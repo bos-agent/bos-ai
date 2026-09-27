@@ -182,6 +182,11 @@ async with BosApp(config_dict, bos_dir="/var/lib/myapp/.bos") as app:
   own `Agent`, the LiteLLM ids of every provider whose API key env var is set; for an external
   runtime, its native names. Hard-coded in `bos/sdk/_model_catalog.py`; nothing is validated
   against it, so an unlisted model still runs and a wrong one fails with the provider's error.
+- **`run(..., interrupt=poll)`** is polled during the turn (a BOS `Agent`: before each LLM call).
+  It returns `None`, or a message dict (`role`, `content`: `MessageContent`) delivered into the
+  running turn. Stopping is a raise, never a return: `AbortTurn` (in `bos.sdk`) ends the turn
+  with `ABORTED_TURN_CONTENT`, `finish_reason="aborted"`. Any other truthy return raises
+  `TypeError` from `run()` (`_poll_interrupt`, shared by every runtime).
 - **One live `BosApp` per process.** A second raises: `bootstrap_platform()`
   writes `os.environ` and rebuilds `AgentRegistry`, both process-global.
 - **The two modes do not co-exist in one process** — mount a gateway *or* hold a
@@ -204,7 +209,7 @@ callable because a restart re-reads config. Routes under the mount path:
 
 Set `[platform] extensions = []` and import only the adapters you want, instead
 of `bos.exts` which loads every built-in. The contract is **`bos.sdk.__all__`**
-(40 names): `BosApp`, `ModelInfo`, `open_harness`, the agent surface (`AgentPort`, `Agent`, …), the ports plus every
+(41 names): `BosApp`, `ModelInfo`, `open_harness`, the agent surface (`AgentPort`, `Agent`, `AbortTurn`, …), the ports plus every
 type their own method signatures use, the nine `ep_*` points, and `Workspace` /
 `RootConfig` / `validate_config`. A test enforces that every promised port is
 implementable from promised names alone. `bos.sdk` re-exports rather than
@@ -1352,7 +1357,8 @@ the only pre-approved server under `never`; an operator `[mcp_servers.bos-tools]
   retried with a correction message up to `max_schema_retries`, then `StructuredOutputError`.
 - **`interrupt` callback**: a truthy return is delivered into the running turn (Claude Code
   `query()` mid-turn; Codex `steer()`); a raised `AbortTurn` interrupts the vendor turn and
-  returns `ABORTED_TURN_CONTENT`, `finish_reason="aborted"`.
+  returns `ABORTED_TURN_CONTENT`, `finish_reason="aborted"`; any other truthy return interrupts
+  it and raises `RuntimeError`, caused by `_poll_interrupt`'s `TypeError`.
 - **`request_stop()`**: interrupts the running turn and returns its latest text (committed);
   one-way — a later turn returns `SHUTDOWN_CONTENT`, `finish_reason="shutdown"`, before any
   vendor call.

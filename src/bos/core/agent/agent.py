@@ -12,6 +12,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal, Sequence, TypeVar
 from xml.sax.saxutils import escape
 
+from ._content import validate_message_content
 from ._structured import (
     UNUSABLE_FINISH_REASONS,
     StructuredOutputError,
@@ -220,6 +221,40 @@ def _resolve_thinking(response: Any) -> str | None:
 
 class AbortTurn(Exception):
     pass
+
+
+class _InterruptReturnError(TypeError):
+    """``interrupt`` returned something that is not a message — the caller's bug, so the turn
+    raises it rather than answering with it."""
+
+
+async def _poll_interrupt(interrupt: Callable[..., Any]) -> dict[str, Any] | None:
+    """Poll a turn's ``interrupt`` callback and hold its return to the one contract every runtime
+    reads it by.
+
+    A falsy return is nothing to deliver. A message dict — a ``role``, and ``content`` that is
+    ``MessageContent`` — is delivered into the running turn: ``Agent`` merges it into the turn's
+    context, an external runtime sends its content as user input. Stopping the turn is not a
+    return value: the callback raises ``AbortTurn``. Anything else is refused here, before any
+    runtime acts on it, rather than failing inside the turn or going out as an empty message.
+    """
+    message = await _apply_async(interrupt, {})
+    if not message:
+        return None
+    if not isinstance(message, dict):
+        problem = f"got {type(message).__name__}"
+    elif not isinstance(message.get("role"), str) or "content" not in message:
+        problem = f"got a dict with keys {list(message)}"
+    else:
+        try:
+            validate_message_content(message["content"])
+            return message
+        except TypeError as e:
+            problem = str(e)
+    raise _InterruptReturnError(
+        "interrupt must return None, or a message dict with 'role' and 'content' to deliver into the "
+        f"running turn; to stop the turn, raise AbortTurn ({problem})"
+    )
 
 
 class _NoopInterceptor:
@@ -603,7 +638,7 @@ class Agent:
                 logger.debug("Event sink emit error", exc_info=True)
 
         async def _interrupt():
-            if interrupt and (llm_message := await _apply_async(interrupt, {})):
+            if interrupt and (llm_message := await _poll_interrupt(interrupt)):
                 ctx.add_message(llm_message, merge=True)
 
         async def _close_with_handoff(reason: Literal["max_iterations", "shutdown"]) -> None:
@@ -847,8 +882,9 @@ class Agent:
             turn_status = "aborted"
             abort_reason = "cancelled"
             raise
-        except StructuredOutputError:
-            # Structured-output failure is the caller's to handle (BEP 12):
+        except (StructuredOutputError, _InterruptReturnError):
+            # The caller's to handle — a structured-output failure (BEP 12), or
+            # an interrupt callback that broke its contract (_poll_interrupt):
             # persist what we have, then propagate rather than masking it as a
             # normal "(error: …)" assistant turn.
             turn_status = "error"
@@ -862,7 +898,13 @@ class Agent:
         finally:
             await _persist_turn()
 
-        finish_reason = ctx.current_llm_response.finish_reason if ctx.current_llm_response else None
+        if turn_status == "aborted":
+            # AbortTurn, from the interrupt callback or an interceptor. The last
+            # LLM response's own reason (None before any) would read as a turn
+            # that ended by itself; "aborted" is what the external runtimes report.
+            finish_reason = "aborted"
+        else:
+            finish_reason = ctx.current_llm_response.finish_reason if ctx.current_llm_response else None
         if schema is not None and structured_ok:
             return AgentResult(
                 output=structured_output,

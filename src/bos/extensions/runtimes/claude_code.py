@@ -121,8 +121,8 @@ from bos.core.agent import (
     TurnEventPhase,
     TurnEventSink,
     TurnEventStage,
-    _apply_async,
     _compact,
+    _poll_interrupt,
     content_as_parts,
     image_source_to_model_url,
 )
@@ -1883,7 +1883,8 @@ class ClaudeCodeAgent:
         - **Raising ends the turn.** Nothing here catches what the callback raises: it propagates
           out of this task, ``run()``'s teardown tells the CLI to stop, and ``run()`` returns the
           aborted-turn marker for ``AbortTurn``, as ``Agent`` does, and fails the turn for
-          anything else.
+          anything else — a truthy return that is not a message among them, which
+          ``_poll_interrupt`` refuses with a ``TypeError`` before anything is sent.
         - **A falsy return does nothing.**
 
         With ``turn.stopping`` set BOS is ending the turn, so nothing is polled or sent any more,
@@ -1933,7 +1934,7 @@ class ClaudeCodeAgent:
                     ):
                         await self._emit(event_sink, event)
                 if interrupt is not None and result is None and not turn.stopping:
-                    if message_for_the_turn := await _apply_async(interrupt, {}):
+                    if message_for_the_turn := await _poll_interrupt(interrupt):
                         await self._steer(turn, message_for_the_turn, chat_id=chat_id, turn_id=turn_id)
             # Also after the stream ends: the warning can arrive while the CLI is between messages (a
             # tool running), so the per-message check above may not see it before the round closes.

@@ -10,6 +10,7 @@ from __future__ import annotations
 from bos.config import RootConfig, Workspace, validate_config
 from bos.core import (
     LLM,
+    AbortTurn,
     Agent,
     AgentHarness,
     AgentPort,
@@ -65,6 +66,9 @@ __all__ = [
     # BosApp.list_models' return value type.
     "ModelInfo",
     "open_harness",
+    # What an `interrupt` callback raises to stop a turn — the one signal that does;
+    # a return value is a message to deliver, never a stop.
+    "AbortTurn",
     "Agent",
     "AgentHarness",
     "AgentPort",
