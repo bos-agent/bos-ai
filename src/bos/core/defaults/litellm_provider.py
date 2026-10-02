@@ -41,6 +41,24 @@ def _normalize_litellm_message(message: dict[str, Any]) -> dict[str, Any]:
     return {**message, "content": normalized}
 
 
+def _response_format(litellm: Any, model: str, schema: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
+    # The agent's structured-output hint (BEP 12) as the `response_format` litellm
+    # maps to each vendor's native field. litellm has no `response_schema` param:
+    # passed through, it reaches most vendors as an unknown body field.
+    try:
+        _, provider, _, _ = litellm.get_llm_provider(
+            model=model, custom_llm_provider=kwargs.get("custom_llm_provider"), api_base=kwargs.get("api_base")
+        )
+    except litellm.BadRequestError:
+        provider = None  # acompletion names the problem
+    if provider == "deepseek":
+        # DeepSeek's API refuses json_schema ("This response_format type is
+        # unavailable now"), though litellm's model map says it supports it. It
+        # takes JSON mode; the schema itself is in the request (BEP 12 §C).
+        return {"type": "json_object"}
+    return {"type": "json_schema", "json_schema": {"name": "response", "schema": schema}}
+
+
 @ep_provider(name="litellm")
 async def litellm_complete(messages: list[dict], model: str, **kwargs: Any) -> LLMResponse:
     try:
@@ -60,5 +78,8 @@ async def litellm_complete(messages: list[dict], model: str, **kwargs: Any) -> L
     except ValueError as exc:
         return LLMResponse(content=f"Error calling default provider: {exc}", finish_reason="error")
 
+    schema = kwargs.pop("response_schema", None)
+    if schema is not None and "response_format" not in kwargs:
+        kwargs["response_format"] = _response_format(litellm, model, schema, kwargs)
     raw = await litellm.acompletion(model=model, messages=normalized_messages, **kwargs)
     return _litellm_response_to_llm_response(raw)

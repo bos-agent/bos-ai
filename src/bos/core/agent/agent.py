@@ -19,6 +19,7 @@ from ._structured import (
     StructuredValidator,
     parse_json,
     provider_hint_schema,
+    schema_instruction,
 )
 from ._utils import (
     _apply_async,
@@ -517,6 +518,10 @@ class Agent:
             {"role": "user", "content": content or ""},
             **(user_message_metadata if isinstance(user_message_metadata, dict) else {}),
         )
+        if schema is not None:
+            # The hint above may never reach the model, so every call of the turn
+            # also states the schema — without keeping it in the chat.
+            ctx.set_ephemeral_message("agent.output_schema", {"role": "user", "content": schema_instruction(schema)})
         turn_status: Literal["running", "completed", "aborted", "error"] = "running"
         abort_reason: str | None = None
 
