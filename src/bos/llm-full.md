@@ -615,8 +615,10 @@ Anatomy & rules (`bos.core.registry`, `bos.extensions.tools.filesystem`):
   function's parameters unless the function accepts `**kwargs`.
 - **Return value** is serialized to the string the model sees: `auto` → `json.dumps` for
   JSON-ish types else `str()`; `json` → always `json.dumps`; `str` → always `str()`.
-- **`usage`** (metadata) is the long-form guidance surfaced to the model; `description` is
-  the short schema description. `parallel_safe` (metadata) gates concurrent execution.
+- **`usage`** (metadata) is the long-form guidance surfaced to the model in the system
+  prompt's `<available_tools>`; `description` is the short schema description. A tool with no
+  `usage` (and no per-agent `usages` override) gets no entry there, since its description is
+  already in the schema. `parallel_safe` (metadata) gates concurrent execution.
 - **`ToolContext` injection**: declare a parameter named `context: ToolContext | None`. The
   harness passes it; it carries the parent turn (e.g. `context.parent` for spawning
   subagents; see `AskSubagent` in `bos.plugins.subagent`) and `context.workspace`, the
@@ -1412,8 +1414,8 @@ applied, which is the only in-process path that reads the actor table. `--agent`
 optional credential probe (one LLM call unless `--no-probe`) → optional `git init`.
 
 Useful env vars: `BOS_HOME` (default `~/.bos`), `BOS_CONFIG`, `BOS_MODEL`,
-`BOS_CONSOLIDATOR_MODEL`, `BOS_CAPABILITY_LIMIT` (max skills/subagents
-listed in the prompt, default 50), `BOS_LOG_LEVEL`, plus provider `*_API_KEY`s.
+`BOS_CONSOLIDATOR_MODEL`, `BOS_CAPABILITY_LIMIT` (max skills, subagents and tool `usage`
+entries listed in the prompt, default 50), `BOS_LOG_LEVEL`, plus provider `*_API_KEY`s.
 
 ---
 

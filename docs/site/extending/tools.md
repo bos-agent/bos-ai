@@ -68,7 +68,7 @@ parameters={
 
 ### (4) `usage`
 
-Longer guidance (a paragraph or more) that the agent surfaces in the system prompt to tell the model *when* and *how* to use this tool.  If omitted, `description` is used as a fallback.
+Longer guidance (a paragraph or more) that the agent surfaces in the system prompt to tell the model *when* and *how* to use this tool.  If omitted, the tool gets no entry there: its `description` already reaches the model in the tool's schema.
 
 ### (5) `parallel_safe`
 

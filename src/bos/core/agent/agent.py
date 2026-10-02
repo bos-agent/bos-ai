@@ -1103,8 +1103,16 @@ class Agent:
         return f"<system_prompt>\n{content}\n</system_prompt>"
 
     async def _prompt_section_tools(self) -> str:
-        available_tools = self._limit_prompt_collection(self._tools.describe_usage(), "tools")
-        available_tools = {k: (self._tools_usage.get(k, v) or "").strip() for k, v in available_tools.items()}
+        # Only text the model doesn't already have: a tool's description reaches it
+        # in the function schema, and a tool without usage text of its own would
+        # only repeat it here — and take a slot under the cap from one that has some.
+        schemas = self._tools.to_openai_schema()
+        entries: dict[str, str] = {}
+        for name, usage in self._tools.describe_usage().items():
+            text = (self._tools_usage.get(name, usage) or "").strip()
+            if text and text != (schemas.get(name, {}).get("function", {}).get("description") or "").strip():
+                entries[name] = text
+        available_tools = self._limit_prompt_collection(entries, "tools")
 
         if not available_tools:
             return "<available_tools>\n\n</available_tools>"
