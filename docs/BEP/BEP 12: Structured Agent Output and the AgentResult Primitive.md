@@ -1,6 +1,6 @@
 # BEP 12: Structured Agent Output & the AgentResult Primitive
 
-Status: **in progress** (updated 2026-06-26)
+Status: **in progress** (updated 2026-10-01)
 
 ---
 
@@ -79,7 +79,9 @@ async def ask(self, chat_id, content, <existing kwargs>) -> str:
 ### C. Structured output
 
 When `schema` is supplied:
-- It is passed as the provider hint into `self._llm.complete(...)` (the same `response_schema` kwarg `LLM.complete` already forwards — `BackgroundLLM` uses exactly this).
+- It reaches the model two ways, because a provider may drop the hint:
+  - **Provider hint** — the `response_schema` kwarg into `self._llm.complete(...)`, sanitized by `provider_hint_schema`. Each provider maps it to its vendor's native structured output. The built-in `litellm` provider sends it as litellm's `response_format` — `json_schema`, which litellm turns into each vendor's own field, or JSON mode (`json_object`) for DeepSeek, whose API refuses `json_schema`. litellm has no `response_schema` param; passed through as is, it reached most vendors as an unknown body field (#121).
+  - **In the request** — `schema_instruction(schema)` as an ephemeral user message (`TurnContext.set_ephemeral_message`), so every call of the turn states the schema and the chat history does not keep it.
 - When the model emits a **final** message (no tool calls), the answer is validated locally with `jsonschema` against the authoritative schema. On success, `output` = parsed object, `structured=True`. On failure, a corrective message is appended and the loop re-enters, bounded by `max_schema_retries`; exhaustion raises (reusing `BackgroundLLM`'s `_UNUSABLE_FINISH_REASONS` distinction so a truncation/filter/error isn't mislabeled a schema failure).
 
 Tools may still run before the final answer — so an agent can *research, then propose a typed result*.
@@ -208,7 +210,7 @@ and defeat the port's purpose. So this is a **decided non-goal**, not a pending 
 1. ✅ **Structured-output validator as a port + adapter** — `StructuredValidator` Protocol + `provider_hint_schema` / `UNUSABLE_FINISH_REASONS` / `StructuredOutputError` / `parse_json` in the stdlib-pure agent ring (`src/bos/core/agent/_structured.py`); `JsonSchemaValidator` adapter in `src/bos/core/defaults/structured_validator.py`, injected by `create_agent`. (Replaces the original "flat shared helper" sketch — see §C amendment.)
 2. ✅ **`AgentResult`** — dataclass in `agent/contract.py`; exported from `bos.core`.
 3. ✅ **`Agent.run` + `ask` wrapper** — loop moved into `run`; `iterations`/`usage` aggregated; `ask` delegates and returns `.output`.
-4. ✅ **Structured path in `run`** — `schema` → provider hint + injected validator + bounded `max_schema_retries`; raises `StructuredOutputError` on exhaustion / unusable finish reason.
+4. ✅ **Structured path in `run`** — `schema` → provider hint + the schema stated in the request (§C) + injected validator + bounded `max_schema_retries`; raises `StructuredOutputError` on exhaustion / unusable finish reason.
 
 **Tracks 5–7 — the `AgentRunner` unification — SHIPPED:**
 
@@ -264,3 +266,4 @@ Tracks 5–7 depend on 1–4 (shipped) and on `create_agent`/`Agent.run` being r
 - **2026-06-26** — Tracks 1–4 shipped (`70793d6`). Recorded the as-built amendment: structured validation landed as a **port + adapter** (forced by the stdlib-pure agent ring), not a flat shared helper (§C). Replaced original tracks 5–6 ("migrate consolidator, retire `BackgroundLLM`") with the broader **`AgentRunner` unification**: a single disposable-agent port subsuming both `SubagentRuntime` and `BackgroundLLM`, with the parent turn as an optional per-call param (Goals 4–5; Design §§D–F; tracks 5–7; resolved Open Issues 1–3, 5).
 - **2026-06-26** — Open Issue #7 resolved: `ToolContext` now composes a single `parent: ParentTurn` (the four turn fields removed, `.parent` property dropped, `ParentTurn.agent_name` made required). Turn fields read via `ctx.parent.*`. Also removed the flat `chat_id`/`turn_id`/`event_sink` tool-call injection — the task/plan tools now read `context.parent.chat_id` and `context` is the sole runtime injection into a tool call.
 - **2026-06-26** — Tracks 5–7 shipped (`acd4ee4`, `315fcf4`, `9d8300f`, `7d62192`). The port takes `parent: ParentTurn` (a minimal linkage descriptor in the agent ring, exposed via `ToolContext.parent`), *not* `ToolContext`, so it stays non-tool-specific. Chat-ids unified into `make_internal_chat_id`. `AskSubagent` and the memory consolidator migrated; `SubagentRuntime`/`BackgroundLLM`/`DefaultBackgroundLLM`/`_HarnessSubagentRuntime` and the old `PluginServices` fields deleted. **Verified and rejected** folding `llm`/`consolidator` into `agent_runner`: the skills `_SkillTestRuntime` needs them to hand-build an instrumented single-skill agent (§F); a future `TestSkill` redo atop `AgentRunner` + an A/B test sandbox (git-worktree isolation) may revisit it.
+- **2026-10-01** — #121: the provider hint alone never reached most vendors — the built-in `litellm` provider passed `response_schema` straight to litellm, which has no such param. It now sends litellm's `response_format` (JSON mode for DeepSeek), and the agent also states the schema in the request as an ephemeral message (§C). Dropped the stale "`BackgroundLLM` uses exactly this" from §C.

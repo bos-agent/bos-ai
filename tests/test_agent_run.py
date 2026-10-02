@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import uuid
 
 import pytest
@@ -147,6 +148,63 @@ class _Scripted:
     async def complete(self, messages, **kwargs) -> LLMResponse:
         self.calls.append(messages)
         return self.responses.pop(0)
+
+
+def _json_objects_in(messages: list[dict]) -> list[object]:
+    """Every JSON object written into the messages' text, wherever it sits."""
+    decoder = json.JSONDecoder()
+    found: list[object] = []
+    for message in messages:
+        content = message.get("content")
+        if not isinstance(content, str):
+            continue
+        for start, char in enumerate(content):
+            if char == "{":
+                try:
+                    found.append(decoder.raw_decode(content, start)[0])
+                except json.JSONDecodeError:
+                    pass
+    return found
+
+
+@pytest.mark.asyncio
+async def test_every_call_of_a_structured_turn_carries_the_schema():
+    """#121: the schema went out only as the provider hint, which most providers drop, so the
+    model first saw it in the retry message, after an answer that had to fail."""
+    tools = ToolRegistry("_test_tools")
+
+    @tools(name="Noop", description="Does nothing.", parameters={"type": "object", "properties": {}, "required": []})
+    async def noop() -> str:
+        return "ok"
+
+    llm = _Scripted(
+        LLMResponse(
+            content="",
+            tool_calls=[ToolCallRequest(id="t1", name="Noop", arguments={})],
+            finish_reason="tool_calls",
+        ),
+        LLMResponse(content='{"answer": "42"}'),
+    )
+    agent = create_test_agent(llm=llm, local_tools=tools, tools=["Noop"], structured_validator=JsonSchemaValidator())
+
+    result = await agent.run("c1", "q", schema=_SCHEMA)
+
+    assert result.output == {"answer": "42"}
+    assert [_SCHEMA in _json_objects_in(messages) for messages in llm.calls] == [True, True]
+
+
+@pytest.mark.asyncio
+async def test_the_schema_is_not_kept_in_the_chat():
+    store = InMemChatStore()
+    llm = _Scripted(LLMResponse(content='{"answer": "42"}'))
+    agent = create_test_agent(chat_store=store, llm=llm, structured_validator=JsonSchemaValidator())
+
+    await agent.run("c1", "q", schema=_SCHEMA)
+
+    assert [(m.llm_message["role"], m.llm_message["content"]) for m in await store.get_messages("c1")] == [
+        ("user", "q"),
+        ("assistant", '{"answer": "42"}'),
+    ]
 
 
 @pytest.mark.parametrize(
