@@ -849,6 +849,7 @@ async def test_prompt_sections_render_first_50_items_and_warn(caplog):
             name=tool_name,
             description=f"Tool description {i:03}",
             parameters={"type": "object", "properties": {}, "required": []},
+            usage=f"Tool usage {i:03}",
         )(lambda: "ok")
 
     class StaticSkillsLoader:
@@ -885,7 +886,7 @@ async def test_prompt_sections_render_first_50_items_and_warn(caplog):
             skills_prompt = await skills_plugin.get_system_prompt_section(None) or ""
             subagents_prompt = await subagent_plugin.get_system_prompt_section(None) or ""
 
-        assert '<tool name="Tool049">\nTool description 049\n</tool>' in tools_prompt
+        assert '<tool name="Tool049">\nTool usage 049\n</tool>' in tools_prompt
         assert "Tool050" not in tools_prompt
         assert '<skill name="skill_049">Skill description 049</skill>' in skills_prompt
         assert "skill_050" not in skills_prompt
@@ -898,6 +899,68 @@ async def test_prompt_sections_render_first_50_items_and_warn(caplog):
     finally:
         AgentRegistry._registry.clear()
         AgentRegistry._registry.update(snapshot)
+
+
+@pytest.mark.parametrize(
+    ("registered", "tools_usage", "entry"),
+    [
+        pytest.param({}, None, None, id="no-usage"),
+        pytest.param({"usage": "Use it for pages, not APIs."}, None, "Use it for pages, not APIs.", id="usage"),
+        pytest.param({"usage": "Fetch content from a URL."}, None, None, id="usage-repeats-description"),
+        pytest.param({"usage": "  Fetch content from a URL.\n"}, None, None, id="usage-repeats-description-padded"),
+        pytest.param({"usage": ""}, None, None, id="empty-usage"),
+        pytest.param({}, {"FetchURL": "Agent-specific guidance."}, "Agent-specific guidance.", id="agent-usage"),
+        pytest.param({"usage": "Use it for pages."}, {"FetchURL": ""}, None, id="agent-usage-blanks-it"),
+        pytest.param(
+            {"usage": "Use it for pages."}, {"FetchURL": "Fetch content from a URL."}, None, id="agent-usage-repeats"
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_a_tool_is_listed_only_for_text_its_schema_lacks(registered, tools_usage, entry):
+    """#119: every tool used to get an entry, and one without its own usage repeated its description,
+    which the function schema already sends: 44 of a real agent's 50 entries said nothing new."""
+    local_tools = ToolRegistry("_test_tools")
+    local_tools(
+        name="FetchURL",
+        description="Fetch content from a URL.",
+        parameters={"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]},
+        **registered,
+    )(lambda url: "ok")
+    agent = create_test_agent(local_tools=local_tools, tools=["FetchURL"], tools_usage=tools_usage)
+
+    prompt = await agent._prompt_section_tools()
+
+    if entry is None:
+        assert prompt == "<available_tools>\n\n</available_tools>"
+    else:
+        assert prompt == f'<available_tools>\n<tool name="FetchURL">\n{entry}\n</tool>\n</available_tools>'
+
+
+@pytest.mark.asyncio
+async def test_tools_without_usage_do_not_crowd_out_one_that_has_it(caplog):
+    """#119: with 51 tools, the 51st in registry order lost its entry, its own usage text included."""
+    local_tools = ToolRegistry("_many_test_tools")
+    names = [f"Tool{i:03}" for i in range(50)]
+    for name in names:
+        local_tools(name=name, description=f"{name} does one thing.", parameters={"type": "object", "properties": {}})(
+            lambda: "ok"
+        )
+    local_tools(
+        name="Guided",
+        description="Does a careful thing.",
+        parameters={"type": "object", "properties": {}},
+        usage="Read the guide before calling it.",
+    )(lambda: "ok")
+    agent = create_test_agent(local_tools=local_tools, tools=[*names, "Guided"])
+
+    with caplog.at_level(logging.WARNING):
+        prompt = await agent._prompt_section_tools()
+
+    assert prompt == (
+        '<available_tools>\n<tool name="Guided">\nRead the guide before calling it.\n</tool>\n</available_tools>'
+    )
+    assert "first 50 tools" not in caplog.text
 
 
 @pytest.mark.asyncio
@@ -930,17 +993,18 @@ async def test_tools_usage_overrides_tool_description_in_prompt():
 
     assert "Custom fetch usage for this agent." in prompt
     assert "Fetch content from a URL." not in prompt
-    assert "Run a bash command." in prompt
+    assert 'name="RunBash"' not in prompt  # no usage of its own: its description is in the schema
 
 
 @pytest.mark.asyncio
-async def test_tools_usage_default_none_keeps_original_descriptions():
+async def test_tools_usage_default_none_keeps_registered_usage():
     local_tools = ToolRegistry("_test_tools")
 
     @local_tools(
         name="FetchURL",
         description="Fetch content from a URL.",
         parameters={"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]},
+        usage="Use it for web pages, not APIs.",
     )
     async def fetch_url(url: str) -> str:
         return "ok"
@@ -949,17 +1013,18 @@ async def test_tools_usage_default_none_keeps_original_descriptions():
 
     prompt = await agent._prompt_section_tools()
 
-    assert "Fetch content from a URL." in prompt
+    assert "Use it for web pages, not APIs." in prompt
 
 
 @pytest.mark.asyncio
-async def test_tools_usage_empty_dict_keeps_all_original_descriptions():
+async def test_tools_usage_empty_dict_keeps_registered_usage():
     local_tools = ToolRegistry("_test_tools")
 
     @local_tools(
         name="FetchURL",
         description="Fetch content from a URL.",
         parameters={"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]},
+        usage="Use it for web pages, not APIs.",
     )
     async def fetch_url(url: str) -> str:
         return "ok"
@@ -967,7 +1032,7 @@ async def test_tools_usage_empty_dict_keeps_all_original_descriptions():
     agent = create_test_agent(local_tools=local_tools, tools=["FetchURL"], tools_usage={})
     prompt = await agent._prompt_section_tools()
 
-    assert "Fetch content from a URL." in prompt
+    assert "Use it for web pages, not APIs." in prompt
 
 
 @pytest.mark.asyncio
