@@ -2,6 +2,32 @@
 
 <!-- version list -->
 
+## v2.3.1 (2026-10-02)
+
+### Bug Fixes
+
+- **agent**: Send the structured-output schema where the model sees it
+  ([#122](https://github.com/bos-agent/bos-ai/pull/122),
+  [`90cf6da`](https://github.com/bos-agent/bos-ai/commit/90cf6dad586a75825cf2a519ec1f597384ad6898))
+
+- **agent**: Stop repeating tool descriptions in <available_tools>
+  ([#123](https://github.com/bos-agent/bos-ai/pull/123),
+  [`72ffe8e`](https://github.com/bos-agent/bos-ai/commit/72ffe8e1fbeba3f9fc7e8558b21155982a76604c))
+
+- **agent**: Validate what interrupt() returns and export AbortTurn from bos.sdk
+  ([#115](https://github.com/bos-agent/bos-ai/pull/115),
+  [`25371c7`](https://github.com/bos-agent/bos-ai/commit/25371c72b620c5fe9e5d079af2c3604eb8453fb4))
+
+- **sdk**: Isolate agent build failures so one agent can't take down BosApp
+  ([#118](https://github.com/bos-agent/bos-ai/pull/118),
+  [`fdcf7cd`](https://github.com/bos-agent/bos-ai/commit/fdcf7cdd0e7c1a34688647a7960a470c67a51f03))
+
+### Chores
+
+- **deps**: Move the repo to uv 0.12.19 ([#116](https://github.com/bos-agent/bos-ai/pull/116),
+  [`b05df1f`](https://github.com/bos-agent/bos-ai/commit/b05df1f516a026af4f5c09ef61e758ed20761c52))
+
+
 ## v2.3.0 (2026-09-26)
 
 ### Bug Fixes
