@@ -4,8 +4,8 @@ The agent ring is stdlib-pure (no third-party imports — enforced by the ring
 isolation guard), so JSON-Schema *validation* (which needs ``jsonschema``) is a
 **port** here, implemented by an outer ring and injected. What lives here is
 only what the loop needs without third-party deps: the provider-hint sanitizer,
-the "unusable completion" set, the error type, the validator protocol, and a
-stdlib parse-only fallback.
+the schema instruction, the "unusable completion" set, the error type, the
+validator protocol, and a stdlib parse-only fallback.
 """
 
 from __future__ import annotations
@@ -39,6 +39,18 @@ def provider_hint_schema(schema: Any) -> Any:
     if isinstance(schema, list):
         return [provider_hint_schema(v) for v in schema]
     return schema
+
+
+def schema_instruction(schema: Any) -> str:
+    """The schema as text for the request itself.
+
+    The provider hint is best-effort: a provider may drop it, or offer only a
+    JSON mode that cannot carry a schema. Stated in the request, the schema
+    reaches the model whatever the provider does with the hint. Plain on
+    purpose: wrapped in an XML tag, DeepSeek's thinking mode sometimes wrote
+    the schema itself out ahead of the answer.
+    """
+    return f"Reply with only a JSON value that matches this JSON Schema:\n{json.dumps(schema)}"
 
 
 def parse_json(content: str) -> Any:
